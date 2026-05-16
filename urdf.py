@@ -135,18 +135,56 @@ def parse_urdf(urdf_path: str) -> URDFParsedConfig:
     )
 
 
-def parse_inertia_max_principal_genesis(entity: Any, link_name: str) -> float:
-    """Extract max diagonal of `link.inertial_i` from a built Genesis entity.
+def estimate_spin_inertia_from_genesis(
+    entity: Any,
+    link_name: str,
+    spin_axis_local: Optional[tuple[float, float, float]] = None,
+) -> float:
+    """Estimate a wheel's spin moment of inertia from a built Genesis entity.
 
-    Used at runtime by VehiclePhysics.__init__ to override the URDF-parsed
-    inertia: Genesis may rotate the inertial frame, so the URDF iyy is not
-    necessarily the spin axis. The max principal moment is the spin MOI for
-    a wheel (mass distributed around the spin axis).
+    This is a FALLBACK estimate consulted only when ``WheelConfig.i_wheel``
+    is not explicitly supplied by the user (and the URDF-derived value is
+    also unavailable). The user's `WheelConfig.i_wheel` is always the
+    authoritative truth when set.
+
+    Caveats:
+      - Genesis stores ``link.inertial_i`` in the inertial principal frame,
+        which may be rotated relative to the body frame. The max diagonal is
+        the spin MOI for cylindrical wheels (mass distributed about the spin
+        axis) but is a heuristic for general shapes.
+      - When ``spin_axis_local`` is provided as a unit 3-vector in body
+        coordinates, the helper projects the (assumed-diagonal) tensor onto
+        that axis: ``I_about_axis = a^T diag(I) a``. This is exact when the
+        inertial frame coincides with the body frame and a reasonable
+        approximation otherwise.
+      - Falls back to ``max(diag(inertial_i))`` on numerical issues or when
+        ``spin_axis_local`` is None.
     """
     import numpy as np
     link = entity.get_link(link_name)
     I_mat = np.asarray(link.inertial_i)
-    return float(np.max(np.diag(I_mat)))
+    diag = np.diag(I_mat) if I_mat.ndim == 2 else np.asarray(I_mat).flatten()
+    diag = np.asarray(diag, dtype=float)
+    if spin_axis_local is None:
+        return float(np.max(diag))
+    a = np.asarray(spin_axis_local, dtype=float)
+    norm = float(np.linalg.norm(a))
+    if norm < 1e-12:
+        return float(np.max(diag))
+    a = a / norm
+    # I about axis = a^T diag(I) a = sum(a_i^2 * I_i)
+    I_about = float(np.sum((a ** 2) * diag))
+    if not np.isfinite(I_about) or I_about <= 0.0:
+        return float(np.max(diag))
+    return I_about
+
+
+# Backwards-compat alias for the old name; emits a deprecation note in docstring.
+def parse_inertia_max_principal_genesis(entity: Any, link_name: str) -> float:
+    """Deprecated alias for ``estimate_spin_inertia_from_genesis``.
+    Will be removed in a future revision; update call sites to the new name.
+    """
+    return estimate_spin_inertia_from_genesis(entity, link_name)
 
 
 # ---------------------------------------------------------------------------

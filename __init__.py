@@ -6,7 +6,7 @@ A single import gives you everything:
         # Top-level driver
         VehiclePhysics,
         # Inputs (unified + typed)
-        VehicleInputs,
+        VehicleInputs, VehicleStepInputs,
         AckermannInputs, PartialAckermannInputs, SkidSteerInputs, NoSteerInputs,
         # Config
         VehicleConfig, WheelConfig, ChassisConfig,
@@ -19,6 +19,8 @@ A single import gives you everything:
         PacejkaAnisotropic, CoulombIsotropic,
         # Sensors / utilities
         WheelRayPattern,
+        # Dynamics primitives (testable, pure-Python)
+        brake_torque_signed, suspension_normal_force,
         # Presets
         car_4w_rwd_ackermann, car_4w_awd_ackermann,
         truck_6w_partial_ackermann, tank_10w_skid_belt,
@@ -45,11 +47,17 @@ from .inputs import (
     PartialAckermannInputs,
     SkidSteerInputs,
     VehicleInputs,
+    VehicleStepInputs,
 )
 from .urdf import (
     URDFParsedConfig,
-    parse_inertia_max_principal_genesis,
+    estimate_spin_inertia_from_genesis,
+    parse_inertia_max_principal_genesis,   # deprecated alias
     parse_urdf,
+)
+from .dynamics import (
+    brake_torque_signed,
+    suspension_normal_force,
 )
 from .strategies import (
     # Steering
@@ -111,10 +119,14 @@ __all__ = [
     "VehicleConfig", "WheelConfig", "ChassisConfig", "ResolvedConfig", "ConfigError",
     "resolve",
     # Inputs
-    "VehicleInputs",
+    "VehicleInputs", "VehicleStepInputs",
     "AckermannInputs", "PartialAckermannInputs", "SkidSteerInputs", "NoSteerInputs",
     # URDF
-    "URDFParsedConfig", "parse_urdf", "parse_inertia_max_principal_genesis",
+    "URDFParsedConfig", "parse_urdf",
+    "estimate_spin_inertia_from_genesis",
+    "parse_inertia_max_principal_genesis",   # deprecated alias
+    # Dynamics primitives
+    "brake_torque_signed", "suspension_normal_force",
     # Strategy ABCs
     "SteeringStrategy", "DrivetrainStrategy", "CouplingStrategy", "StabilityHook",
     # Steering

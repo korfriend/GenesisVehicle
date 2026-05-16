@@ -126,3 +126,33 @@ def test_resolve_preserves_stability_hooks_and_dt():
     assert resolved.dt == pytest.approx(0.01)
     assert len(resolved.stability_hooks) == 1
     assert isinstance(resolved.stability_hooks[0], LowSpeedRegularizer)
+
+
+def test_user_explicit_i_wheel_wins_over_urdf():
+    """WheelConfig.i_wheel set by the user must survive resolve() unchanged.
+    URDF iyy is only a fallback estimate (contract section 4 of API.md)."""
+    overrides = {
+        "front_left_wheel": WheelConfig(i_wheel=42.0),
+    }
+    cfg = _hjw_basic_config(wheel_overrides=overrides)
+    resolved = resolve(cfg)
+    by_name = {w.name: w for w in resolved.wheels}
+    # User-set wheel keeps 42.0
+    assert by_name["front_left_wheel"].i_wheel == pytest.approx(42.0)
+    # Other wheels fall back to the URDF-derived value (HJW iyy = 2.348).
+    assert by_name["rear_right_wheel"].i_wheel == pytest.approx(2.348)
+
+
+def test_user_explicit_radius_wins_over_urdf():
+    """Same contract for radius: explicit user value wins over URDF cylinder."""
+    overrides = {
+        "front_left_wheel": WheelConfig(radius=0.50),
+    }
+    cfg = _hjw_basic_config(wheel_overrides=overrides)
+    resolved = resolve(cfg)
+    by_name = {w.name: w for w in resolved.wheels}
+    assert by_name["front_left_wheel"].radius == pytest.approx(0.50)
+    # HJW URDF wheel mesh has no cylinder element -> URDF radius = None ->
+    # default fallback. Other wheels fall back to the module default.
+    other = by_name["rear_right_wheel"].radius
+    assert other is not None

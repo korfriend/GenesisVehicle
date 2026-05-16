@@ -16,9 +16,10 @@ import genesis as gs
 from genesis.utils.geom import transform_by_quat
 
 from .config import ResolvedConfig, VehicleConfig, resolve
-from .inputs import VehicleInputs
+from .dynamics import brake_torque_signed, suspension_normal_force
+from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import read_distances
-from .urdf import parse_inertia_max_principal_genesis
+from .urdf import estimate_spin_inertia_from_genesis
 from .visual import VisualSync
 
 
@@ -86,6 +87,14 @@ class VehiclePhysics:
         self.dev = gs.device
         self.fdt = gs.tc_float
 
+        # Snapshot which wheels have an explicit i_wheel BEFORE resolve() fills
+        # URDF defaults. Per the SDK contract: WheelConfig.i_wheel (when set
+        # by the user or populated from URDF) is the authoritative value. The
+        # Genesis-runtime refinement below only fires for wheels where neither
+        # the user nor the URDF supplied a value (i.e. resolve fell back to
+        # DEFAULT_I_WHEEL).
+        user_explicit_i_wheel = [w.i_wheel is not None for w in config.wheels]
+
         self.resolved: ResolvedConfig = resolve(config)
         self.dt = float(self.resolved.dt)
 
@@ -98,18 +107,21 @@ class VehiclePhysics:
             base_idx = int(base_link.idx)
         self.base_idx_list = [base_idx]
 
-        # Refresh i_wheel from the live Genesis entity (URDF inertia may be
-        # rotated by Genesis; max principal moment is the spin MOI).
-        for w in self.resolved.wheels:
+        # Genesis-runtime spin-inertia estimate as a LAST-RESORT fallback.
+        # Skipped for wheels whose i_wheel was explicit (user or URDF).
+        for i, w in enumerate(self.resolved.wheels):
+            if user_explicit_i_wheel[i]:
+                continue
             spin_link_name = self._spin_child_link_name(entity, w.spin_joint_name)
-            if spin_link_name is not None:
-                try:
-                    moi = parse_inertia_max_principal_genesis(entity, spin_link_name)
-                    if moi > 0.0:
-                        w.i_wheel = moi
-                except Exception:
-                    # Fall back to URDF / default value.
-                    pass
+            if spin_link_name is None:
+                continue
+            try:
+                moi = estimate_spin_inertia_from_genesis(entity, spin_link_name)
+                if moi > 0.0:
+                    w.i_wheel = moi
+            except Exception:
+                # Keep the value resolve() already filled (URDF or DEFAULT_I_WHEEL).
+                pass
 
         # Build WheelMeta.
         self.wheel_meta = self._build_wheel_meta(self.resolved)
@@ -186,7 +198,7 @@ class VehiclePhysics:
         if self.visual is not None:
             self.visual.wheel_visual_angle[idx] = 0.0
 
-    def step(self, inputs: Any) -> None:
+    def step(self, inputs: VehicleStepInputs) -> None:
         """Advance the vehicle one physics step.
 
         Accepts either the strategy's expected input type or a unified
@@ -275,21 +287,18 @@ class VehiclePhysics:
             compression = torch.clamp(rest_d[i] - d, min=0.0)         # (n_envs,)
             air_mask = compression <= 0
 
-            # (A) Suspension N with per-wheel asymmetric damper.
+            # (A) Suspension N — asymmetric damper, non-negative clamp, air-mask zero.
             if self._prev_init:
                 raw_rate = (compression - self.prev_compression[:, i]) / DT
                 comp_rate = torch.clamp(raw_rate, -float(rate_clamp[i]), float(rate_clamp[i]))
             else:
                 comp_rate = torch.zeros_like(compression)
             self.prev_compression[:, i] = compression
-            C_damp = torch.where(
-                comp_rate > 0.0,
-                torch.full_like(comp_rate, float(c_comp[i])),
-                torch.full_like(comp_rate, float(c_ext[i])),
+            N = suspension_normal_force(
+                compression, comp_rate,
+                k_susp[i], c_comp[i], c_ext[i],
+                air_mask,
             )
-            N = float(k_susp[i]) * compression + C_damp * comp_rate
-            N = torch.clamp(N, min=0.0)
-            N = torch.where(air_mask, torch.zeros_like(N), N)
 
             # (B) Wheel-frame fwd/lat. ISO 8855 convention: positive steer
             # rotates fwd from +X toward -Y (right turn). NOTE: this is the
@@ -329,8 +338,10 @@ class VehiclePhysics:
                 hook.apply_post_tire(ctx, i)
             F_long, F_lat = ctx.F_long, ctx.F_lat
 
-            # (D) Wheel omega update.
-            T_brake_eff = T_brake_pw[:, i] * torch.tanh(self.omega[:, i] / 0.5)
+            # (D) Wheel omega update. brake_torque_signed converts the positive
+            # brake magnitude into a signed torque opposing wheel rotation, so
+            # `- T_brake_eff` always decelerates the wheel (see API.md S7).
+            T_brake_eff = brake_torque_signed(T_brake_pw[:, i], self.omega[:, i])
             T_friction = float(radius[i]) * F_long
             domega = (T_drive_pw[:, i] - T_brake_eff - T_friction) / float(i_wheel[i])
             new_omega = self.omega[:, i] + domega * DT

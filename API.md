@@ -14,13 +14,12 @@ from genesis_vehicle import (
     car_4w_rwd_ackermann, parse_urdf,
 )
 
-# 1. Build the Genesis scene as usual (vehicle URDF + ground plane).
 gs.init(backend=gs.gpu)
 scene = gs.Scene(...)
 scene.add_entity(gs.morphs.Plane())
 car = scene.add_entity(gs.morphs.URDF(file=URDF_PATH, pos=(0, 0, 1.5)))
 
-# 2. Build the wheel raycaster from URDF wheel positions.
+# Wheel raycaster — positions come from URDF.
 parsed = parse_urdf(URDF_PATH)
 sensor = scene.add_sensor(gs.sensors.Raycaster(
     pattern=WheelRayPattern([w.position for w in parsed.wheels]),
@@ -28,17 +27,12 @@ sensor = scene.add_sensor(gs.sensors.Raycaster(
 ))
 scene.build(n_envs=1)
 
-# 3. Choose a preset (or build VehicleConfig manually) and step the vehicle.
 cfg = car_4w_rwd_ackermann(URDF_PATH)
 physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
 for step in range(480):
     physics.step(VehicleInputs(throttle=0.5, brake=0.0, steer=0.0))
     scene.step()
 ```
-
-That's the whole API surface for a basic demo. The rest of this document covers
-the pieces you reach for when you want custom topology, RL inputs, or to
-write your own strategy.
 
 ---
 
@@ -49,12 +43,12 @@ write your own strategy.
 Every step, for every wheel:
 
 1. **Raycast** — distance `d` from chassis-local wheel point straight down.
-2. **Suspension** — compression `c = max(rest_d - d, 0)`; `N = K_susp * c + C(c_dot) * c_dot` with **per-wheel asymmetric damper** (`c_compression` for compression, `c_extension` for rebound).
+2. **Suspension** — compression `c = max(rest_d - d, 0)`, then `N` from a per-wheel asymmetric damper (see §7.2 for the exact contract).
 3. **Slip** — `kappa = (v_roll - v_long) / max(|v_long|, eps_v)`, `alpha = atan2(v_lat, |v_long|)`.
 4. **Tire force** — `(F_long, F_lat) = TireModel(v_long, v_lat, v_roll, N, wheel_params)`. Pacejka does friction-ellipse clamping internally.
-5. **omega update + chassis force-at-point** — `domega = (T_drive - T_brake - R*F_long) / I_wheel`; chassis gets `N*up + F_long*fwd + F_lat*lat` and `r x F` torque at `r = wheel - chassis_center`.
+5. **omega + chassis force-at-point** — `domega = (T_drive - T_brake_eff - R*F_long) / I_wheel`; chassis gets `N*up + F_long*fwd + F_lat*lat` and `r x F` torque. `T_brake_eff` is the signed form (§7.1).
 
-`VehiclePhysics.step()` runs this loop with strategy hooks plugged at fixed seams (see §3.5).
+`VehiclePhysics.step()` runs this loop with strategy hooks plugged at fixed seams (§5).
 
 ### 2.2 Coordinate / sign conventions (ISO 8855)
 
@@ -64,45 +58,50 @@ Every step, for every wheel:
 | `+Y` | left |
 | `+Z` | up |
 
-| Input | Range | Sign |
+| Input | Range | Meaning |
 |---|---|---|
-| `throttle` | `[-1, +1]` | `+` accelerate forward, `-` reverse |
-| `brake` | `[0, 1]` | always positive magnitude |
+| `throttle` | `[-1, +1]` | signed; `+` accelerates forward, `-` reverses |
+| `brake` | `[0, 1]` | positive magnitude — internally converted to a signed torque opposing wheel rotation (§7.1) |
 | `steer` | `[-1, +1]` | **`+steer` = right turn** |
 
-Implementations hide internal flips (Genesis RHS, URDF `<axis 0 0 -1>`, KDU's legacy `+steer=LEFT`) inside the strategy / visual layer. The user-facing API is unambiguous.
+Internal sign flips (Genesis RHS, URDF `<axis 0 0 -1>`, KDU's legacy `+steer = LEFT`) are absorbed inside the strategy / visual layer. The user-facing API is unambiguous.
 
 ### 2.3 Strategies (composition over inheritance)
 
 A `VehicleConfig` is built from four orthogonal strategies plus optional stability hooks:
 
-| Strategy axis | Concrete options |
+| Axis | Concrete options |
 |---|---|
 | `SteeringStrategy` | `Ackermann`, `PartialAckermann`, `SkidSteer`, `NoSteer` |
 | `DrivetrainStrategy` | `FWD`, `RWD`, `AWD`, `PerSide` |
 | `CouplingStrategy` | `Independent`, `SameSideBelt` |
 | `TireModel` | `PacejkaAnisotropic`, `CoulombIsotropic` |
-| `StabilityHook` (opt-in list) | `RollingResistance`, `LowSpeedRegularizer`, `StaticFrictionLock` |
+| `StabilityHook` (opt-in list, §6) | `RollingResistance`, `LowSpeedRegularizer`, `StaticFrictionLock` |
 
-Each strategy is a small class you can subclass to add a new vehicle behaviour.
+Each is a small class you can subclass to add a new behaviour.
 
-### 2.4 URDF as default, API as override
+### 2.4 URDF is the default source; explicit API overrides are the final truth
 
 For every URDF-derivable field (positions, radii, masses, inertia, joint names),
-the API contract is:
+the precedence is:
 
-1. URDF parsing produces a default `WheelConfig` per wheel.
-2. User-provided `WheelConfig` fields with non-`None` values **win**.
-3. Anything still `None` falls back to module-level defaults (`config.DEFAULT_*`).
+```
+module default  <  URDF-derived default  <  explicit API override
+```
 
-This applies whether you use `VehicleConfig.from_urdf(...)` or build a `VehicleConfig`
-explicitly. Either way, `resolve()` performs the merge.
+In words: URDF provides defaults; `WheelConfig` / `VehicleConfig` values that
+the user explicitly set always win. After `resolve()`, the `ResolvedConfig` is
+the only source of truth used by `VehiclePhysics`.
+
+`i_wheel` follows the same precedence with one addition: if both the user and
+the URDF leave it unset, the SDK consults Genesis runtime metadata as a
+last-resort estimate (§3.4, §7.3).
 
 ### 2.5 Batched by default
 
-Every state tensor is `(n_envs, n_wheels)` or `(n_envs, 3/4)`. Single-env case
-(`n_envs=1`) is just a special case. Scalar OR `(n_envs,)` tensor inputs are
-both accepted. Use `physics.reset(env_ids=...)` for partial reset (RL / MPPI).
+Every state tensor is `(n_envs, n_wheels)` or `(n_envs, 3/4)`. Single-env
+(`n_envs=1`) is a special case. Scalar OR `(n_envs,)` tensor inputs are both
+accepted. Use `physics.reset(env_ids=...)` for partial reset (RL / MPPI).
 
 ---
 
@@ -115,7 +114,7 @@ Imported as `from genesis_vehicle import <name>` unless otherwise noted.
 ```python
 class VehiclePhysics:
     def __init__(scene, entity, sensor, config: VehicleConfig, n_envs: int = 1)
-    def step(inputs: VehicleInputs | <typed>) -> None
+    def step(inputs: VehicleStepInputs) -> None
     def reset(env_ids: torch.Tensor | None = None) -> None
 ```
 
@@ -126,11 +125,11 @@ State (read-only, all `(n_envs, n_wheels)`):
 - `last_T_drive`, `last_T_brake`
 
 Resolved internals:
-- `resolved: ResolvedConfig` — post-merge config
+- `resolved: ResolvedConfig` — post-merge config; only source of truth at runtime
 - `wheel_meta: WheelMeta` — cached per-wheel tensors (positions, radius, side masks, axle indices, etc.)
 
-`step()` accepts either the strategy's `InputType` (e.g. `AckermannInputs`) or a
-unified `VehicleInputs`; the latter is auto-converted via `from_unified()`.
+`step()` accepts either the strategy's `InputType` (e.g. `AckermannInputs`) or
+a unified `VehicleInputs`. The latter is auto-converted via `from_unified()`.
 
 ### 3.2 Inputs
 
@@ -138,7 +137,7 @@ unified `VehicleInputs`; the latter is auto-converted via `from_unified()`.
 @dataclass
 class VehicleInputs:
     throttle: float | torch.Tensor    # [-1, +1] signed
-    brake:    float | torch.Tensor    # [0, 1]
+    brake:    float | torch.Tensor    # [0, 1] positive magnitude
     steer:    float | torch.Tensor    # [-1, +1], + = right turn
 
 @dataclass
@@ -146,18 +145,26 @@ class AckermannInputs:           # for Ackermann / PartialAckermann
     throttle, brake, steer
 @dataclass
 class SkidSteerInputs:           # for SkidSteer + PerSide
-    throttle, brake, steer_diff
+    throttle, brake, steer_diff  # + = right turn
 @dataclass
 class NoSteerInputs:             # for NoSteer + any drivetrain
     throttle, brake
+
+# Convenience alias for VehiclePhysics.step() type hints.
+VehicleStepInputs = Union[
+    VehicleInputs, AckermannInputs, PartialAckermannInputs,
+    SkidSteerInputs, NoSteerInputs,
+]
 ```
 
-Each typed input has a `from_unified(VehicleInputs) -> Self` classmethod for
+Every typed input has a `from_unified(VehicleInputs) -> Self` classmethod for
 RL pipelines that prefer the unified `VehicleInputs` schema.
 
 ### 3.3 Config
 
 ```python
+from dataclasses import field
+
 @dataclass
 class WheelConfig:
     # All fields Optional. None = derive from URDF or module default.
@@ -180,9 +187,9 @@ class ChassisConfig:
 class VehicleConfig:
     urdf_path: str
     wheels: list[WheelConfig]
-    steering, drivetrain, coupling, tire    # strategies / model
-    chassis: ChassisConfig = ChassisConfig()
-    stability_hooks: list[StabilityHook] = []
+    steering, drivetrain, coupling, tire
+    chassis: ChassisConfig = field(default_factory=ChassisConfig)
+    stability_hooks: list[StabilityHook] = field(default_factory=list)
     dt: float = 1.0/48.0
     enable_visual_sync: bool = True
 
@@ -192,10 +199,12 @@ class VehicleConfig:
                   chassis: ChassisConfig = None, **kwargs) -> VehicleConfig
 ```
 
+> **Implementation note.** Mutable defaults on dataclass fields (`chassis: ChassisConfig = ChassisConfig()` or `list = []`) are unsafe — they are shared across instances. The SDK uses `field(default_factory=...)` throughout. When constructing your own dataclasses, follow the same pattern.
+
 `from_urdf()` is the easiest path: pass strategies + a dict of per-wheel
 overrides keyed by URDF wheel link name; the wheel list is auto-populated.
 
-`resolve(config) -> ResolvedConfig` runs the URDF→config→default merge and
+`resolve(config) -> ResolvedConfig` runs the URDF → user → default merge and
 each strategy's `validate()`. Called automatically by `VehiclePhysics.__init__`.
 
 `ConfigError` — raised on bad config (missing required fields, wheel count
@@ -205,24 +214,41 @@ mismatch, sides missing for skid-steer, etc.).
 
 ```python
 parse_urdf(urdf_path: str) -> URDFParsedConfig
-parse_inertia_max_principal_genesis(entity, link_name: str) -> float
+
+estimate_spin_inertia_from_genesis(
+    entity, link_name: str,
+    spin_axis_local: tuple[float, float, float] | None = None,
+) -> float
 ```
 
-`parse_urdf()` discovers wheels by walking the URDF joint tree:
+`parse_urdf()` is a **convention-based helper** that discovers wheels by
+walking the URDF joint tree:
+
 - Wheels = prismatic joints whose name ends with `_susp` or `_suspension_joint`
-- Spin joint = first descendant `continuous` joint with axis (0, ±1, 0)
-- Steer joint = `revolute` joint with axis (0, 0, ±1) along the chain
-- Side = `l_*`/`_left_*` → 'L', `r_*`/`_right_*` → 'R', else `None`
-- Axle index = clusters by x-coordinate, sorted descending so axle 0 = front-most
+- Spin joint = first descendant `continuous` joint with axis `(0, ±1, 0)`
+- Steer joint = `revolute` joint with axis `(0, 0, ±1)` along the chain
+- Side: `l_*` / `_left_*` → `'L'`; `r_*` / `_right_*` → `'R'`; else `None`
+- Axle index: clusters by x-coordinate, sorted descending so axle 0 = front-most
+
+> **For non-conforming URDFs**, construct `VehicleConfig` explicitly or supply
+> `wheel_overrides` with the relevant joint names. `parse_urdf()` is a
+> best-effort convenience for our supported vehicle naming conventions, not a
+> general URDF interpreter.
 
 `URDFParsedConfig` fields:
 - `base_link_name`, `chassis_mass`, `wheels: list[WheelConfig]`
 - `steer_axis_signs: dict[str, int]` — used by visual layer for `<axis 0 0 -1>` flip
 - `susp_has_dynamics: dict[str, bool]` — picks `set_dofs_position` vs `control_dofs_position`
 
-`parse_inertia_max_principal_genesis()` reads `link.inertial_i` from a built
-Genesis entity and returns the max diagonal — robust against Genesis rotating
-the inertial frame (which makes URDF `iyy` unreliable as the spin MOI).
+`estimate_spin_inertia_from_genesis()` is a **fallback estimate** consulted
+only when `WheelConfig.i_wheel` is not set (by the user OR by the URDF). When
+`spin_axis_local` is provided, the helper projects the inertia tensor onto
+that axis (`a^T diag(I) a`); otherwise it returns `max(diag(inertial_i))`,
+which is the spin MOI for cylindrical wheels but a heuristic for general
+shapes. **`WheelConfig.i_wheel` (when supplied) is always authoritative.**
+
+The old name `parse_inertia_max_principal_genesis` is kept as a deprecated
+alias and will be removed in a future revision.
 
 ### 3.5 Strategies — full surface
 
@@ -238,13 +264,11 @@ class Ackermann(SteeringStrategy):
 class PartialAckermann(Ackermann):
     def __init__(max_steer_rad=0.7, steered_axles=(0,),
                  wheelbase=None, track_width=None)
-    # For multi-axle vehicles where only some axles steer.
     InputType = PartialAckermannInputs
 
 class SkidSteer(SteeringStrategy):
     # No steer angle; turning happens via PerSide drivetrain.
     InputType = SkidSteerInputs
-    def affects_drive(self) -> bool: return True
 
 class NoSteer(SteeringStrategy):
     InputType = NoSteerInputs
@@ -257,22 +281,20 @@ class RWD(DrivetrainStrategy):
     def __init__(t_drive_max, t_brake_max,
                  driven_axles=None,    # default: rear-most axle
                  brake_bias=None)      # default: 60/40 front/rear (2-axle); uniform otherwise
-
 class FWD(RWD):                       # default driven_axles = front-most axle
 class AWD(DrivetrainStrategy):
     def __init__(t_drive_max, t_brake_max,
                  drive_weights=None,   # per-wheel weights, default uniform
                  brake_bias=None)
-
 class PerSide(DrivetrainStrategy):
-    """For tank-style skid steer."""
+    """For tank-style skid steer.
+    Unified-input mapping (ISO +steer = right turn):
+        left_cmd  = throttle + steer_gain * steer
+        right_cmd = throttle - steer_gain * steer
+    So +steer makes the LEFT side faster -> right turn."""
     def __init__(t_drive_max, t_brake_max,
-                 steer_gain=1.0,
-                 omega_max_drive=100.0,
-                 throttle_gear_cap=1.0,
-                 use_per_side_taper=True)
-    # Per-side ω taper (KDU pattern): T_max(omega) = T_drive_max*(1 - omega/omega_max_drive)
-    # only on the same direction as omega; opposite direction (decel) keeps full T_max.
+                 steer_gain=1.0, omega_max_drive=100.0,
+                 throttle_gear_cap=1.0, use_per_side_taper=True)
 ```
 
 #### Coupling
@@ -283,7 +305,19 @@ class SameSideBelt(CouplingStrategy):
     # Tank track: omega[L] := mean(omega[L]) per env; same for R.
 ```
 
+**`CouplingStrategy.apply()` contract.** Coupling fires once per step **after**
+the per-wheel omega integration in the wheel loop and **before** visual sync.
+The chassis force/torque applied in the same step still uses the pre-coupling
+omegas (since they were computed during the wheel loop); the coupled omega is
+the state observed by the next simulation step. This matches the KDU reference
+behaviour and is documented as the SDK contract — strategies must not assume
+they run inside the per-wheel loop.
+
 #### Stability hooks (opt-in via `VehicleConfig.stability_hooks`)
+
+See §6 for the rationale (these are numerical stabilizers, not physical
+forces). Hook ordering matters — put `RollingResistance` before
+`StaticFrictionLock` so the lock has the last word on `F_long`.
 
 ```python
 class RollingResistance(StabilityHook):
@@ -293,8 +327,7 @@ class RollingResistance(StabilityHook):
 
 class LowSpeedRegularizer(StabilityHook):
     def __init__(v_kin_com=0.5, ang_kin=0.5,
-                 disable_when_control_active=True,
-                 control_threshold=0.01)
+                 disable_when_control_active=True, control_threshold=0.01)
     # PRE_LOOP: compute moving = clamp(max(|v|/v_kin, |omega|/ang_kin), 0, 1)
     # POST_TIRE: scale F by `moving`; pull omega toward v_long/radius for grounded wheels.
     # When user has throttle/brake pressed: moving := 1 (so the car can pull away).
@@ -311,31 +344,38 @@ class StaticFrictionLock(StabilityHook):
 ```python
 class PacejkaAnisotropic(TireModel):
     def __init__(eps_v=0.5)
-    # Per-wheel coefficients (B, C, E for long + lat axes), mu_long, mu_lat
-    # come from wheel_params — one model instance serves the whole vehicle.
+    # Per-wheel (B, C, E) for long + lat, mu_long, mu_lat come from wheel_params.
     # Returns (F_long, F_lat, kappa, alpha) with friction-ellipse clamp.
-
 class CoulombIsotropic(TireModel):
     def __init__(eps_v=0.5)
     # F = -mu * N * v_slip / |v_slip|, isotropic.
 ```
 
-### 3.7 Sensor / utilities
+### 3.7 Sensor / dynamics utilities
 
 ```python
 class WheelRayPattern(genesis.options.sensors.raycaster.RaycastPattern):
     def __init__(positions: list[tuple[float, float, float]])
     @classmethod
     def from_config(resolved: ResolvedConfig) -> WheelRayPattern
-    # One -z body-frame ray per wheel. Pass to gs.sensors.Raycaster(pattern=...).
 
 read_distances(sensor, n_envs: int) -> torch.Tensor
     # Returns (n_envs, n_wheels). Handles the n_envs=1 sensor shape quirk.
+
+# --- Pure-Python dynamics primitives (testable without Genesis) ---
+brake_torque_signed(
+    t_brake: torch.Tensor, omega: torch.Tensor, smoothing_scale: float = 0.5,
+) -> torch.Tensor
+    # See §7.1.
+
+suspension_normal_force(
+    compression, comp_rate,
+    k_susp, c_compression, c_extension, air_mask,
+) -> torch.Tensor
+    # See §7.2.
 ```
 
 ### 3.8 Presets
-
-Each preset returns a `VehicleConfig` ready for `VehiclePhysics(...)`:
 
 | Function | Topology | Steering | Drive | Coupling |
 |---|---|---|---|---|
@@ -344,8 +384,8 @@ Each preset returns a `VehicleConfig` ready for `VehiclePhysics(...)`:
 | `truck_6w_partial_ackermann(urdf_path)` | 6 wheels | Ackermann on axle 0 | AWD (uniform) | Independent |
 | `tank_10w_skid_belt(urdf_path)` | 10 wheels | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
 
-Tune them by editing the returned config (`cfg.dt = ...`, replace a strategy,
-add a stability hook) before passing to `VehiclePhysics`.
+Tune by editing the returned config (`cfg.dt = ...`, replace a strategy, add a
+stability hook) before passing it to `VehiclePhysics`.
 
 ---
 
@@ -382,11 +422,10 @@ cfg = VehicleConfig.from_urdf(
 N_ENVS = 256
 physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=N_ENVS)
 throttle = torch.zeros(N_ENVS, device='cuda')
-brake = torch.zeros(N_ENVS, device='cuda')
-steer = torch.zeros(N_ENVS, device='cuda')
+brake    = torch.zeros(N_ENVS, device='cuda')
+steer    = torch.zeros(N_ENVS, device='cuda')
 
 for t in range(T):
-    # Each input is a (N_ENVS,) tensor:
     physics.step(VehicleInputs(throttle, brake, steer))
     scene.step()
     if t % 100 == 0:
@@ -396,17 +435,15 @@ for t in range(T):
 
 ### 4.3 Custom strategy
 
-Subclass any strategy ABC. Example: per-wheel torque vectoring on top of AWD.
-
 ```python
 import torch
 from genesis_vehicle import AWD
 
 class TorqueVectoringAWD(AWD):
     def distribute_torque(self, inputs, omega, wheel_meta, device, dtype):
-        T_drive, T_brake = super().distribute_torque(inputs, omega, wheel_meta, device, dtype)
-        # Add a yaw-rate based per-wheel bias.
-        ...
+        T_drive, T_brake = super().distribute_torque(
+            inputs, omega, wheel_meta, device, dtype)
+        # Per-wheel bias from yaw rate, etc.
         return T_drive, T_brake
 ```
 
@@ -415,18 +452,147 @@ Same pattern works for `SteeringStrategy.per_wheel_steer`,
 
 ### 4.4 Stability hook ordering
 
-`stability_hooks` is a list; hooks run in list order. PRE_LOOP hooks run once
-per step; POST_TIRE hooks run once per wheel after the tire model. If both
-`RollingResistance` and `StaticFrictionLock` are active, place `RollingResistance`
-**first** so the lock gets the last word on `F_long`.
-
 ```python
 cfg.stability_hooks = [RollingResistance(), StaticFrictionLock()]
 ```
 
+Hooks run in list order. If both are active, place `RollingResistance` first
+so the lock overrides any rolling-resistance contribution at rest.
+
 ---
 
-## 5. Migration cheatsheet
+## 5. Pipeline hook insertion points
+
+```
+VehiclePhysics.step(inputs)
+
+[0] Input adaptation
+    typed = inputs if isinstance(inputs, steering.InputType)
+            else steering.InputType.from_unified(inputs)
+
+[1] PRE-LOOP
+    steer_per_wheel = SteeringStrategy.per_wheel_steer(typed)
+    T_drive_pw, T_brake_pw = DrivetrainStrategy.distribute_torque(typed, omega, meta)
+    for hook in stability_hooks if PRE_LOOP in hook.slots:
+        hook.apply_pre_loop(ctx)                     # e.g. LowSpeedRegularizer
+
+[2] Raycast (read_distances) + first-step protection
+
+[3] Chassis state read
+
+[per-wheel loop i = 0 .. n_wheels-1, all batched over n_envs]
+    (A) compression, comp_rate, asymmetric damper -> N      (§7.2)
+    (B) wheel-frame fwd/lat using steer_per_wheel[:, i]
+    (C) F_long, F_lat = TireModel(...)
+        for hook in stability_hooks if POST_TIRE in hook.slots:
+            hook.apply_post_tire(ctx, i)             # RollingResistance, ...
+    (D) T_brake_eff = brake_torque_signed(T_brake_pw[:, i], omega[:, i])  (§7.1)
+        domega = (T_drive - T_brake_eff - R * F_long) / I_wheel
+        omega[:, i] = clamp(omega[:, i] + DT*domega, ±OMEGA_MAX)
+    (E) accumulate F_world, torque into total_F, total_T
+
+[4] CouplingStrategy.apply(omega, meta)              # post-loop, pre-force-apply
+[5] solver.apply_links_external_force/torque (chassis)
+[6] VisualSync (if enabled)
+```
+
+---
+
+## 6. Stability hooks are NUMERICAL stabilizers, not physical forces
+
+`RollingResistance` is on the physical-vs-numerical boundary (the `cr` term is
+a physical quantity but its tanh smoothing is for numerical stability).
+`LowSpeedRegularizer` and `StaticFrictionLock` are purely numerical: they
+exist to tame the low-speed instability of the ray-wheel + Pacejka model and
+to provide hold-at-rest behavior that the smooth tire force can't deliver.
+
+> **For strict parameter identification or Real2Sim fitting, disable stability
+> hooks (or include them in the identification loop explicitly) so their
+> numerical biases do not leak into your physical parameters.**
+
+In Korean:
+
+> stability hook은 기본 차량 물리 모델이 아니라, ray-wheel 모델의 저속 불안정성을 줄이기 위한 보정 항이다. Real2Sim 파라미터 추정에서는 이 항이 물리 파라미터와 섞이지 않도록 주의해야 한다.
+
+---
+
+## 7. Physics contracts
+
+These contracts are enforced by `genesis_vehicle.dynamics` (pure-Python,
+unit-tested in `tests/test_dynamics.py`) and consumed by `core.py`. They are
+the SDK's promises about ambiguous physical conventions.
+
+### 7.1 Brake torque is a positive command magnitude
+
+`brake` (user input) is always in `[0, 1]`. Internally, the SDK converts it
+to a signed torque opposing wheel rotation:
+
+```
+T_brake_eff = T_brake * tanh(omega / smoothing_scale)
+domega     = (T_drive - T_brake_eff - R * F_long) / I_wheel
+```
+
+- For `omega > 0`, `T_brake_eff > 0`, so `-T_brake_eff` decelerates the wheel.
+- For `omega < 0` (reverse spin), `T_brake_eff < 0`, so `-T_brake_eff > 0`
+  again decelerates.
+- For `omega ≈ 0`, `T_brake_eff ≈ 0` — the smooth brake cannot pin the wheel.
+  Pair with `StaticFrictionLock` for hard hold-at-rest behaviour.
+
+### 7.2 Normal force is non-negative; air-mask wheels contribute nothing
+
+Per-wheel suspension force uses the asymmetric damper (different coefficient
+on compression vs extension) and is clamped non-negative — the ground cannot
+pull a wheel down:
+
+```
+c_damp = c_compression if c_dot > 0 else c_extension
+N_raw  = K_susp * compression + c_damp * c_dot
+N      = max(N_raw, 0)
+N      = 0 if the ray missed the ground (air_mask)
+```
+
+When `N = 0`, the per-wheel `F_long`, `F_lat` are also zero (no contact),
+though `T_drive` and `T_brake` still update `omega` (the wheel spins freely
+in the air).
+
+### 7.3 `WheelConfig.i_wheel` truth policy
+
+```
+1. WheelConfig.i_wheel set by the user            -> AUTHORITATIVE (used as-is)
+2. URDF inertia (via parse_urdf, max diagonal)    -> default / estimate
+3. Genesis-runtime metadata                       -> fallback estimate
+4. DEFAULT_I_WHEEL                                -> last-resort fallback
+```
+
+For ray-wheel dynamics, the wheel spin inertia is often different from the
+URDF hinge inertia (e.g. URDF wheel hinge is visual-only while real ray-wheel
+inertia comes from a coarser estimate). In Real2Sim / parameter fitting,
+**always set `WheelConfig.i_wheel` explicitly** to take this out of the
+estimation pipeline.
+
+### 7.4 Steering sign convention (ISO 8855)
+
+`+steer` is right turn under all strategies (`Ackermann`, `PartialAckermann`,
+`SkidSteer`). Unit-tested:
+
+- **Ackermann right turn**: both front wheels turn positive; the right wheel
+  (the inner wheel for a right turn) has the larger angle.
+- **SkidSteer right turn**: the left side commands more torque than the right
+  side (`left_cmd > right_cmd` via `left_cmd = throttle + steer_gain * steer`).
+
+KDU's legacy `+steer = LEFT` is **not** carried forward; KDU demo callsites
+must flip the sign in migration.
+
+### 7.5 Coupling order
+
+`CouplingStrategy.apply(omega)` runs after the per-wheel omega integration in
+the current step and before the next step. Drive torque distribution in the
+same step uses **pre-coupling** omegas (one-step lag), matching the KDU
+reference implementation.
+
+---
+
+## 8. Migration cheatsheet
 
 ### From HJW (`HJW/car_raywheel.py`)
 
@@ -434,8 +600,8 @@ cfg.stability_hooks = [RollingResistance(), StaticFrictionLock()]
 |---|---|
 | `CarRayWheelPhysics(scene, car, sensor)` | `VehiclePhysics(scene, car, sensor, cfg)` where `cfg = car_4w_rwd_ackermann(URDF_PATH)` |
 | `physics.step(throttle, brake, steer)` | `physics.step(VehicleInputs(throttle, brake, steer))` |
-| Module-level constants (`K_SUSP`, `C_COMP`, `MU`, `PB_X`, …) | `WheelConfig` fields, set via `wheel_overrides` |
-| `WHEEL_POSITIONS`, `N_WHEELS`, `BRAKE_BIAS_PER_WHEEL` | URDF + `RWD(brake_bias=[…])` |
+| Module-level constants (`K_SUSP`, `C_COMP`, `MU`, `PB_X`, ...) | `WheelConfig` fields, set via `wheel_overrides` |
+| `WHEEL_POSITIONS`, `N_WHEELS`, `BRAKE_BIAS_PER_WHEEL` | URDF + `RWD(brake_bias=[...])` |
 | Steer sign flip at `car_raywheel.py:298` | hidden inside `Ackermann` (no manual flip) |
 
 ### From JMK (`JMK/real2sim/gt_ray/0_test_ray_step{11,12}.py`)
@@ -452,8 +618,9 @@ physics.step(VehicleInputs(throttle=THROTTLE, brake=0, steer=0))
 physics.step(VehicleInputs(throttle=0.5, brake=0, steer=+0.4))   # ISO + = right
 ```
 
-JMK's hard-coded chassis mass (1330) and track width (1.48) **are dropped**;
-URDF (1200, 1.32) wins per the SDK's URDF-as-truth rule.
+JMK's hard-coded chassis mass (1330) and track width (1.48) **are dropped**:
+URDF (1200, 1.32) provides the defaults; only an explicit user override would
+restore them. (Per the precedence in §2.4, the SDK never invents these values.)
 
 ### From KDU (`KDU/physics.py`)
 
@@ -461,8 +628,8 @@ URDF (1200, 1.32) wins per the SDK's URDF-as-truth rule.
 |---|---|
 | `parse_tank_urdf()` | `parse_urdf()` (generalised; same naming convention) |
 | `TankRayPhysics(tank, sensor, urdf_path)` | `VehiclePhysics(scene, tank, sensor, cfg)` where `cfg = tank_10w_skid_belt(urdf_path)` |
-| `physics.step(throttle, brake, steer)` with `+steer = LEFT` | `physics.step(VehicleInputs(throttle, brake, steer=-old_steer))` — note the **sign flip** to match ISO 8855 |
-| `omega[LEFT_IDX] = mean()` belt constraint | `SameSideBelt()` coupling |
+| `physics.step(throttle, brake, steer)` with `+steer = LEFT` | `physics.step(VehicleInputs(throttle, brake, steer=-old_steer))` — **sign flip** to ISO 8855 |
+| `omega[LEFT_IDX] = mean()` belt constraint | `SameSideBelt()` coupling (post-loop, pre-force-apply — see §7.5) |
 | `_cap_torque` per-side taper | `PerSide(use_per_side_taper=True)` |
 | Static friction lock | `StaticFrictionLock(brake_thr=0.3, v_thr=0.5, hold_k=200_000.0)` |
 | `THROTTLE_GEAR_CAP = 0.3` | `PerSide(throttle_gear_cap=0.3)` |
@@ -470,14 +637,34 @@ URDF (1200, 1.32) wins per the SDK's URDF-as-truth rule.
 
 ---
 
-## 6. Module map
+## 9. Recommended unit tests (kept in `genesis_vehicle/tests/`)
+
+Pure-Python, runnable without Genesis (`pytest genesis_vehicle/tests/`).
+
+| Coverage area | Test file | Notes |
+|---|---|---|
+| Config resolve (URDF default, user override, defaults fill) | `test_config_resolve.py` | Includes `test_user_explicit_i_wheel_wins_over_urdf` |
+| URDF parsing (HJW + KDU naming) | `test_urdf_parse.py` | |
+| Ackermann sign + inner/outer | `test_strategies_unit.py` | `+steer` → both wheels positive, FR > FL |
+| SkidSteer sign (left faster on +steer) | `test_strategies_unit.py` | `test_perside_iso_right_turn_left_faster` |
+| SameSideBelt averages each side | `test_strategies_unit.py` | |
+| RWD front-drive-zero invariant | `test_strategies_unit.py` | |
+| `brake_torque_signed` reverses with omega | `test_dynamics.py` | `omega < 0` → `T_brake_eff < 0` |
+| Suspension N clamped non-negative | `test_dynamics.py` | Strong rebound → `N = 0`, not negative |
+| Suspension air-mask → `N = 0` | `test_dynamics.py` | |
+| Asymmetric damper (compression vs extension) | `test_dynamics.py` | |
+
+---
+
+## 10. Module map
 
 | File | Purpose |
 |---|---|
 | `core.py` | `VehiclePhysics` — 5-step pipeline orchestrator |
 | `config.py` | `WheelConfig`, `ChassisConfig`, `VehicleConfig`, `ResolvedConfig`, `resolve()`, `ConfigError`, `DEFAULT_*` |
-| `inputs.py` | `VehicleInputs` + typed inputs |
-| `urdf.py` | `parse_urdf()`, `URDFParsedConfig`, runtime inertia helper |
+| `inputs.py` | `VehicleInputs`, `VehicleStepInputs`, typed inputs |
+| `urdf.py` | `parse_urdf()`, `URDFParsedConfig`, `estimate_spin_inertia_from_genesis` |
+| `dynamics.py` | `brake_torque_signed`, `suspension_normal_force` — pure helpers |
 | `raycast.py` | `WheelRayPattern`, `read_distances()` |
 | `visual.py` | `VisualSync` (auto-invoked by core; flips URDF axis quirks) |
 | `tire_models/` | `TireModel` ABC + `PacejkaAnisotropic`, `CoulombIsotropic` |
@@ -490,7 +677,7 @@ URDF (1200, 1.32) wins per the SDK's URDF-as-truth rule.
 
 ---
 
-## 7. Defaults reference (from `config.py`)
+## 11. Defaults reference (from `config.py`)
 
 | Constant | Value | Notes |
 |---|---|---|
@@ -503,7 +690,8 @@ URDF (1200, 1.32) wins per the SDK's URDF-as-truth rule.
 | `DEFAULT_COMP_RATE_CLAMP` | 30 m/s | numerical clamp on `c_dot` |
 | `DEFAULT_RADIUS` | 0.35 m | wheel radius (used only if URDF has no `<cylinder>`) |
 | `DEFAULT_MASS` | 20 kg | wheel mass fallback |
-| `DEFAULT_I_WHEEL` | 1.5 kg·m² | wheel spin MOI fallback |
+| `DEFAULT_I_WHEEL` | 1.5 kg·m² | wheel spin MOI fallback (last-resort; see §7.3) |
 | `DEFAULT_PACEJKA` | `PB_X=10, PC_X=1.65, PE_X=0.4, PB_Y=8, PC_Y=1.30, PE_Y=0.4` | mid-grip car defaults |
 
-These are last-resort fallbacks. URDF + `WheelConfig` overrides take precedence.
+These are last-resort fallbacks. URDF + `WheelConfig` overrides take precedence
+per §2.4.

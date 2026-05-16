@@ -65,3 +65,15 @@ class NoSteerInputs:
     @classmethod
     def from_unified(cls, vi: VehicleInputs) -> "NoSteerInputs":
         return cls(vi.throttle, vi.brake)
+
+
+# Convenience alias for VehiclePhysics.step() type hints. Accepts any typed
+# input matching the configured strategy's InputType, or the unified
+# VehicleInputs (auto-converted via from_unified()).
+VehicleStepInputs = Union[
+    VehicleInputs,
+    AckermannInputs,
+    PartialAckermannInputs,
+    SkidSteerInputs,
+    NoSteerInputs,
+]
