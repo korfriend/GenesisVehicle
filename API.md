@@ -3,6 +3,14 @@
 Ray-cast wheel + Pacejka-tire vehicle SDK on top of Genesis. One package, one
 import path, batched (`n_envs >= 1`) by default.
 
+> **Version:** see `genesis_vehicle.__version__`. Release history in
+> [`CHANGELOG.md`](CHANGELOG.md). `VehiclePhysics.__init__` prints a one-line
+> banner the first time it is constructed in a process:
+>
+> ```
+> [genesis_vehicle v0.4.0] Initialized: 4 wheels, Ackermann, RWD, Independent, n_envs=1, hooks=[RollingResistance, LowSpeedRegularizer]
+> ```
+
 ---
 
 ## 1. Quick start
@@ -97,7 +105,28 @@ the only source of truth used by `VehiclePhysics`.
 the URDF leave it unset, the SDK consults Genesis runtime metadata as a
 last-resort estimate (§3.4, §7.3).
 
-### 2.5 Batched by default
+### 2.5 What is a "stability hook"?
+
+A **hook** is a post-processing callback that runs at a fixed point in the
+5-step pipeline. The main dynamics (raycast → suspension → slip → tire → ω)
+are not modified; the hook just *adds one more term* at a designated seam,
+the same way `git pre-commit`, a web-framework middleware, or a Java
+interceptor works. Examples in this SDK:
+
+- `RollingResistance` runs after the tire model produces `F_long`, and
+  subtracts `cr * N * tanh(v_long / scale)`.
+- `LowSpeedRegularizer` runs once pre-loop (computes a `moving∈[0,1]`
+  factor) and once per wheel post-tire (scales `F_long`/`F_lat` by `moving`
+  and pulls `omega` toward rolling-without-slip).
+- `StaticFrictionLock` runs post-tire when `brake > thr` and
+  `|v_long| < thr`; overrides `F_long` with `-K * v_long` and forces
+  `omega = 0`.
+
+In v0.3.0 the SDK selects hooks via a **stability profile** rather than a
+free-form list (§6). Advanced users can still pass `stability="research"`
+and assemble `cfg.stability_hooks` manually.
+
+### 2.6 Batched by default
 
 Every state tensor is `(n_envs, n_wheels)` or `(n_envs, 3/4)`. Single-env
 (`n_envs=1`) is a special case. Scalar OR `(n_envs,)` tensor inputs are both
@@ -313,11 +342,11 @@ the state observed by the next simulation step. This matches the KDU reference
 behaviour and is documented as the SDK contract — strategies must not assume
 they run inside the per-wheel loop.
 
-#### Stability hooks (opt-in via `VehicleConfig.stability_hooks`)
+#### Stability hooks (selected via `stability=` profile; §6)
 
-See §6 for the rationale (these are numerical stabilizers, not physical
-forces). Hook ordering matters — put `RollingResistance` before
-`StaticFrictionLock` so the lock has the last word on `F_long`.
+Hook ordering matters — put `RollingResistance` before `StaticFrictionLock`
+so the lock has the last word on `F_long`. The `stability_hooks_for_profile`
+helper enforces a sensible order.
 
 ```python
 class RollingResistance(StabilityHook):
@@ -373,9 +402,39 @@ suspension_normal_force(
     k_susp, c_compression, c_extension, air_mask,
 ) -> torch.Tensor
     # See §7.2.
+
+# --- Version API ---
+genesis_vehicle.__version__               # str, e.g. "0.3.0"
+genesis_vehicle.VERSION_INFO              # tuple, e.g. (0, 3, 0)
+genesis_vehicle.version() -> str          # same as __version__
+genesis_vehicle.version_info() -> tuple   # same as VERSION_INFO
+# VehiclePhysics.__init__ prints a banner with the version + a config summary
+# on first construction per process. There is no global "quiet" flag yet.
 ```
 
 ### 3.8 Presets
+
+Every preset takes a keyword-only `stability` argument that picks the
+stability profile (see §6).
+
+```python
+def car_4w_rwd_ackermann(
+    urdf_path: str, n_envs: int = 1, *, stability: str = "control",
+) -> VehicleConfig
+def car_4w_awd_ackermann(
+    urdf_path: str, n_envs: int = 1, *, stability: str = "control",
+) -> VehicleConfig
+def truck_6w_partial_ackermann(
+    urdf_path: str, n_envs: int = 1, *, stability: str = "control",
+) -> VehicleConfig
+def tank_10w_skid_belt(
+    urdf_path: str, n_envs: int = 1, *, stability: str = "control",
+) -> VehicleConfig
+
+stability_hooks_for_profile(
+    profile: str = "control", vehicle_kind: str = "car",
+) -> list[StabilityHook]
+```
 
 | Function | Topology | Steering | Drive | Coupling |
 |---|---|---|---|---|
@@ -384,8 +443,8 @@ suspension_normal_force(
 | `truck_6w_partial_ackermann(urdf_path)` | 6 wheels | Ackermann on axle 0 | AWD (uniform) | Independent |
 | `tank_10w_skid_belt(urdf_path)` | 10 wheels | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
 
-Tune by editing the returned config (`cfg.dt = ...`, replace a strategy, add a
-stability hook) before passing it to `VehiclePhysics`.
+Tune by editing the returned config (`cfg.dt = ...`, replace a strategy,
+override `cfg.stability_hooks`) before passing it to `VehiclePhysics`.
 
 ---
 
@@ -498,21 +557,62 @@ VehiclePhysics.step(inputs)
 
 ---
 
-## 6. Stability hooks are NUMERICAL stabilizers, not physical forces
+## 6. Stability profiles (`stability="control" | "raw" | "research"`)
 
-`RollingResistance` is on the physical-vs-numerical boundary (the `cr` term is
-a physical quantity but its tanh smoothing is for numerical stability).
-`LowSpeedRegularizer` and `StaticFrictionLock` are purely numerical: they
-exist to tame the low-speed instability of the ray-wheel + Pacejka model and
-to provide hold-at-rest behavior that the smooth tire force can't deliver.
+Low-speed stabilization of a ray-wheel + Pacejka model is a fundamental
+numerical concern, not an optional add-on. Every preset and the
+`stability_hooks_for_profile` helper select a **profile** that materializes
+the appropriate set of hooks. This mirrors the convention in other vehicle
+SDKs (PhysX `eSTICKY_TIRE_FRICTION` mode, Jolt anti-rollback, Chaos low-speed
+threshold, Unity WheelCollider stick-slip): the low-speed stabilization is
+*part of the model*, not a plug-in the user has to remember to enable.
 
-> **For strict parameter identification or Real2Sim fitting, disable stability
-> hooks (or include them in the identification loop explicitly) so their
-> numerical biases do not leak into your physical parameters.**
+| Profile | Hooks materialized (car) | Hooks materialized (tank) | Use case |
+|---|---|---|---|
+| `"control"` (default) | `RollingResistance`, `LowSpeedRegularizer(disable_when_control_active=False)` | + `StaticFrictionLock(0.3, 0.5, 200_000)` | **Recommended for almost everyone**: RL / MPPI / general control / Real2Sim. The regularizer is active even under throttle (the v0.3.0 footgun fix). |
+| `"raw"` | _empty_ | _empty_ | Raw ray-wheel + Pacejka with NO numerical stabilization. For debugging the bare dynamics or running hook-ablation studies. Not a general-purpose default. |
+| `"research"` | _empty_ | _empty_ | Caller assembles `cfg.stability_hooks` manually (advanced). |
 
-In Korean:
+```python
+# RL / MPPI / Real2Sim — default profile is correct.
+cfg = car_4w_rwd_ackermann(URDF)
 
-> stability hook은 기본 차량 물리 모델이 아니라, ray-wheel 모델의 저속 불안정성을 줄이기 위한 보정 항이다. Real2Sim 파라미터 추정에서는 이 항이 물리 파라미터와 섞이지 않도록 주의해야 한다.
+# Raw dynamics — debugging or ablation study.
+cfg = car_4w_rwd_ackermann(URDF, stability="raw")
+
+# Custom hook stack (advanced).
+cfg = car_4w_rwd_ackermann(URDF, stability="research")
+cfg.stability_hooks = [RollingResistance(tanh_scale=0.3),
+                       StaticFrictionLock(brake_thr=0.2)]
+```
+
+### The one rule (covers MPPI, RL, and Real2Sim)
+
+**Fitting forward model = deployment forward model.** Hooks are part of the
+model. Whatever stability profile you deploy with, fit with the same. For our
+SDK that almost always means `"control"` in both fitting and deployment.
+
+- **MPPI / RL** — train against `"control"`, deploy against `"control"`.
+- **Real2Sim** — fit (μ, K, B, …) against `"control"` so the fitted values
+  reflect "how this vehicle behaves under the model you'll actually use".
+  Fitted parameters are model-coupled: Pacejka `B` is not "rubber's true
+  stiffness" but "the coefficient that, inside Pacejka inside our SDK with
+  these hooks, best matches real data". That coupling is fine — desired,
+  even — as long as deployment uses the same model.
+
+### When `"raw"` is actually useful
+
+Not for general Real2Sim. Use `"raw"` only when:
+
+1. You want to study the bare ray-wheel + Pacejka dynamics (e.g. debug a
+   stiff-ODE oscillation).
+2. You want to measure the contribution of the hooks themselves (run the
+   same scenario in `"control"` and `"raw"` and diff).
+3. You are exporting parameter values to a different simulator that
+   guarantees no equivalent hooks — but note: parameter values are not
+   portable in any rigorous sense; refit in the destination simulator.
+
+> 핵심: hook 도 forward model 의 일부. fitting 과 deployment 가 같은 hook config 라면 그게 일관된 모델. 우리 SDK 로 fitting + 우리 SDK 로 배포면 `"control"` 그대로 쓰면 됨. `"raw"` 는 hook 의 기여도를 분리해서 보고 싶을 때만 (debugging / ablation).
 
 ---
 

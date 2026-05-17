@@ -15,12 +15,36 @@ import torch
 import genesis as gs
 from genesis.utils.geom import transform_by_quat
 
+from ._version import __version__
 from .config import ResolvedConfig, VehicleConfig, resolve
 from .dynamics import brake_torque_signed, suspension_normal_force
 from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import read_distances
 from .urdf import estimate_spin_inertia_from_genesis
 from .visual import VisualSync
+
+
+# Process-level flag so the version banner prints at most once per process,
+# even if the user instantiates several VehiclePhysics objects.
+_BANNER_PRINTED = False
+
+
+def _print_version_banner(resolved: ResolvedConfig, n_envs: int) -> None:
+    """Print a one-line version + config summary on first VehiclePhysics init."""
+    global _BANNER_PRINTED
+    if _BANNER_PRINTED:
+        return
+    _BANNER_PRINTED = True
+    hook_names = [type(h).__name__ for h in resolved.stability_hooks]
+    print(
+        f"[genesis_vehicle v{__version__}] Initialized: "
+        f"{len(resolved.wheels)} wheels, "
+        f"{type(resolved.steering).__name__}, "
+        f"{type(resolved.drivetrain).__name__}, "
+        f"{type(resolved.coupling).__name__}, "
+        f"n_envs={n_envs}, "
+        f"hooks={hook_names if hook_names else 'none'}"
+    )
 
 
 @dataclass
@@ -157,6 +181,9 @@ class VehiclePhysics:
                 device=self.dev,
                 dtype=self.fdt,
             )
+
+        # Version + config banner — printed once per process.
+        _print_version_banner(self.resolved, n_envs)
 
     # -----------------------------------------------------------------
     # Public API

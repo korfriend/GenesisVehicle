@@ -31,6 +31,21 @@ visual) are imported on first attribute access so that pure-Python unit tests
 on URDF parsing, config merging, and strategy logic can run without GPU.
 """
 
+# --- Version --------------------------------------------------------------
+
+from ._version import __version__, VERSION_INFO
+
+
+def version() -> str:
+    """Return the SDK version as a string (e.g. ``'0.3.0'``)."""
+    return __version__
+
+
+def version_info() -> tuple[int, int, int]:
+    """Return the SDK version as a ``(major, minor, patch)`` tuple."""
+    return VERSION_INFO
+
+
 # --- Eager (no Genesis runtime needed) ---------------------------------------
 
 from .config import (
@@ -83,6 +98,7 @@ from .presets import (
     car_4w_awd_ackermann,
     truck_6w_partial_ackermann,
     tank_10w_skid_belt,
+    stability_hooks_for_profile,
 )
 
 # --- Lazy (require Genesis at import time) -----------------------------------
@@ -109,6 +125,8 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    # Version
+    "__version__", "VERSION_INFO", "version", "version_info",
     # Driver (lazy)
     "VehiclePhysics", "WheelMeta", "PipelineContext",
     # Sensor / raycast (lazy)
@@ -142,4 +160,5 @@ __all__ = [
     # Presets
     "car_4w_rwd_ackermann", "car_4w_awd_ackermann",
     "truck_6w_partial_ackermann", "tank_10w_skid_belt",
+    "stability_hooks_for_profile",
 ]

@@ -1,4 +1,19 @@
-"""Preset VehicleConfig builders for the four reference topologies."""
+"""Preset VehicleConfig builders for the four reference topologies.
+
+Every preset takes a ``stability`` keyword (``"control" | "raw" | "research"``)
+that selects which numerical stabilization hooks the resulting config carries.
+
+  - ``"control"`` (default) — RL/MPPI-friendly. Bundles RollingResistance +
+    LowSpeedRegularizer (active under throttle/brake, see footgun note in
+    CHANGELOG v0.3.0) + StaticFrictionLock for tanks. **For Real2Sim too**:
+    fitting and deployment must share the same forward model, and that
+    forward model includes the hooks.
+  - ``"raw"`` — empty hook list (raw ray-wheel + Pacejka, no numerical
+    stabilization). For debugging the bare dynamics or running hook-ablation
+    studies, NOT a general Real2Sim recommendation. (See API.md S6.)
+  - ``"research"`` — empty hook list; caller is expected to assemble hooks
+    themselves via ``cfg.stability_hooks``.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +24,7 @@ from .config import (
     DEFAULT_C_EXTENSION,
     DEFAULT_REST_STROKE,
     ChassisConfig,
+    ConfigError,
     VehicleConfig,
     WheelConfig,
 )
@@ -22,10 +38,56 @@ from .strategies import (
     RollingResistance,
     SameSideBelt,
     SkidSteer,
+    StabilityHook,
     StaticFrictionLock,
     Independent,
 )
 from .tire_models import PacejkaAnisotropic
+
+
+# ---------------------------------------------------------------------------
+# Stability profile
+# ---------------------------------------------------------------------------
+
+
+_VALID_PROFILES = ("control", "raw", "research")
+
+
+def stability_hooks_for_profile(
+    profile: str = "control",
+    vehicle_kind: str = "car",
+) -> list[StabilityHook]:
+    """Materialize the stability hooks for a given profile + vehicle kind.
+
+    Used by the presets; exposed publicly so users assembling a VehicleConfig
+    from scratch can opt in to the same defaults.
+
+    Args:
+        profile: ``"control"``, ``"raw"``, or ``"research"``.
+        vehicle_kind: ``"car"`` (no static lock) or ``"tank"`` (adds
+            StaticFrictionLock under the ``"control"`` profile).
+    """
+    if profile not in _VALID_PROFILES:
+        raise ConfigError(
+            f"Unknown stability profile {profile!r}; "
+            f"expected one of {_VALID_PROFILES}."
+        )
+    if profile in ("raw", "research"):
+        return []
+    # profile == "control"
+    hooks: list[StabilityHook] = [
+        RollingResistance(),
+        LowSpeedRegularizer(
+            v_kin_com=0.5,
+            ang_kin=0.5,
+            disable_when_control_active=False,   # active under MPPI throttle
+        ),
+    ]
+    if vehicle_kind == "tank":
+        hooks.append(
+            StaticFrictionLock(brake_thr=0.3, v_thr=0.5, hold_k=200_000.0)
+        )
+    return hooks
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +123,12 @@ def _hjw_wheel_overrides() -> dict[str, WheelConfig]:
     }
 
 
-def car_4w_rwd_ackermann(urdf_path: str, n_envs: int = 1) -> VehicleConfig:
+def car_4w_rwd_ackermann(
+    urdf_path: str,
+    n_envs: int = 1,
+    *,
+    stability: str = "control",
+) -> VehicleConfig:
     """4-wheel RWD car with front Ackermann steering. Matches HJW reference."""
     return VehicleConfig.from_urdf(
         urdf_path,
@@ -76,15 +143,17 @@ def car_4w_rwd_ackermann(urdf_path: str, n_envs: int = 1) -> VehicleConfig:
         tire=PacejkaAnisotropic(eps_v=0.5),
         wheel_overrides=_hjw_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
-        stability_hooks=[
-            RollingResistance(),
-            LowSpeedRegularizer(v_kin_com=0.5, ang_kin=0.5),
-        ],
+        stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
         dt=1.0 / 48.0,
     )
 
 
-def car_4w_awd_ackermann(urdf_path: str, n_envs: int = 1) -> VehicleConfig:
+def car_4w_awd_ackermann(
+    urdf_path: str,
+    n_envs: int = 1,
+    *,
+    stability: str = "control",
+) -> VehicleConfig:
     """4-wheel AWD car with front Ackermann steering."""
     return VehicleConfig.from_urdf(
         urdf_path,
@@ -99,15 +168,17 @@ def car_4w_awd_ackermann(urdf_path: str, n_envs: int = 1) -> VehicleConfig:
         tire=PacejkaAnisotropic(eps_v=0.5),
         wheel_overrides=_hjw_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
-        stability_hooks=[
-            RollingResistance(),
-            LowSpeedRegularizer(v_kin_com=0.5, ang_kin=0.5),
-        ],
+        stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
         dt=1.0 / 48.0,
     )
 
 
-def truck_6w_partial_ackermann(urdf_path: str, n_envs: int = 1) -> VehicleConfig:
+def truck_6w_partial_ackermann(
+    urdf_path: str,
+    n_envs: int = 1,
+    *,
+    stability: str = "control",
+) -> VehicleConfig:
     """6-wheel truck: front Ackermann, middle + rear axles driven."""
     return VehicleConfig.from_urdf(
         urdf_path,
@@ -115,20 +186,12 @@ def truck_6w_partial_ackermann(urdf_path: str, n_envs: int = 1) -> VehicleConfig
         drivetrain=AWD(
             t_drive_max=1500.0,
             t_brake_max=3500.0,
-            # Driven on middle (axle 1) + rear (axle 2) wheels; weighted equally.
-            # drive_weights are aligned to wheel index, so the user supplies them
-            # explicitly when the URDF wheel order is known. We default to None
-            # here, which uses uniform 1/6 across all wheels — adequate as a
-            # baseline preset and easily overridden.
             brake_bias=None,
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
-        stability_hooks=[
-            RollingResistance(),
-            LowSpeedRegularizer(v_kin_com=0.5, ang_kin=0.5),
-        ],
+        stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
         dt=1.0 / 48.0,
     )
 
@@ -162,7 +225,12 @@ def _kdu_wheel_overrides() -> dict[str, WheelConfig]:
     return {n: WheelConfig(**common) for n in names}
 
 
-def tank_10w_skid_belt(urdf_path: str, n_envs: int = 1) -> VehicleConfig:
+def tank_10w_skid_belt(
+    urdf_path: str,
+    n_envs: int = 1,
+    *,
+    stability: str = "control",
+) -> VehicleConfig:
     """10-wheel skid-steer tank with same-side belt coupling. Matches KDU reference."""
     return VehicleConfig.from_urdf(
         urdf_path,
@@ -179,9 +247,6 @@ def tank_10w_skid_belt(urdf_path: str, n_envs: int = 1) -> VehicleConfig:
         tire=PacejkaAnisotropic(eps_v=0.5),
         wheel_overrides=_kdu_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
-        stability_hooks=[
-            RollingResistance(tanh_scale=0.5),
-            StaticFrictionLock(brake_thr=0.3, v_thr=0.5, hold_k=200_000.0),
-        ],
+        stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="tank"),
         dt=0.005,
     )
