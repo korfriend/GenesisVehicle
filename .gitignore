@@ -1,0 +1,47 @@
+# --- Python bytecode / cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- Packaging / build ---
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+.tox/
+.cache/
+
+# --- Testing / coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+
+# --- WSL Windows download-quarantine sidecars ---
+*Zone.Identifier
+
+# --- Demo / experiment outputs ---
+outputs/
+*.mp4
+*.png
+*.npy
+*.ckpt
