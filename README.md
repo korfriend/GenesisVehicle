@@ -1,63 +1,64 @@
 # genesis_vehicle
 
 A ray-cast wheel + Pacejka-tire vehicle physics SDK on top of the
-[Genesis](https://genesis-embodied-ai.github.io/) physics engine. Batched
-(`n_envs ≥ 1`) by default, designed for RL / MPPI control loops and
-Real2Sim parameter fitting.
+[Genesis](https://genesis-embodied-ai.github.io/) physics engine.
 
-## Strategy axes (mix and match — independent of wheel count)
+genesis_vehicle is a Python package that wraps Genesis with a batched
+(`n_envs ≥ 1`), composable vehicle physics layer. The wheel-count of your
+URDF and the choice of steering / drivetrain / coupling / tire model are
+independent — wire any combination through `VehicleConfig` and let the SDK
+run the same 5-step pipeline (raycast → suspension → slip → tire → ω) for
+every wheel, every step, every env. Designed for RL / MPPI control loops
+and Real2Sim parameter fitting.
 
-| Axis | Concrete options |
-|---|---|
-| **Steering** | `Ackermann`, `PartialAckermann`, `SkidSteer`, `NoSteer` |
-| **Drivetrain** | `FWD`, `RWD`, `AWD`, `PerSide` |
-| **Coupling** | `Independent`, `SameSideBelt` |
-| **Tire model** | `PacejkaAnisotropic`, `CoulombIsotropic` |
-| **Stability hooks** (via `stability=` profile) | `RollingResistance`, `LowSpeedRegularizer`, `StaticFrictionLock` |
+## More About genesis_vehicle
 
-Wheel count is whatever your URDF declares — Ackermann on a 6-wheel truck,
-skid-steer on a 4-wheel rover, AWD on a 10-wheel tank — all valid as long
-as the soft per-strategy constraints hold:
+At a glance, the SDK provides:
 
-- Ackermann / PartialAckermann: each steered axle has an L + R pair
-- SkidSteer / SameSideBelt: every wheel has `side='L'` or `side='R'`
+- **A single `VehiclePhysics` driver** that orchestrates the 5-step
+  ray-wheel + Pacejka pipeline batched over `n_envs`. One `step()` call
+  advances every env, every wheel, in lock-step.
+- **Composable building blocks** for steering, drivetrain, wheel coupling,
+  tire model, and stability hooks (see the table below). Each block is a
+  small class you can subclass.
+- **URDF-as-default, API-as-truth merge.** Wheel positions, radii, masses,
+  inertia, and joint names come from your URDF; anything you set explicitly
+  on `WheelConfig` wins. After `resolve()`, the resulting `ResolvedConfig`
+  is the only source of truth at runtime.
+- **ISO 8855 sign convention** end-to-end: `+X` forward, `+Y` left, `+Z`
+  up, `+steer` = right turn, `+throttle` = forward. Internal sign flips
+  for Genesis RHS / URDF axis quirks are absorbed inside the strategies.
+- **Stability profiles** (`"control"` / `"raw"` / `"research"`) that bundle
+  the right numerical stabilizers for your use case so MPPI / RL / Real2Sim
+  users don't have to assemble hook lists by hand.
+- **Pure-Python tests** (no Genesis runtime needed) that you can run in
+  any CI.
 
-Subclass any strategy ABC (`SteeringStrategy`, `DrivetrainStrategy`,
-`CouplingStrategy`, `TireModel`, `StabilityHook`) to add new behaviors.
-
-## Bundled presets
-
-Four ready-to-use `VehicleConfig` builders:
-
-| Function | Wheels | Steering | Drivetrain | Coupling |
-|---|---|---|---|---|
-| `car_4w_rwd_ackermann` | 4 | Ackermann front | RWD | Independent |
-| `car_4w_awd_ackermann` | 4 | Ackermann front | AWD | Independent |
-| `truck_6w_partial_ackermann` | 6 | Ackermann on axle 0 | AWD (uniform) | Independent |
-| `tank_10w_skid_belt` | 10 | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
-
-These cover the reference patterns the SDK was built from; copy and tweak
-for your own topology.
+The full mental model is laid out in
+[`docs/concepts.md`](docs/concepts.md); the API surface lives in
+[`docs/api-reference.md`](docs/api-reference.md).
 
 ## Installation
 
-Requires Python 3.12+, [Genesis](https://genesis-embodied-ai.github.io/)
-with a CUDA-enabled `torch`, plus `numpy`.
+Requires Python 3.12+ and [Genesis](https://genesis-embodied-ai.github.io/)
+with a CUDA-enabled `torch`.
 
-The SDK is a directory; there is no `pip install` yet. After cloning:
+The SDK is a single Python package directory; there is no `pip install`
+yet. Clone and add the parent directory to `PYTHONPATH`:
 
 ```bash
 git clone https://github.com/korfriend/GenesisVehicle.git
-cd GenesisVehicle
+# either:
+export PYTHONPATH="$(pwd):$PYTHONPATH"
+# or inside your entry script:
+#   import sys; sys.path.insert(0, "<parent of cloned dir>")
 ```
 
-Either add the parent of the cloned directory to `PYTHONPATH` or use
-`sys.path.insert(0, '<parent>')` in your entry script so that
-`import genesis_vehicle` resolves.
+Then `import genesis_vehicle` from anywhere.
 
-Dev dependency (for the test suite): `pip install pytest`.
+Dev dependency for running the test suite: `pip install pytest`.
 
-## 1-minute quickstart
+## Getting Started
 
 ```python
 import genesis as gs
@@ -90,33 +91,75 @@ for step in range(480):                                       # 10 s @ 48 Hz
 print(car.get_pos()[0].cpu().numpy())
 ```
 
-On first construction, `VehiclePhysics` prints a one-line banner:
+On first `VehiclePhysics` construction, the SDK prints a one-line banner:
 
 ```
 [genesis_vehicle v0.4.0] Initialized: 4 wheels, Ackermann, RWD, Independent, n_envs=1, hooks=[RollingResistance, LowSpeedRegularizer]
 ```
 
+Telling you, at a glance: version, topology, which strategies are wired
+up, batch size, and which stability hooks are active.
+
+More examples and the worked-out 10 s SETTLE / ACCEL / TURN / BRAKE scenario
+walkthrough are in [`docs/quickstart.md`](docs/quickstart.md).
+
+## Building Blocks
+
+The five composition slots a `VehicleConfig` exposes. All are independent
+of wheel count — pick any combination as long as the soft per-strategy
+constraints hold (Ackermann needs an L + R wheel pair on each steered
+axle; SkidSteer and SameSideBelt need every wheel to declare `side='L'`
+or `side='R'`).
+
+| Slot | Concrete options shipped |
+|---|---|
+| **Steering** | `Ackermann`, `PartialAckermann`, `SkidSteer`, `NoSteer` |
+| **Drivetrain** | `FWD`, `RWD`, `AWD`, `PerSide` |
+| **Coupling** | `Independent`, `SameSideBelt` |
+| **Tire model** | `PacejkaAnisotropic`, `CoulombIsotropic` |
+| **Stability hooks** (via `stability=` profile) | `RollingResistance`, `LowSpeedRegularizer`, `StaticFrictionLock` |
+
+Subclass any of the ABCs (`SteeringStrategy`, `DrivetrainStrategy`,
+`CouplingStrategy`, `TireModel`, `StabilityHook`) to add new behaviors.
+
+## Bundled Presets
+
+Four ready-to-use `VehicleConfig` builders:
+
+| Function | Wheels | Steering | Drivetrain | Coupling |
+|---|---|---|---|---|
+| `car_4w_rwd_ackermann` | 4 | Ackermann front | RWD | Independent |
+| `car_4w_awd_ackermann` | 4 | Ackermann front | AWD | Independent |
+| `truck_6w_partial_ackermann` | 6 | Ackermann on axle 0 | AWD (uniform) | Independent |
+| `tank_10w_skid_belt` | 10 | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
+
+These cover the reference patterns the SDK was built from; copy and tweak
+for your own topology. Every preset takes a keyword-only
+`stability="control" | "raw" | "research"` argument (default `"control"`
+— see [`docs/stability-profiles.md`](docs/stability-profiles.md)).
+
 ## Documentation
+
+Detailed docs live under [`docs/`](docs/):
 
 | Page | What's in it |
 |---|---|
 | [`docs/index.md`](docs/index.md) | Documentation home — full TOC |
 | [`docs/quickstart.md`](docs/quickstart.md) | Minimal example, runnable end-to-end |
-| [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855 signs, hooks intuition, batched-by-default |
-| [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default value) |
+| [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855, hook intuition, batched-by-default |
+| [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default) |
 | [`docs/pipeline-and-hooks.md`](docs/pipeline-and-hooks.md) | Hook insertion points in the 5-step pipeline |
 | [`docs/stability-profiles.md`](docs/stability-profiles.md) | `control` / `raw` / `research` profiles + the "one rule" for MPPI / Real2Sim |
-| [`docs/physics-contracts.md`](docs/physics-contracts.md) | Brake-sign, non-negative N, `i_wheel` truth policy, steering / coupling order |
+| [`docs/physics-contracts.md`](docs/physics-contracts.md) | Brake sign, non-negative N, `i_wheel` truth policy, steering / coupling order |
 | [`docs/migration.md`](docs/migration.md) | Mapping legacy 3-variant style code onto the SDK |
 | [`docs/testing.md`](docs/testing.md) | Test inventory + module map |
 
-Version history: [`CHANGELOG.md`](CHANGELOG.md).
-
-## Repository layout
+## Repository Layout
 
 ```
 genesis_vehicle/
 ├── README.md                       <-- you are here
+├── LICENSE                         Apache 2.0
 ├── CHANGELOG.md                    per-version release notes
 ├── __init__.py                     single-import public surface
 ├── _version.py                     __version__ / VERSION_INFO source of truth
@@ -143,15 +186,16 @@ python -m pytest tests/ -v
 ```
 
 58 pure-Python tests covering URDF parsing, config resolve, strategy math,
-dynamics primitives, version reporting, and stability-profile semantics. No
-Genesis runtime needed — they run on CPU in ~3 s.
+dynamics primitives, version reporting, and stability-profile semantics.
+No Genesis runtime needed — they run on CPU in ~3 s.
 
-## Versioning
+## Releases and Versioning
 
 [Semantic Versioning](https://semver.org/) (pre-1.0, so minor bumps may
-break). Current version: `genesis_vehicle.__version__`. See
-[`CHANGELOG.md`](CHANGELOG.md) for release notes.
+break). Current version: `genesis_vehicle.__version__`. Per-release notes
+in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 
-(Add license terms here.)
+genesis_vehicle is released under the [Apache License 2.0](LICENSE),
+matching the upstream Genesis physics engine.
