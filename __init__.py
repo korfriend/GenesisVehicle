@@ -111,6 +111,8 @@ _GENESIS_LAZY = {
     "WheelRayPattern": ("genesis_vehicle.raycast", "WheelRayPattern"),
     "read_distances": ("genesis_vehicle.raycast", "read_distances"),
     "VisualSync": ("genesis_vehicle.visual", "VisualSync"),
+    "add_vehicle": ("genesis_vehicle.scene_helpers", "add_vehicle"),
+    "make_wheel_raycaster": ("genesis_vehicle.scene_helpers", "make_wheel_raycaster"),
 }
 
 
@@ -132,6 +134,8 @@ __all__ = [
     "VehiclePhysics", "WheelMeta", "PipelineContext",
     # Sensor / raycast (lazy)
     "WheelRayPattern", "read_distances",
+    # Scene helpers (lazy — thin wrappers around Genesis boilerplate)
+    "add_vehicle", "make_wheel_raycaster",
     # Visual (lazy)
     "VisualSync",
     # Config

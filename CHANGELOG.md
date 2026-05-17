@@ -10,6 +10,33 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.4.2] — 2026-05-18
+
+### Added
+- `genesis_vehicle.scene_helpers` module with two thin Genesis-side
+  convenience helpers:
+  - `make_wheel_raycaster(scene, entity, urdf_path, ...)` — replaces the
+    five-line `parse_urdf` + `WheelRayPattern` + `gs.sensors.Raycaster` +
+    `scene.add_sensor` boilerplate with one call.
+  - `add_vehicle(scene, urdf_path, preset_fn=None, ...)` — adds the URDF
+    entity + raycaster (and optionally builds the preset `VehicleConfig`)
+    in one call. Returns `(car, sensor, cfg)`. Caller still owns
+    `scene.build()` and `VehiclePhysics(...)` construction so other
+    entities / sensors can be added between.
+- Both are lazy-imported through the top-level package, so
+  `from genesis_vehicle import add_vehicle` works without Genesis
+  installed at import time.
+
+### Design note
+The SDK intentionally does NOT fully encapsulate Genesis. Helpers cut the
+canonical boilerplate for the common case; full-encapsulation facades for
+CARLA-style or Gym-style use will live under `genesis_vehicle.adapters/`
+when needed. This keeps the core API research-friendly (viewer, terrain,
+custom materials, multi-agent scenes all stay accessible) while still
+offering a one-liner for the common path.
+
+---
+
 ## [0.4.1] — 2026-05-17
 
 ### Added

@@ -63,8 +63,7 @@ Dev dependency for running the test suite: `pip install pytest`.
 ```python
 import genesis as gs
 from genesis_vehicle import (
-    VehiclePhysics, VehicleInputs, WheelRayPattern,
-    car_4w_rwd_ackermann, parse_urdf,
+    VehiclePhysics, VehicleInputs, add_vehicle, car_4w_rwd_ackermann,
 )
 
 URDF = "<path to your car_raywheel.urdf>"
@@ -72,16 +71,9 @@ URDF = "<path to your car_raywheel.urdf>"
 gs.init(backend=gs.gpu)
 scene = gs.Scene(sim_options=gs.options.SimOptions(dt=1/48, substeps=50))
 scene.add_entity(gs.morphs.Plane())
-car = scene.add_entity(gs.morphs.URDF(file=URDF, pos=(0, 0, 1.5)))
 
-parsed = parse_urdf(URDF)
-sensor = scene.add_sensor(gs.sensors.Raycaster(
-    pattern=WheelRayPattern([w.position for w in parsed.wheels]),
-    entity_idx=car.idx, max_range=20.0, return_world_frame=True,
-))
+car, sensor, cfg = add_vehicle(scene, URDF, car_4w_rwd_ackermann)
 scene.build(n_envs=1)
-
-cfg = car_4w_rwd_ackermann(URDF)
 physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
 
 for step in range(480):                                       # 10 s @ 48 Hz
@@ -90,6 +82,13 @@ for step in range(480):                                       # 10 s @ 48 Hz
 
 print(car.get_pos()[0].cpu().numpy())
 ```
+
+`add_vehicle` is a thin convenience helper that bundles the canonical
+URDF-entity + wheel-raycaster + preset config boilerplate. The full
+hand-wired form (using `WheelRayPattern` + `parse_urdf` directly) is also
+available — see [`docs/api-reference.md`](docs/api-reference.md). The SDK
+deliberately does NOT fully encapsulate Genesis; you keep direct access to
+`gs.Scene`, viewer, terrain, materials, and any other Genesis feature you need.
 
 On first `VehiclePhysics` construction, the SDK prints a one-line banner:
 

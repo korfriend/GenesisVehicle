@@ -10,8 +10,7 @@ suspension joints follow the SDK's naming convention (see
 ```python
 import genesis as gs
 from genesis_vehicle import (
-    VehiclePhysics, VehicleInputs, WheelRayPattern,
-    car_4w_rwd_ackermann, parse_urdf,
+    VehiclePhysics, VehicleInputs, add_vehicle, car_4w_rwd_ackermann,
 )
 
 URDF = "<path to your car_raywheel.urdf>"
@@ -20,20 +19,13 @@ URDF = "<path to your car_raywheel.urdf>"
 gs.init(backend=gs.gpu)
 scene = gs.Scene(sim_options=gs.options.SimOptions(dt=1/48, substeps=50))
 scene.add_entity(gs.morphs.Plane())
-car = scene.add_entity(gs.morphs.URDF(file=URDF, pos=(0, 0, 1.5)))
 
-# 2. Wheel raycaster — positions come from the URDF.
-parsed = parse_urdf(URDF)
-sensor = scene.add_sensor(gs.sensors.Raycaster(
-    pattern=WheelRayPattern([w.position for w in parsed.wheels]),
-    entity_idx=car.idx, max_range=20.0, return_world_frame=True,
-))
+# 2. SDK helper bundles URDF entity + wheel raycaster + preset cfg.
+car, sensor, cfg = add_vehicle(scene, URDF, car_4w_rwd_ackermann)
 scene.build(n_envs=1)
 
-# 3. Pick a preset and step.
-cfg = car_4w_rwd_ackermann(URDF)
+# 3. Construct VehiclePhysics and step.
 physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
-
 for step in range(480):                                       # 10s @ 48 Hz
     physics.step(VehicleInputs(throttle=0.5, brake=0.0, steer=0.0))
     scene.step()
@@ -44,6 +36,24 @@ print(car.get_pos()[0].cpu().numpy())
 That's the whole API surface for a basic demo. The rest of the docs cover
 what to reach for when you want custom topology, RL inputs, or your own
 strategy.
+
+`add_vehicle` is a thin helper (see `genesis_vehicle/scene_helpers.py`). The
+hand-wired equivalent — useful when you need to customize URDF position,
+material, or the raycaster's `max_range` per-side — is:
+
+```python
+from genesis_vehicle import WheelRayPattern, parse_urdf
+
+car = scene.add_entity(gs.morphs.URDF(file=URDF, pos=(0, 0, 1.5)))
+parsed = parse_urdf(URDF)
+sensor = scene.add_sensor(gs.sensors.Raycaster(
+    pattern=WheelRayPattern([w.position for w in parsed.wheels]),
+    entity_idx=car.idx, max_range=20.0, return_world_frame=True,
+))
+cfg = car_4w_rwd_ackermann(URDF)
+```
+
+Both forms are first-class; pick whichever fits.
 
 ## Banner
 
