@@ -5,14 +5,39 @@ A ray-cast wheel + Pacejka-tire vehicle physics SDK on top of the
 (`n_envs ≥ 1`) by default, designed for RL / MPPI control loops and
 Real2Sim parameter fitting.
 
-Supported topologies out of the box:
+## Strategy axes (mix and match — independent of wheel count)
 
-- 4-wheel cars with Ackermann steering (RWD / FWD / AWD)
-- 6 / 8-wheel trucks with partial Ackermann
-- 10-wheel tanks with skid-steer + same-side belt coupling
+| Axis | Concrete options |
+|---|---|
+| **Steering** | `Ackermann`, `PartialAckermann`, `SkidSteer`, `NoSteer` |
+| **Drivetrain** | `FWD`, `RWD`, `AWD`, `PerSide` |
+| **Coupling** | `Independent`, `SameSideBelt` |
+| **Tire model** | `PacejkaAnisotropic`, `CoulombIsotropic` |
+| **Stability hooks** (via `stability=` profile) | `RollingResistance`, `LowSpeedRegularizer`, `StaticFrictionLock` |
 
-Add your own via the strategy ABCs (`SteeringStrategy`,
-`DrivetrainStrategy`, `CouplingStrategy`, `TireModel`, `StabilityHook`).
+Wheel count is whatever your URDF declares — Ackermann on a 6-wheel truck,
+skid-steer on a 4-wheel rover, AWD on a 10-wheel tank — all valid as long
+as the soft per-strategy constraints hold:
+
+- Ackermann / PartialAckermann: each steered axle has an L + R pair
+- SkidSteer / SameSideBelt: every wheel has `side='L'` or `side='R'`
+
+Subclass any strategy ABC (`SteeringStrategy`, `DrivetrainStrategy`,
+`CouplingStrategy`, `TireModel`, `StabilityHook`) to add new behaviors.
+
+## Bundled presets
+
+Four ready-to-use `VehicleConfig` builders:
+
+| Function | Wheels | Steering | Drivetrain | Coupling |
+|---|---|---|---|---|
+| `car_4w_rwd_ackermann` | 4 | Ackermann front | RWD | Independent |
+| `car_4w_awd_ackermann` | 4 | Ackermann front | AWD | Independent |
+| `truck_6w_partial_ackermann` | 6 | Ackermann on axle 0 | AWD (uniform) | Independent |
+| `tank_10w_skid_belt` | 10 | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
+
+These cover the reference patterns the SDK was built from; copy and tweak
+for your own topology.
 
 ## Installation
 
