@@ -128,6 +128,7 @@ Four ready-to-use `VehicleConfig` builders:
 
 | Function | Wheels | Steering | Drivetrain | Coupling |
 |---|---|---|---|---|
+| `car_4w_fwd_ackermann` | 4 | Ackermann front | FWD | Independent |
 | `car_4w_rwd_ackermann` | 4 | Ackermann front | RWD | Independent |
 | `car_4w_awd_ackermann` | 4 | Ackermann front | AWD | Independent |
 | `truck_6w_partial_ackermann` | 6 | Ackermann on axle 0 | AWD (uniform) | Independent |

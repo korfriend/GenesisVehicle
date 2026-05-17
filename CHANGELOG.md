@@ -10,6 +10,13 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.4.1] — 2026-05-17
+
+### Added
+- `car_4w_fwd_ackermann` preset — 4-wheel front-wheel-drive car with front Ackermann steering. Fills the obvious gap between the existing `car_4w_rwd_ackermann` and `car_4w_awd_ackermann` presets (real-world passenger cars are mostly FWD). Mirrors the RWD preset's parameters with `FWD(driven_axles=(0,))`.
+
+---
+
 ## [0.4.0] — 2026-05-17
 
 ### Changed (BREAKING)

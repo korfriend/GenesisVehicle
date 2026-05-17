@@ -277,6 +277,9 @@ Every preset takes a keyword-only `stability` argument that picks the
 stability profile (see [`stability-profiles.md`](stability-profiles.md)).
 
 ```python
+def car_4w_fwd_ackermann(
+    urdf_path: str, n_envs: int = 1, *, stability: str = "control",
+) -> VehicleConfig
 def car_4w_rwd_ackermann(
     urdf_path: str, n_envs: int = 1, *, stability: str = "control",
 ) -> VehicleConfig
@@ -297,6 +300,7 @@ stability_hooks_for_profile(
 
 | Function | Topology | Steering | Drive | Coupling |
 |---|---|---|---|---|
+| `car_4w_fwd_ackermann(urdf_path)` | 4 wheels | Ackermann front | FWD | Independent |
 | `car_4w_rwd_ackermann(urdf_path)` | 4 wheels | Ackermann front | RWD | Independent |
 | `car_4w_awd_ackermann(urdf_path)` | 4 wheels | Ackermann front | AWD | Independent |
 | `truck_6w_partial_ackermann(urdf_path)` | 6 wheels | Ackermann on axle 0 | AWD (uniform) | Independent |

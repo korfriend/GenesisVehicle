@@ -95,6 +95,7 @@ from .tire_models import (
 )
 from .presets import (
     car_4w_rwd_ackermann,
+    car_4w_fwd_ackermann,
     car_4w_awd_ackermann,
     truck_6w_partial_ackermann,
     tank_10w_skid_belt,
@@ -158,7 +159,7 @@ __all__ = [
     # Tire models
     "TireModel", "PacejkaAnisotropic", "CoulombIsotropic",
     # Presets
-    "car_4w_rwd_ackermann", "car_4w_awd_ackermann",
+    "car_4w_rwd_ackermann", "car_4w_fwd_ackermann", "car_4w_awd_ackermann",
     "truck_6w_partial_ackermann", "tank_10w_skid_belt",
     "stability_hooks_for_profile",
 ]

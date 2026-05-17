@@ -8,9 +8,11 @@ import pytest
 
 import genesis_vehicle
 from genesis_vehicle import (
+    FWD,
     LowSpeedRegularizer,
     RollingResistance,
     StaticFrictionLock,
+    car_4w_fwd_ackermann,
     car_4w_rwd_ackermann,
     stability_hooks_for_profile,
     tank_10w_skid_belt,
@@ -112,3 +114,17 @@ def test_preset_tank_default_includes_static_friction_lock():
 def test_preset_tank_raw_profile_has_no_hooks():
     cfg = tank_10w_skid_belt(KDU_URDF, stability="raw")
     assert cfg.stability_hooks == []
+
+
+def test_preset_car_fwd_uses_fwd_drivetrain():
+    """FWD preset must wire up an FWD drivetrain (not RWD/AWD)."""
+    cfg = car_4w_fwd_ackermann(HJW_URDF)
+    assert isinstance(cfg.drivetrain, FWD), \
+        f"expected FWD, got {type(cfg.drivetrain).__name__}"
+
+
+def test_preset_car_fwd_default_profile_has_hooks():
+    cfg = car_4w_fwd_ackermann(HJW_URDF)
+    types = [type(h).__name__ for h in cfg.stability_hooks]
+    assert "RollingResistance" in types
+    assert "LowSpeedRegularizer" in types

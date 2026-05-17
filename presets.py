@@ -31,6 +31,7 @@ from .config import (
 from .strategies import (
     Ackermann,
     AWD,
+    FWD,
     LowSpeedRegularizer,
     PartialAckermann,
     PerSide,
@@ -137,6 +138,31 @@ def car_4w_rwd_ackermann(
             t_drive_max=1000.0,
             t_brake_max=2500.0,
             driven_axles=(1,),
+            brake_bias=_hjw_brake_bias(),
+        ),
+        coupling=Independent(),
+        tire=PacejkaAnisotropic(eps_v=0.5),
+        wheel_overrides=_hjw_wheel_overrides(),
+        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
+        stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
+        dt=1.0 / 48.0,
+    )
+
+
+def car_4w_fwd_ackermann(
+    urdf_path: str,
+    n_envs: int = 1,
+    *,
+    stability: str = "control",
+) -> VehicleConfig:
+    """4-wheel FWD car with front Ackermann steering (typical passenger car)."""
+    return VehicleConfig.from_urdf(
+        urdf_path,
+        steering=Ackermann(max_steer_rad=0.7, front_axle=0),
+        drivetrain=FWD(
+            t_drive_max=1000.0,
+            t_brake_max=2500.0,
+            driven_axles=(0,),
             brake_bias=_hjw_brake_bias(),
         ),
         coupling=Independent(),
