@@ -1,0 +1,66 @@
+# Testing
+
+## Running the tests
+
+From the repo root:
+
+```bash
+python -m pytest tests/ -v
+```
+
+58 pure-Python tests; no Genesis runtime required. Runs in ~3s on CPU.
+
+GPU integration is exercised by user-side demo scripts in your downstream
+project — the SDK's own test suite stays pure-Python so it can run in any
+CI without GPU.
+
+## Test inventory
+
+| Coverage area | Test file | Notes |
+|---|---|---|
+| Version reporting | `test_version_and_profile.py` | `__version__`, `VERSION_INFO`, `version()`, `version_info()` |
+| Stability profile semantics | `test_version_and_profile.py` | `control` / `raw` / `research` materialize the right hook lists; tank-vs-car difference; unknown profile raises |
+| Preset profile integration | `test_version_and_profile.py` | `car_4w_rwd_ackermann(stability="raw")` etc. produce expected hook lists |
+| Config resolve | `test_config_resolve.py` | URDF default + user override + module default merge; user-explicit `i_wheel` / `radius` wins over URDF |
+| URDF parsing (HJW + KDU naming) | `test_urdf_parse.py` | wheel discovery, side detection, axle clustering, chain walk for HJW's deep tree |
+| Ackermann sign + inner/outer | `test_strategies_unit.py` | `+steer` → both wheels positive, FR > FL |
+| SkidSteer sign (left faster on +steer) | `test_strategies_unit.py` | `test_perside_iso_right_turn_left_faster` |
+| SameSideBelt averages each side | `test_strategies_unit.py` | |
+| RWD front-drive-zero invariant | `test_strategies_unit.py` | T_drive[FL] == 0, T_drive[RL] == T/2 |
+| PerSide gear cap | `test_strategies_unit.py` | throttle=1.0, gear_cap=0.3 → effective 0.3 |
+| `brake_torque_signed` reverses with omega | `test_dynamics.py` | `omega < 0` → `T_brake_eff < 0` |
+| Suspension N clamped non-negative | `test_dynamics.py` | strong rebound → `N = 0`, not negative |
+| Suspension air-mask → `N = 0` | `test_dynamics.py` | |
+| Asymmetric damper (compression vs extension) | `test_dynamics.py` | same |c_dot| produces different N when c_compression ≠ c_extension |
+
+## Public-surface import smoke check
+
+```bash
+python -m genesis_vehicle.tests._check_import
+```
+
+Imports every symbol from the top-level package and prints the version +
+the lazy-import names. Confirms that the eager surface loads without Genesis
+and that the lazy names (`VehiclePhysics`, `VisualSync`, `WheelRayPattern`,
+...) are properly registered.
+
+## Module map
+
+| File | Purpose |
+|---|---|
+| `core.py` | `VehiclePhysics` — 5-step pipeline orchestrator |
+| `config.py` | `WheelConfig`, `ChassisConfig`, `VehicleConfig`, `ResolvedConfig`, `resolve()`, `ConfigError`, `DEFAULT_*` |
+| `inputs.py` | `VehicleInputs`, `VehicleStepInputs`, typed inputs |
+| `urdf.py` | `parse_urdf()`, `URDFParsedConfig`, `estimate_spin_inertia_from_genesis` |
+| `dynamics.py` | `brake_torque_signed`, `suspension_normal_force` — pure helpers |
+| `raycast.py` | `WheelRayPattern`, `read_distances()` |
+| `visual.py` | `VisualSync` (auto-invoked by core; flips URDF axis quirks) |
+| `tire_models/` | `TireModel` ABC + `PacejkaAnisotropic`, `CoulombIsotropic` |
+| `strategies/steering.py` | `SteeringStrategy` + 4 concrete |
+| `strategies/drivetrain.py` | `DrivetrainStrategy` + 4 concrete |
+| `strategies/coupling.py` | `CouplingStrategy` + 2 concrete |
+| `strategies/stability.py` | `StabilityHook` + 3 concrete |
+| `presets.py` | 4 ready-to-use `VehicleConfig` builders + `stability_hooks_for_profile` |
+| `_version.py` | `__version__`, `VERSION_INFO` (single source of truth) |
+| `tests/` | Pure-Python unit tests (no Genesis runtime needed) |
+| `CHANGELOG.md` | Per-version release notes |

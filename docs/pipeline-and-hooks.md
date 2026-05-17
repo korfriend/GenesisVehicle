@@ -1,0 +1,71 @@
+# Pipeline and hook insertion points
+
+The 5-step pipeline with every strategy and stability-hook seam marked.
+
+```
+VehiclePhysics.step(inputs)
+
+[0] Input adaptation
+    typed = inputs if isinstance(inputs, steering.InputType)
+            else steering.InputType.from_unified(inputs)
+
+[1] PRE-LOOP
+    steer_per_wheel = SteeringStrategy.per_wheel_steer(typed)
+    T_drive_pw, T_brake_pw = DrivetrainStrategy.distribute_torque(typed, omega, meta)
+    for hook in stability_hooks if PRE_LOOP in hook.slots:
+        hook.apply_pre_loop(ctx)                     # e.g. LowSpeedRegularizer
+
+[2] Raycast (read_distances) + first-step protection
+
+[3] Chassis state read
+
+[per-wheel loop i = 0 .. n_wheels-1, all batched over n_envs]
+    (A) compression, comp_rate, asymmetric damper -> N     (physics-contracts.md S7.2)
+    (B) wheel-frame fwd/lat using steer_per_wheel[:, i]
+    (C) F_long, F_lat = TireModel(...)
+        for hook in stability_hooks if POST_TIRE in hook.slots:
+            hook.apply_post_tire(ctx, i)             # RollingResistance, ...
+    (D) T_brake_eff = brake_torque_signed(T_brake_pw[:, i], omega[:, i])  (S7.1)
+        domega = (T_drive - T_brake_eff - R * F_long) / I_wheel
+        omega[:, i] = clamp(omega[:, i] + DT*domega, ±OMEGA_MAX)
+    (E) accumulate F_world, torque into total_F, total_T
+
+[4] CouplingStrategy.apply(omega, meta)              # post-loop, pre-force-apply
+[5] solver.apply_links_external_force/torque (chassis)
+[6] VisualSync (if enabled)
+```
+
+## Hook slots
+
+A stability hook declares which slots it implements via the `slots` class
+attribute (a tuple containing some of `"PRE_LOOP"`, `"POST_TIRE"`).
+
+| Hook | Slots | What it does |
+|---|---|---|
+| `RollingResistance` | `("POST_TIRE",)` | Subtracts `cr * N * tanh(v_long / scale)` from `F_long` per wheel. |
+| `LowSpeedRegularizer` | `("PRE_LOOP", "POST_TIRE")` | Pre-loop: compute `moving ∈ [0,1]` from chassis speed. Post-tire: scale `F_long`/`F_lat` by `moving`; record an omega pull target so core blends ω toward `v_long / radius`. |
+| `StaticFrictionLock` | `("POST_TIRE",)` | When `brake > thr` and `|v_long| < thr`: override `F_long` with `-K * v_long` (clamped to ±μN) and request `omega = 0` via `ctx.omega_override`. |
+
+Hook order is the list order (see
+[`stability-profiles.md`](stability-profiles.md#hook-ordering-inside-a-profile)
+for the recommended ordering).
+
+## Coupling timing detail
+
+`CouplingStrategy.apply()` runs at step [4], after the per-wheel loop
+completes and after `omega` has been integrated for every wheel, but
+**before** `solver.apply_links_external_force/torque` is called. The chassis
+force applied in the same step still reflects the pre-coupling per-wheel
+F_long (because F_long was computed inside the loop using pre-coupling
+omegas). The coupled omega becomes visible to the next step. This is the
+KDU reference behavior and is documented as the SDK contract.
+
+## What hooks CANNOT do
+
+- Mutate `T_drive_per_wheel` / `T_brake_per_wheel` (those are owned by the
+  drivetrain; if you need custom torque routing, subclass the strategy).
+- Insert at custom seams; only `PRE_LOOP` and `POST_TIRE` exist.
+- Run during the air-mask branch with non-zero `N` (the air mask is applied
+  before the hook sees the wheel).
+
+For anything else, subclass the relevant strategy ABC instead.

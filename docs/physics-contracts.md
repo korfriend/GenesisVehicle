@@ -1,0 +1,87 @@
+# Physics contracts
+
+The SDK's promises about ambiguous physical conventions. These contracts are
+enforced by `genesis_vehicle.dynamics` (pure-Python, unit-tested in
+`tests/test_dynamics.py`) and consumed by `core.py`.
+
+## 7.1 Brake torque is a positive command magnitude
+
+`brake` (user input) is always in `[0, 1]`. Internally, the SDK converts it
+to a signed torque opposing wheel rotation:
+
+```
+T_brake_eff = T_brake * tanh(omega / smoothing_scale)
+domega      = (T_drive - T_brake_eff - R * F_long) / I_wheel
+```
+
+- For `omega > 0`, `T_brake_eff > 0`, so `-T_brake_eff` decelerates the wheel.
+- For `omega < 0` (reverse spin), `T_brake_eff < 0`, so `-T_brake_eff > 0`
+  again decelerates.
+- For `omega ≈ 0`, `T_brake_eff ≈ 0` — the smooth brake cannot pin the
+  wheel. Pair with `StaticFrictionLock` for hard hold-at-rest behaviour.
+
+Implementation: `genesis_vehicle.dynamics.brake_torque_signed`.
+
+## 7.2 Normal force is non-negative; air-mask wheels contribute nothing
+
+Per-wheel suspension force uses the asymmetric damper (different coefficient
+on compression vs extension) and is clamped non-negative — the ground cannot
+pull a wheel down:
+
+```
+c_damp = c_compression if c_dot > 0 else c_extension
+N_raw  = K_susp * compression + c_damp * c_dot
+N      = max(N_raw, 0)
+N      = 0 if the ray missed the ground (air_mask)
+```
+
+When `N = 0`, the per-wheel `F_long`, `F_lat` are also zero (no contact),
+though `T_drive` and `T_brake` still update `omega` (the wheel spins freely
+in the air).
+
+Implementation: `genesis_vehicle.dynamics.suspension_normal_force`.
+
+## 7.3 `WheelConfig.i_wheel` truth policy
+
+```
+1. WheelConfig.i_wheel set by the user            -> AUTHORITATIVE (used as-is)
+2. URDF inertia (via parse_urdf, max diagonal)    -> default / estimate
+3. Genesis-runtime metadata                       -> fallback estimate
+4. DEFAULT_I_WHEEL                                -> last-resort fallback
+```
+
+For ray-wheel dynamics, the wheel spin inertia is often different from the
+URDF hinge inertia (e.g. URDF wheel hinge is visual-only while real
+ray-wheel inertia comes from a coarser estimate). In Real2Sim / parameter
+fitting, **always set `WheelConfig.i_wheel` explicitly** to take this out of
+the estimation pipeline.
+
+## 7.4 Steering sign convention (ISO 8855)
+
+`+steer` is right turn under all strategies (`Ackermann`,
+`PartialAckermann`, `SkidSteer`). Unit-tested:
+
+- **Ackermann right turn**: both front wheels turn positive; the right wheel
+  (the inner wheel for a right turn) has the larger angle.
+- **SkidSteer right turn**: the left side commands more torque than the
+  right side (`left_cmd > right_cmd` via
+  `left_cmd = throttle + steer_gain * steer`).
+
+KDU's legacy `+steer = LEFT` is **not** carried forward; KDU demo callsites
+must flip the sign in migration. See
+[`migration.md`](migration.md#from-kdu-kduphysicspy).
+
+## 7.5 Coupling order
+
+`CouplingStrategy.apply(omega)` runs after the per-wheel omega integration
+in the current step and before the next step. Drive torque distribution in
+the same step uses **pre-coupling** omegas (one-step lag), matching the KDU
+reference implementation. Strategies must not assume they run inside the
+per-wheel loop.
+
+## 7.6 First-step protection
+
+The wheel raycaster is not populated until the first `scene.step()`. To
+avoid a NaN cascade, `VehiclePhysics.step()` skips force application on the
+first call when all distances are zero, sets `_prev_init = True`, and runs
+normally from the second step onward.
