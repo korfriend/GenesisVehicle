@@ -42,6 +42,7 @@ class VisualSync:
         self.dtype = dtype
         self.wheels = resolved.wheels
         self.n_wheels = len(self.wheels)
+        self.spin_enabled = bool(getattr(resolved, "visual_spin_enabled", True))
 
         # Visual mesh radius for suspension positioning. Default = avg wheel radius.
         if wheel_mesh_radius is None:
@@ -123,13 +124,17 @@ class VisualSync:
         omega: torch.Tensor,              # (n_envs, n_wheels)
         dt: float,
     ) -> None:
-        # Integrate spin angle and wrap to [-pi, pi].
-        self.wheel_visual_angle = self.wheel_visual_angle + omega * dt
-        two_pi = 2.0 * math.pi
-        self.wheel_visual_angle = ((self.wheel_visual_angle + math.pi) % two_pi) - math.pi
-
-        # Spin joints.
-        if self._spin_dofs_valid:
+        # Spin joints — skip entirely when disabled (saves a Genesis call per
+        # step + a few tensor ops). Useful for cylindrical wheels (e.g. tank
+        # sprockets/road wheels) where rotation isn't visible anyway.
+        if self.spin_enabled and self._spin_dofs_valid:
+            # Integrate spin angle and wrap to [-pi, pi]. In-place to avoid
+            # allocating a fresh tensor every step.
+            self.wheel_visual_angle.add_(omega * dt)
+            two_pi = 2.0 * math.pi
+            self.wheel_visual_angle = (
+                (self.wheel_visual_angle + math.pi) % two_pi
+            ) - math.pi
             spin_cmd = self.wheel_visual_angle[:, self._spin_idx_valid]
             self.entity.set_dofs_position(
                 spin_cmd, self._spin_dofs_valid, zero_velocity=False,

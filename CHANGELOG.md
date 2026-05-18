@@ -10,6 +10,22 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.4.4] — 2026-05-18
+
+### Performance
+- **Tank chase-cam fps fix** — interactive demo on the KDU tank ran at ~15 fps vs ~25 fps for the original `KDU/example_interactive.py`. Two contributions:
+  - `VisualSync` was syncing wheel spin angle (`set_dofs_position` for the 10 continuous spin joints) every step. The original KDU intentionally skipped this since the cylinder primitive wheels are rotationally symmetric and a spinning visual is invisible.
+  - The chassis `up_world` reference tensor was being re-allocated every step inside `VehiclePhysics.step()` instead of being cached at init time.
+
+### Added
+- `VehicleConfig.visual_spin_enabled: bool = True` (also on `ResolvedConfig`). Set `False` to skip the per-step spin-angle `set_dofs_position` call. Saves ~3-5 ms / step in interactive mode (one fewer Genesis call). Cars keep the default `True` so mesh wheels visibly roll; tanks (`tank_10w_skid_belt` preset) now default to `False`.
+
+### Changed
+- `VehiclePhysics.__init__` caches `_up_world` once instead of re-creating it each `step()`.
+- `VisualSync` integrates the visual spin angle in place (`add_`) when enabled.
+
+---
+
 ## [0.4.3] — 2026-05-18
 
 ### Fixed

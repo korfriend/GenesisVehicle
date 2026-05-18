@@ -182,6 +182,11 @@ class VehiclePhysics:
                 dtype=self.fdt,
             )
 
+        # Cached static tensors (avoid re-allocating every step).
+        self._up_world = torch.tensor(
+            [0.0, 0.0, 1.0], device=self.dev, dtype=self.fdt,
+        ).unsqueeze(0).expand(n_envs, 3).contiguous()
+
         # Version + config banner — printed once per process.
         _print_version_banner(self.resolved, n_envs)
 
@@ -288,9 +293,7 @@ class VehiclePhysics:
         for hook in self.pre_loop_hooks:
             hook.apply_pre_loop(ctx)
 
-        up_world = torch.tensor(
-            [0.0, 0.0, 1.0], device=dev, dtype=fdt,
-        ).unsqueeze(0).expand(n_envs, 3).contiguous()
+        up_world = self._up_world
 
         total_F = torch.zeros(n_envs, 3, device=dev, dtype=fdt)
         total_T = torch.zeros(n_envs, 3, device=dev, dtype=fdt)

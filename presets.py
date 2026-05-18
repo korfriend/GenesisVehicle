@@ -283,4 +283,8 @@ def tank_10w_skid_belt(
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="tank"),
         dt=0.005,
         visual_susp_mode="control",
+        # Tank wheels are cylinder primitives — visible spin doesn't add anything
+        # but the extra set_dofs_position call costs ~3-5ms per step (noticeable
+        # in interactive chase-cam mode).
+        visual_spin_enabled=False,
     )

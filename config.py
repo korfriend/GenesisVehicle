@@ -106,6 +106,14 @@ class VehicleConfig:
     # step. Tank preset opts into "control" automatically.
     visual_susp_mode: str = "auto"
 
+    # Whether to sync wheel spin angle (set_dofs_position on each wheel's
+    # continuous joint). Costs one Genesis call per step; safe to disable for
+    # vehicles where wheel rotation is invisible (e.g. tank cylinder wheels are
+    # rotationally symmetric in mesh). Tank preset sets this to False for ~3-5ms
+    # /step savings in interactive mode. Cars keep it True so mesh wheels visibly
+    # roll.
+    visual_spin_enabled: bool = True
+
     @classmethod
     def from_urdf(
         cls,
@@ -170,6 +178,7 @@ class ResolvedConfig:
     enable_visual_sync: bool
     urdf: Any   # URDFParsedConfig — used by visual layer for joint axis-sign lookup
     visual_susp_mode: str = "auto"
+    visual_spin_enabled: bool = True
 
 
 def _merge_wheel(base: WheelConfig, override: WheelConfig) -> WheelConfig:
@@ -267,4 +276,5 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
         enable_visual_sync=config.enable_visual_sync,
         urdf=parsed,
         visual_susp_mode=config.visual_susp_mode,
+        visual_spin_enabled=config.visual_spin_enabled,
     )
