@@ -10,6 +10,33 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.3] — 2026-05-18
+
+### Fixed — steer wheel visual rotated the wrong direction
+
+`VisualSync` was driving the steer joints **opposite to the physics-side
+steering direction** for both URDF axis conventions:
+
+- URDF axis `(0, 0, 1)` (e.g. truck preset, JMK URDF) — visual wheels rotated LEFT when physics rotated RIGHT, and vice versa.
+- URDF axis `(0, 0, -1)` (HJW URDF) — same inversion.
+
+The old formula `visual_cmd = phys * sign` assumed the only conversion
+needed was the URDF axis flip captured in `sign`. It missed that the
+physics-side `steer_per_wheel` is **opposite-handed** from the URDF joint
+convention to begin with (physics +θ = right turn = CW from above; URDF
+axis `(0,0,1)` +joint = CCW from above). The correct formula is
+`visual_cmd = -phys * sign`:
+
+- axis `(0, 0, 1)`: `sign=+1` → `visual_cmd = -phys` → joint goes CW for +phys → right turn visual ✓
+- axis `(0, 0, -1)`: `sign=-1` → `visual_cmd = +phys` → joint goes CW for +phys → right turn visual ✓
+
+Demos affected: HJW (4-wheel car, axis -1) and Truck6w (axis +1). The
+4-wheel HJW demo never had the wheel direction verified visually; the
+truck demo just hit it (front wheels turned left when the truck arced
+right). KDU (skid-steer, no steer joints) and JMK demos are unaffected.
+
+---
+
 ## [0.5.2] — 2026-05-18
 
 ### Changed — `truck_6w_partial_ackermann` preset

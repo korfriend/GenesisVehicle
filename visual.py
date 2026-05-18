@@ -140,15 +140,20 @@ class VisualSync:
                 spin_cmd, self._spin_dofs_valid, zero_velocity=False,
             )
 
-        # Steer joints. URDF axis (0,0,-1) requires negating the visual command
-        # so the user-visible rotation matches the physics-side angle.
+        # Steer joints. Physics-side `steer_per_wheel` is ISO 8855 (+ = right
+        # turn, computed as wheel fwd tilted from +X toward -Y). The URDF
+        # joint angle that produces a CW visual rotation (= right turn from
+        # above) depends on the URDF axis z sign:
+        #   axis (0, 0,  1): +joint = CCW = LEFT  → visual_cmd = -phys
+        #   axis (0, 0, -1): +joint = CW  = RIGHT → visual_cmd = +phys
+        # Unified: visual_cmd = -phys * sign  (sign = +1 for (0,0,1), -1 for (0,0,-1))
         if self.steer_dofs:
             cols = self.steer_wheel_idx
             phys = steer_per_wheel[:, cols]
             signs = torch.tensor(
                 self.steer_axis_signs, device=self.device, dtype=self.dtype
             ).unsqueeze(0)
-            visual_cmd = phys * signs
+            visual_cmd = -phys * signs
             self.entity.set_dofs_position(
                 visual_cmd, self.steer_dofs, zero_velocity=False,
             )
