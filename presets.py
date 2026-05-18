@@ -216,31 +216,41 @@ def truck_6w_partial_ackermann(
     """6-wheel truck: front-axle Ackermann steering, middle + rear axles driven.
 
     Drive layout mirrors a real truck — front axle steers (no drive), mid and
-    rear axles split the drive torque equally. The SDK's ``RWD`` strategy is
-    misnamed for this case but mechanically does what we want: "drive
-    uniformly across the wheels on the listed axles". Passing
-    ``driven_axles=(1, 2)`` drives middle and rear (axle 0 = front, the
-    steered one).
+    rear axles split the drive torque equally. Uses RWD strategy with
+    ``driven_axles=(1, 2)`` (RWD's name is slightly misleading here; it just
+    means "drive uniformly on listed axles").
 
     Torque sized for a ~5-ton truck (URDF chassis mass 5000 kg, 6 wheels @
-    40 kg each). ``t_drive_max = 10_000 N·m`` total → 2500 N·m / driven wheel
-    at full throttle across the 4 driven wheels. Gives ~2-3 m/s² acceleration
-    on flat ground without wheelspin (Pacejka peak per driven wheel ≈ 8800 N
-    vs ~2500 N required).
+    40 kg each):
+      - ``t_drive_max = 10_000 N·m`` total → 2500 N·m / driven wheel at full
+        throttle. ~2-3 m/s² acceleration on flat ground without wheelspin.
+      - ``t_brake_max = 15_000 N·m`` total → realistic emergency-brake decel
+        of ~4 m/s² when throttle is off (lower brake torques felt weak on a
+        5-ton chassis).
+
+    The ``"control"`` stability profile gets a ``StaticFrictionLock`` on top
+    of the default car hooks, so the truck holds at rest under brake instead
+    of creeping. ``brake_thr=0.3``, ``v_thr=0.5`` (same thresholds as the
+    tank preset), ``hold_k=400_000`` (proportional to chassis mass).
     """
+    hooks = stability_hooks_for_profile(stability, vehicle_kind="car")
+    if stability == "control":
+        hooks.append(StaticFrictionLock(
+            brake_thr=0.3, v_thr=0.5, hold_k=400_000.0,
+        ))
     return VehicleConfig.from_urdf(
         urdf_path,
         steering=PartialAckermann(max_steer_rad=0.55, steered_axles=(0,)),
         drivetrain=RWD(
             t_drive_max=10_000.0,
-            t_brake_max=8_000.0,
+            t_brake_max=15_000.0,
             driven_axles=(1, 2),    # mid + rear (NOT front, which steers)
             brake_bias=None,        # default uniform within axle
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
-        stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
+        stability_hooks=hooks,
         dt=1.0 / 48.0,
     )
 

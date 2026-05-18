@@ -10,6 +10,42 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.5] — 2026-05-18
+
+### Changed — `truck_6w_partial_ackermann` brake behavior
+
+User report from the Truck6w demo: pressing SPACE (brake) while the
+scenario kept driving throttle on produced visibly slow deceleration —
+the brake was working mechanically (~1.8 m/s² decel for a 5-ton truck
+with throttle still applied), but not enough to feel responsive.
+
+Two preset tweaks:
+
+- `t_brake_max` 8000 → 15_000 N·m. Realistic emergency-brake decel for a
+  5-ton chassis is ~4-5 m/s²; the old value capped at ~2 m/s² (and that
+  was while fighting throttle). Now ~4 m/s² with throttle off.
+- The `"control"` stability profile for the truck preset now also includes
+  `StaticFrictionLock(brake_thr=0.3, v_thr=0.5, hold_k=400_000)` (same
+  pattern as the tank preset). The truck used to creep at < 0.5 m/s after
+  the brake's `tanh(omega/0.5)` smoothing weakened — now it holds at rest.
+
+The `"raw"` and `"research"` profiles get no StaticFrictionLock (consistent
+with their "no hooks" semantics).
+
+### Demo behavior — `GeneVehicle_Truck6w/demo_drive.py`
+
+SPACE is now an **emergency brake**: it forces throttle to 0 in addition
+to setting brake = 1. Mirrors real-car panic-brake semantics (brake pedal
+overrides the accelerator). The scenario throttle resumes when SPACE is
+released. Reason for the change: the previous behavior (SPACE adds brake
+on top of scenario throttle) made `T_drive` and `T_brake` fight each other
+and decelerated very gently — confusing to the human.
+
+For raw "brake-while-throttling" research, hold SPACE and observe — but be
+aware that the scenario throttle is now zeroed under SPACE.
+
+---
+
 ## [0.5.4] — 2026-05-18
 
 ### Documentation — URDF steer joint axis recommendation
