@@ -10,6 +10,25 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.4] — 2026-05-18
+
+### Documentation — URDF steer joint axis recommendation
+
+Added a recommendation in `docs/physics-contracts.md` §7.4: new URDFs
+should declare steer joint axes as `<axis xyz="0 0 -1"/>` so that
+`+joint_angle` and `+steer` (user-facing ISO 8855) share the same sign
+domain. The SDK's `VisualSync` still compensates for either axis convention
+via `visual_cmd = -phys * sign`, so existing URDFs with `(0, 0, 1)` (e.g.
+JMK) keep working — the recommendation is only for new URDFs.
+
+### Fixed in repo
+- `GeneVehicle_Truck6w/urdf/truck_6w.urdf` — steer joint axes changed from
+  `(0, 0, 1)` to `(0, 0, -1)` to match the recommendation. Visual behavior
+  was already correct (v0.5.3 fix), but the URDF now follows the
+  recommended convention internally.
+
+---
+
 ## [0.5.3] — 2026-05-18
 
 ### Fixed — steer wheel visual rotated the wrong direction
