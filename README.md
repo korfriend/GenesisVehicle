@@ -130,7 +130,7 @@ Four ready-to-use `VehicleConfig` builders:
 | `car_4w_fwd_ackermann` | 4 | Ackermann front | FWD | Independent |
 | `car_4w_rwd_ackermann` | 4 | Ackermann front | RWD | Independent |
 | `car_4w_awd_ackermann` | 4 | Ackermann front | AWD | Independent |
-| `truck_6w_partial_ackermann` | 6 | Ackermann on axle 0 | AWD (uniform) | Independent |
+| `truck_6w_partial_ackermann` | 6 | Ackermann on axle 0 | Drive on axles 1+2 (mid + rear) | Independent |
 | `tank_10w_skid_belt` | 10 | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
 
 These cover the reference patterns the SDK was built from; copy and tweak

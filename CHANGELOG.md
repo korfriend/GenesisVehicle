@@ -10,6 +10,15 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.2] — 2026-05-18
+
+### Changed — `truck_6w_partial_ackermann` preset
+
+- **Drive layout fixed to match real trucks.** Was `AWD` with uniform 1/6 split across all 6 wheels (front-axle steered wheels were also driven). Now `RWD(driven_axles=(1, 2))` — only the middle and rear axles drive, the front axle is steered-only. This matches conventional truck drivetrain layouts (front steer, rear/mid drive) and stops the visible weirdness of the steering wheels also producing forward torque.
+- **Torque sized for the truck's mass.** `t_drive_max` 1500 → 10_000 N·m (was producing ~0.13 m/s² acceleration on a 5-ton truck after rolling resistance — barely visible). `t_brake_max` 3500 → 8000 N·m for symmetry. At full throttle the truck now hits ~2-3 m/s² acceleration without wheelspin (Pacejka peak per driven wheel at equilibrium ≈ 8800 N vs ~2500 N required).
+
+---
+
 ## [0.5.1] — 2026-05-18
 
 ### Fixed — preset vehicles could not start from rest under throttle

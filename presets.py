@@ -213,14 +213,29 @@ def truck_6w_partial_ackermann(
     *,
     stability: str = "control",
 ) -> VehicleConfig:
-    """6-wheel truck: front Ackermann, middle + rear axles driven."""
+    """6-wheel truck: front-axle Ackermann steering, middle + rear axles driven.
+
+    Drive layout mirrors a real truck — front axle steers (no drive), mid and
+    rear axles split the drive torque equally. The SDK's ``RWD`` strategy is
+    misnamed for this case but mechanically does what we want: "drive
+    uniformly across the wheels on the listed axles". Passing
+    ``driven_axles=(1, 2)`` drives middle and rear (axle 0 = front, the
+    steered one).
+
+    Torque sized for a ~5-ton truck (URDF chassis mass 5000 kg, 6 wheels @
+    40 kg each). ``t_drive_max = 10_000 N·m`` total → 2500 N·m / driven wheel
+    at full throttle across the 4 driven wheels. Gives ~2-3 m/s² acceleration
+    on flat ground without wheelspin (Pacejka peak per driven wheel ≈ 8800 N
+    vs ~2500 N required).
+    """
     return VehicleConfig.from_urdf(
         urdf_path,
         steering=PartialAckermann(max_steer_rad=0.55, steered_axles=(0,)),
-        drivetrain=AWD(
-            t_drive_max=1500.0,
-            t_brake_max=3500.0,
-            brake_bias=None,
+        drivetrain=RWD(
+            t_drive_max=10_000.0,
+            t_brake_max=8_000.0,
+            driven_axles=(1, 2),    # mid + rear (NOT front, which steers)
+            brake_bias=None,        # default uniform within axle
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
