@@ -81,7 +81,15 @@ def stability_hooks_for_profile(
         LowSpeedRegularizer(
             v_kin_com=0.5,
             ang_kin=0.5,
-            disable_when_control_active=False,   # active under MPPI throttle
+            # IMPORTANT: regularizer is OFF when the user is actively throttling
+            # or braking. Otherwise the omega-pull / F-scale at v=0 would force
+            # omega back to 0 every step → vehicle cannot start from rest under
+            # throttle. (v0.3.0 set this to False thinking it would help MPPI
+            # low-speed oscillation; v0.5.1 reverted it because the startup
+            # footgun is far worse. MPPI users who need an always-on
+            # regularizer can opt into `disable_when_control_active=False`
+            # via `stability="research"` + a custom hook list.)
+            disable_when_control_active=True,
         ),
     ]
     if vehicle_kind == "tank":

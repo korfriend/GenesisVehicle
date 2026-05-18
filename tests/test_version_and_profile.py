@@ -65,13 +65,14 @@ def test_profile_control_tank_adds_static_friction_lock():
     assert types == ["RollingResistance", "LowSpeedRegularizer", "StaticFrictionLock"]
 
 
-def test_profile_control_uses_mppi_friendly_lowspeed_default():
+def test_profile_control_disables_regularizer_under_throttle():
     """The 'control' profile builds LowSpeedRegularizer with
-    disable_when_control_active=False so it remains active under MPPI throttle.
-    (See CHANGELOG v0.3.0 footgun-fix entry.)"""
+    disable_when_control_active=True so the vehicle can start from rest under
+    throttle (see CHANGELOG v0.5.1 — reverts the v0.3.0 setting that froze
+    every preset vehicle at rest)."""
     hooks = stability_hooks_for_profile("control", vehicle_kind="car")
     lsr = next(h for h in hooks if isinstance(h, LowSpeedRegularizer))
-    assert lsr.disable_when_control_active is False
+    assert lsr.disable_when_control_active is True
 
 
 def test_profile_raw_returns_empty():

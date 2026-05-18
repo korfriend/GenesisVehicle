@@ -10,6 +10,55 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.1] — 2026-05-18
+
+### Fixed — preset vehicles could not start from rest under throttle
+
+The `"control"` stability profile built `LowSpeedRegularizer` with
+`disable_when_control_active=False` (set in v0.3.0). At `v=0, omega=0`,
+the regularizer:
+
+1. Scaled `F_long` and `F_lat` by `moving = 0` → no propulsion force.
+2. Set `omega_pull_factor = 1`, `omega_pull_target = v_long / radius = 0`
+   → forced `omega` back to 0 every step.
+
+Combined: any preset vehicle (`car_4w_rwd_ackermann`, `tank_10w_skid_belt`,
+`truck_6w_partial_ackermann`, …) issuing `throttle > 0` at rest would
+spin its wheels for one step and then have `omega` snapped back to 0.
+**Vehicle stuck at rest indefinitely.** Discovered while running the
+6-wheel truck demo where the truck wouldn't accelerate.
+
+### Reverted — `disable_when_control_active=True` is back in `"control"` profile
+
+This restores the original HJW behavior: the regularizer is off when the
+user is actively throttling or braking. The vehicle can accelerate from
+rest as expected. The regularizer still fires when the chassis is at
+rest with no input (suppressing drift jitter), which is its original
+intent.
+
+### Trade-off note
+
+The v0.3.0 change was made on the hypothesis that an always-on
+regularizer would help MPPI low-speed uphill oscillation. That
+hypothesis was never validated and the resulting behavior breaks every
+demo. MPPI users who want an always-on regularizer can opt in
+explicitly via `stability="research"` + a custom hook list:
+
+```python
+cfg.stability_hooks = [
+    RollingResistance(),
+    LowSpeedRegularizer(disable_when_control_active=False),
+]
+```
+
+### Test update
+
+`test_profile_control_uses_mppi_friendly_lowspeed_default` →
+`test_profile_control_disables_regularizer_under_throttle`. Same assertion
+flipped (`False` → `True`).
+
+---
+
 ## [0.5.0] — 2026-05-18
 
 ### Performance — vectorized per-wheel pipeline
