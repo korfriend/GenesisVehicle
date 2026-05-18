@@ -1,7 +1,7 @@
-"""Isotropic Coulomb tire model.
+"""Isotropic Coulomb tire model — vectorized.
 
-Lifted from HJW/tire_models.py:coulomb_isotropic. F = -mu N v_slip / |v_slip|
-with eps_v floor; serves as a baseline comparison against PacejkaAnisotropic.
+v0.5.0: accepts batched ``(n_envs, n_wheels)`` inputs and reads ``mu_long``
+from ``wheel_meta``. One call covers all wheels in all envs.
 """
 
 from __future__ import annotations
@@ -14,29 +14,30 @@ from . import TireModel
 
 
 class CoulombIsotropic(TireModel):
-    """Single-mu, slip-vector-opposed friction. mu pulled from wheel_params.mu_long."""
+    """Single-mu, slip-vector-opposed friction. ``mu`` per wheel from
+    ``wheel_meta.mu_long`` (single mu, isotropic by definition)."""
 
     def __init__(self, eps_v: float = 0.5):
-        self.eps_v = eps_v
+        self.eps_v = float(eps_v)
 
     def __call__(
         self,
-        v_long: torch.Tensor,
-        v_lat: torch.Tensor,
-        v_roll: torch.Tensor,
-        N: torch.Tensor,
-        wheel_params: Any,
+        v_long: torch.Tensor,   # (n_envs, n_wheels)
+        v_lat: torch.Tensor,    # (n_envs, n_wheels)
+        v_roll: torch.Tensor,   # (n_envs, n_wheels)
+        N: torch.Tensor,        # (n_envs, n_wheels)
+        wheel_meta: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         slip_long = v_long - v_roll
         slip_lat = v_lat
         slip_mag = torch.sqrt(slip_long * slip_long + slip_lat * slip_lat)
         denom = torch.clamp(slip_mag, min=self.eps_v)
 
-        mu = float(wheel_params.mu_long)   # isotropic: only one mu used
+        mu = wheel_meta.mu_long.unsqueeze(0)           # (1, n_wheels)
         F_long = -mu * N * slip_long / denom
         F_lat = -mu * N * slip_lat / denom
 
-        # Diagnostics (kept for parity with PacejkaAnisotropic.return signature).
+        # Diagnostics (signature parity with PacejkaAnisotropic).
         abs_v_long = torch.clamp(torch.abs(v_long), min=self.eps_v)
         kappa = (v_roll - v_long) / abs_v_long
         alpha = torch.atan2(v_lat, abs_v_long)

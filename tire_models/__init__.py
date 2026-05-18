@@ -14,18 +14,23 @@ import torch
 
 
 class TireModel(ABC):
-    """Stateless per-wheel tire force model."""
+    """Stateless batched tire force model.
+
+    v0.5.0: inputs are batched ``(n_envs, n_wheels)`` tensors; per-wheel
+    coefficients are read from ``wheel_meta`` (a ``WheelMeta`` with
+    ``(n_wheels,)`` coefficient tensors). One call covers all wheels.
+    """
 
     @abstractmethod
     def __call__(
         self,
-        v_long: torch.Tensor,
-        v_lat: torch.Tensor,
-        v_roll: torch.Tensor,
-        N: torch.Tensor,
-        wheel_params: Any,   # WheelConfig with all fields filled
+        v_long: torch.Tensor,   # (n_envs, n_wheels)
+        v_lat: torch.Tensor,    # (n_envs, n_wheels)
+        v_roll: torch.Tensor,   # (n_envs, n_wheels)
+        N: torch.Tensor,        # (n_envs, n_wheels)
+        wheel_meta: Any,        # WheelMeta with batched per-wheel tensors
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return (F_long, F_lat, kappa, alpha), each shape == v_long.shape."""
+        """Return ``(F_long, F_lat, kappa, alpha)``, each ``(n_envs, n_wheels)``."""
 
 
 from .pacejka import PacejkaAnisotropic    # noqa: E402  (re-export after ABC defn)
