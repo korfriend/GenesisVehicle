@@ -97,6 +97,15 @@ class VehicleConfig:
     dt: float = 1.0 / 48.0
     enable_visual_sync: bool = True
 
+    # Visual suspension joint mode:
+    #   "auto"       — per-joint decision based on URDF <dynamics> presence (legacy default)
+    #   "kinematic"  — force set_dofs_position (HJW-style, light wheels < ~50kg)
+    #   "control"    — force control_dofs_position with high kp/kv (KDU-style, heavy wheels)
+    # Heavy wheels (e.g. KDU tank's 500 kg) need PD control or they fall under
+    # gravity between substeps even though set_dofs_position is re-applied each
+    # step. Tank preset opts into "control" automatically.
+    visual_susp_mode: str = "auto"
+
     @classmethod
     def from_urdf(
         cls,
@@ -160,6 +169,7 @@ class ResolvedConfig:
     dt: float
     enable_visual_sync: bool
     urdf: Any   # URDFParsedConfig — used by visual layer for joint axis-sign lookup
+    visual_susp_mode: str = "auto"
 
 
 def _merge_wheel(base: WheelConfig, override: WheelConfig) -> WheelConfig:
@@ -239,6 +249,12 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
         if validator is not None:
             validator(merged)
 
+    if config.visual_susp_mode not in ("auto", "kinematic", "control"):
+        raise ConfigError(
+            f"visual_susp_mode must be 'auto', 'kinematic', or 'control', "
+            f"got {config.visual_susp_mode!r}"
+        )
+
     return ResolvedConfig(
         wheels=merged,
         chassis=chassis,
@@ -250,4 +266,5 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
         dt=config.dt,
         enable_visual_sync=config.enable_visual_sync,
         urdf=parsed,
+        visual_susp_mode=config.visual_susp_mode,
     )

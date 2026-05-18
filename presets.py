@@ -257,7 +257,14 @@ def tank_10w_skid_belt(
     *,
     stability: str = "control",
 ) -> VehicleConfig:
-    """10-wheel skid-steer tank with same-side belt coupling. Matches KDU reference."""
+    """10-wheel skid-steer tank with same-side belt coupling. Matches KDU reference.
+
+    Uses ``visual_susp_mode="control"`` because the tank's wheels are heavy
+    (500 kg each) and a kinematic set_dofs_position cannot prevent them from
+    falling under gravity between substeps. The control path applies a stiff
+    PD (kp=1e7, kv=1e5) on each suspension prismatic joint, matching the
+    KDU reference behavior.
+    """
     return VehicleConfig.from_urdf(
         urdf_path,
         steering=SkidSteer(),
@@ -275,4 +282,5 @@ def tank_10w_skid_belt(
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="tank"),
         dt=0.005,
+        visual_susp_mode="control",
     )

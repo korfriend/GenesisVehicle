@@ -63,6 +63,10 @@ class VisualSync:
         self.susp_uses_control: list[bool] = []   # True -> control_dofs_position; False -> set_dofs_position
 
         urdf = resolved.urdf
+        # Top-level override for suspension visual mode. "auto" keeps the per-joint
+        # decision based on URDF <dynamics>; "kinematic"/"control" force one path
+        # for every wheel (heavy wheels need "control" — see VehicleConfig docstring).
+        mode = getattr(resolved, "visual_susp_mode", "auto")
         for i, w in enumerate(self.wheels):
             if w.spin_joint_name is not None:
                 self.spin_dofs.append(int(entity.get_joint(w.spin_joint_name).dofs_idx_local[0]))
@@ -74,7 +78,13 @@ class VisualSync:
                 self.steer_wheel_idx.append(i)
             if w.susp_joint_name is not None:
                 self.susp_dofs.append(int(entity.get_joint(w.susp_joint_name).dofs_idx_local[0]))
-                self.susp_uses_control.append(bool(urdf.susp_has_dynamics.get(w.susp_joint_name, False)))
+                if mode == "control":
+                    uses_ctrl = True
+                elif mode == "kinematic":
+                    uses_ctrl = False
+                else:   # "auto"
+                    uses_ctrl = bool(urdf.susp_has_dynamics.get(w.susp_joint_name, False))
+                self.susp_uses_control.append(uses_ctrl)
             else:
                 self.susp_dofs.append(-1)
                 self.susp_uses_control.append(False)
@@ -152,16 +162,20 @@ class VisualSync:
             zero_v = torch.zeros_like(joint_pos)
             self.entity.set_dofs_velocity(zero_v, self._susp_set_dofs)
 
-        # Suspension joints. control_dofs_position path (KDU): command = compression.
+        # Suspension joints. control_dofs_position path (heavy wheels):
+        # Use the SAME ground-following formula as the set_dofs_position path
+        # so the wheel mesh lands on the ground at equilibrium regardless of
+        # chassis settle height. The earlier "command = compression" formula
+        # was wrong for URDFs whose susp joint origin sits at the chassis z
+        # plane (KDU pattern) — `compression` is always >= 0, so the wheel
+        # could only ride UP from rest, never extend DOWN to reach the ground.
         if self._susp_ctrl_dofs:
             d = distances[:, self._susp_ctrl_idx]
-            # Compute compression per visual wheel; use rest_stroke + radius as REST_D.
-            rest_d = torch.tensor(
-                [float(self.wheels[i].rest_stroke) + float(self.wheels[i].radius)
-                 for i in self._susp_ctrl_idx],
-                device=self.device, dtype=self.dtype,
-            ).unsqueeze(0)
-            compression = torch.clamp(rest_d - d, min=0.0)
+            air = (d <= 1e-6) | (d >= 19.9)
+            joint_pos = self.wheel_mesh_radius - d
+            joint_pos = torch.where(
+                air, torch.full_like(joint_pos, -self.l_susp), joint_pos,
+            )
             self.entity.control_dofs_position(
-                compression, dofs_idx_local=self._susp_ctrl_dofs,
+                joint_pos, dofs_idx_local=self._susp_ctrl_dofs,
             )
