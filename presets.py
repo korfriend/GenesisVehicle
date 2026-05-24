@@ -65,8 +65,9 @@ def stability_hooks_for_profile(
 
     Args:
         profile: ``"control"``, ``"raw"``, or ``"research"``.
-        vehicle_kind: ``"car"`` (no static lock) or ``"tank"`` (adds
-            StaticFrictionLock under the ``"control"`` profile).
+        vehicle_kind: ``"car"`` or ``"tank"``. Both get the same hook set
+            in v0.5.8+; the parameter is kept for forward compatibility
+            with future vehicle-specific tweaks.
     """
     if profile not in _VALID_PROFILES:
         raise ConfigError(
@@ -75,7 +76,11 @@ def stability_hooks_for_profile(
         )
     if profile in ("raw", "research"):
         return []
-    # profile == "control"
+    # profile == "control" — applied to every vehicle_kind. Prior to v0.5.8
+    # StaticFrictionLock was tank-only; the new stick-slip lock is cheap
+    # enough (no work when not engaged) that there's no reason to leave
+    # cars without it. Removing it caused a real footgun where any car
+    # preset on a slope or after impact creeped indefinitely under brake.
     hooks: list[StabilityHook] = [
         RollingResistance(),
         LowSpeedRegularizer(
@@ -91,11 +96,8 @@ def stability_hooks_for_profile(
             # via `stability="research"` + a custom hook list.)
             disable_when_control_active=True,
         ),
+        StaticFrictionLock(brake_thr=0.3, v_thr=0.5),
     ]
-    if vehicle_kind == "tank":
-        hooks.append(
-            StaticFrictionLock(brake_thr=0.3, v_thr=0.5)
-        )
     return hooks
 
 
@@ -228,15 +230,11 @@ def truck_6w_partial_ackermann(
         of ~4 m/s² when throttle is off (lower brake torques felt weak on a
         5-ton chassis).
 
-    The ``"control"`` stability profile gets a ``StaticFrictionLock`` on top
-    of the default car hooks, so the truck holds at rest under brake instead
-    of creeping. ``brake_thr=0.3``, ``v_thr=0.5`` (same thresholds as the
-    tank preset). The v0.5.7 stick-slip model auto-sizes its spring around
-    the explicit-Euler stability bound — no mass-scaled gain to tune.
+    The ``"control"`` stability profile (v0.5.8+) includes a
+    ``StaticFrictionLock`` by default for every vehicle kind, so the truck
+    holds at rest under brake instead of creeping.
     """
     hooks = stability_hooks_for_profile(stability, vehicle_kind="car")
-    if stability == "control":
-        hooks.append(StaticFrictionLock(brake_thr=0.3, v_thr=0.5))
     return VehicleConfig.from_urdf(
         urdf_path,
         steering=PartialAckermann(max_steer_rad=0.55, steered_axles=(0,)),

@@ -10,6 +10,62 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.8] — 2026-05-24
+
+### Added — bundled `samples/` directory
+
+Three minimal, self-contained reference scripts ship with the SDK so
+that `pip install genesis-vehicle` is immediately runnable without
+hunting for assets or umbrella-level helpers:
+
+- [`samples/quickstart.py`](samples/quickstart.py) — minimum-viable
+  call pattern (preset → `add_vehicle` → step loop). Drives a car
+  forward for 5 s on flat ground.
+- [`samples/slope_hold.py`](samples/slope_hold.py) — `StaticFrictionLock`
+  side-slope hold regression check. Reports OK / REGRESSION based on
+  lateral slip over 10 s under `brake=1.0`.
+- [`samples/batched_rollout.py`](samples/batched_rollout.py) — batched
+  `n_envs > 1` API for RL / MPPI. Demonstrates per-env random controls
+  and per-step throughput.
+
+Bundled asset:
+- [`samples/urdf/car_4w.urdf`](samples/urdf/car_4w.urdf) — minimal
+  1.2 t 4-wheel RWD sedan, primitive geometry only (no mesh files),
+  follows project URDF conventions.
+
+Run as Python modules:
+
+```bash
+python -m genesis_vehicle.samples.quickstart
+python -m genesis_vehicle.samples.slope_hold --slope 20
+python -m genesis_vehicle.samples.batched_rollout --n_envs 256
+```
+
+Docs (`quickstart.md`, `stability-profiles.md`, `api-reference.md`)
+now cross-reference the samples as runnable examples.
+
+### Changed — `"control"` profile is now uniform across vehicle kinds
+
+`stability_hooks_for_profile("control", vehicle_kind=...)` now returns
+the same hook set (`[RollingResistance, LowSpeedRegularizer,
+StaticFrictionLock]`) regardless of `vehicle_kind`. Previously only
+`vehicle_kind="tank"` got the lock — `vehicle_kind="car"` was hook[0:2]
+only. That was a real footgun: any preset car on a slope (or after an
+impact-induced lateral velocity) would creep indefinitely under brake.
+
+The new stick-slip lock (v0.5.7) is cheap enough that there's no
+reason to leave cars without it. The truck preset's manual `append` of
+the lock is removed since the base profile now includes it.
+
+`vehicle_kind` is kept as a parameter for forward compatibility with
+future vehicle-specific tweaks, but currently has no effect on the
+profile hook set.
+
+Test update: `test_profile_control_car_includes_static_friction_lock`
+replaces the pre-v0.5.8 `..._returns_two_hooks` test.
+
+---
+
 ## [0.5.7] — 2026-05-24
 
 ### Fixed — `StaticFrictionLock` is now true static friction (stick-slip)

@@ -53,16 +53,21 @@ def test_version_info_matches_string():
 # ---------------------------------------------------------------------------
 
 
-def test_profile_control_car_returns_two_hooks():
+def test_profile_control_car_includes_static_friction_lock():
+    """v0.5.8+: every vehicle_kind on the `control` profile gets a
+    StaticFrictionLock by default (was tank-only pre-v0.5.8). The
+    stick-slip lock is cheap and avoids the brake-creep footgun."""
     hooks = stability_hooks_for_profile("control", vehicle_kind="car")
     types = [type(h).__name__ for h in hooks]
-    assert types == ["RollingResistance", "LowSpeedRegularizer"]
-
-
-def test_profile_control_tank_adds_static_friction_lock():
-    hooks = stability_hooks_for_profile("control", vehicle_kind="tank")
-    types = [type(h).__name__ for h in hooks]
     assert types == ["RollingResistance", "LowSpeedRegularizer", "StaticFrictionLock"]
+
+
+def test_profile_control_tank_matches_car():
+    """vehicle_kind currently has no effect on the control hook set
+    (kept as a parameter for forward compatibility with future tweaks)."""
+    car  = stability_hooks_for_profile("control", vehicle_kind="car")
+    tank = stability_hooks_for_profile("control", vehicle_kind="tank")
+    assert [type(h).__name__ for h in car] == [type(h).__name__ for h in tank]
 
 
 def test_profile_control_disables_regularizer_under_throttle():
