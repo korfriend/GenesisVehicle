@@ -179,14 +179,6 @@ def estimate_spin_inertia_from_genesis(
     return I_about
 
 
-# Backwards-compat alias for the old name; emits a deprecation note in docstring.
-def parse_inertia_max_principal_genesis(entity: Any, link_name: str) -> float:
-    """Deprecated alias for ``estimate_spin_inertia_from_genesis``.
-    Will be removed in a future revision; update call sites to the new name.
-    """
-    return estimate_spin_inertia_from_genesis(entity, link_name)
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -56,7 +56,7 @@ the SDK never invents these values.)
 | `physics.step(throttle, brake, steer)` with `+steer = LEFT` | `physics.step(VehicleInputs(throttle, brake, steer=-old_steer))` — **sign flip** to ISO 8855 |
 | `omega[LEFT_IDX] = mean()` belt constraint | `SameSideBelt()` coupling (post-loop, pre-force-apply — see [`physics-contracts.md`](physics-contracts.md#75-coupling-order)) |
 | `_cap_torque` per-side taper | `PerSide(use_per_side_taper=True)` |
-| Static friction lock | `StaticFrictionLock(brake_thr=0.3, v_thr=0.5, hold_k=200_000.0)` (already part of `"control"` profile for tanks) |
+| Static friction lock | `StaticFrictionLock(brake_thr=0.3, v_thr=0.5)` (already part of `"control"` profile for tanks; v0.5.7 position-anchored stick-slip — no `hold_k` proportional gain anymore) |
 | `THROTTLE_GEAR_CAP = 0.3` | `PerSide(throttle_gear_cap=0.3)` |
 | Turret / barrel DoFs | NOT in SDK — keep in user demo code |
 

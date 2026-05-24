@@ -226,7 +226,7 @@ class LowSpeedRegularizer(StabilityHook):
                  disable_when_control_active=True, control_threshold=0.01)
 
 class StaticFrictionLock(StabilityHook):
-    def __init__(brake_thr=0.3, v_thr=0.5, hold_k=200_000.0)
+    def __init__(brake_thr=0.3, v_thr=0.5, k_spring=500_000.0, k_damp=20_000.0)
 ```
 
 Hooks are selected via `stability=` profile in the presets (see

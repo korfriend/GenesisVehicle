@@ -99,6 +99,10 @@ class PipelineContext:
     brake: Optional[torch.Tensor] = None         # (n_envs,)
     vel: Optional[torch.Tensor] = None           # (n_envs, 3)
     ang: Optional[torch.Tensor] = None           # (n_envs, 3)
+    # Simulation step duration in seconds (= cfg.dt). Hooks that integrate
+    # state across steps (e.g., position-anchored stick-slip in
+    # StaticFrictionLock) need this. Added in v0.5.7.
+    dt: float = 0.0
     # WheelMeta with batched per-wheel coefficients (for hooks/tire to read).
     wheel_meta: Any = None
 
@@ -331,6 +335,7 @@ class VehiclePhysics:
         ctx.omega = self.omega; ctx.air_mask = air_mask
         ctx.omega_override = None
         ctx.omega_pull_factor = None; ctx.omega_pull_target = None
+        ctx.dt = float(DT)
         for hook in self.post_tire_hooks:
             hook.apply_post_tire(ctx)
         F_long, F_lat = ctx.F_long, ctx.F_lat

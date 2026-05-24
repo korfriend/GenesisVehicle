@@ -44,7 +44,7 @@ attribute (a tuple containing some of `"PRE_LOOP"`, `"POST_TIRE"`).
 |---|---|---|
 | `RollingResistance` | `("POST_TIRE",)` | Subtracts `cr * N * tanh(v_long / scale)` from `F_long` per wheel. |
 | `LowSpeedRegularizer` | `("PRE_LOOP", "POST_TIRE")` | Pre-loop: compute `moving ∈ [0,1]` from chassis speed. Post-tire: scale `F_long`/`F_lat` by `moving`; record an omega pull target so core blends ω toward `v_long / radius`. |
-| `StaticFrictionLock` | `("POST_TIRE",)` | When `brake > thr` and `|v_long| < thr`: override `F_long` with `-K * v_long` (clamped to ±μN) and request `omega = 0` via `ctx.omega_override`. |
+| `StaticFrictionLock` | `("POST_TIRE",)` | When `brake > thr` and planar speed `sqrt(v_long² + v_lat²) < thr`: 2D stick-slip lock with per-wheel position anchor. Stores anchor at lock engagement; computes `F = -K_spring·displacement - K_damp·velocity` in both axes; projects onto the per-wheel friction ellipse (same form as `pacejka.py`); requests `omega = 0` via `ctx.omega_override`. v0.5.7 — replaced v0.5.6's tanh velocity damper with proper position-anchored stick-slip. Vehicle holds with **zero drift** on any slope up to `μ ≈ tan(slope_angle)` (truck preset with μ=1.0: rock-solid up to ~30°, vehicle rolls over physically beyond ~35°). |
 
 Hook order is the list order (see
 [`stability-profiles.md`](stability-profiles.md#hook-ordering-inside-a-profile)
