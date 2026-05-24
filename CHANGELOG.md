@@ -10,6 +10,151 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.7] — 2026-05-24
+
+### Fixed — `StaticFrictionLock` is now true static friction (stick-slip)
+
+User physics critique on v0.5.6 (the tanh velocity-damper version): a
+real asphalt-tire contact at μ=1.0 should hold a vehicle stationary on
+any slope where μ > tan(slope_angle) — for a 20° slope that's μ > 0.36,
+well within μ=1.0. v0.5.6 still showed ~5 cm drift over 10 s at 20°
+because `F = -μN·tanh(v/scale)` is fundamentally a *kinetic* friction
+model: any non-zero `v` produces an opposing force, but `v=0` produces
+`F=0`. Equilibrium on a slope therefore requires non-zero v_lat — visible
+creep, even though physics says the vehicle should be motionless.
+
+### Changes
+
+- `genesis_vehicle/strategies/stability.py` — rewrote `StaticFrictionLock`
+  as a **position-anchored stick-slip** model:
+  - When the lock first engages on a wheel, the contact position becomes
+    its anchor (displacement `d = 0`).
+  - Each step while active: integrate `d += v · dt`; compute force as a
+    spring + damper: `F = -K_spring·d - K_damp·v`.
+  - Project `(F_long, F_lat)` onto the per-wheel friction ellipse (same
+    form as `tire_models/pacejka.py`).
+  - If the projection clamps (i.e., wheel is slipping), advance the anchor
+    so the next-step spring force matches the friction limit — kinetic-
+    friction behaviour without spring runaway.
+  - Otherwise (stuck), the spring quietly absorbs any external lateral
+    force up to μN. Vehicle is **truly stationary**.
+  - New tuning parameters: `k_spring` (default 500_000 N/m per wheel,
+    around the explicit-Euler stability limit at dt=0.02 for a 5 t
+    chassis) and `k_damp` (default 20_000 N·s/m per wheel, ~half-critical
+    at the natural frequency).
+  - Legacy `hold_k`, `hold_k_lat`, `slip_scale` constructor kwargs are
+    REMOVED (see BREAKING section below).
+- `genesis_vehicle/core.py` — added `ctx.dt: float` to PipelineContext
+  so hooks can integrate per-step state (the stick-slip lock needs it).
+- `genesis_vehicle/presets.py` — tank and truck preset call sites updated
+  to the new signature (`StaticFrictionLock(brake_thr=0.3, v_thr=0.5)`,
+  no `hold_k` arg).
+- `genesis_vehicle/urdf.py` + `__init__.py` — removed deprecated alias
+  `parse_inertia_max_principal_genesis` (was a back-compat shim from
+  v0.4.x → v0.5.0 rename; no longer needed in pre-1.0).
+
+### Verified — `samples/slope_lateral_slip.py` truck preset
+
+| slope    | v0.5.5 (1D lock)  | v0.5.6 (2D tanh) | v0.5.7 (stick-slip) |
+|---|---|---|---|
+| flat 0°  | -72 mm            | 0 mm             | **0.0 mm**          |
+| 20°      | -114 mm           | -54 mm           | **2.9 mm**          |
+| 30°      | (not tested)      | (not tested)     | **0.4 mm**          |
+| 40°      | (rolls over)      | (rolls over)     | (rolls over)        |
+
+The 40° case is a real physical limit: μ=1.0 → max-hold-able slope ≈
+arctan(1.0) = 45°, but a high-COG 5 t truck tips over at ~35-40° well
+before reaching the friction limit. The lock cannot prevent tip-over
+(would need a separate "rollover restraint" hook, out of scope).
+
+### BREAKING — Migration required
+
+`StaticFrictionLock` no longer accepts `hold_k`, `hold_k_lat`, or
+`slip_scale`. They were proportional / tanh gains in the prior velocity-
+damper models (v0.5.5, v0.5.6) and have no meaning in the new stick-slip
+model. Replace with `k_spring` / `k_damp` (or drop them and use the
+defaults, which are tuned for typical 1-5 t vehicles):
+
+```python
+# Before:
+StaticFrictionLock(brake_thr=0.3, v_thr=0.5, hold_k=400_000.0)
+# After:
+StaticFrictionLock(brake_thr=0.3, v_thr=0.5)
+# or explicitly:
+StaticFrictionLock(brake_thr=0.3, v_thr=0.5,
+                   k_spring=500_000.0, k_damp=20_000.0)
+```
+
+Pre-1.0 SDK — no deprecation shim. Bundled presets (tank, truck) have
+been updated.
+
+---
+
+## [0.5.6] — 2026-05-24
+
+### Fixed — `StaticFrictionLock` 2D extension (lateral slip on slopes)
+
+Student bug report from MPPI work: a truck holding `brake=1.0` on a 20°
+side slope continued to creep downhill ~11 cm over 10 s, despite the
+control-profile stability hooks all being active. Root cause:
+``StaticFrictionLock`` only wrote ``ctx.F_long``; ``ctx.F_lat`` came
+straight from Pacejka, which is ill-conditioned near rest because
+``alpha = atan2(v_lat, max(|v_long|, eps_v=0.5))`` artificially
+compresses the slip angle (so ``F_lat`` from the magic formula was
+much smaller than what a real tire would produce at rest).
+
+### Changes
+
+- `genesis_vehicle/strategies/stability.py` — `StaticFrictionLock` now:
+  - Activates on planar wheel speed ``sqrt(v_long² + v_lat²) < v_thr``
+    (was: ``|v_long| < v_thr`` only).
+  - Overrides both ``F_long`` and ``F_lat`` with a smooth saturated
+    hold ``-mu·N · tanh(v / slip_scale)`` per axis, then projects onto
+    the per-wheel friction ellipse — same form as the Pacejka clamp.
+  - Switched from `clamp(-hold_k · v, ±mu·N)` (proportional + hard
+    clamp) to `tanh(v / slip_scale)`: the original form was a
+    bang-bang controller whose effective gain in the saturated regime
+    exceeded the explicit-Euler stability bound (`K_total · dt / mass
+    = 9.6` for the truck preset, well above the ~2 stability limit) —
+    fine in 1D where ``v_long`` was always tiny, but on a side slope
+    the sustained lateral gravity excited the discretization into a
+    growing oscillation. The tanh form keeps `|F| ≤ mu·N` smoothly,
+    eliminating overshoot.
+  - New `hold_k_lat` parameter (defaults to `hold_k`) and `slip_scale`
+    (defaults to `v_thr / 5` — the stable upper limit on the truck
+    preset at dt=0.02).
+- `_version.py`: 0.5.5 → 0.5.6.
+- `docs/pipeline-and-hooks.md`, `docs/stability-profiles.md`: updated
+  hook descriptions.
+
+### Verified — `samples/slope_lateral_slip.py`
+
+| slope | pre-patch slip | post-patch slip | verdict |
+|---|---|---|---|
+| flat (0°)     | -72 mm  | **0 mm**   | OK |
+| 10° side      | n/a     | **32 mm**  | NO BUG OBSERVED (under 80 mm threshold) |
+| 20° side      | -114 mm | **54 mm**  | NO BUG OBSERVED |
+
+### Known limitation
+
+The tanh saturated form is a pure velocity damper: any sustained external
+lateral force (gravity component on a slope) produces an equilibrium drift
+velocity proportional to (force) / (gain near v=0). At the maximum stable
+gain, this is ~5-10 mm/s on the truck preset at 20°. Truly zero-drift
+hold on steep slopes (> ~25°) would require a position-tracked stick-slip
+model (store a per-wheel anchor at lock-on time, spring + damper to it,
+release when force exceeds the static-friction circle). Filed as future
+work; current behavior is the standard fix for the Real2Sim / MPPI use
+cases that motivated the bug report.
+
+### Migration
+
+`StaticFrictionLock(brake_thr=..., v_thr=..., hold_k=...)` continues to
+work — `hold_k_lat` defaults to `hold_k`, `slip_scale` defaults from
+`v_thr`. No call-site changes required in `presets.py` or external code.
+
+---
+
 ## [0.5.5] — 2026-05-18
 
 ### Changed — `truck_6w_partial_ackermann` brake behavior

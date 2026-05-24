@@ -94,7 +94,7 @@ def stability_hooks_for_profile(
     ]
     if vehicle_kind == "tank":
         hooks.append(
-            StaticFrictionLock(brake_thr=0.3, v_thr=0.5, hold_k=200_000.0)
+            StaticFrictionLock(brake_thr=0.3, v_thr=0.5)
         )
     return hooks
 
@@ -231,13 +231,12 @@ def truck_6w_partial_ackermann(
     The ``"control"`` stability profile gets a ``StaticFrictionLock`` on top
     of the default car hooks, so the truck holds at rest under brake instead
     of creeping. ``brake_thr=0.3``, ``v_thr=0.5`` (same thresholds as the
-    tank preset), ``hold_k=400_000`` (proportional to chassis mass).
+    tank preset). The v0.5.7 stick-slip model auto-sizes its spring around
+    the explicit-Euler stability bound — no mass-scaled gain to tune.
     """
     hooks = stability_hooks_for_profile(stability, vehicle_kind="car")
     if stability == "control":
-        hooks.append(StaticFrictionLock(
-            brake_thr=0.3, v_thr=0.5, hold_k=400_000.0,
-        ))
+        hooks.append(StaticFrictionLock(brake_thr=0.3, v_thr=0.5))
     return VehicleConfig.from_urdf(
         urdf_path,
         steering=PartialAckermann(max_steer_rad=0.55, steered_axles=(0,)),

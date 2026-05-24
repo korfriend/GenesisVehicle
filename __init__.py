@@ -67,7 +67,6 @@ from .inputs import (
 from .urdf import (
     URDFParsedConfig,
     estimate_spin_inertia_from_genesis,
-    parse_inertia_max_principal_genesis,   # deprecated alias
     parse_urdf,
 )
 from .dynamics import (
@@ -147,7 +146,6 @@ __all__ = [
     # URDF
     "URDFParsedConfig", "parse_urdf",
     "estimate_spin_inertia_from_genesis",
-    "parse_inertia_max_principal_genesis",   # deprecated alias
     # Dynamics primitives
     "brake_torque_signed", "suspension_normal_force",
     # Strategy ABCs
