@@ -11,6 +11,7 @@ API surface. All three depend only on the SDK itself and the bundled
 | 3 | [`batched_rollout.py`](batched_rollout.py) | The batched `n_envs > 1` API for RL / MPPI. Spawn N cars in parallel, per-env random controls, measure per-step throughput. |
 | 4 | [`road_loop.py`](road_loop.py) | **Multi-vehicle visual demo** — 4 vehicle kinds (FWD red sedan, RWD blue coupe, AWD green SUV, yellow 6-wheel truck), `--n_per_kind` each, all driving a circular track under constant Ackermann steering. Top-down camera frames the whole fleet. |
 | 5 | [`perf_vectorization.py`](perf_vectorization.py) | **n_envs batching speedup benchmark.** Sweeps `n_envs ∈ [1, 4, 16, 64, 256, 1024]` (one fresh subprocess per measurement) and prints a scaling table showing per-env cost dropping from ~26 ms (single env) to < 1 ms (64+ envs). Use to gauge RL / MPPI throughput on your machine. |
+| 6 | [`multi_env_render.py`](multi_env_render.py) | **Render every parallel env in one grid view.** Uses Genesis's `env_separate_rigid=True` + `env_spacing` so `n_envs > 1` parallel rollouts are laid out in a `√n × √n` grid (physics still overlapping, only visualization offset). Each env gets a different random throttle/steer — eyeball RL/MPPI diversity at a glance. |
 
 ## Bundled asset
 
@@ -33,6 +34,8 @@ python -m genesis_vehicle.samples.road_loop
 python -m genesis_vehicle.samples.road_loop --n_per_kind 8 --duration 30
 python -m genesis_vehicle.samples.perf_vectorization
 python -m genesis_vehicle.samples.perf_vectorization --n_envs_list 1,4,16,64
+python -m genesis_vehicle.samples.multi_env_render --n_envs 16
+python -m genesis_vehicle.samples.multi_env_render --n_envs 64 --spacing 8
 ```
 
 All three are headless (no viewer, no `cv2`, no `pynput`). The chase-cam

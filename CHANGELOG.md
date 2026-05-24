@@ -10,6 +10,47 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.10] — 2026-05-25
+
+### Added — `multi_env_render` sample
+
+[`samples/multi_env_render.py`](samples/multi_env_render.py) closes the
+loop on the v0.5.9 batching story: ``perf_vectorization`` shows you the
+44× speedup at ``n_envs=64`` as numbers, but until now there was no
+way to actually SEE what those 64 parallel rollouts were doing —
+Genesis simulates them at the same world coordinates (the env axis is
+a "parallel universe" axis, not a spatial one).
+
+The fix is a Genesis feature pair we hadn't exposed in samples yet:
+
+```python
+scene = gs.Scene(
+    vis_options=gs.options.VisOptions(env_separate_rigid=True, ...),
+    ...,
+)
+scene.build(
+    n_envs=N,
+    env_spacing=(dx, dy),     # visualization-only offset
+    n_envs_per_row=K,         # √N by default
+)
+```
+
+The renderer then offsets each env's rigid entities to its grid cell.
+Physics is unchanged (still parallel universes at the same coords);
+only the visualization adds the per-env transform. The overhead
+camera frames the entire grid, so MPPI candidate trajectories or RL
+rollout diversity is visible at a glance.
+
+Per-env throttle / steer are randomized so every cell looks different —
+useful as a sanity check that batched simulation isn't accidentally
+making all envs identical.
+
+### Docs
+
+- `samples/README.md` updated with row #6.
+
+---
+
 ## [0.5.9] — 2026-05-24
 
 ### Added — two more samples (`road_loop`, `perf_vectorization`)
