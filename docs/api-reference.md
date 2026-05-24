@@ -4,12 +4,15 @@ Full public surface. Imported as `from genesis_vehicle import <name>` unless
 otherwise noted. For the mental model behind these names, read
 [`concepts.md`](concepts.md) first.
 
-> **Runnable references:** the three scripts under
-> [`../samples/`](../samples/) exercise the most common call patterns:
+> **Runnable references:** the scripts under [`../samples/`](../samples/)
+> exercise the most common call patterns:
 > [`quickstart.py`](../samples/quickstart.py) (the minimum-viable API),
 > [`slope_hold.py`](../samples/slope_hold.py) (StaticFrictionLock behavior),
-> [`batched_rollout.py`](../samples/batched_rollout.py) (the `n_envs > 1`
-> shapes referenced throughout this doc).
+> [`batched_rollout.py`](../samples/batched_rollout.py) and
+> [`perf_vectorization.py`](../samples/perf_vectorization.py) (the
+> `n_envs > 1` shapes and the throughput benefit of batching), and
+> [`road_loop.py`](../samples/road_loop.py) (multi-vehicle visual demo
+> with 4 distinct kinds driving a closed loop).
 
 ## 1. `VehiclePhysics` — the driver
 

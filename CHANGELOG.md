@@ -10,6 +10,44 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.9] — 2026-05-24
+
+### Added — two more samples (`road_loop`, `perf_vectorization`)
+
+- [`samples/road_loop.py`](samples/road_loop.py) — multi-vehicle visual
+  demo. 4 distinct kinds (FWD red sedan, RWD blue coupe, AWD green SUV,
+  yellow 6-wheel truck), `--n_per_kind` each, all driving a circular
+  track under constant Ackermann steering. Top-down camera frames the
+  whole fleet. URDFs are generated parametrically at runtime to a
+  tempdir so the demo stays self-contained.
+
+- [`samples/perf_vectorization.py`](samples/perf_vectorization.py) —
+  `n_envs` batching speedup benchmark. Sweeps
+  `n_envs ∈ [1, 4, 16, 64, 256, 1024]` (one fresh subprocess per
+  measurement to keep GPU state clean) and prints a scaling table.
+  Typical result on an RTX 5070 Laptop:
+
+  | n_envs | ms / step | env-steps / s | per env (μs) | speedup |
+  |-------:|----------:|--------------:|-------------:|--------:|
+  |      1 |     26.28 |            38 |       26 277 |    1.0× |
+  |      4 |     36.78 |           109 |        9 196 |    2.9× |
+  |     16 |     37.28 |           429 |        2 330 |   11.3× |
+  |     64 |     37.86 |         1 691 |          592 |  44.4× |
+
+  `ms / step` stays roughly constant from n_envs=4 upward — Genesis +
+  the SDK saturate the GPU, so each additional parallel env is nearly
+  free. This is the headline batching benefit that RL / MPPI workloads
+  exploit. The sweep is honest (each row a separate GPU process) rather
+  than relying on simulated kernel-launch overhead.
+
+### Docs
+
+- `docs/api-reference.md` runnable-references callout extended to list
+  all five samples.
+- `samples/README.md` updated.
+
+---
+
 ## [0.5.8] — 2026-05-24
 
 ### Added — bundled `samples/` directory
