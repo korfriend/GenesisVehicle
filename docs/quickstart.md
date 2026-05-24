@@ -5,6 +5,14 @@ position. Requires Genesis (CUDA) installed and a 4-wheel-car URDF whose
 suspension joints follow the SDK's naming convention (see
 [`api-reference.md`](api-reference.md#4-urdf-utilities)).
 
+> **TL;DR — runnable file:** [`../samples/quickstart.py`](../samples/quickstart.py)
+> uses the bundled `samples/urdf/car_4w.urdf` so you can run it right after
+> `pip install` without supplying your own URDF:
+>
+> ```bash
+> python -m genesis_vehicle.samples.quickstart
+> ```
+
 ## Minimal example
 
 ```python

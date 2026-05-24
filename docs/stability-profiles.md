@@ -14,7 +14,7 @@ model*, not a plug-in the user has to remember to enable.
 
 | Profile | Hooks materialized (car) | Hooks materialized (tank) | Use case |
 |---|---|---|---|
-| `"control"` (default) | `RollingResistance`, `LowSpeedRegularizer(disable_when_control_active=False)` | + `StaticFrictionLock(brake_thr=0.3, v_thr=0.5, k_spring=500_000, k_damp=20_000)` | **Recommended for almost everyone**: RL / MPPI / general control / Real2Sim. The regularizer is active even under throttle (the v0.3.0 footgun fix). `StaticFrictionLock` (v0.5.7) is a position-anchored stick-slip model holding both longitudinal and lateral axes — zero drift on any slope up to the physical friction limit (μ ≈ tan(slope_angle)). Legacy `hold_k` / `hold_k_lat` / `slip_scale` constructor kwargs are silently accepted for back-compat with v0.5.5 / v0.5.6 call sites. |
+| `"control"` (default) | `RollingResistance`, `LowSpeedRegularizer(disable_when_control_active=False)`, `StaticFrictionLock(brake_thr=0.3, v_thr=0.5, k_spring=500_000, k_damp=20_000)` | same as car (v0.5.8 unified — was tank-only pre-v0.5.8) | **Recommended for almost everyone**: RL / MPPI / general control / Real2Sim. The regularizer is active even under throttle (the v0.3.0 footgun fix). `StaticFrictionLock` (v0.5.7) is a position-anchored stick-slip model — zero drift on any slope up to the physical friction limit (μ ≈ tan(slope_angle)). See [`../samples/slope_hold.py`](../samples/slope_hold.py) for a regression check. |
 | `"raw"` | _empty_ | _empty_ | Raw ray-wheel + Pacejka with NO numerical stabilization. For debugging the bare dynamics or running hook-ablation studies. Not a general-purpose default. |
 | `"research"` | _empty_ | _empty_ | Caller assembles `cfg.stability_hooks` manually (advanced). |
 
