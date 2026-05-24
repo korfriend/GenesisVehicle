@@ -90,9 +90,12 @@ interceptor works. Examples:
 - `LowSpeedRegularizer` runs once pre-loop (computes a `moving ∈ [0, 1]`
   factor) and once per wheel post-tire (scales `F_long`/`F_lat` by `moving`
   and pulls `omega` toward rolling-without-slip).
-- `StaticFrictionLock` runs post-tire when `brake > thr` and
-  `|v_long| < thr`; overrides `F_long` with `-K * v_long` and forces
-  `omega = 0`.
+- `StaticFrictionLock` runs post-tire when `brake > thr` and planar
+  wheel speed `< thr`; engages a per-wheel position anchor and applies
+  a 2D spring-damper `F = -K_spring·displacement - K_damp·velocity`,
+  projected onto the per-wheel friction ellipse, then forces `omega = 0`.
+  Stuck = vehicle is truly stationary; slipping = anchor advances along
+  the friction limit (kinetic mode).
 
 Selecting which hooks are active is done via a **stability profile**
 (`"control"` / `"raw"` / `"research"`), not by assembling a free-form list.
