@@ -227,6 +227,9 @@ class LowSpeedRegularizer(StabilityHook):
 
 class StaticFrictionLock(StabilityHook):
     def __init__(brake_thr=0.3, v_thr=0.5, k_spring=500_000.0, k_damp=20_000.0)
+    # 2D stick-slip: per-wheel position anchor + spring-damper,
+    # projected onto the friction ellipse; omega forced to 0 on locked wheels.
+    # Active when brake > brake_thr AND sqrt(v_long^2 + v_lat^2) < v_thr.
 ```
 
 Hooks are selected via `stability=` profile in the presets (see
