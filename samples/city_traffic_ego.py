@@ -31,8 +31,11 @@ Run
 ---
     python -m genesis_vehicle.samples.city_traffic_ego
     python -m genesis_vehicle.samples.city_traffic_ego --duration 12 --viewer
-    python -m genesis_vehicle.samples.city_traffic_ego --n_envs 16 --bench
+    python -m genesis_vehicle.samples.city_traffic_ego --n_envs 16
         ↑ 16 parallel scenarios, L2 × L3 combined batching
+
+Timing block always prints at the end (single CUDA sync before/after the
+drive loop — zero per-step overhead).
 """
 
 from __future__ import annotations
@@ -167,8 +170,6 @@ def main():
                     help="Ego constant throttle (default 0.4).")
     ap.add_argument("--viewer", action="store_true",
                     help="Render top-down camera per step.")
-    ap.add_argument("--bench", action="store_true",
-                    help="Print per-step wall time during the drive phase.")
     args = ap.parse_args()
 
     print(f"genesis_vehicle v{sdk_version}  |  city_traffic_ego")
@@ -336,8 +337,8 @@ def main():
     n_steps = int(args.duration / DT)
     print(f"[drive {n_steps} steps  ego throttle={args.ego_throttle:.2f}]\n")
 
-    if args.bench:
-        torch.cuda.synchronize()
+    # Always-on timing — single sync before/after, zero per-step overhead.
+    torch.cuda.synchronize()
     t_start = time.perf_counter()
     render_every = max(1, int(0.04 / DT))      # ~25 fps
 
@@ -360,8 +361,7 @@ def main():
         if args.viewer and step % render_every == 0:
             cam.render()
 
-    if args.bench:
-        torch.cuda.synchronize()
+    torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
 
     # ------------------------------------------------------------------
@@ -378,12 +378,11 @@ def main():
         print(f"  {labels[v_i]:<8}  ({p[0]:+7.2f}, {p[1]:+6.2f}, {p[2]:.2f})  "
               f"{dy:+8.3f}  {speed:7.2f} m/s")
 
-    if args.bench:
-        ms = wall / n_steps * 1000.0
-        total_veh_steps = args.n_envs * K_total * n_steps
-        print(f"\n[bench] {n_steps} steps in {wall:.2f}s  → {ms:6.2f} ms/step  "
-              f"({total_veh_steps/wall:,.0f} vehicle-steps/s, "
-              f"batch={args.n_envs}×{K_total}={args.n_envs*K_total} per step)")
+    ms = wall / n_steps * 1000.0
+    total_veh_steps = args.n_envs * K_total * n_steps
+    print(f"\n[timing] {n_steps} steps in {wall:.2f}s  → {ms:6.2f} ms/step  "
+          f"({total_veh_steps/wall:,.0f} vehicle-steps/s, "
+          f"batch={args.n_envs}×{K_total}={args.n_envs*K_total} per step)")
 
 
 if __name__ == "__main__":

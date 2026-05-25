@@ -10,6 +10,48 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.22] — 2026-05-25
+
+### Added — zero-overhead timing across all non-bench samples
+
+Every sample now prints a `[timing]` line at the end of its main drive
+loop showing total wall time, ms/step, and throughput. The measurement
+adds essentially zero overhead — one `torch.cuda.synchronize()` before
+the loop and one after, no per-step sync. Sample output:
+
+```
+[timing] 240 steps in 11.01s  = 45.88 ms/step  (22 steps/s)
+[timing] 150 steps in 35.57s  → 237.13 ms/step  (135 vehicle-steps/s, batch=4×8=32 per step)
+```
+
+Per-sample variants of the throughput field:
+
+| Sample | extra throughput info |
+|---|---|
+| `quickstart`         | `steps/s` |
+| `slope_hold`         | `steps/s` |
+| `batched_rollout`    | `env-steps/s` (existing, unchanged) |
+| `road_loop`          | `vehicle-steps/s, solver=<name>` |
+| `multi_env_render`   | `env-steps/s, batch <n_envs>` |
+| `city_traffic_ego`   | `vehicle-steps/s, batch=N×K` |
+
+The three perf benches (`perf_vectorization`, `perf_multi_vehicle`,
+`perf_l2_l3_combined`) are unchanged — they were already comprehensive
+benchmarks.
+
+### Removed — `--bench` flag (now always-on)
+
+`road_loop` and `city_traffic_ego` previously gated their wall-time
+print behind `--bench` because of a perceived overhead concern. The
+overhead turned out to be negligible (single sync before/after), so the
+flag is removed and the timing prints unconditionally. Scripts passing
+`--bench` to these two samples will need to drop the flag — argparse
+will error otherwise.
+
+No SDK code changes; samples only. 60 SDK tests still pass.
+
+---
+
 ## [0.5.21] — 2026-05-25
 
 ### Fixed — `--viewer` now actually opens a viewer window
