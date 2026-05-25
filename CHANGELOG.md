@@ -10,6 +10,28 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.19] — 2026-05-25
+
+### Docs — first-class samples link from README
+
+The 9 bundled samples were referenced throughout the docs but the
+catalog [`samples/README.md`](samples/README.md) wasn't linked from
+the main README itself. Fixed:
+
+- **README.md** new "Samples" section between "Bundled Presets" and
+  "Documentation". Lists all 9 samples with their `python -m
+  genesis_vehicle.samples.<name>` invocation in a single code block,
+  short note about `--viewer` vs headless-by-design benches, and
+  pointer to `samples/README.md` for full catalog with descriptions.
+- **README.md** Documentation table gets a `samples/README.md` row at
+  the top alongside `docs/index.md`.
+- **docs/index.md** TOC gains a "See all 9 runnable samples" entry
+  linking to `samples/README.md`.
+
+No code changes.
+
+---
+
 ## [0.5.18] — 2026-05-25
 
 ### Docs — align sample references with the v0.5.17 viewer additions
