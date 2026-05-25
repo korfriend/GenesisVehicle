@@ -6,6 +6,7 @@ Landing page. Pick the document that matches what you're doing.
 |---|---|
 | Run something in 1 minute | [`quickstart.md`](quickstart.md) |
 | Build a mental model before reading code | [`concepts.md`](concepts.md) |
+| Pick the right batching axis (L1 / L2 / L3) for your workflow | [`batching.md`](batching.md) |
 | Look up a specific class / function / default | [`api-reference.md`](api-reference.md) |
 | Understand WHERE in the simulation step your hook runs | [`pipeline-and-hooks.md`](pipeline-and-hooks.md) |
 | Pick a stability profile (or understand why it matters for MPPI / Real2Sim) | [`stability-profiles.md`](stability-profiles.md) |
