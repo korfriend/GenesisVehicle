@@ -73,10 +73,23 @@ def _quat_rotate(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
 
 
 class MultiVehicleKindPhysics:
-    """One batched physics driver for K vehicles of the SAME URDF / cfg.
+    """Batched physics driver for K vehicles of the SAME URDF / cfg, optionally
+    across N parallel Genesis envs.
 
-    Use ``MultiVehiclePhysics`` instead if you have multiple vehicle kinds
-    — it wraps one of these per kind.
+    Combined batch size is ``N * K`` (Genesis envs × vehicles per env). All
+    compute (Pacejka, hooks, suspension, omega) runs once on shape
+    ``(N*K, n_wheels)`` tensors; entity / sensor I/O is a single batched
+    solver call per quantity per kind.
+
+      n_envs = 1, K > 1   → L2 (same-scene multi-vehicle).
+      n_envs > 1, K = 1   → L3 (parallel envs, but use plain VehiclePhysics
+                                directly — this class adds no value over it).
+      n_envs > 1, K > 1   → L2 + L3 combined. The headline use case is
+                            "M parallel scenarios, each with K-vehicle
+                            traffic around an ego" for autonomous-driving
+                            MPPI / RL.
+
+    Use ``MultiVehiclePhysics`` to dispatch across multiple kinds.
     """
 
     def __init__(
@@ -85,21 +98,24 @@ class MultiVehicleKindPhysics:
         entities: Sequence[Any],
         sensors: Sequence[Any],
         config: VehicleConfig,
+        n_envs: int = 1,
     ):
         assert len(entities) == len(sensors) and len(entities) >= 1
+        assert n_envs >= 1
         K = len(entities)
+        NK = n_envs * K
 
-        # Reuse VehiclePhysics's setup by constructing a "prototype" instance
-        # with n_envs=K so wheel_meta, resolved config, hook lists, omega
-        # tensor (shape (K, n_wheels)), pre-built broadcasts, etc. all come
-        # out correctly sized. The prototype's `entity` / `sensor` are the
-        # first-of-K; we override the I/O paths below.
-        self._proto = VehiclePhysics(scene, entities[0], sensors[0], config, n_envs=K)
+        # Proto VehiclePhysics with batch dim = N * K. All its internal tensors
+        # (omega, prev_compression, _wheel_body_b, _up_world, …) come out at
+        # shape (NK, n_wheels) or (NK, n_wheels, 3), which is the flat-batch
+        # form the compute pipeline operates on.
+        self._proto = VehiclePhysics(scene, entities[0], sensors[0], config, n_envs=NK)
 
-        # Override the entity / sensor handles with the full K-sized lists.
         self.entities = list(entities)
         self.sensors = list(sensors)
         self.K = K
+        self.n_envs = n_envs
+        self.NK = NK
         self.scene = scene
         self.solver = scene.sim.rigid_solver
         self.dev = self._proto.dev
@@ -107,6 +123,7 @@ class MultiVehicleKindPhysics:
         self.dt = self._proto.dt
 
         # Re-resolve base link indices: K different links, one per entity.
+        # (Same K indices apply to every Genesis env — n_envs is implicit.)
         base_name = self._proto.resolved.chassis.base_link_name
         base_idx_list = []
         for e in entities:
@@ -115,28 +132,22 @@ class MultiVehicleKindPhysics:
             except Exception:
                 base_link = [l for l in e.links if l.name == base_name][0]
                 base_idx_list.append(int(base_link.idx))
-        self.base_idx_list = base_idx_list   # Python list of K ints
+        self.base_idx_list = base_idx_list
         self.base_idx_tensor = torch.tensor(
             base_idx_list, dtype=torch.long, device=self.dev,
         )
 
-        # The proto's _wheel_body_b / _up_world were built for n_envs=K; we
-        # reuse them as-is (shape (K, n_wheels, 3) / (K, 3)).
-
-        # Replace the proto's VisualSync (which was built for n_envs=K and
-        # would issue a shape-(K, n_dofs) set_dofs_position into a scene
-        # that actually has n_envs=1 — Genesis would reject it) with K
-        # per-entity VisualSync objects, each one bound to its own entity
-        # and built for n_envs=1. Compute is still batched (K, n_wheels);
-        # the visual writes are a Python loop over K (each call is a small
-        # set_dofs_position, negligible vs the compute saving).
+        # Replace the proto's VisualSync with K per-entity VisualSync objects,
+        # each one bound to its own entity and built for the actual Genesis
+        # n_envs. Compute output gets sliced (N, n_wheels) per entity for
+        # each visual.step(). (See the [VISUAL] block at the bottom of step().)
         self._proto.visual = None
         self.visuals: list[VisualSync] = []
         if self._proto.resolved.enable_visual_sync:
             for ent in entities:
                 self.visuals.append(VisualSync(
                     entity=ent, resolved=self._proto.resolved,
-                    n_envs=1, device=self.dev, dtype=self.fdt,
+                    n_envs=n_envs, device=self.dev, dtype=self.fdt,
                 ))
 
     # ------------------------------------------------------------------
@@ -162,37 +173,45 @@ class MultiVehicleKindPhysics:
     # ------------------------------------------------------------------
     def _read_state_batched(self) -> tuple[torch.Tensor, torch.Tensor,
                                             torch.Tensor, torch.Tensor]:
-        """Read K base-link poses + velocities via the rigid solver's
-        multi-link batched API. Returns (pos, quat, vel, ang), each shaped
-        ``(K, 3)`` for pos/vel/ang and ``(K, 4)`` for quat."""
-        # `get_links_pos` returns (n_envs, n_links_queried, 3); with the
-        # scene built at n_envs=1, the first dim is 1 — squeeze it.
-        pos  = self.solver.get_links_pos(self.base_idx_tensor)[0]    # (K, 3)
-        quat = self.solver.get_links_quat(self.base_idx_tensor)[0]   # (K, 4)
-        vel  = self.solver.get_links_vel(self.base_idx_tensor)[0]    # (K, 3)
-        ang  = self.solver.get_links_ang(self.base_idx_tensor)[0]    # angular VELOCITY (K, 3)
-        return pos, quat, vel, ang
+        """Read state for all N×K base links via the rigid solver's multi-link
+        batched API. Returns ``(pos, quat, vel, ang)``, each flat-batched
+        shape ``(NK, 3)`` / ``(NK, 4)`` — row-major over envs then vehicles
+        (env 0 vehicle 0, env 0 vehicle 1, ..., env 0 vehicle K-1, env 1 v0, ...)."""
+        # get_links_pos returns (n_envs, K, 3) when n_envs >= 1.
+        pos  = self.solver.get_links_pos(self.base_idx_tensor)
+        quat = self.solver.get_links_quat(self.base_idx_tensor)
+        vel  = self.solver.get_links_vel(self.base_idx_tensor)
+        ang  = self.solver.get_links_ang(self.base_idx_tensor)
+        return (pos.reshape(self.NK, 3),
+                quat.reshape(self.NK, 4),
+                vel.reshape(self.NK, 3),
+                ang.reshape(self.NK, 3))
 
     def _read_distances_batched(self) -> torch.Tensor:
-        """Stack K raycaster reads into a (K, n_wheels) tensor."""
+        """Stack K raycaster reads into a flat ``(NK, n_wheels)`` tensor.
+
+        Each sensor returns ``(n_envs, n_wheels)``. We stack across K along
+        dim 1 → ``(N, K, n_wheels)`` → flatten → ``(NK, n_wheels)`` with the
+        same env-major / vehicle-minor row ordering as the state reads."""
         out = []
         for s in self.sensors:
-            d = read_distances(s, n_envs=1)     # (1, n_wheels)
-            out.append(d[0])
-        return torch.stack(out, dim=0)          # (K, n_wheels)
+            d = read_distances(s, n_envs=self.n_envs)   # (N, n_wheels)
+            out.append(d)
+        # stack on dim 1 to interleave [N, K, n_wheels] then flatten
+        stacked = torch.stack(out, dim=1)               # (N, K, n_wheels)
+        return stacked.reshape(self.NK, -1)
 
     def _apply_force_torque_batched(self, total_F: torch.Tensor,
                                      total_T: torch.Tensor) -> None:
-        """Apply per-vehicle base-link force + torque in ONE solver call each.
+        """Apply per-vehicle base-link force + torque in ONE batched solver call.
 
-        Shape: ``(1, K, 3)`` — scene has 1 env, K target links.
-        """
-        self.solver.apply_links_external_force(
-            total_F.unsqueeze(0), self.base_idx_tensor,
-        )
-        self.solver.apply_links_external_torque(
-            total_T.unsqueeze(0), self.base_idx_tensor,
-        )
+        Compute outputs are flat ``(NK, 3)``. We reshape to ``(N, K, 3)`` to
+        match what ``apply_links_external_force`` expects when the scene is
+        built with n_envs=N and we target K different links per env."""
+        F_NK3 = total_F.reshape(self.n_envs, self.K, 3)
+        T_NK3 = total_T.reshape(self.n_envs, self.K, 3)
+        self.solver.apply_links_external_force(F_NK3, self.base_idx_tensor)
+        self.solver.apply_links_external_torque(T_NK3, self.base_idx_tensor)
 
     # ------------------------------------------------------------------
     # The step pipeline. Mirrors VehiclePhysics.step but with batched I/O.
@@ -206,38 +225,47 @@ class MultiVehicleKindPhysics:
                       inputs). Each vehicle's throttle / brake / steer
                       become element-k of the batched (K,) tensor.
         """
-        assert len(inputs_list) == self.K
+        assert len(inputs_list) == self.K, (
+            f"expected K={self.K} inputs, got {len(inputs_list)}")
         p = self._proto
         K = self.K
+        N = self.n_envs
+        NK = self.NK
         n = p.wheel_meta.n_wheels
         dev, fdt = p.dev, p.fdt
         DT = p.dt
         wm = p.wheel_meta
 
-        # Coerce per-vehicle inputs into batched tensors.
+        # Coerce per-vehicle inputs into a flat-batched tensor of length NK.
+        # Each inputs_list[k] is a VehicleInputs whose throttle/brake/steer is
+        # either a scalar (same across all N envs) or a shape-(N,) tensor.
+        # Stack K → (N, K) → flatten in env-major order → (NK,).
+        def _to_NK(attr: str) -> torch.Tensor:
+            per_k = []
+            for i in inputs_list:
+                v = getattr(i, attr, 0.0)
+                if torch.is_tensor(v):
+                    t = v.to(device=dev, dtype=fdt)
+                    if t.dim() == 0:
+                        t = t.expand(N)
+                    assert t.shape == (N,), (
+                        f"input '{attr}' tensor must be shape ({N},), got {tuple(t.shape)}")
+                else:
+                    t = torch.full((N,), float(v), device=dev, dtype=fdt)
+                per_k.append(t)
+            return torch.stack(per_k, dim=1).reshape(NK)   # (N, K) → (NK,)
+
+        throttle_t = _to_NK("throttle")
+        brake_t    = _to_NK("brake")
+        steer_t    = _to_NK("steer")
+
         steering = p.resolved.steering
-        # Build a synthetic batched input compatible with the strategy.
-        throttle_t = torch.tensor(
-            [float(getattr(i, "throttle", 0.0)) for i in inputs_list],
-            device=dev, dtype=fdt,
-        )
-        brake_t = torch.tensor(
-            [float(getattr(i, "brake", 0.0)) for i in inputs_list],
-            device=dev, dtype=fdt,
-        )
-        steer_t = torch.tensor(
-            [float(getattr(i, "steer", 0.0)) for i in inputs_list],
-            device=dev, dtype=fdt,
-        )
-        # Strategies expect a single VehicleInputs-like object whose
-        # throttle/brake/steer are (K,) tensors (matching the n_envs=K
-        # contract).
         batched_in = VehicleInputs(throttle=throttle_t, brake=brake_t, steer=steer_t)
         batched_in = steering.InputType.from_unified(batched_in)
 
         steer_per_wheel = steering.per_wheel_steer(
-            batched_in, K, wm, dev, fdt,
-        )                                                # (K, n)
+            batched_in, NK, wm, dev, fdt,
+        )                                                # (NK, n)
         T_drive_pw, T_brake_pw = p.resolved.drivetrain.distribute_torque(
             batched_in, p.omega, wm, dev, fdt,
         )
@@ -263,10 +291,10 @@ class MultiVehicleKindPhysics:
             hook.apply_pre_loop(ctx)
 
         # World-space wheel positions.
-        quat_b_flat = quat.unsqueeze(1).expand(K, n, 4).reshape(K * n, 4)
-        wheel_body_flat = p._wheel_body_b.reshape(K * n, 3)
+        quat_b_flat = quat.unsqueeze(1).expand(NK, n, 4).reshape(NK * n, 4)
+        wheel_body_flat = p._wheel_body_b.reshape(NK * n, 3)
         wheel_world = (transform_by_quat(wheel_body_flat, quat_b_flat)
-                       .reshape(K, n, 3) + pos.unsqueeze(1))
+                       .reshape(NK, n, 3) + pos.unsqueeze(1))
 
         # (A) Suspension + damper + N.
         compression = torch.clamp(wm.rest_d.unsqueeze(0) - distances, min=0.0)
@@ -295,14 +323,14 @@ class MultiVehicleKindPhysics:
         wheel_fwd_local = torch.stack([cs, -ss, zer], dim=-1)
         wheel_lat_local = torch.stack([ss,  cs, zer], dim=-1)
         wheel_fwd_world = transform_by_quat(
-            wheel_fwd_local.reshape(K * n, 3), quat_b_flat
-        ).reshape(K, n, 3)
+            wheel_fwd_local.reshape(NK * n, 3), quat_b_flat
+        ).reshape(NK, n, 3)
         wheel_lat_world = transform_by_quat(
-            wheel_lat_local.reshape(K * n, 3), quat_b_flat
-        ).reshape(K, n, 3)
+            wheel_lat_local.reshape(NK * n, 3), quat_b_flat
+        ).reshape(NK, n, 3)
 
         r_vec = wheel_world - pos.unsqueeze(1)
-        ang_b = ang.unsqueeze(1).expand(K, n, 3)
+        ang_b = ang.unsqueeze(1).expand(NK, n, 3)
         v_hit = vel.unsqueeze(1) + torch.cross(ang_b, r_vec, dim=-1)
         v_long = (v_hit * wheel_fwd_world).sum(dim=-1)
         v_lat  = (v_hit * wheel_lat_world).sum(dim=-1)
@@ -368,18 +396,25 @@ class MultiVehicleKindPhysics:
         self._apply_force_torque_batched(total_F, total_T)
         p._prev_init = True
 
-        # [VISUAL] — per-entity Python loop over K VisualSync objects. The
-        # compute pipeline already produced batched (K, n_wheels) angles;
-        # we slice into (1, n_wheels) for each entity and call its
-        # VisualSync (n_envs=1) so set_dofs_position sees the shape it
-        # expects. Loop cost is ~K small set_dofs_position calls — small
-        # compared to the batched compute savings.
+        # [VISUAL] — per-entity Python loop over K VisualSync objects, each
+        # built with n_envs=N. Compute outputs are flat (NK, n_wheels); we
+        # reshape to (N, K, n_wheels) and slice the k-th vehicle's slab
+        # ((N, n_wheels)) to feed its visual.step(). With N=1 this is the
+        # original L2-only path; with N>1 each visual gets a real n_envs-
+        # batched update.
         if self.visuals:
+            # NB: 'N' got reassigned earlier in section (A) to the per-wheel
+            # normal-force tensor — use the explicit self.n_envs / self.K
+            # here instead of the local names.
+            n_envs = self.n_envs
+            steer_NK = steer_per_wheel.reshape((n_envs, K, n))
+            dist_NK  = distances.reshape((n_envs, K, n))
+            omega_NK = p.omega.reshape((n_envs, K, n))
             for k_i, vis in enumerate(self.visuals):
                 vis.step(
-                    steer_per_wheel[k_i:k_i + 1],
-                    distances[k_i:k_i + 1],
-                    p.omega[k_i:k_i + 1],
+                    steer_NK[:, k_i, :].contiguous(),
+                    dist_NK[:, k_i, :].contiguous(),
+                    omega_NK[:, k_i, :].contiguous(),
                     DT,
                 )
 
@@ -412,7 +447,8 @@ class MultiVehiclePhysics:
     """
 
     def __init__(self, scene: Any,
-                 vehicles: Sequence[tuple]):    # list of (entity, sensor, cfg)
+                 vehicles: Sequence[tuple],    # list of (entity, sensor, cfg)
+                 n_envs: int = 1):
         if not vehicles:
             raise ValueError("MultiVehiclePhysics needs at least one vehicle.")
         # Group by cfg identity (same Python object → same kind). Callers
@@ -429,6 +465,7 @@ class MultiVehiclePhysics:
             groups[key].append(veh)
 
         self.vehicles = list(vehicles)   # preserve caller's order
+        self.n_envs = n_envs
         self.kinds = []                  # list of MultiVehicleKindPhysics
         self.kind_slices: list[slice] = []  # per-kind slice into flat inputs
         # Build per-kind physics, tracking which flat-input indices belong to it.
@@ -442,7 +479,7 @@ class MultiVehiclePhysics:
             sensors  = [v[1] for v in kind_vehicles]
             cfg      = kind_vehicles[0][2]
             self.kinds.append(
-                MultiVehicleKindPhysics(scene, entities, sensors, cfg))
+                MultiVehicleKindPhysics(scene, entities, sensors, cfg, n_envs=n_envs))
             # Find the flat positions of these vehicles in the caller's order.
             for slot_i, veh in enumerate(kind_vehicles):
                 flat_i = next(j for j, v in enumerate(self.vehicles) if v is veh)
