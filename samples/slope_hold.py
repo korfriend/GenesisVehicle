@@ -198,8 +198,16 @@ def main():
         print(f"  → REGRESSION  ({abs_slip_mm:.1f} mm > {HOLD_OK_M*1000:.0f} mm threshold)")
         print(f"      Likely cause: stability.py StaticFrictionLock anchor / spring-damper")
         print(f"      logic regression, or pacejka.py / core.py wiring change.")
-    print(f"[timing] {n_done} steps in {wall:.2f}s  "
-          f"= {wall/n_done*1000:.2f} ms/step  ({n_done/wall:.0f} steps/s)")
+    verdict = "OK" if abs_slip_mm < HOLD_OK_M * 1000 else "REGRESSION"
+    _hud.print_perf_summary(
+        sample=f"slope_hold  (v{sdk_version})",
+        completed=not user_quit,
+        n_done=n_done, n_target=n_hold, wall=wall,
+        extra=[
+            f"slope      : {slope_deg:+.1f} deg",
+            f"lat. slip  : {slip*1000:+.1f} mm  ({verdict})",
+        ],
+    )
 
 
 if __name__ == "__main__":

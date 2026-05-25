@@ -411,11 +411,17 @@ def main():
         print(f"  {labels[v_i]:<8}  ({p[0]:+7.2f}, {p[1]:+6.2f}, {p[2]:.2f})  "
               f"{dy:+8.3f}  {speed:7.2f} m/s")
 
-    ms = wall / n_done * 1000.0
-    total_veh_steps = args.n_envs * K_total * n_done
-    print(f"\n[timing] {n_done} steps in {wall:.2f}s  → {ms:6.2f} ms/step  "
-          f"({total_veh_steps/wall:,.0f} vehicle-steps/s, "
-          f"batch={args.n_envs}×{K_total}={args.n_envs*K_total} per step)")
+    _hud.print_perf_summary(
+        sample=f"city_traffic_ego  (v{sdk_version})",
+        completed=not user_quit,
+        n_done=n_done, n_target=n_steps, wall=wall,
+        batch=args.n_envs * K_total, batch_label="vehicle",
+        extra=[
+            f"L2 kinds   : {mphys.n_kinds}   K per kind = {[k.K for k in mphys.kinds]}",
+            f"L3 envs    : {args.n_envs}    (batch = n_envs x K = "
+            f"{args.n_envs} x {K_total} = {args.n_envs*K_total})",
+        ],
+    )
 
 
 if __name__ == "__main__":

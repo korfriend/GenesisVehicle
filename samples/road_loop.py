@@ -458,9 +458,17 @@ def main():
     wall = time.perf_counter() - t_start
     _hud.cv2_cleanup()
     n_done = step + 1 if user_quit else n_steps
-    print(f"\n[timing] {n_done} steps in {wall:.2f}s  "
-          f"= {wall/n_done*1000:6.2f} ms/step  "
-          f"({N_TOTAL * n_done / wall:,.0f} vehicle-steps/s, solver={args.solver})")
+    _hud.print_perf_summary(
+        sample=f"road_loop  (v{sdk_version})",
+        completed=not user_quit,
+        n_done=n_done, n_target=n_steps, wall=wall,
+        batch=N_TOTAL, batch_label="vehicle",
+        extra=[
+            f"solver     : {args.solver}",
+            f"fleet      : {N_TOTAL} vehicles "
+            f"({', '.join(f'{nm}={k}' for nm, k, *_ in KINDS)})",
+        ],
+    )
 
     # ------------------------------------------------------------------
     # Final pose summary (one sample per kind — should be near radius).
