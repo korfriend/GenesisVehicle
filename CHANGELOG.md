@@ -10,6 +10,32 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.18] — 2026-05-25
+
+### Docs — align sample references with the v0.5.17 viewer additions
+
+After v0.5.17 added `--viewer` to `quickstart`, `slope_hold`, and
+`batched_rollout` (and made it explicit that the three perf benches
+are headless by design), the doc references hadn't yet been updated.
+This release fixes those:
+
+- **README.md** "Three-axis vectorization" section — closing paragraph
+  now separates "runnable benchmarks (headless)" and "visual demos
+  (with `--viewer`)" into two groups, and adds the
+  `city_traffic_ego.py` reference under L2 × L3 visuals (was missing).
+- **docs/quickstart.md** — TL;DR shows BOTH `python -m
+  genesis_vehicle.samples.quickstart` and the `--viewer` variant.
+- **docs/batching.md** — L1, L2, L3, and L2 × L3 sections all flag
+  whether each referenced sample has `--viewer` or is headless by
+  design. New "See also" entry under L2 × L3 points to both the
+  headless `perf_l2_l3_combined.py` AND the visual
+  `city_traffic_ego.py`. Performance reference table gets a row for
+  `city_traffic_ego.py`.
+
+No code changes.
+
+---
+
 ## [0.5.17] — 2026-05-25
 
 ### Added — `--viewer` for the 3 samples that didn't have it

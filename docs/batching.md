@@ -47,7 +47,8 @@ strategy all process every wheel in one call. Nothing to tune.
 ### See also
 
 - [`samples/quickstart.py`](../samples/quickstart.py) — the smallest
-  VehiclePhysics call (and therefore the smallest L1 use).
+  VehiclePhysics call (and therefore the smallest L1 use). Add
+  `--viewer` for a side chase-cam.
 
 ---
 
@@ -108,8 +109,8 @@ overrides) and runs a single batched compute per kind:
 
 ### See also
 
-- [`samples/perf_multi_vehicle.py`](../samples/perf_multi_vehicle.py) — solver comparison sweep at varying K.
-- [`samples/road_loop.py`](../samples/road_loop.py) — visual demo with `--solver multi_batched`.
+- [`samples/perf_multi_vehicle.py`](../samples/perf_multi_vehicle.py) — solver comparison sweep at varying K. **Headless by design** (bench).
+- [`samples/road_loop.py`](../samples/road_loop.py) — visual demo with `--solver multi_batched`. Add `--viewer` for top-down camera.
 
 ---
 
@@ -163,9 +164,9 @@ unchanged). See [`samples/multi_env_render.py`](../samples/multi_env_render.py).
 
 ### See also
 
-- [`samples/batched_rollout.py`](../samples/batched_rollout.py) — minimal `n_envs > 1` call pattern.
-- [`samples/perf_vectorization.py`](../samples/perf_vectorization.py) — scaling sweep.
-- [`samples/multi_env_render.py`](../samples/multi_env_render.py) — render all envs in a grid.
+- [`samples/batched_rollout.py`](../samples/batched_rollout.py) — minimal `n_envs > 1` call pattern. Add `--viewer` to lay all N envs out in a grid (env_separate_rigid).
+- [`samples/perf_vectorization.py`](../samples/perf_vectorization.py) — scaling sweep. **Headless by design** (rendering would distort throughput numbers).
+- [`samples/multi_env_render.py`](../samples/multi_env_render.py) — render all envs in a grid (dedicated visual demo, always renders).
 
 ---
 
@@ -235,6 +236,11 @@ action sequences). With L2 × L3:
 
 This is the headline workflow the v0.5.14 release was built around.
 
+### See also
+
+- [`samples/perf_l2_l3_combined.py`](../samples/perf_l2_l3_combined.py) — 2D `(K, N)` scaling sweep. **Headless by design** (bench).
+- [`samples/city_traffic_ego.py`](../samples/city_traffic_ego.py) — concrete autonomous-driving demo: 1 ego + 7 traffic on a 4-lane highway. `--n_envs N` enables L2 × L3, `--viewer` for top-down camera.
+
 ---
 
 ## Decision matrix
@@ -282,6 +288,7 @@ table above.
 | L2 sweep | [`samples/perf_multi_vehicle.py`](../samples/perf_multi_vehicle.py) | 1.14× at K=2, 1.07× at K=4 (4-kind fleet) |
 | L2 × L3 combined | [`samples/perf_l2_l3_combined.py`](../samples/perf_l2_l3_combined.py) | 4.6× at K=2 N=4 (≈ product of L2 × L3 individual) |
 | Multi-vehicle visual | [`samples/road_loop.py`](../samples/road_loop.py) | 6% faster than per-vehicle loop with full VisualSync (16 vehicles, 4 kinds) |
+| L2 × L3 ego+traffic visual | [`samples/city_traffic_ego.py`](../samples/city_traffic_ego.py) | 8 vehicles × 4 envs = 32 batched; 3.5× throughput vs n_envs=1 |
 
 Re-run the samples on your machine — absolute numbers depend on GPU
 and WSL/native setup.

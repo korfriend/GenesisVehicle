@@ -10,7 +10,8 @@ suspension joints follow the SDK's naming convention (see
 > `pip install` without supplying your own URDF:
 >
 > ```bash
-> python -m genesis_vehicle.samples.quickstart
+> python -m genesis_vehicle.samples.quickstart            # headless
+> python -m genesis_vehicle.samples.quickstart --viewer   # side chase-cam
 > ```
 
 ## Minimal example
