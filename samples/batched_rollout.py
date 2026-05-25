@@ -77,15 +77,29 @@ def main():
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
     gs.init(backend=gs.gpu, logging_level="warning")
 
+    per_row = max(1, int(round(math.sqrt(args.n_envs))))
+    n_rows  = math.ceil(args.n_envs / per_row)
+    grid_w  = args.grid_spacing * per_row
+    grid_h  = args.grid_spacing * n_rows
+    cam_h   = max(grid_w, grid_h) * 1.2
+    viewer_opts = gs.options.ViewerOptions(
+        res=(1280, 720),
+        camera_pos=(0.0, 0.0, cam_h),
+        camera_lookat=(0.0, 0.0, 0.0),
+        camera_up=(1.0, 0.0, 0.0),
+        camera_fov=70,
+    ) if args.viewer else None
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=20),
         rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
+        viewer_options=viewer_opts,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10),
             env_separate_rigid=args.viewer,
         ),
-        show_viewer=False,
+        show_viewer=args.viewer,
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0)),
@@ -98,11 +112,6 @@ def main():
 
     cam = None
     if args.viewer:
-        per_row = max(1, int(round(math.sqrt(args.n_envs))))
-        n_rows = math.ceil(args.n_envs / per_row)
-        grid_w = args.grid_spacing * per_row
-        grid_h = args.grid_spacing * n_rows
-        cam_h = max(grid_w, grid_h) * 1.2
         cam = scene.add_camera(
             res=(1280, 720),
             pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),

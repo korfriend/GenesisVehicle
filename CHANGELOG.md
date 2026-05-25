@@ -10,6 +10,57 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.21] — 2026-05-25
+
+### Fixed — `--viewer` now actually opens a viewer window
+
+Previously the `--viewer` flag on the 6 viewer-supporting samples
+(`quickstart`, `slope_hold`, `batched_rollout`, `road_loop`,
+`multi_env_render`, `city_traffic_ego`) only added an offscreen
+camera that called `cam.render()` each step. That renders into a
+GPU tensor but DOES NOT open any visible window — `--viewer` did
+nothing the user could see. Bug report from korfriend:
+
+> "gen_vesis/bin/python -m genesis_vehicle.samples.city_traffic_ego
+> --viewer  이거 뷰어 안 나오던데"
+
+Fixed by wiring `--viewer` to Genesis's built-in interactive viewer:
+
+```python
+viewer_opts = gs.options.ViewerOptions(
+    res=(1280, 720),
+    camera_pos=(...), camera_lookat=(...), camera_up=(...), camera_fov=...,
+) if args.viewer else None
+scene = gs.Scene(
+    ...,
+    viewer_options=viewer_opts,
+    show_viewer=args.viewer,
+)
+```
+
+Each sample's `ViewerOptions` uses the same camera framing as its
+existing offscreen camera (side chase-cam for `quickstart`, side view
+of the slope for `slope_hold`, top-down for `road_loop` /
+`city_traffic_ego` / `multi_env_render`, grid top-down for
+`batched_rollout`). The offscreen camera is kept — it still produces
+image tensors for inspection / mp4 recording, independent of the
+viewer window.
+
+`multi_env_render` also gained a `--viewer` flag (was always
+headless-render-only, no window).
+
+### Caveats
+
+- The viewer window is Genesis's, not OpenCV — mouse-rotate, zoom,
+  ESC to close.
+- WSL / WSLg with a software OpenGL fallback won't open a window; you
+  need hardware GL (D3D12 via `GALLIUM_DRIVER=d3d12` on WSL, or native
+  Windows / Linux). See `docs/batching.md` notes about WSL GL.
+
+All 60 SDK tests still pass.
+
+---
+
 ## [0.5.20] — 2026-05-25
 
 ### Fixed — samples now run via direct file path too

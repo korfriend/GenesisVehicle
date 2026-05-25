@@ -78,13 +78,21 @@ def main():
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
     gs.init(backend=gs.gpu, logging_level="warning")
 
+    viewer_opts = gs.options.ViewerOptions(
+        res=(1280, 720),
+        camera_pos=(15.0, 0.0, 6.0),
+        camera_lookat=(0.0, 0.0, 1.0),
+        camera_up=(0.0, 0.0, 1.0),
+        camera_fov=50,
+    ) if args.viewer else None
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=50),
         rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
+        viewer_options=viewer_opts,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10)),
-        show_viewer=False,
+        show_viewer=args.viewer,
     )
     # Tilt the ground around world X-axis. fixed=True is critical — without
     # it the ground itself falls under gravity, putting the car in a
