@@ -10,6 +10,69 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.14] — 2026-05-25
+
+### Added — L2 × L3 combined batching (`n_envs > 1` for MultiVehiclePhysics)
+
+`MultiVehicleKindPhysics` and `MultiVehiclePhysics` now accept an
+``n_envs`` parameter. The internal compute pipeline batch dimension
+becomes ``N * K`` (parallel envs × vehicles per kind), and all I/O
+collapses to ONE batched solver call per quantity per kind:
+
+  - State reads (`get_links_{pos,quat,vel,ang}`): return ``(N, K, 3)``,
+    flattened to ``(NK, 3)`` for compute.
+  - Force / torque writes: compute output ``(NK, 3)`` reshaped to
+    ``(N, K, 3)`` and applied in one ``apply_links_external_force`` call.
+  - VisualSync: K per-entity objects, each built with ``n_envs=N``;
+    compute output sliced ``(N, n_wheels)`` per entity.
+
+```python
+mphys = MultiVehiclePhysics(scene, vehicles, n_envs=64)
+mphys.step([VehicleInputs(throttle=tensor_of_shape_N, ...) for _ in vehicles])
+```
+
+Per-vehicle inputs accept ``(N,)`` tensors so each parallel env can have
+distinct controls (RL-style per-env action diversity).
+
+**n_envs default is 1**, so existing v0.5.11-v0.5.13 call sites continue
+to work unchanged.
+
+### Added — `perf_l2_l3_combined` sample
+
+[`samples/perf_l2_l3_combined.py`](samples/perf_l2_l3_combined.py)
+sweeps a 2D ``(K, N)`` grid and reports a scaling table. Each cell is
+a fresh subprocess (clean GPU state). Sample result on RTX 5070 Laptop:
+
+|  K |  N | total | ms/step | per veh (μs) | gain |
+|---:|---:|------:|--------:|-------------:|-----:|
+|  1 |  1 |     1 |   26.31 |       26,315 | 1.0× |
+|  1 |  4 |     4 |   37.83 |        9,458 | 2.8× |
+|  2 |  1 |     2 |   35.98 |       17,992 | 1.5× |
+|  2 |  4 |     8 |   45.79 |        5,724 | **4.6×** |
+
+The L2-only (K=2) and L3-only (N=4) gains (1.5×, 2.8×) multiply close
+to the combined gain (4.6× ≈ 1.5×2.8 = 4.2×, with a small bonus from
+better GPU utilization at larger batch). This is the headline pattern
+for autonomous-driving simulation: K vehicles per scenario (ego + N_t
+traffic) × M parallel scenarios.
+
+### Use case decision matrix
+
+| Scenario | Solver |
+|---|---|
+| 1 vehicle, RL rollouts | `VehiclePhysics(n_envs=N)` |
+| K vehicles in 1 visible scene (traffic) | `MultiVehiclePhysics(n_envs=1)` |
+| 1 vehicle but parallel scenarios | `VehiclePhysics(n_envs=N)` |
+| **K vehicles × N parallel scenarios** | **`MultiVehiclePhysics(n_envs=N)`** |
+
+### Migration
+
+None — `n_envs=1` is the default; existing code keeps working.
+
+All 60 SDK tests pass; new sample smoke-tested.
+
+---
+
 ## [0.5.13] — 2026-05-25
 
 ### Added — `perf_multi_vehicle` sample (L2 solver comparison)

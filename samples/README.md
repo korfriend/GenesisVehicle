@@ -13,6 +13,7 @@ API surface. All three depend only on the SDK itself and the bundled
 | 5 | [`perf_vectorization.py`](perf_vectorization.py) | **n_envs batching speedup benchmark.** Sweeps `n_envs ∈ [1, 4, 16, 64, 256, 1024]` (one fresh subprocess per measurement) and prints a scaling table showing per-env cost dropping from ~26 ms (single env) to < 1 ms (64+ envs). Use to gauge RL / MPPI throughput on your machine. |
 | 6 | [`multi_env_render.py`](multi_env_render.py) | **Render every parallel env in one grid view.** Uses Genesis's `env_separate_rigid=True` + `env_spacing` so `n_envs > 1` parallel rollouts are laid out in a `√n × √n` grid (physics still overlapping, only visualization offset). Each env gets a different random throttle/steer — eyeball RL/MPPI diversity at a glance. |
 | 7 | [`perf_multi_vehicle.py`](perf_multi_vehicle.py) | **L2 batching benchmark.** Compares `MultiVehiclePhysics` (groups by kind, batched compute per kind) against the default per-vehicle loop on the same 4-kind fleet, sweeping `--n_per_kind ∈ [1, 2, 4, 8]`. Subprocess per measurement. At K=1 multi_batched is slightly slower (batching overhead with nothing to batch); from K=2+ the gap widens — typically 1.1-1.2× faster. Use to decide which solver fits your multi-vehicle scene. |
+| 8 | [`perf_l2_l3_combined.py`](perf_l2_l3_combined.py) | **L2 × L3 combined scaling.** 2D grid sweep `(K, N)` showing that L2 (cross-vehicle in one env) and L3 (parallel envs) stack multiplicatively. e.g. K=2 alone gives 1.5×, N=4 alone gives 2.8×, K=2×N=4 combined gives **4.6×** vs single-vehicle baseline — close to the theoretical product. Subprocess per cell. The headline batching pattern for autonomous-driving ego + traffic in MPPI / multi-agent RL. |
 
 ## Bundled asset
 
@@ -39,6 +40,8 @@ python -m genesis_vehicle.samples.multi_env_render --n_envs 16
 python -m genesis_vehicle.samples.multi_env_render --n_envs 64 --spacing 8
 python -m genesis_vehicle.samples.perf_multi_vehicle
 python -m genesis_vehicle.samples.perf_multi_vehicle --n_per_kind_list 2,4,8,16
+python -m genesis_vehicle.samples.perf_l2_l3_combined
+python -m genesis_vehicle.samples.perf_l2_l3_combined --grid 1,4:1,4,16,64
 ```
 
 All three are headless (no viewer, no `cv2`, no `pynput`). The chase-cam
