@@ -1,7 +1,7 @@
 """quickstart.py — minimal genesis_vehicle hello-world.
 
 Spawn a 4-wheel RWD car on flat ground, drive forward for 5 seconds with
-throttle=0.5, print the final pose. About 40 lines of physics code.
+throttle=0.5, print the final pose. About 50 lines of physics code.
 
 What this demonstrates
 ----------------------
@@ -20,14 +20,15 @@ here you'll see only the top-level API surface, no per-wheel internals.
 Run
 ---
     python -m genesis_vehicle.samples.quickstart
-    # or:
-    python genesis_vehicle/samples/quickstart.py
+    python -m genesis_vehicle.samples.quickstart --viewer
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 
+import numpy as np
 import genesis as gs
 
 from genesis_vehicle import (
@@ -41,7 +42,13 @@ URDF_PATH = os.path.join(os.path.dirname(__file__), "urdf", "car_4w.urdf")
 
 
 def main():
-    print(f"genesis_vehicle v{sdk_version}  |  quickstart")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--viewer", action="store_true",
+                    help="Render a side-view camera each step (chase-cam-style).")
+    args = ap.parse_args()
+
+    print(f"genesis_vehicle v{sdk_version}  |  quickstart"
+          + ("  (viewer ON)" if args.viewer else ""))
 
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
     gs.init(backend=gs.gpu, logging_level="warning")
@@ -49,6 +56,9 @@ def main():
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=50),
         rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
+        vis_options=gs.options.VisOptions(
+            shadow=True, ambient_light=(0.40, 0.40, 0.40),
+            background_color=(0.05, 0.07, 0.10)),
         show_viewer=False,
     )
     scene.add_entity(
@@ -61,22 +71,49 @@ def main():
         material=gs.materials.Rigid(friction=1.0),
     )
 
+    cam = None
+    if args.viewer:
+        # Side chase-cam — camera trails the car at a fixed offset behind +
+        # to the side, looking forward along +X.
+        cam = scene.add_camera(
+            res=(1280, 720),
+            pos=(-8.0, -6.0, 4.0), lookat=(0.0, 0.0, 1.0),
+            up=(0.0, 0.0, 1.0), fov=55, near=0.1, far=200.0, GUI=False,
+        )
+
     scene.build(n_envs=1)
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
 
     DT = cfg.dt
     n_settle = int(1.5 / DT)
     n_drive  = int(5.0 / DT)
+    render_every = max(1, int(0.04 / DT))    # ~25 fps render
+
+    def _render():
+        if cam is None:
+            return
+        # Trail the car: offset (-8, -6, 4) from current chassis pos.
+        p = car.get_pos()[0].cpu().numpy()
+        cam.set_pose(
+            pos=p + np.array([-8.0, -6.0, 4.0]),
+            lookat=p + np.array([0.0, 0.0, 1.0]),
+            up=np.array([0.0, 0.0, 1.0]),
+        )
+        cam.render()
 
     # Phase 1 — settle (brake held while the car drops onto the ground).
-    for _ in range(n_settle):
+    for step in range(n_settle):
         physics.step(VehicleInputs(throttle=0.0, brake=1.0, steer=0.0))
         scene.step()
+        if step % render_every == 0:
+            _render()
 
     # Phase 2 — open-loop forward throttle.
-    for _ in range(n_drive):
+    for step in range(n_drive):
         physics.step(VehicleInputs(throttle=0.5, brake=0.0, steer=0.0))
         scene.step()
+        if step % render_every == 0:
+            _render()
 
     p = car.get_pos()[0].cpu().numpy()
     v = car.get_vel()[0].cpu().numpy()

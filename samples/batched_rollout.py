@@ -21,11 +21,17 @@ Run
 ---
     python -m genesis_vehicle.samples.batched_rollout
     python -m genesis_vehicle.samples.batched_rollout --n_envs 256 --steps 200
+    python -m genesis_vehicle.samples.batched_rollout --n_envs 16 --viewer
+        ↑ --viewer lays the N envs out on a grid (env_separate_rigid) so
+          you can SEE all parallel rollouts. Note: rendering adds per-step
+          overhead and makes the throughput numbers unrepresentative —
+          run without --viewer for true bench timings.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import time
 
@@ -50,10 +56,17 @@ def main():
                     help="Steps to measure after warmup (default 100).")
     ap.add_argument("--warmup", type=int, default=20,
                     help="Warmup steps to compile kernels (default 20).")
+    ap.add_argument("--viewer", action="store_true",
+                    help="Render all N envs in a grid (env_separate_rigid). "
+                         "Adds per-step overhead — for clean bench numbers, "
+                         "use perf_vectorization.py instead.")
+    ap.add_argument("--grid_spacing", type=float, default=12.0,
+                    help="Grid cell spacing (m) when --viewer is on (default 12).")
     args = ap.parse_args()
 
     print(f"genesis_vehicle v{sdk_version}  |  batched_rollout  "
-          f"n_envs={args.n_envs}  steps={args.steps}")
+          f"n_envs={args.n_envs}  steps={args.steps}"
+          + ("  (viewer ON — grid)" if args.viewer else ""))
 
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
     gs.init(backend=gs.gpu, logging_level="warning")
@@ -61,6 +74,11 @@ def main():
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=20),
         rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
+        vis_options=gs.options.VisOptions(
+            shadow=True, ambient_light=(0.40, 0.40, 0.40),
+            background_color=(0.05, 0.07, 0.10),
+            env_separate_rigid=args.viewer,
+        ),
         show_viewer=False,
     )
     scene.add_entity(
@@ -72,7 +90,26 @@ def main():
         material=gs.materials.Rigid(friction=1.0),
     )
 
-    scene.build(n_envs=args.n_envs)
+    cam = None
+    if args.viewer:
+        per_row = max(1, int(round(math.sqrt(args.n_envs))))
+        n_rows = math.ceil(args.n_envs / per_row)
+        grid_w = args.grid_spacing * per_row
+        grid_h = args.grid_spacing * n_rows
+        cam_h = max(grid_w, grid_h) * 1.2
+        cam = scene.add_camera(
+            res=(1280, 720),
+            pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
+            up=(1.0, 0.0, 0.0), fov=70, near=0.1, far=cam_h * 4, GUI=False,
+        )
+        scene.build(
+            n_envs=args.n_envs,
+            env_spacing=(args.grid_spacing, args.grid_spacing),
+            n_envs_per_row=per_row,
+        )
+        print(f"  viewer grid: {per_row} × {n_rows} cells, spacing {args.grid_spacing} m")
+    else:
+        scene.build(n_envs=args.n_envs)
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=args.n_envs)
     device = car.get_pos().device
 
@@ -85,9 +122,12 @@ def main():
 
     # 1.5 s settle, brake held, identical across envs.
     settle_in = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
-    for _ in range(int(1.5 / cfg.dt)):
+    render_every = max(1, int(0.04 / cfg.dt))
+    for step in range(int(1.5 / cfg.dt)):
         physics.step(settle_in)
         scene.step()
+        if cam is not None and step % render_every == 0:
+            cam.render()
     print(f"\n[settled — running {args.warmup + args.steps} steps "
           f"({args.warmup} warmup + {args.steps} measured)]")
 
@@ -104,9 +144,11 @@ def main():
         scene.step()
 
     t0 = time.perf_counter()
-    for _ in range(args.steps):
+    for step in range(args.steps):
         physics.step(inputs)
         scene.step()
+        if cam is not None and step % render_every == 0:
+            cam.render()
     wall = time.perf_counter() - t0
 
     p = car.get_pos().cpu().numpy()    # (n_envs, 3)

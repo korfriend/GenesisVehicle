@@ -12,7 +12,14 @@ runs ``N × K`` total vehicles in a single batched compute call (the
 vehicles, you want N parallel scenarios for sample-efficient rollouts).
 
 This script sweeps a 2D grid of ``(N, K)`` and times each cell in a
-fresh subprocess (clean GPU state per row). The headline result:
+fresh subprocess (clean GPU state per row).
+
+NO ``--viewer`` flag — this is a benchmark. Camera rendering adds per-step
+overhead that distorts the throughput numbers. For a VISUAL L2 × L3 demo
+(ego + traffic across N parallel scenarios), see
+``samples/city_traffic_ego.py --viewer --n_envs N``.
+
+The headline result:
 
 - L1 alone: K=1, N=1 → 1 vehicle, baseline ms/step
 - L2 only:  K=4, N=1 → 4 vehicles same scene, batched compute

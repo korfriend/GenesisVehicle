@@ -8,6 +8,12 @@ multi-vehicle scene (4 kinds: FWD / RWD / AWD / Truck), at increasing
 Each measurement runs in a fresh subprocess (clean GPU state) — the same
 pattern as ``perf_vectorization.py``.
 
+NO ``--viewer`` flag — this is a benchmark. Camera rendering adds per-step
+overhead that distorts the throughput numbers. For a visual demo of a
+multi-vehicle fleet on a track, see ``samples/road_loop.py --viewer``
+(which exercises the same `MultiVehiclePhysics` solver via
+``--solver multi_batched``).
+
 Default sweep: n_per_kind ∈ [1, 2, 4, 8]. With 4 kinds that's 4, 8, 16,
 32 total vehicles. The per_vehicle solver is N Python `step()` calls;
 the multi_batched solver groups by kind so it's 4 calls regardless of K
