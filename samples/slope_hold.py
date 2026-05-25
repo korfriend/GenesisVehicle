@@ -165,7 +165,7 @@ def main():
     roll0 = _quat_to_roll_deg(car.get_quat()[0].cpu().numpy())
     y0 = float(p0[1])
     print(f"  settled: pos=({p0[0]:+.3f}, {p0[1]:+.3f}, {p0[2]:+.3f}) m   "
-          f"roll={roll0:+.2f}°  (expect roll ≈ {-slope_deg:+.1f}° on slope)")
+          f"roll={roll0:+.2f}°  (expect roll ≈ {slope_deg:+.1f}° on slope)")
 
     # Timed end-to-end with a single CUDA sync before/after (zero per-step overhead).
     torch.cuda.synchronize()

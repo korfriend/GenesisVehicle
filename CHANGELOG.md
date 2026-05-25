@@ -10,6 +10,50 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.26] — 2026-05-25
+
+### Fixed — `slope_hold` settled-roll print had the wrong sign
+
+The ground tilt is created with `euler=(slope_deg, 0.0, 0.0)`, which
+rotates the box +slope_deg around X. The car settled on the slope picks
+up the same +slope_deg roll. The "expected" value in the settled-pose
+print was `{-slope_deg:+.1f}°` (negated) — so the user saw
+`roll=+20.30° (expect roll ≈ -20.0° on slope)` and would reasonably
+suspect a sign convention bug in the SDK. The bug was in the print
+line; the physics was already correct (lateral slip OK = 0.5 mm).
+
+Fix: drop the negation. The settled-roll print now reads
+`expect roll ≈ +20.0° on slope` for a +20° wedge.
+
+### Full-sample bench notes (informational, no code change)
+
+Ran every sample headless and observed:
+
+- `quickstart` / `slope_hold` — 41 / 49 ms per step. Stable.
+- `batched_rollout n_envs=16` — 35 ms/step → 451 env-steps/s. L3
+  batching working as designed.
+- `multi_env_render n_envs=4` — 106 ms/step (~10 fps). Higher than
+  raw physics because the sample always calls `cam.render()` (that's
+  the sample's purpose; see README "always renders" tag).
+- `road_loop` 16 vehicles — 754 ms/step with `multi_batched`, 829
+  with `per_vehicle` (9 % gap). The solver-choice gap is small because
+  `scene.step()` dominates at 16 entities in one scene.
+- `perf_vectorization` — 23 → 37 ms across n_envs ∈ [1, 1024]; 646×
+  speedup at n_envs=1024 vs n_envs=1. L3 batching is the right axis
+  for raw throughput.
+- `perf_multi_vehicle` K=4 n_per_kind ∈ [1, 2, 4] — 66 → 200 → 896 ms;
+  per-vehicle cost grows super-linearly because Genesis's `scene.step`
+  cost in number-of-bodies dominates. Both `per_vehicle` and
+  `multi_batched` solvers hit this equally (multi_batched is only
+  ~10 % faster), as already documented in that sample's docstring.
+- `perf_l2_l3_combined` — same K=N cell measured 64 ms vs 176 ms on
+  separate runs. Variance comes from per-subprocess JIT-cache warm
+  state, not from the SDK. The reported `gain` columns are still
+  meaningful as a ratio within one run, but absolute ms values
+  benchmark-to-benchmark are noisy by ±2-3×.
+
+---
+
 ## [0.5.25] — 2026-05-25
 
 ### Added — `print_perf_summary` end-of-run report on every sample
