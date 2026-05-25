@@ -64,11 +64,15 @@ Measured (RTX 5070 Laptop, see [`docs/batching.md`](docs/batching.md)):
 | 2 | 4 |     8 | **4.6×** (combined ≈ 1.5 × 2.8) |
 | 1 | 64 |  64 | **44×** (L3 push) |
 
-Full design + decision matrix in [`docs/batching.md`](docs/batching.md);
-runnable benchmarks in [`samples/perf_vectorization.py`](samples/perf_vectorization.py)
-(L3), [`samples/perf_multi_vehicle.py`](samples/perf_multi_vehicle.py)
-(L2), [`samples/perf_l2_l3_combined.py`](samples/perf_l2_l3_combined.py)
-(combined).
+Full design + decision matrix in [`docs/batching.md`](docs/batching.md).
+Runnable benchmarks (headless):
+[`samples/perf_vectorization.py`](samples/perf_vectorization.py) (L3),
+[`samples/perf_multi_vehicle.py`](samples/perf_multi_vehicle.py) (L2),
+[`samples/perf_l2_l3_combined.py`](samples/perf_l2_l3_combined.py) (combined).
+Visual demos (with `--viewer`):
+[`samples/multi_env_render.py`](samples/multi_env_render.py) (L3 grid),
+[`samples/road_loop.py`](samples/road_loop.py) (L2 multi-kind track),
+[`samples/city_traffic_ego.py`](samples/city_traffic_ego.py) (L2 × L3 ego + traffic highway).
 
 ## Installation
 
