@@ -10,6 +10,89 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.11] — 2026-05-25
+
+### Added — `MultiVehiclePhysics` (L2 cross-vehicle batching)
+
+New SDK class for the case where K vehicles share ONE Genesis scene at
+DIFFERENT positions (traffic, multi-agent, MPPI candidate fleets). The
+default ``VehiclePhysics`` is one-per-entity, so K vehicles in the same
+scene meant a Python loop of K ``step()`` calls per simulation step.
+
+``MultiVehiclePhysics`` groups vehicles by URDF / cfg identity and runs
+ONE batched compute pipeline per kind:
+
+- Pacejka tire model: one call over ``(K_kind, n_wheels)`` instead of
+  K_kind separate calls.
+- Stability hooks: one batched invocation per hook per kind.
+- Force + torque application: one ``apply_links_external_force`` call
+  with K_kind link indices instead of K_kind separate calls.
+
+The compute batching uses the rigid solver's existing batched APIs
+(``get_links_pos``, ``get_links_quat``, ``get_links_vel``,
+``get_links_ang``) so cross-vehicle reads are also a single call per
+quantity per kind.
+
+```python
+from genesis_vehicle import MultiVehiclePhysics, VehicleInputs
+
+# Build the scene as usual: K different entities, each spawned at its own
+# pose, each with its own sensor. SHARE the cfg instance across vehicles
+# of the same kind — MultiVehiclePhysics groups by ``id(cfg)``.
+cfg_per_kind = [preset_fn(urdf) for ...]
+vehicles = []
+for k, (urdf, preset_fn) in enumerate(kinds):
+    for _ in range(K):
+        ent, sens, _ = add_vehicle(scene, urdf, preset_fn=None, pos=(...))
+        vehicles.append((ent, sens, cfg_per_kind[k]))
+
+scene.build(n_envs=1)
+mphys = MultiVehiclePhysics(scene, vehicles)
+for step in range(N):
+    mphys.step([VehicleInputs(...) for _ in vehicles])
+    scene.step()
+```
+
+### Performance
+
+L2 batching helps but is bounded by Genesis's per-entity ``scene.step()``
+cost (which dominates as the number of in-scene entities grows). For a
+16-vehicle ``road_loop`` scenario the measured speedup is **~10%**
+(848 → 760 ms/step on an RTX 5070 Laptop).
+
+For dramatic batching speedups, ``n_envs > 1`` (L3) is still the right
+tool — see ``samples/perf_vectorization.py`` (44× at n_envs=64). L2's
+value is enabling multi-vehicle scenes (visualization, multi-agent
+interaction, mixed-kind comparisons) at a modest extra cost vs the
+per-vehicle loop, NOT replacing L3 for pure-throughput RL/MPPI.
+
+### Sample integration
+
+``samples/road_loop.py`` gains ``--solver {per_vehicle, multi_batched}``
+(default ``per_vehicle``) and ``--bench`` flags so users can compare the
+two on the same 4-kind, K-per-kind fleet:
+
+```bash
+python -m genesis_vehicle.samples.road_loop --n_per_kind 4 --bench --solver per_vehicle
+python -m genesis_vehicle.samples.road_loop --n_per_kind 4 --bench --solver multi_batched
+```
+
+### Known limitations
+
+- `MultiVehicleKindPhysics` disables its internal `VisualSync` (the
+  visual joint updates would need K separate VisualSync objects, not
+  in v0.5.11). Wheels won't visibly spin in the chase-cam view; chassis
+  motion is correct.
+- Vehicles of the SAME kind must share the SAME cfg INSTANCE (not just
+  the same URDF) — group by passing `cfg_per_kind[k]` instead of calling
+  the preset fresh per vehicle. `MultiVehiclePhysics` groups by
+  `id(cfg)`.
+
+All 60 SDK tests pass; no changes to `VehiclePhysics` or other existing
+APIs.
+
+---
+
 ## [0.5.10] — 2026-05-25
 
 ### Added — `multi_env_render` sample

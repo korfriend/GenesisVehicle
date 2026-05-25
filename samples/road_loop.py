@@ -34,8 +34,10 @@ import tempfile
 import numpy as np
 import genesis as gs
 
+import time
+
 from genesis_vehicle import (
-    VehiclePhysics, VehicleInputs,
+    VehiclePhysics, MultiVehiclePhysics, VehicleInputs,
     car_4w_fwd_ackermann, car_4w_rwd_ackermann, car_4w_awd_ackermann,
     truck_6w_partial_ackermann,
     __version__ as sdk_version,
@@ -280,6 +282,13 @@ def main():
                     help="Constant throttle for all vehicles (default 0.4).")
     ap.add_argument("--viewer", action="store_true",
                     help="Render the top-down camera each step.")
+    ap.add_argument("--solver", default="per_vehicle",
+                    choices=["per_vehicle", "multi_batched"],
+                    help="Solver: 'per_vehicle' (N VehiclePhysics, Python loop) or "
+                         "'multi_batched' (MultiVehiclePhysics — kinds grouped, "
+                         "compute pipeline batched within each kind).")
+    ap.add_argument("--bench", action="store_true",
+                    help="Print per-step wall time stats during the drive phase.")
     args = ap.parse_args()
 
     K = args.n_per_kind
@@ -315,12 +324,18 @@ def main():
     )
     _add_loop_markers(scene, radius=args.radius, n=24)
 
+    # Build ONE cfg per kind and share across vehicles of that kind. This is
+    # important for MultiVehiclePhysics, which groups by cfg identity to know
+    # which vehicles can share a batched compute pipeline.
+    cfg_per_kind = [preset_fn(urdf_paths[k_i], stability="control")
+                    for k_i, (_n, _c, _u, preset_fn, _wb, _nw) in enumerate(KINDS)]
+
     # Spawn vehicles, interleaved around the loop so kinds are mixed visually.
     physics_list = []
     entities = []
     for global_idx in range(N_TOTAL):
         kind_idx  = global_idx % len(KINDS)
-        kind_name, _color, _urdf_fn, preset_fn, wheelbase, _nw = KINDS[kind_idx]
+        kind_name, _color, _urdf_fn, _preset_fn, wheelbase, _nw = KINDS[kind_idx]
         theta = 2 * math.pi * global_idx / N_TOTAL
         pos   = (args.radius * math.cos(theta),
                  args.radius * math.sin(theta), 1.0)
@@ -329,9 +344,9 @@ def main():
                                 pos=pos, euler=(0.0, 0.0, yaw_deg))
         ent  = scene.add_entity(morph, material=gs.materials.Rigid(friction=1.0))
         sens = make_wheel_raycaster(scene, ent, urdf_paths[kind_idx])
-        cfg  = preset_fn(urdf_paths[kind_idx], stability="control")
         entities.append((kind_name, ent, wheelbase))
-        physics_list.append((ent, sens, cfg))
+        # Same cfg INSTANCE shared across all K vehicles of this kind.
+        physics_list.append((ent, sens, cfg_per_kind[kind_idx]))
 
     # Top-down camera framing the whole loop.
     cam_height = args.radius * 2.5
@@ -343,10 +358,23 @@ def main():
     )
 
     scene.build(n_envs=1)
-    # Build VehiclePhysics per vehicle (one scene, many entities — see
-    # perf_vectorization.py for the n_envs-batched alternative).
-    physics_objs = [VehiclePhysics(scene, e, s, c, n_envs=1)
-                    for (e, s, c) in physics_list]
+
+    # Two solver setups:
+    #   'per_vehicle'   — N independent VehiclePhysics. Python loop over them.
+    #   'multi_batched' — MultiVehiclePhysics: kinds grouped, each kind's K
+    #                     vehicles share one batched compute pipeline.
+    if args.solver == "per_vehicle":
+        physics_objs = [VehiclePhysics(scene, e, s, c, n_envs=1)
+                        for (e, s, c) in physics_list]
+        def step_all(inputs_list):
+            for ph, inp in zip(physics_objs, inputs_list):
+                ph.step(inp)
+    else:
+        mphys = MultiVehiclePhysics(scene, physics_list)
+        def step_all(inputs_list):
+            mphys.step(inputs_list)
+        print(f"  solver : multi_batched — {mphys.n_kinds} kinds, "
+              f"K per kind = {[k.K for k in mphys.kinds]}")
 
     # Constant Ackermann steering — for ISO 8855 (+steer = right turn, CW),
     # a CCW loop needs negative steer.
@@ -361,10 +389,9 @@ def main():
     # ------------------------------------------------------------------
     print(f"\n[settle 1.5 s]")
     settle = [VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
-              for _ in physics_objs]
+              for _ in range(N_TOTAL)]
     for _ in range(int(1.5 / DT)):
-        for ph, inp in zip(physics_objs, settle):
-            ph.step(inp)
+        step_all(settle)
         scene.step()
         if args.viewer:
             cam.render()
@@ -375,14 +402,26 @@ def main():
     n_steps = int(args.duration / DT)
     print(f"[drive {n_steps} steps  throttle={args.throttle:.2f}  "
           f"steer per-vehicle ≈ {math.degrees(-math.atan(2.7 / args.radius)):.1f}° (car) / "
-          f"{math.degrees(-math.atan(3.6 / args.radius)):.1f}° (truck)]")
+          f"{math.degrees(-math.atan(3.6 / args.radius)):.1f}° (truck)  "
+          f"solver={args.solver}]")
 
+    import torch
+    if args.bench:
+        torch.cuda.synchronize()
+    t_start = time.perf_counter()
     for step in range(n_steps):
-        for ph, inp in zip(physics_objs, drive_inputs):
-            ph.step(inp)
+        step_all(drive_inputs)
         scene.step()
         if args.viewer and step % 2 == 0:    # ~25 fps render
             cam.render()
+    if args.bench:
+        torch.cuda.synchronize()
+    wall = time.perf_counter() - t_start
+    if args.bench:
+        ms_per_step = wall / n_steps * 1000.0
+        print(f"\n[bench] {n_steps} steps in {wall:.2f}s  "
+              f"= {ms_per_step:6.2f} ms/step  "
+              f"({N_TOTAL * n_steps / wall:.0f} vehicle-steps/s)")
 
     # ------------------------------------------------------------------
     # Final pose summary (one sample per kind — should be near radius).
