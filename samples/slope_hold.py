@@ -80,22 +80,18 @@ def main():
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
     gs.init(backend=gs.gpu, logging_level="warning")
 
-    viewer_opts = gs.options.ViewerOptions(
-        res=(1280, 720),
-        camera_pos=(15.0, 0.0, 6.0),
-        camera_lookat=(0.0, 0.0, 1.0),
-        camera_up=(0.0, 0.0, 1.0),
-        camera_fov=50,
-    ) if args.viewer else None
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=50),
         rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
-        viewer_options=viewer_opts,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10)),
-        show_viewer=args.viewer,
+        show_viewer=False,    # --viewer uses cv2 HUD instead
     )
+    from genesis_vehicle.samples import _hud
+    if args.viewer and not _hud.have_cv2():
+        print("WARN: --viewer needs opencv-python. Continuing headless.")
+        args.viewer = False
     # Tilt the ground around world X-axis. fixed=True is critical — without
     # it the ground itself falls under gravity, putting the car in a
     # co-moving frame and removing the apparent lateral gravity.
@@ -132,14 +128,39 @@ def main():
     n_settle = int(3.0 / DT)
     n_hold   = int(args.duration / DT)
     render_every = max(1, int(0.04 / DT))
+    hud_perf = _hud.PerfMeter(window=60)
+
+    def _hud_render(t_sim: float, slip_mm: float):
+        if cam is None:
+            return True
+        if not args.viewer:
+            cam.render()
+            return True
+        q = car.get_quat()[0].cpu().numpy()
+        roll = _quat_to_roll_deg(q)
+        p = car.get_pos()[0].cpu().numpy()
+        frame = _hud.render_hud_frame(
+            cam,
+            title=f"slope_hold  slope={slope_deg:+.0f}°   v{sdk_version}",
+            lines=[
+                f"t = {t_sim:5.2f} s    brake = 1.00 (held)",
+                f"pos = ({p[0]:+6.2f}, {p[1]:+6.2f}, {p[2]:+5.2f})  roll = {roll:+6.2f}°",
+                f"lateral slip = {slip_mm:+7.2f} mm",
+                "[ESC] quit",
+            ],
+            perf_ms=hud_perf.ms_per_step(),
+        )
+        return _hud.cv2_show("genesis_vehicle slope_hold", frame)
 
     inputs = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
 
     for step in range(n_settle):
         physics.step(inputs)
         scene.step()
-        if cam is not None and step % render_every == 0:
-            cam.render()
+        hud_perf.tick()
+        if step % render_every == 0:
+            if not _hud_render(step * DT, slip_mm=0.0):
+                break
     p0 = car.get_pos()[0].cpu().numpy()
     roll0 = _quat_to_roll_deg(car.get_quat()[0].cpu().numpy())
     y0 = float(p0[1])
@@ -149,13 +170,20 @@ def main():
     # Timed end-to-end with a single CUDA sync before/after (zero per-step overhead).
     torch.cuda.synchronize()
     t_start = time.perf_counter()
+    user_quit = False
     for step in range(n_hold):
         physics.step(inputs)
         scene.step()
-        if cam is not None and step % render_every == 0:
-            cam.render()
+        hud_perf.tick()
+        if step % render_every == 0:
+            current_slip_mm = (float(car.get_pos()[0, 1].cpu().numpy()) - y0) * 1000.0
+            if not _hud_render(3.0 + step * DT, slip_mm=current_slip_mm):
+                user_quit = True
+                break
     torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
+    _hud.cv2_cleanup()
+    n_done = step + 1 if user_quit else n_hold
     p1 = car.get_pos()[0].cpu().numpy()
     slip = float(p1[1]) - y0
     abs_slip_mm = abs(slip) * 1000.0
@@ -170,8 +198,8 @@ def main():
         print(f"  → REGRESSION  ({abs_slip_mm:.1f} mm > {HOLD_OK_M*1000:.0f} mm threshold)")
         print(f"      Likely cause: stability.py StaticFrictionLock anchor / spring-damper")
         print(f"      logic regression, or pacejka.py / core.py wiring change.")
-    print(f"[timing] {n_hold} steps in {wall:.2f}s  "
-          f"= {wall/n_hold*1000:.2f} ms/step  ({n_hold/wall:.0f} steps/s)")
+    print(f"[timing] {n_done} steps in {wall:.2f}s  "
+          f"= {wall/n_done*1000:.2f} ms/step  ({n_done/wall:.0f} steps/s)")
 
 
 if __name__ == "__main__":

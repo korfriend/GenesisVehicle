@@ -47,6 +47,7 @@ from genesis_vehicle import (
     add_vehicle,
     __version__ as sdk_version,
 )
+from genesis_vehicle.samples import _hud
 
 URDF_PATH = os.path.join(os.path.dirname(__file__), "urdf", "car_4w.urdf")
 
@@ -63,22 +64,17 @@ def main():
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
     gs.init(backend=gs.gpu, logging_level="warning")
 
-    viewer_opts = gs.options.ViewerOptions(
-        res=(1280, 720),
-        camera_pos=(-8.0, -6.0, 4.0),
-        camera_lookat=(0.0, 0.0, 1.0),
-        camera_up=(0.0, 0.0, 1.0),
-        camera_fov=55,
-    ) if args.viewer else None
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=50),
         rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
-        viewer_options=viewer_opts,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10)),
-        show_viewer=args.viewer,
+        show_viewer=False,    # --viewer uses cv2 HUD instead (see below)
     )
+    if args.viewer and not _hud.have_cv2():
+        print("WARN: --viewer needs opencv-python. Continuing headless.")
+        args.viewer = False
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0)),
         material=gs.materials.Rigid(friction=1.0),
@@ -105,45 +101,69 @@ def main():
     DT = cfg.dt
     n_settle = int(1.5 / DT)
     n_drive  = int(5.0 / DT)
-    render_every = max(1, int(0.04 / DT))    # ~25 fps render
+    render_every = max(1, int(0.04 / DT))    # ~25 fps HUD refresh
+    hud_perf = _hud.PerfMeter(window=60)
 
-    def _render():
+    def _hud_render(t_sim: float, throttle: float):
         if cam is None:
-            return
+            return True
         # Trail the car: offset (-8, -6, 4) from current chassis pos.
         p = car.get_pos()[0].cpu().numpy()
+        v = car.get_vel()[0].cpu().numpy()
+        speed = float((v[0] ** 2 + v[1] ** 2) ** 0.5)
         cam.set_pose(
             pos=p + np.array([-8.0, -6.0, 4.0]),
             lookat=p + np.array([0.0, 0.0, 1.0]),
             up=np.array([0.0, 0.0, 1.0]),
         )
-        cam.render()
+        if not args.viewer:
+            cam.render()
+            return True
+        frame = _hud.render_hud_frame(
+            cam,
+            title=f"quickstart  v{sdk_version}",
+            lines=[
+                f"t = {t_sim:5.2f} s    throttle = {throttle:+.2f}",
+                f"pos = ({p[0]:+6.2f}, {p[1]:+6.2f})    speed = {speed:5.2f} m/s",
+                "[ESC] quit",
+            ],
+            perf_ms=hud_perf.ms_per_step(),
+        )
+        return _hud.cv2_show("genesis_vehicle quickstart", frame)
 
     # Phase 1 — settle (brake held while the car drops onto the ground).
     for step in range(n_settle):
         physics.step(VehicleInputs(throttle=0.0, brake=1.0, steer=0.0))
         scene.step()
+        hud_perf.tick()
         if step % render_every == 0:
-            _render()
+            if not _hud_render(step * DT, throttle=0.0):
+                break
 
     # Phase 2 — open-loop forward throttle. Timed end-to-end with a
     # single CUDA sync before/after the loop (zero per-step overhead).
     torch.cuda.synchronize()
     t_start = time.perf_counter()
+    user_quit = False
     for step in range(n_drive):
         physics.step(VehicleInputs(throttle=0.5, brake=0.0, steer=0.0))
         scene.step()
+        hud_perf.tick()
         if step % render_every == 0:
-            _render()
+            if not _hud_render(1.5 + step * DT, throttle=0.5):
+                user_quit = True
+                break
     torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
+    _hud.cv2_cleanup()
 
+    n_done = step + 1 if user_quit else n_drive
     p = car.get_pos()[0].cpu().numpy()
     v = car.get_vel()[0].cpu().numpy()
     print(f"\nFinal pose: x={p[0]:+.2f} y={p[1]:+.2f} z={p[2]:.2f}  "
           f"speed={(v[0]**2 + v[1]**2)**0.5:.2f} m/s")
-    print(f"[timing] {n_drive} steps in {wall:.2f}s  "
-          f"= {wall/n_drive*1000:.2f} ms/step  ({n_drive/wall:.0f} steps/s)")
+    print(f"[timing] {n_done} steps in {wall:.2f}s  "
+          f"= {wall/n_done*1000:.2f} ms/step  ({n_done/wall:.0f} steps/s)")
 
 
 if __name__ == "__main__":

@@ -79,18 +79,14 @@ def main():
     gs.init(backend=gs.gpu, logging_level="warning")
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
 
-    # Camera framing — used both for the offscreen cam below and the
-    # interactive viewer (when --viewer).
+    from genesis_vehicle.samples import _hud
+    if args.viewer and not _hud.have_cv2():
+        print("WARN: --viewer needs opencv-python. Continuing headless.")
+        args.viewer = False
+
     grid_w = args.spacing * per_row
     grid_h = args.spacing * n_rows
     cam_h  = max(grid_w, grid_h) * 1.5
-    viewer_opts = gs.options.ViewerOptions(
-        res=(1280, 720),
-        camera_pos=(0.0, 0.0, cam_h),
-        camera_lookat=(0.0, 0.0, 0.0),
-        camera_up=(1.0, 0.0, 0.0),
-        camera_fov=70,
-    ) if args.viewer else None
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=20),
@@ -98,13 +94,12 @@ def main():
             dt=cfg.dt, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
-        viewer_options=viewer_opts,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10),
             env_separate_rigid=True,        # ← visualization grid layout
         ),
-        show_viewer=args.viewer,
+        show_viewer=False,    # --viewer uses cv2 HUD instead
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0), plane_size=(args.spacing * per_row * 2,
@@ -156,17 +151,44 @@ def main():
     n_steps = int(args.duration / DT)
     print(f"[drive {n_steps} steps  (per-env throttle/steer randomized)]")
     render_every = max(1, int(0.04 / DT))    # ~25 fps render
+    hud_perf = _hud.PerfMeter(window=60)
+
+    def _hud_render(step: int):
+        if not args.viewer:
+            cam.render()
+            return True
+        v = car.get_vel().cpu().numpy()
+        speed = np.linalg.norm(v[:, :2], axis=1)
+        frame = _hud.render_hud_frame(
+            cam,
+            title=f"multi_env_render  n_envs={n_envs}   v{sdk_version}",
+            lines=[
+                f"step {step:>4}/{n_steps}    grid {per_row}×{n_rows}    "
+                f"spacing {args.spacing:.0f} m",
+                f"speed across envs: {speed.min():.2f} .. {speed.max():.2f} m/s "
+                f"(mean {speed.mean():.2f})",
+                "[ESC] quit",
+            ],
+            perf_ms=hud_perf.ms_per_step(),
+        )
+        return _hud.cv2_show("genesis_vehicle multi_env_render", frame)
 
     # Timed end-to-end with a single CUDA sync before/after (zero per-step overhead).
     torch.cuda.synchronize()
     t_start = time.perf_counter()
+    user_quit = False
     for step in range(n_steps):
         physics.step(drive)
         scene.step()
+        hud_perf.tick()
         if step % render_every == 0:
-            cam.render()
+            if not _hud_render(step):
+                user_quit = True
+                break
     torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
+    _hud.cv2_cleanup()
+    n_done = step + 1 if user_quit else n_steps
 
     # Final spread — confirm envs diverged.
     p = car.get_pos().cpu().numpy()    # shape (n_envs, 3) in WORLD coords (no grid offset)
@@ -179,9 +201,9 @@ def main():
           f"(range {p[:, 1].max() - p[:, 1].min():.2f} m)")
     print(f"  speed  : {speed.min():.2f} .. {speed.max():.2f} m/s  "
           f"(mean {speed.mean():.2f})")
-    print(f"\n[timing] {n_steps} steps in {wall:.2f}s  "
-          f"= {wall/n_steps*1000:.2f} ms/step  "
-          f"({n_envs*n_steps/wall:,.0f} env-steps/s, batch {n_envs})")
+    print(f"\n[timing] {n_done} steps in {wall:.2f}s  "
+          f"= {wall/n_done*1000:.2f} ms/step  "
+          f"({n_envs*n_done/wall:,.0f} env-steps/s, batch {n_envs})")
     print(f"\nNote: get_pos() returns the chassis-local world position WITHOUT the")
     print(f"      env_spacing offset (which is a visualization-only transform).")
     print(f"      The renderer adds the offset so all envs appear in their grid cell.")

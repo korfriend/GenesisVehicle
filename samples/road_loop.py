@@ -312,24 +312,20 @@ def main():
     gs.init(backend=gs.gpu, logging_level="warning")
     DT = 0.02
     cam_height = args.radius * 2.5
-    viewer_opts = gs.options.ViewerOptions(
-        res=(1280, 720),
-        camera_pos=(0.0, 0.0, cam_height),
-        camera_lookat=(0.0, 0.0, 0.0),
-        camera_up=(1.0, 0.0, 0.0),    # +X is "up" on screen
-        camera_fov=60,
-    ) if args.viewer else None
+    from genesis_vehicle.samples import _hud
+    if args.viewer and not _hud.have_cv2():
+        print("WARN: --viewer needs opencv-python. Continuing headless.")
+        args.viewer = False
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT, substeps=20),
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
-        viewer_options=viewer_opts,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10)),
-        show_viewer=args.viewer,
+        show_viewer=False,    # --viewer uses cv2 HUD instead
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0), plane_size=(120.0, 120.0)),
@@ -421,18 +417,50 @@ def main():
 
     # Always-on timing — single sync before/after, zero per-step overhead.
     import torch
+    hud_perf = _hud.PerfMeter(window=60)
+
+    def _hud_render(step: int):
+        if not args.viewer:
+            cam.render()
+            return True
+        # Pick the first vehicle of each kind for HUD speed display.
+        speeds = []
+        for kind_i in range(len(KINDS)):
+            ent = entities[kind_i][1]
+            v = ent.get_vel()[0].cpu().numpy()
+            speeds.append(float(np.linalg.norm(v[:2])))
+        frame = _hud.render_hud_frame(
+            cam,
+            title=f"road_loop  v{sdk_version}   solver={args.solver}",
+            lines=[
+                f"step {step:>4}/{n_steps}    "
+                f"{N_TOTAL} vehicles, {len(KINDS)} kinds (×{K} each)",
+                f"speeds: FWD {speeds[0]:4.1f}  RWD {speeds[1]:4.1f}  "
+                f"AWD {speeds[2]:4.1f}  Truck {speeds[3]:4.1f} m/s",
+                "[ESC] quit",
+            ],
+            perf_ms=hud_perf.ms_per_step(),
+        )
+        return _hud.cv2_show("genesis_vehicle road_loop", frame)
+
     torch.cuda.synchronize()
     t_start = time.perf_counter()
+    user_quit = False
     for step in range(n_steps):
         step_all(drive_inputs)
         scene.step()
-        if args.viewer and step % 2 == 0:    # ~25 fps render
-            cam.render()
+        hud_perf.tick()
+        if step % 2 == 0:    # ~25 fps render
+            if not _hud_render(step):
+                user_quit = True
+                break
     torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
-    print(f"\n[timing] {n_steps} steps in {wall:.2f}s  "
-          f"= {wall/n_steps*1000:6.2f} ms/step  "
-          f"({N_TOTAL * n_steps / wall:,.0f} vehicle-steps/s, solver={args.solver})")
+    _hud.cv2_cleanup()
+    n_done = step + 1 if user_quit else n_steps
+    print(f"\n[timing] {n_done} steps in {wall:.2f}s  "
+          f"= {wall/n_done*1000:6.2f} ms/step  "
+          f"({N_TOTAL * n_done / wall:,.0f} vehicle-steps/s, solver={args.solver})")
 
     # ------------------------------------------------------------------
     # Final pose summary (one sample per kind — should be near radius).

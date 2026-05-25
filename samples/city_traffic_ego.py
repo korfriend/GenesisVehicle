@@ -195,16 +195,11 @@ def main():
     # ------------------------------------------------------------------
     gs.init(backend=gs.gpu, logging_level="warning")
     DT = 0.02
-    # Top-down camera framing — used both for the interactive viewer window
-    # AND the offscreen `cam` that produces image tensors below.
     cam_h = 55.0
-    viewer_opts = gs.options.ViewerOptions(
-        res=(1280, 720),
-        camera_pos=(0.0, 0.0, cam_h),
-        camera_lookat=(0.0, 0.0, 0.0),
-        camera_up=(1.0, 0.0, 0.0),
-        camera_fov=60,
-    ) if args.viewer else None
+    from genesis_vehicle.samples import _hud
+    if args.viewer and not _hud.have_cv2():
+        print("WARN: --viewer needs opencv-python. Continuing headless.")
+        args.viewer = False
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT, substeps=20),
@@ -212,7 +207,6 @@ def main():
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
-        viewer_options=viewer_opts,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10),
@@ -220,7 +214,7 @@ def main():
             # camera can show all of them. n_envs=1 → no offset.
             env_separate_rigid=(args.n_envs > 1),
         ),
-        show_viewer=args.viewer,
+        show_viewer=False,    # --viewer uses cv2 HUD instead
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0),
@@ -341,7 +335,35 @@ def main():
     torch.cuda.synchronize()
     t_start = time.perf_counter()
     render_every = max(1, int(0.04 / DT))      # ~25 fps
+    hud_perf = _hud.PerfMeter(window=60)
 
+    def _hud_render(step: int):
+        if not args.viewer:
+            cam.render()
+            return True
+        # env 0 ego state.
+        ego_ent = vehicles[0][0]
+        ep = ego_ent.get_pos()[0].cpu().numpy()
+        ev = ego_ent.get_vel()[0].cpu().numpy()
+        ego_speed = float(np.linalg.norm(ev[:2]))
+        frame = _hud.render_hud_frame(
+            cam,
+            title=f"city_traffic_ego  v{sdk_version}",
+            lines=[
+                f"step {step:>4}/{n_steps}    "
+                f"{K_total} vehicles × {args.n_envs} envs = "
+                f"{K_total * args.n_envs} total batched",
+                f"ego (env 0): pos=({ep[0]:+6.2f}, {ep[1]:+5.2f})  "
+                f"lane Δy={ep[1] - target_lanes[0]:+5.3f}  speed={ego_speed:4.1f} m/s",
+                f"L2 kinds: {mphys.n_kinds}    "
+                f"K per kind = {[k.K for k in mphys.kinds]}",
+                "[ESC] quit",
+            ],
+            perf_ms=hud_perf.ms_per_step(),
+        )
+        return _hud.cv2_show("genesis_vehicle city_traffic_ego", frame)
+
+    user_quit = False
     for step in range(n_steps):
         # Read state once per step. Multi-entity reads aren't auto-batched
         # at the entity-API level — loop is short (K_total = 8).
@@ -358,11 +380,16 @@ def main():
             ))
         mphys.step(inputs)
         scene.step()
-        if args.viewer and step % render_every == 0:
-            cam.render()
+        hud_perf.tick()
+        if step % render_every == 0:
+            if not _hud_render(step):
+                user_quit = True
+                break
 
     torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
+    _hud.cv2_cleanup()
+    n_done = step + 1 if user_quit else n_steps
 
     # ------------------------------------------------------------------
     # Report.
@@ -378,9 +405,9 @@ def main():
         print(f"  {labels[v_i]:<8}  ({p[0]:+7.2f}, {p[1]:+6.2f}, {p[2]:.2f})  "
               f"{dy:+8.3f}  {speed:7.2f} m/s")
 
-    ms = wall / n_steps * 1000.0
-    total_veh_steps = args.n_envs * K_total * n_steps
-    print(f"\n[timing] {n_steps} steps in {wall:.2f}s  → {ms:6.2f} ms/step  "
+    ms = wall / n_done * 1000.0
+    total_veh_steps = args.n_envs * K_total * n_done
+    print(f"\n[timing] {n_done} steps in {wall:.2f}s  → {ms:6.2f} ms/step  "
           f"({total_veh_steps/wall:,.0f} vehicle-steps/s, "
           f"batch={args.n_envs}×{K_total}={args.n_envs*K_total} per step)")
 
