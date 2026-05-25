@@ -10,6 +10,39 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.13] — 2026-05-25
+
+### Added — `perf_multi_vehicle` sample (L2 solver comparison)
+
+[`samples/perf_multi_vehicle.py`](samples/perf_multi_vehicle.py) — the
+L2 counterpart to `perf_vectorization.py`. Sweeps `--n_per_kind` and
+runs the same 4-kind fleet under both solvers (`per_vehicle` and
+`multi_batched`) in fresh subprocesses, prints a scaling table:
+
+| n_per_kind | total | per_vehicle (ms) | multi_batched (ms) | speedup |
+|-----------:|------:|-----------------:|-------------------:|--------:|
+|          1 |     4 |            75.27 |              78.84 |   0.95× |
+|          2 |     8 |           208.20 |             183.25 |   1.14× |
+
+At K=1 (4 vehicles, 1 per kind) `multi_batched` is slightly SLOWER —
+the batching machinery has setup overhead with nothing to batch (each
+"kind" group is just 1 vehicle). From K=2 upward the gap widens; in
+practice expect 1.1-1.2× speedup for realistic multi-vehicle scenes.
+
+Use this script to:
+- Decide which solver to use for your specific fleet size + kind mix.
+- Catch regressions if either solver's perf drifts.
+
+The output makes it concrete that L2 batching is helpful but bounded
+(see also `MultiVehiclePhysics` docstring) — for pure throughput on
+one vehicle kind, n_envs > 1 (L3) remains the right tool.
+
+### Docs
+
+- `samples/README.md` — added row #7.
+
+---
+
 ## [0.5.12] — 2026-05-25
 
 ### Fixed — `MultiVehicleKindPhysics` now supports VisualSync

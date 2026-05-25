@@ -12,6 +12,7 @@ API surface. All three depend only on the SDK itself and the bundled
 | 4 | [`road_loop.py`](road_loop.py) | **Multi-vehicle visual demo** — 4 vehicle kinds (FWD red sedan, RWD blue coupe, AWD green SUV, yellow 6-wheel truck), `--n_per_kind` each, all driving a circular track under constant Ackermann steering. Top-down camera frames the whole fleet. `--solver multi_batched` switches from N independent `VehiclePhysics` calls to one `MultiVehiclePhysics` that batches the compute per kind (~10% faster on a 16-vehicle scene). |
 | 5 | [`perf_vectorization.py`](perf_vectorization.py) | **n_envs batching speedup benchmark.** Sweeps `n_envs ∈ [1, 4, 16, 64, 256, 1024]` (one fresh subprocess per measurement) and prints a scaling table showing per-env cost dropping from ~26 ms (single env) to < 1 ms (64+ envs). Use to gauge RL / MPPI throughput on your machine. |
 | 6 | [`multi_env_render.py`](multi_env_render.py) | **Render every parallel env in one grid view.** Uses Genesis's `env_separate_rigid=True` + `env_spacing` so `n_envs > 1` parallel rollouts are laid out in a `√n × √n` grid (physics still overlapping, only visualization offset). Each env gets a different random throttle/steer — eyeball RL/MPPI diversity at a glance. |
+| 7 | [`perf_multi_vehicle.py`](perf_multi_vehicle.py) | **L2 batching benchmark.** Compares `MultiVehiclePhysics` (groups by kind, batched compute per kind) against the default per-vehicle loop on the same 4-kind fleet, sweeping `--n_per_kind ∈ [1, 2, 4, 8]`. Subprocess per measurement. At K=1 multi_batched is slightly slower (batching overhead with nothing to batch); from K=2+ the gap widens — typically 1.1-1.2× faster. Use to decide which solver fits your multi-vehicle scene. |
 
 ## Bundled asset
 
@@ -36,6 +37,8 @@ python -m genesis_vehicle.samples.perf_vectorization
 python -m genesis_vehicle.samples.perf_vectorization --n_envs_list 1,4,16,64
 python -m genesis_vehicle.samples.multi_env_render --n_envs 16
 python -m genesis_vehicle.samples.multi_env_render --n_envs 64 --spacing 8
+python -m genesis_vehicle.samples.perf_multi_vehicle
+python -m genesis_vehicle.samples.perf_multi_vehicle --n_per_kind_list 2,4,8,16
 ```
 
 All three are headless (no viewer, no `cv2`, no `pynput`). The chase-cam
