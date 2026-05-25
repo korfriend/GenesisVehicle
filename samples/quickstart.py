@@ -160,10 +160,15 @@ def main():
     n_done = step + 1 if user_quit else n_drive
     p = car.get_pos()[0].cpu().numpy()
     v = car.get_vel()[0].cpu().numpy()
-    print(f"\nFinal pose: x={p[0]:+.2f} y={p[1]:+.2f} z={p[2]:.2f}  "
-          f"speed={(v[0]**2 + v[1]**2)**0.5:.2f} m/s")
-    print(f"[timing] {n_done} steps in {wall:.2f}s  "
-          f"= {wall/n_done*1000:.2f} ms/step  ({n_done/wall:.0f} steps/s)")
+    _hud.print_perf_summary(
+        sample=f"quickstart  (v{sdk_version})",
+        completed=not user_quit,
+        n_done=n_done, n_target=n_drive, wall=wall,
+        extra=[
+            f"final pose : x={p[0]:+.2f}  y={p[1]:+.2f}  z={p[2]:.2f}",
+            f"final speed: {(v[0]**2 + v[1]**2)**0.5:.2f} m/s",
+        ],
+    )
 
 
 if __name__ == "__main__":

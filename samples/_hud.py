@@ -222,3 +222,64 @@ def cv2_cleanup() -> None:
     """Close all cv2 windows. Safe to call even if cv2 isn't installed."""
     if cv2 is not None:
         cv2.destroyAllWindows()
+
+
+# ----------------------------------------------------------------------
+# End-of-run perf summary — surfaced regardless of completion vs ESC
+# ----------------------------------------------------------------------
+
+def print_perf_summary(
+    *,
+    sample: str,
+    completed: bool,
+    n_done: int,
+    n_target: int,
+    wall: float,
+    batch: Optional[int] = None,
+    batch_label: str = "unit",
+    extra: Optional[Sequence[str]] = None,
+) -> None:
+    """Print a multi-line perf summary block at the end of a sample run.
+
+    Args
+    ----
+    sample      : Sample name (e.g. ``"multi_env_render"``) — shown in header.
+    completed   : True if the run ran to its planned step count, False if the
+                  user ESC-quit early. The header line distinguishes the two.
+    n_done      : Steps actually executed (use ``step + 1 if user_quit else
+                  n_target``).
+    n_target    : Steps the loop was asked to run.
+    wall        : Wall time over those ``n_done`` steps, in seconds.
+    batch       : Items processed per step (n_envs, K_total, or n_envs*K).
+                  Pass ``None`` for single-vehicle, single-env samples.
+    batch_label : Label for the batched throughput line — e.g. ``"env"`` →
+                  "X env/step → Y env-steps/s".
+    extra       : Extra lines appended after the standard block (e.g.
+                  diagnostic context the sample wants to surface).
+
+    The summary is always printed (regardless of ``completed``), so the user
+    can compare runs cut short by ESC against full runs on the same line
+    numbers.
+    """
+    bar = "=" * 70
+    status = "COMPLETED" if completed else "USER QUIT (ESC)"
+    n_done = max(1, int(n_done))
+    pct = 100.0 * n_done / max(1, int(n_target))
+    ms = wall / n_done * 1000.0
+    sps = n_done / wall if wall > 0 else 0.0
+    print()
+    print(bar)
+    print(f" {sample}  —  {status}")
+    print(bar)
+    print(f"  steps      : {n_done:>6} / {n_target:<6}   ({pct:5.1f}% of requested)")
+    print(f"  wall time  : {wall:>6.2f} s")
+    print(f"  ms / step  : {ms:>6.2f}")
+    print(f"  steps / s  : {sps:>6.2f}")
+    if batch is not None and batch > 1:
+        bps = batch * sps
+        print(f"  batch      : {batch} {batch_label}/step  ->  "
+              f"{bps:,.0f} {batch_label}-steps/s")
+    if extra:
+        for line in extra:
+            print(f"  {line}")
+    print(bar)

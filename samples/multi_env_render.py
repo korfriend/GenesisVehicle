@@ -207,9 +207,16 @@ def main():
           f"(range {p[:, 1].max() - p[:, 1].min():.2f} m)")
     print(f"  speed  : {speed.min():.2f} .. {speed.max():.2f} m/s  "
           f"(mean {speed.mean():.2f})")
-    print(f"\n[timing] {n_done} steps in {wall:.2f}s  "
-          f"= {wall/n_done*1000:.2f} ms/step  "
-          f"({n_envs*n_done/wall:,.0f} env-steps/s, batch {n_envs})")
+    _hud.print_perf_summary(
+        sample=f"multi_env_render  (v{sdk_version})",
+        completed=not user_quit,
+        n_done=n_done, n_target=n_steps, wall=wall,
+        batch=n_envs, batch_label="env",
+        extra=[
+            f"grid       : {per_row} x {n_rows}   spacing {args.spacing:.1f} m",
+            f"speed range: {speed.min():.2f} .. {speed.max():.2f} m/s",
+        ],
+    )
     print(f"\nNote: get_pos() returns the chassis-local world position WITHOUT the")
     print(f"      env_spacing offset (which is a visualization-only transform).")
     print(f"      The renderer adds the offset so all envs appear in their grid cell.")

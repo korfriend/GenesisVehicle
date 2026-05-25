@@ -163,13 +163,26 @@ def main():
         )
         return _hud.cv2_show("genesis_vehicle batched_rollout", frame)
 
+    user_quit = False
     for step in range(int(1.5 / cfg.dt)):
         physics.step(settle_in)
         scene.step()
         hud_perf.tick()
         if step % render_every == 0:
             if not _hud_render("settle", step, int(1.5 / cfg.dt)):
+                user_quit = True
                 break
+    if user_quit:
+        # Don't enter the measure loop if the user already wanted out during
+        # settle — just emit a partial summary and return.
+        _hud.cv2_cleanup()
+        _hud.print_perf_summary(
+            sample=f"batched_rollout  (v{sdk_version})",
+            completed=False, n_done=step + 1, n_target=int(1.5 / cfg.dt),
+            wall=0.0, batch=args.n_envs, batch_label="env",
+            extra=["quit during settle phase — no measured drive timing"],
+        )
+        return
     print(f"\n[settled — running {args.warmup + args.steps} steps "
           f"({args.warmup} warmup + {args.steps} measured)]")
 
@@ -186,6 +199,7 @@ def main():
         scene.step()
         hud_perf.tick()
 
+    user_quit = False
     t0 = time.perf_counter()
     for step in range(args.steps):
         physics.step(inputs)
@@ -193,19 +207,28 @@ def main():
         hud_perf.tick()
         if step % render_every == 0:
             if not _hud_render("measure", step, args.steps):
+                user_quit = True
                 break
     wall = time.perf_counter() - t0
     _hud.cv2_cleanup()
+    n_done = step + 1 if user_quit else args.steps
 
     p = car.get_pos().cpu().numpy()    # (n_envs, 3)
     v = car.get_vel().cpu().numpy()
     speed = (v[:, :2] ** 2).sum(axis=1) ** 0.5
 
-    print(f"\n[per-step wall time]  {wall / args.steps * 1000:.2f} ms / step  "
-          f"→ {args.n_envs * args.steps / wall:.0f} env-steps / s")
-    print(f"[chassis spread]   x: {p[:, 0].min():+.2f}..{p[:, 0].max():+.2f}  "
-          f"y: {p[:, 1].min():+.2f}..{p[:, 1].max():+.2f}  "
-          f"speed: {speed.min():.2f}..{speed.max():.2f} m/s")
+    _hud.print_perf_summary(
+        sample=f"batched_rollout  (v{sdk_version})",
+        completed=not user_quit,
+        n_done=n_done, n_target=args.steps, wall=wall,
+        batch=args.n_envs, batch_label="env",
+        extra=[
+            f"warmup     : {args.warmup} steps (not counted)",
+            f"spread x   : {p[:,0].min():+.2f} .. {p[:,0].max():+.2f}",
+            f"spread y   : {p[:,1].min():+.2f} .. {p[:,1].max():+.2f}",
+            f"speed range: {speed.min():.2f} .. {speed.max():.2f} m/s",
+        ],
+    )
 
 
 if __name__ == "__main__":

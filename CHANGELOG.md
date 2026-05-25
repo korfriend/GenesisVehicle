@@ -10,6 +10,62 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.25] — 2026-05-25
+
+### Added — `print_perf_summary` end-of-run report on every sample
+
+When a sample finishes — whether it ran to completion or the user ESC-quit
+mid-run — it now prints a banner-separated multi-line block instead of a
+single `[timing]` line. The header makes the completion state explicit
+(`COMPLETED` vs `USER QUIT (ESC)`) so a short run cut at step 12/200 is
+obvious at a glance.
+
+```
+======================================================================
+ multi_env_render  (v0.5.25)  —  USER QUIT (ESC)
+======================================================================
+  steps      :     42 / 200      ( 21.0% of requested)
+  wall time  :   4.21 s
+  ms / step  : 100.24
+  steps / s  :   9.98
+  batch      : 4 env/step  ->  40 env-steps/s
+  grid       : 2 x 2   spacing 10.0 m
+======================================================================
+```
+
+The helper lives in `samples/_hud.py`:
+
+```python
+_hud.print_perf_summary(
+    sample=f"multi_env_render  (v{sdk_version})",
+    completed=not user_quit,
+    n_done=n_done, n_target=n_steps, wall=wall,
+    batch=n_envs, batch_label="env",
+    extra=[...],
+)
+```
+
+Applied to all six viewer-supporting samples (`quickstart`, `slope_hold`,
+`batched_rollout`, `multi_env_render`, `road_loop`, `city_traffic_ego`).
+The three `perf_*` benches were left alone — they have their own
+purpose-built reports.
+
+### Fixed — `batched_rollout` accuracy when ESC-quit
+
+`batched_rollout` previously computed `wall / args.steps` even when the
+measure loop broke early. With an ESC quit at step 30/100 it would
+under-report ms/step by ~3.3x. Now tracks `user_quit` through both the
+settle and measure loops, uses the actual `n_done` step count, and
+short-circuits with a partial summary if the user quits during the
+settle phase.
+
+### Smoke check
+
+60 SDK pytest pass. `quickstart` headless prints the new summary block
+on completion.
+
+---
+
 ## [0.5.24] — 2026-05-25
 
 ### Fixed — `--viewer` only showed env 0 when `env_separate_rigid=True`
