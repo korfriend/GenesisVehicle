@@ -10,6 +10,57 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.27] — 2026-05-25
+
+### Fixed — perf summaries had rendering folded into physics ms/step
+
+In every sample that wrote out a `[timing]` / `print_perf_summary` line,
+the headless main loop was calling `cam.render()` every few steps even
+though the result was thrown away. The reported `ms/step` therefore
+mixed physics with render cost, and the gap was huge for samples that
+render a large image: `multi_env_render --n_envs 4` measured 106 ms/step
+when the actual pure-physics cost is 37 ms/step. ~70 % was wasted
+rendering frames into the bit bucket.
+
+### Changed — strict separation of physics vs render in samples
+
+- In **headless** mode (no `--viewer`), no camera is created at all and
+  no render call happens in the main loop. The reported `ms/step` is
+  now pure physics + `scene.step()`. (Genesis's `scene.step()` does a
+  per-step renderer-state sync if any camera exists, so even an unused
+  camera measurably slows physics — hence creating none.)
+- In **viewer** mode, the main loop renders inline (same as v0.5.26),
+  and a separate post-loop standalone render benchmark of 20 frames is
+  printed on its own line in the summary block.
+- New `_hud.bench_render(cam, n=20)` helper — single `cuda.synchronize()`
+  on each side, returns `(ms_per_frame, n)`.
+- `_hud.print_perf_summary` gained `render_ms` / `render_n` kwargs.
+  Render line is omitted when no camera exists.
+
+### Re-bench (headless, pure physics)
+
+| Sample                          | Before (ms/step) | After (ms/step) | Notes                                |
+|---------------------------------|-----------------:|----------------:|--------------------------------------|
+| `quickstart`                    | 41–55            | 42              | unchanged (render was rare)          |
+| `slope_hold`                    | 49               | 49              | unchanged                            |
+| `batched_rollout n_envs=16`     | 36               | 37              | unchanged (cam was None already)     |
+| `multi_env_render n_envs=4`     | 106              | **37**          | **−65 %** — render was 70 % of cost  |
+| `road_loop` 16 vehicles         | 829              | 824             | unchanged (`scene.step` dominates)   |
+| `city_traffic_ego` 8 vehicles   | 208              | 198             | small win                            |
+| `perf_vectorization` n=1..1024  | 23→37            | 25→38           | unchanged (already cam-less)         |
+
+### Behavior change for `multi_env_render`
+
+Previously the sample always called `cam.render()` even in headless
+("always renders" tag in the README). With this change, headless
+`multi_env_render` runs pure physics and prints a clean ms/step;
+`--viewer` keeps the cv2 grid HUD behavior unchanged. If you need the
+old "render to a tensor every step" behavior for mp4 recording, run
+with `--viewer` — the sample's identity (rendering N parallel envs in
+one tiled view) is in the viewer path now, not the headless path.
+
+---
+
 ## [0.5.26] — 2026-05-25
 
 ### Fixed — `slope_hold` settled-roll print had the wrong sign

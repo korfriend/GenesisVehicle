@@ -357,15 +357,18 @@ def main():
         # Same cfg INSTANCE shared across all K vehicles of this kind.
         physics_list.append((ent, sens, cfg_per_kind[kind_idx]))
 
-    # Offscreen camera framing the whole loop (for image-tensor render).
-    # The interactive viewer window (when --viewer) is configured via
-    # viewer_options above; this offscreen cam is independent.
-    cam = scene.add_camera(
-        res=(1280, 720),
-        pos=(0.0, 0.0, cam_height), lookat=(0.0, 0.0, 0.0),
-        up=(1.0, 0.0, 0.0),       # +X is up on screen
-        fov=60, near=0.1, far=cam_height * 4, GUI=False,
-    )
+    # Offscreen camera framing the whole loop, only created when --viewer.
+    # Having a camera in the scene adds a per-step renderer-state-sync cost
+    # inside scene.step(); skipping it in headless gives a clean
+    # physics-only ms/step number.
+    cam = None
+    if args.viewer:
+        cam = scene.add_camera(
+            res=(1280, 720),
+            pos=(0.0, 0.0, cam_height), lookat=(0.0, 0.0, 0.0),
+            up=(1.0, 0.0, 0.0),       # +X is up on screen
+            fov=60, near=0.1, far=cam_height * 4, GUI=False,
+        )
 
     scene.build(n_envs=1)
 
@@ -420,8 +423,8 @@ def main():
     hud_perf = _hud.PerfMeter(window=60)
 
     def _hud_render(step: int):
+        # Headless = pure physics (cam is None); viewer = render + HUD.
         if not args.viewer:
-            cam.render()
             return True
         # Pick the first vehicle of each kind for HUD speed display.
         speeds = []
@@ -458,11 +461,13 @@ def main():
     wall = time.perf_counter() - t_start
     _hud.cv2_cleanup()
     n_done = step + 1 if user_quit else n_steps
+    r_ms, r_n = _hud.bench_render(cam, n=20) if cam is not None else (None, None)
     _hud.print_perf_summary(
         sample=f"road_loop  (v{sdk_version})",
         completed=not user_quit,
         n_done=n_done, n_target=n_steps, wall=wall,
         batch=N_TOTAL, batch_label="vehicle",
+        render_ms=r_ms, render_n=r_n,
         extra=[
             f"solver     : {args.solver}",
             f"fleet      : {N_TOTAL} vehicles "

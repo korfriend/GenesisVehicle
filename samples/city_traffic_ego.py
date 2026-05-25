@@ -276,17 +276,21 @@ def main():
     # via the viewer_options above; this offscreen camera is independent
     # and runs whether or not the viewer is on.
     # ------------------------------------------------------------------
-    # With env_separate_rigid (args.n_envs > 1 + --viewer), the render returns
-    # a per-env stack — the HUD tiles cells into a grid and downsizes them, so
-    # rendering each cell at 1080p is wasted. Use a modest per-cell res in
-    # that case; keep 1080p when there's only one env to render.
-    cam_res = (640, 360) if (args.viewer and args.n_envs > 1) else (1920, 1080)
-    cam = scene.add_camera(
-        res=cam_res,
-        pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
-        up=(1.0, 0.0, 0.0),       # +X is "up" on screen (driving away from viewer)
-        fov=60, near=0.1, far=cam_h * 4, GUI=False,
-    )
+    # Camera only when --viewer. Having a camera in the scene adds per-step
+    # renderer-state-sync cost inside scene.step(), so skipping it in
+    # headless gives a clean physics-only ms/step number. With
+    # env_separate_rigid (args.n_envs > 1 + --viewer) the render returns a
+    # per-env stack and the HUD tiles + downsizes cells, so a modest per-
+    # cell res is enough; with single env, keep 1080p.
+    cam = None
+    if args.viewer:
+        cam_res = (640, 360) if args.n_envs > 1 else (1920, 1080)
+        cam = scene.add_camera(
+            res=cam_res,
+            pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
+            up=(1.0, 0.0, 0.0),       # +X is "up" on screen (driving away from viewer)
+            fov=60, near=0.1, far=cam_h * 4, GUI=False,
+        )
 
     # ------------------------------------------------------------------
     # Build + MultiVehiclePhysics (n_envs = L3 axis; K = L2 axis = K_total here).
@@ -343,8 +347,8 @@ def main():
     hud_perf = _hud.PerfMeter(window=60)
 
     def _hud_render(step: int):
+        # Headless = pure physics (cam is None); viewer = render + HUD.
         if not args.viewer:
-            cam.render()
             return True
         # env 0 ego state.
         ego_ent = vehicles[0][0]
@@ -411,11 +415,13 @@ def main():
         print(f"  {labels[v_i]:<8}  ({p[0]:+7.2f}, {p[1]:+6.2f}, {p[2]:.2f})  "
               f"{dy:+8.3f}  {speed:7.2f} m/s")
 
+    r_ms, r_n = _hud.bench_render(cam, n=20) if cam is not None else (None, None)
     _hud.print_perf_summary(
         sample=f"city_traffic_ego  (v{sdk_version})",
         completed=not user_quit,
         n_done=n_done, n_target=n_steps, wall=wall,
         batch=args.n_envs * K_total, batch_label="vehicle",
+        render_ms=r_ms, render_n=r_n,
         extra=[
             f"L2 kinds   : {mphys.n_kinds}   K per kind = {[k.K for k in mphys.kinds]}",
             f"L3 envs    : {args.n_envs}    (batch = n_envs x K = "

@@ -85,10 +85,14 @@ def main():
         material=gs.materials.Rigid(friction=1.0),
     )
 
+    # Camera only when --viewer. Adding a camera to the scene triggers
+    # per-step renderer-state sync inside scene.step() (transform updates,
+    # etc.), measurably slowing pure-physics timing in headless mode. So in
+    # headless we skip the camera entirely and report physics-only numbers;
+    # render ms/frame is measured separately only when --viewer (the cam
+    # already exists for the HUD).
     cam = None
     if args.viewer:
-        # Side chase-cam — camera trails the car at a fixed offset behind +
-        # to the side, looking forward along +X.
         cam = scene.add_camera(
             res=(1280, 720),
             pos=(-8.0, -6.0, 4.0), lookat=(0.0, 0.0, 1.0),
@@ -105,9 +109,10 @@ def main():
     hud_perf = _hud.PerfMeter(window=60)
 
     def _hud_render(t_sim: float, throttle: float):
-        if cam is None:
+        # Headless = pure physics (no render call in the timed loop).
+        # Viewer = render + HUD overlay; cam pose follows the car.
+        if not args.viewer:
             return True
-        # Trail the car: offset (-8, -6, 4) from current chassis pos.
         p = car.get_pos()[0].cpu().numpy()
         v = car.get_vel()[0].cpu().numpy()
         speed = float((v[0] ** 2 + v[1] ** 2) ** 0.5)
@@ -116,9 +121,6 @@ def main():
             lookat=p + np.array([0.0, 0.0, 1.0]),
             up=np.array([0.0, 0.0, 1.0]),
         )
-        if not args.viewer:
-            cam.render()
-            return True
         frame = _hud.render_hud_frame(
             cam,
             title=f"quickstart  v{sdk_version}",
@@ -160,10 +162,14 @@ def main():
     n_done = step + 1 if user_quit else n_drive
     p = car.get_pos()[0].cpu().numpy()
     v = car.get_vel()[0].cpu().numpy()
+
+    # Separate render-only benchmark (viewer only — see comment near cam).
+    r_ms, r_n = _hud.bench_render(cam, n=20) if cam is not None else (None, None)
     _hud.print_perf_summary(
         sample=f"quickstart  (v{sdk_version})",
         completed=not user_quit,
         n_done=n_done, n_target=n_drive, wall=wall,
+        render_ms=r_ms, render_n=r_n,
         extra=[
             f"final pose : x={p[0]:+.2f}  y={p[1]:+.2f}  z={p[2]:.2f}",
             f"final speed: {(v[0]**2 + v[1]**2)**0.5:.2f} m/s",
