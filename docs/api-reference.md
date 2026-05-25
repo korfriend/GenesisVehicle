@@ -37,9 +37,10 @@ class MultiVehiclePhysics:
 
 Vehicles of the same kind must share the SAME ``cfg`` instance — group
 by passing ``cfg_per_kind[k]`` instead of calling the preset fresh per
-vehicle. ~10% faster than the per-vehicle loop at K=16; bounded by
-Genesis's per-entity ``scene.step()`` cost. For RL/MPPI throughput use
-``n_envs > 1`` instead (L3 batching — see
+vehicle. ~6% faster than the per-vehicle loop at K=16 with full
+VisualSync, ~10% if visuals are off; bounded by Genesis's per-entity
+``scene.step()`` cost. For RL/MPPI throughput use ``n_envs > 1`` instead
+(L3 batching — see
 [`../samples/perf_vectorization.py`](../samples/perf_vectorization.py)).
 
 State (read-only, all `(n_envs, n_wheels)`):

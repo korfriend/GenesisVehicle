@@ -57,6 +57,7 @@ from .core import VehiclePhysics, PipelineContext
 from .dynamics import brake_torque_signed
 from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import read_distances
+from .visual import VisualSync
 
 
 def _quat_rotate(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
@@ -122,12 +123,21 @@ class MultiVehicleKindPhysics:
         # The proto's _wheel_body_b / _up_world were built for n_envs=K; we
         # reuse them as-is (shape (K, n_wheels, 3) / (K, 3)).
 
-        # VisualSync was built with proto's n_envs=K, but the underlying
-        # Genesis scene is n_envs=1 (K vehicles in one env, not K envs).
-        # Calling visual.step would set_dofs_position with mismatched
-        # shape. Disable for v0.5.11. Per-entity visual sync would need K
-        # independent VisualSync objects (Python loop over K) — TODO.
+        # Replace the proto's VisualSync (which was built for n_envs=K and
+        # would issue a shape-(K, n_dofs) set_dofs_position into a scene
+        # that actually has n_envs=1 — Genesis would reject it) with K
+        # per-entity VisualSync objects, each one bound to its own entity
+        # and built for n_envs=1. Compute is still batched (K, n_wheels);
+        # the visual writes are a Python loop over K (each call is a small
+        # set_dofs_position, negligible vs the compute saving).
         self._proto.visual = None
+        self.visuals: list[VisualSync] = []
+        if self._proto.resolved.enable_visual_sync:
+            for ent in entities:
+                self.visuals.append(VisualSync(
+                    entity=ent, resolved=self._proto.resolved,
+                    n_envs=1, device=self.dev, dtype=self.fdt,
+                ))
 
     # ------------------------------------------------------------------
     # Expose proto attributes for callers (omega, last_*, etc.)
@@ -358,15 +368,20 @@ class MultiVehicleKindPhysics:
         self._apply_force_torque_batched(total_F, total_T)
         p._prev_init = True
 
-        # [VISUAL]  — per-entity Python loop. Each entity's VisualSync only
-        # knows about ITS entity, so we need K separate VisualSync objects
-        # to drive K visuals correctly. For simplicity in v0.5.11, the
-        # proto's VisualSync (bound to entities[0]) only animates the first
-        # vehicle. Set ``cfg.visual_spin_enabled = False`` (or omit
-        # VisualSync entirely) if visible-wheel spin on every vehicle
-        # matters more than batching speedup.
-        if p.visual is not None:
-            p.visual.step(steer_per_wheel, distances, p.omega, DT)
+        # [VISUAL] — per-entity Python loop over K VisualSync objects. The
+        # compute pipeline already produced batched (K, n_wheels) angles;
+        # we slice into (1, n_wheels) for each entity and call its
+        # VisualSync (n_envs=1) so set_dofs_position sees the shape it
+        # expects. Loop cost is ~K small set_dofs_position calls — small
+        # compared to the batched compute savings.
+        if self.visuals:
+            for k_i, vis in enumerate(self.visuals):
+                vis.step(
+                    steer_per_wheel[k_i:k_i + 1],
+                    distances[k_i:k_i + 1],
+                    p.omega[k_i:k_i + 1],
+                    DT,
+                )
 
 
 class MultiVehiclePhysics:
