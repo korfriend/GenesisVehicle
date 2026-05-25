@@ -10,6 +10,59 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.29] — 2026-05-26
+
+### Performance — substeps=10 across all remaining samples (1.4-2.2× faster)
+
+v0.5.28 dropped `road_loop` and `city_traffic_ego` to substeps=10
+(verified safe). Extended the same change to every other sample:
+
+- `quickstart` and `slope_hold` were on substeps=**50** (Genesis-default
+  ×2.5). Internal dt of 0.2 ms — total overkill for a 2 Hz suspension
+  natural frequency. Dropped to 10 → internal dt = 1 ms.
+- `batched_rollout`, `multi_env_render`, `perf_vectorization`,
+  `perf_multi_vehicle`, `perf_l2_l3_combined` were on substeps=20.
+  Dropped to 10.
+
+Physics verified identical:
+
+- `quickstart`: final pose (12.42, 0.01, 0.12) and speed 5.02 m/s
+  (was (12.38, 0.02, 0.12) and 4.90 m/s — same trajectory).
+- `slope_hold`: settled roll +20.31° (matches expected +20°), lateral
+  slip ≤0.1 mm (was 0.5 mm — still well under the 10 mm threshold).
+
+### Re-bench (headless, pure physics)
+
+| Sample                          | v0.5.27 | v0.5.28 | v0.5.29 | total speedup |
+|---------------------------------|--------:|--------:|--------:|--------------:|
+| `quickstart`                    | 42      | 42      | **19**  | 2.2×          |
+| `slope_hold`                    | 49      | 49      | **23**  | 2.1×          |
+| `batched_rollout` n_envs=16     | 37      | 37      | **24**  | 1.5×          |
+| `multi_env_render` n_envs=4     | 37      | 37      | **24**  | 1.5×          |
+| `road_loop` 16 veh multi_batched| 740     | 447     | **457** | 1.6×          |
+| `city_traffic_ego` 8 veh        | 198     | 138     | **140** | 1.4×          |
+| `perf_vectorization` n=256      | 35      | 35      | **25**  | 1.4×          |
+| `perf_multi_vehicle` K=4 batched| 776     | 776     | **439** | 1.8×          |
+
+`perf_vectorization` n=256 throughput went from 7,200 → **10,300
+env-steps/s** at the same physics fidelity.
+
+60 SDK pytest pass.
+
+### Rationale
+
+Genesis's default `substeps=20` (and the older `quickstart`/`slope_hold`
+`substeps=50`) was chosen for broad robustness across arbitrary stiff
+contact stacks. Our ray-cast wheels never expose Genesis's constraint
+solver to wheel-ground contact (we apply the wheel forces as external
+forces to the chassis), so the tightest natural frequency the solver
+has to integrate is the suspension spring-damper (~2 Hz at K~50 kN/m,
+m~375 kg quarter-car). `internal dt = 1 ms` (substeps=10 with dt=0.01,
+or substeps=20 with dt=0.02) is the validated floor; going to internal
+dt = 2 ms also works for these samples but is at the edge.
+
+---
+
 ## [0.5.28] — 2026-05-25
 
 ### Performance — `road_loop` and `city_traffic_ego` substeps 20 → 10
