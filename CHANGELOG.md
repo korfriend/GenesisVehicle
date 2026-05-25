@@ -10,6 +10,52 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.17] — 2026-05-25
+
+### Added — `--viewer` for the 3 samples that didn't have it
+
+[`samples/quickstart.py`](samples/quickstart.py),
+[`samples/slope_hold.py`](samples/slope_hold.py),
+[`samples/batched_rollout.py`](samples/batched_rollout.py) now accept
+`--viewer`:
+
+- **quickstart**: side chase-cam trailing the car.
+- **slope_hold**: side view showing the slope tilt + the brake-locked
+  car (so the v0.5.7 stick-slip fix is visible as the car staying put).
+- **batched_rollout**: lays the N envs out on a grid via
+  `env_separate_rigid=True` + `env_spacing` so all parallel rollouts are
+  visible in one frame. (Same mechanism as `multi_env_render.py`.) The
+  flag explicitly notes that rendering distorts the throughput numbers
+  — use `perf_vectorization.py` for clean bench timings.
+
+### Clarified — three perf samples are intentionally headless
+
+[`samples/perf_vectorization.py`](samples/perf_vectorization.py),
+[`samples/perf_multi_vehicle.py`](samples/perf_multi_vehicle.py),
+[`samples/perf_l2_l3_combined.py`](samples/perf_l2_l3_combined.py)
+docstrings now explicitly say they have NO `--viewer` flag because
+camera rendering adds per-step overhead that distorts the throughput
+numbers they're trying to measure. Each one points to the matching
+visual sample for the same scenario.
+
+### Viewer support across all 9 samples
+
+| Sample | --viewer | Notes |
+|---|---|---|
+| quickstart           | ✓ (new) | side chase-cam |
+| slope_hold           | ✓ (new) | side view of tilted ground + car |
+| batched_rollout      | ✓ (new) | env grid via env_separate_rigid |
+| road_loop            | ✓        | top-down loop |
+| perf_vectorization   | ✗ headless by design | bench |
+| multi_env_render     | always renders | env grid is the demo |
+| perf_multi_vehicle   | ✗ headless by design | bench |
+| perf_l2_l3_combined  | ✗ headless by design | bench |
+| city_traffic_ego     | ✓        | top-down highway |
+
+No SDK code changes; samples only.
+
+---
+
 ## [0.5.16] — 2026-05-25
 
 ### Added — `city_traffic_ego` sample (highway ego + traffic scenario)

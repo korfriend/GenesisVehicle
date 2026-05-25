@@ -5,6 +5,12 @@ prints a scaling table. Genesis builds one scene per ``gs.init`` call,
 so this script spawns a fresh subprocess per measurement to keep GPU
 state clean across configurations.
 
+NO ``--viewer`` flag — this is a benchmark. Camera rendering adds per-step
+overhead that distorts the throughput numbers we're trying to measure.
+For a visual demo of N parallel envs in a grid, see
+``samples/multi_env_render.py`` (which always renders) or
+``samples/batched_rollout.py --viewer`` (env_separate_rigid grid).
+
 Default sweep
 -------------
     n_envs ∈ [1, 4, 16, 64, 256, 1024]

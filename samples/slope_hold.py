@@ -24,6 +24,7 @@ Run
     python -m genesis_vehicle.samples.slope_hold
     python -m genesis_vehicle.samples.slope_hold --slope 30
     python -m genesis_vehicle.samples.slope_hold --flat   # baseline
+    python -m genesis_vehicle.samples.slope_hold --slope 20 --viewer
 """
 
 from __future__ import annotations
@@ -59,11 +60,14 @@ def main():
                     help="Override --slope, use 0° as a baseline.")
     ap.add_argument("--duration", type=float, default=10.0,
                     help="Brake-hold duration in seconds (default 10).")
+    ap.add_argument("--viewer", action="store_true",
+                    help="Render a side view of the slope + car each step.")
     args = ap.parse_args()
     slope_deg = 0.0 if args.flat else float(args.slope)
 
     print(f"genesis_vehicle v{sdk_version}  |  slope_hold  "
-          f"slope={slope_deg:+.1f}°  hold={args.duration:.1f}s")
+          f"slope={slope_deg:+.1f}°  hold={args.duration:.1f}s"
+          + ("  (viewer ON)" if args.viewer else ""))
 
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
     gs.init(backend=gs.gpu, logging_level="warning")
@@ -71,6 +75,9 @@ def main():
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=50),
         rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
+        vis_options=gs.options.VisOptions(
+            shadow=True, ambient_light=(0.40, 0.40, 0.40),
+            background_color=(0.05, 0.07, 0.10)),
         show_viewer=False,
     )
     # Tilt the ground around world X-axis. fixed=True is critical — without
@@ -90,27 +97,44 @@ def main():
         material=gs.materials.Rigid(friction=1.0),
     )
 
+    cam = None
+    if args.viewer:
+        # Side view that shows the slope tilt AND the car. Camera looks at
+        # the world origin (where the car spawns) from the +X side at the
+        # height of typical chassis (~1 m), so the slope is visible as a
+        # tilted plane and lateral drift is visible end-on.
+        cam = scene.add_camera(
+            res=(1280, 720),
+            pos=(15.0, 0.0, 6.0), lookat=(0.0, 0.0, 1.0),
+            up=(0.0, 0.0, 1.0), fov=50, near=0.1, far=200.0, GUI=False,
+        )
+
     scene.build(n_envs=1)
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
 
     DT = cfg.dt
     n_settle = int(3.0 / DT)
     n_hold   = int(args.duration / DT)
+    render_every = max(1, int(0.04 / DT))
 
     inputs = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
 
-    for _ in range(n_settle):
+    for step in range(n_settle):
         physics.step(inputs)
         scene.step()
+        if cam is not None and step % render_every == 0:
+            cam.render()
     p0 = car.get_pos()[0].cpu().numpy()
     roll0 = _quat_to_roll_deg(car.get_quat()[0].cpu().numpy())
     y0 = float(p0[1])
     print(f"  settled: pos=({p0[0]:+.3f}, {p0[1]:+.3f}, {p0[2]:+.3f}) m   "
           f"roll={roll0:+.2f}°  (expect roll ≈ {-slope_deg:+.1f}° on slope)")
 
-    for _ in range(n_hold):
+    for step in range(n_hold):
         physics.step(inputs)
         scene.step()
+        if cam is not None and step % render_every == 0:
+            cam.render()
     p1 = car.get_pos()[0].cpu().numpy()
     slip = float(p1[1]) - y0
     abs_slip_mm = abs(slip) * 1000.0
