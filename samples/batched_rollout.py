@@ -77,29 +77,26 @@ def main():
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
     gs.init(backend=gs.gpu, logging_level="warning")
 
+    from genesis_vehicle.samples import _hud
+    if args.viewer and not _hud.have_cv2():
+        print("WARN: --viewer needs opencv-python. Continuing headless.")
+        args.viewer = False
+
     per_row = max(1, int(round(math.sqrt(args.n_envs))))
     n_rows  = math.ceil(args.n_envs / per_row)
     grid_w  = args.grid_spacing * per_row
     grid_h  = args.grid_spacing * n_rows
     cam_h   = max(grid_w, grid_h) * 1.2
-    viewer_opts = gs.options.ViewerOptions(
-        res=(1280, 720),
-        camera_pos=(0.0, 0.0, cam_h),
-        camera_lookat=(0.0, 0.0, 0.0),
-        camera_up=(1.0, 0.0, 0.0),
-        camera_fov=70,
-    ) if args.viewer else None
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=20),
         rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
-        viewer_options=viewer_opts,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10),
             env_separate_rigid=args.viewer,
         ),
-        show_viewer=args.viewer,
+        show_viewer=False,    # --viewer uses cv2 HUD instead
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0)),
@@ -138,11 +135,38 @@ def main():
     # 1.5 s settle, brake held, identical across envs.
     settle_in = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
     render_every = max(1, int(0.04 / cfg.dt))
+    hud_perf = _hud.PerfMeter(window=60)
+
+    def _hud_render(phase: str, step: int, total: int):
+        if cam is None:
+            return True
+        if not args.viewer:
+            cam.render()
+            return True
+        # Quick spread stats for HUD.
+        v = car.get_vel().cpu().numpy()
+        speed = (v[:, :2] ** 2).sum(axis=1) ** 0.5
+        frame = _hud.render_hud_frame(
+            cam,
+            title=f"batched_rollout  n_envs={args.n_envs}   v{sdk_version}",
+            lines=[
+                f"phase: {phase}    step {step:>4}/{total}",
+                f"grid : {per_row} × {n_rows}    spacing {args.grid_spacing} m",
+                f"speed across envs: {speed.min():.2f} .. {speed.max():.2f} m/s "
+                f"(mean {speed.mean():.2f})",
+                "[ESC] quit",
+            ],
+            perf_ms=hud_perf.ms_per_step(),
+        )
+        return _hud.cv2_show("genesis_vehicle batched_rollout", frame)
+
     for step in range(int(1.5 / cfg.dt)):
         physics.step(settle_in)
         scene.step()
-        if cam is not None and step % render_every == 0:
-            cam.render()
+        hud_perf.tick()
+        if step % render_every == 0:
+            if not _hud_render("settle", step, int(1.5 / cfg.dt)):
+                break
     print(f"\n[settled — running {args.warmup + args.steps} steps "
           f"({args.warmup} warmup + {args.steps} measured)]")
 
@@ -157,14 +181,18 @@ def main():
     for _ in range(args.warmup):
         physics.step(inputs)
         scene.step()
+        hud_perf.tick()
 
     t0 = time.perf_counter()
     for step in range(args.steps):
         physics.step(inputs)
         scene.step()
-        if cam is not None and step % render_every == 0:
-            cam.render()
+        hud_perf.tick()
+        if step % render_every == 0:
+            if not _hud_render("measure", step, args.steps):
+                break
     wall = time.perf_counter() - t0
+    _hud.cv2_cleanup()
 
     p = car.get_pos().cpu().numpy()    # (n_envs, 3)
     v = car.get_vel().cpu().numpy()

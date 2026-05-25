@@ -10,6 +10,68 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.23] — 2026-05-25
+
+### Changed — `--viewer` now opens a cv2 window with live HUD overlay
+
+`--viewer` previously opened Genesis's built-in interactive 3D window
+(v0.5.21) but had no way to overlay text — performance numbers, vehicle
+state, sample-specific info — on top of the camera frame. Switched to a
+cv2-based pattern that does:
+
+- Renders the offscreen camera each step
+- Draws a semi-transparent header rectangle
+- Overlays a title + per-sample state lines + a perf footer
+  (rolling-mean `ms/step` + `fps`)
+- Shows via `cv2.imshow`; `ESC` quits
+
+The trade-off: lose Genesis's mouse-rotate interactivity, gain a
+fixed-POV camera with informative overlay (the camera's pose is the one
+each sample already set for its offscreen rendering).
+
+### Added — `samples/_hud.py`
+
+Minimal helper used by all 6 viewer-supporting samples:
+
+- `PerfMeter` — rolling-mean ms/step over a configurable window (default 60).
+  ``tick()`` cost is well under 1 μs; safe to call every step.
+- `render_hud_frame(cam, title, lines, perf_ms)` — renders the camera and
+  draws the HUD overlay; returns BGR `np.ndarray` for `cv2.imshow`.
+- `cv2_show(window, frame)` — wraps `cv2.imshow + cv2.waitKey(1)`;
+  returns `False` on `ESC`.
+- `cv2_cleanup()` — `cv2.destroyAllWindows()`.
+
+No `pynput` dependency (unlike the umbrella `_demo_hud.py`); cv2 only.
+If cv2 isn't importable, `--viewer` falls back to headless with a
+warning.
+
+### Per-sample HUD content
+
+| Sample | HUD lines |
+|---|---|
+| `quickstart`         | t, throttle, pos, speed |
+| `slope_hold`         | t, brake, pos, roll, lateral slip |
+| `batched_rollout`    | phase, step, grid, speed spread across envs |
+| `road_loop`          | step, vehicle/kind count, per-kind speeds |
+| `multi_env_render`   | step, grid spec, speed spread across envs |
+| `city_traffic_ego`   | step, total batch, ego pose/speed, L2 kinds |
+
+All include a perf footer (`X.XX ms/step (Y fps)`) and an `[ESC] quit`
+prompt.
+
+### `ESC`-to-quit
+
+All 6 samples now break out of the main loop on `ESC`. The end-of-run
+`[timing]` print uses the actual `n_done` step count (steps that ran
+before `ESC`), so the throughput numbers are honest even when the user
+cuts the run short.
+
+### No SDK code changes
+
+Pure sample / docs work. 60 SDK tests pass.
+
+---
+
 ## [0.5.22] — 2026-05-25
 
 ### Added — zero-overhead timing across all non-bench samples
