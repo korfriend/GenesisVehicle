@@ -10,6 +10,35 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.12] — 2026-05-25
+
+### Fixed — `MultiVehicleKindPhysics` now supports VisualSync
+
+v0.5.11 disabled the internal VisualSync entirely because the proto
+`VehiclePhysics(n_envs=K)` it inherits from would issue a
+`set_dofs_position` with shape `(K, n_dofs)` into a scene actually
+built with `n_envs=1`, which Genesis rejects (the K dim is "vehicles
+in this env", not "parallel envs").
+
+Fix: build K independent `VisualSync` instances (one per entity, each
+`n_envs=1`). After the batched compute pipeline produces (K, n_wheels)
+spin / steer / suspension targets, the visual step slices them into K
+per-entity (1, n_wheels) chunks and dispatches K small
+`set_dofs_position` calls — a Python loop, but each call is tiny.
+
+Measured overhead: ~34 ms added to the 16-vehicle road_loop step
+(760 → 794 ms / step). Net L2 speedup vs per_vehicle (848 → 794)
+shrinks slightly from 10% to ~6%, but every vehicle now gets correct
+wheel-spin and steering visuals — making `multi_batched` a drop-in
+replacement for `per_vehicle` in visual demos.
+
+### Migration
+
+None — same `MultiVehiclePhysics` constructor signature. Existing code
+written against v0.5.11 keeps working and gets visuals for free.
+
+---
+
 ## [0.5.11] — 2026-05-25
 
 ### Added — `MultiVehiclePhysics` (L2 cross-vehicle batching)
