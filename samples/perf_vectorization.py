@@ -68,7 +68,7 @@ def _internal_run(n_envs: int, warmup: int, steps: int) -> None:
     gs.init(backend=gs.gpu, logging_level="warning")
     DT = 0.02
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=DT, substeps=20),
+        sim_options=gs.options.SimOptions(dt=DT, substeps=10),
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,

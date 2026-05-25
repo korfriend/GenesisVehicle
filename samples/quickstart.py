@@ -65,7 +65,7 @@ def main():
     gs.init(backend=gs.gpu, logging_level="warning")
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=50),
+        sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=10),
         rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),

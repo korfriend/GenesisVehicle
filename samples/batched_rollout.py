@@ -89,7 +89,7 @@ def main():
     cam_h   = max(grid_w, grid_h) * 1.2
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=20),
+        sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=10),
         rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
