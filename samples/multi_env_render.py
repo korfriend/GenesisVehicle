@@ -112,17 +112,19 @@ def main():
     )
 
     # Overhead offscreen camera. With env_separate_rigid=True, this camera
-    # produces N tiled per-env frames; rendering at full 1920×1080 per env is
-    # wasted work because the HUD downsizes each cell to ≤480 px. Use a
-    # modest per-env resolution when viewing the grid, full res when headless
-    # (the caller may want to mp4-record the offscreen frame).
-    cam_res = (640, 360) if args.viewer else (1920, 1080)
-    cam = scene.add_camera(
-        res=cam_res,
-        pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
-        up=(1.0, 0.0, 0.0),
-        fov=70, near=0.1, far=cam_h * 4, GUI=False,
-    )
+    # produces N tiled per-env frames. Camera is only created when --viewer
+    # (or when a post-loop render bench is wanted); having a camera in the
+    # scene measurably slows scene.step (renderer state sync per step), so
+    # in pure-physics headless mode we skip it. Without --viewer the sample
+    # measures pure physics throughput across the grid.
+    cam = None
+    if args.viewer:
+        cam = scene.add_camera(
+            res=(640, 360),
+            pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
+            up=(1.0, 0.0, 0.0),
+            fov=70, near=0.1, far=cam_h * 4, GUI=False,
+        )
 
     # Build with env_spacing + n_envs_per_row → physics-irrelevant grid for vis.
     scene.build(
@@ -150,7 +152,6 @@ def main():
     for _ in range(int(1.5 / DT)):
         physics.step(settle)
         scene.step()
-        cam.render()
 
     # Drive.
     n_steps = int(args.duration / DT)
@@ -159,8 +160,8 @@ def main():
     hud_perf = _hud.PerfMeter(window=60)
 
     def _hud_render(step: int):
+        # Headless = pure physics (cam is None); viewer = render + tiled HUD.
         if not args.viewer:
-            cam.render()
             return True
         v = car.get_vel().cpu().numpy()
         speed = np.linalg.norm(v[:, :2], axis=1)
@@ -207,11 +208,13 @@ def main():
           f"(range {p[:, 1].max() - p[:, 1].min():.2f} m)")
     print(f"  speed  : {speed.min():.2f} .. {speed.max():.2f} m/s  "
           f"(mean {speed.mean():.2f})")
+    r_ms, r_n = _hud.bench_render(cam, n=20) if cam is not None else (None, None)
     _hud.print_perf_summary(
         sample=f"multi_env_render  (v{sdk_version})",
         completed=not user_quit,
         n_done=n_done, n_target=n_steps, wall=wall,
         batch=n_envs, batch_label="env",
+        render_ms=r_ms, render_n=r_n,
         extra=[
             f"grid       : {per_row} x {n_rows}   spacing {args.spacing:.1f} m",
             f"speed range: {speed.min():.2f} .. {speed.max():.2f} m/s",

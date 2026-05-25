@@ -237,6 +237,8 @@ def print_perf_summary(
     wall: float,
     batch: Optional[int] = None,
     batch_label: str = "unit",
+    render_ms: Optional[float] = None,
+    render_n: Optional[int] = None,
     extra: Optional[Sequence[str]] = None,
 ) -> None:
     """Print a multi-line perf summary block at the end of a sample run.
@@ -279,7 +281,31 @@ def print_perf_summary(
         bps = batch * sps
         print(f"  batch      : {batch} {batch_label}/step  ->  "
               f"{bps:,.0f} {batch_label}-steps/s")
+    if render_ms is not None and render_n is not None and render_n > 0:
+        rfps = 1000.0 / render_ms if render_ms > 0 else 0.0
+        print(f"  render     : {render_ms:>6.2f} ms / frame   "
+              f"({rfps:5.1f} fps, avg of {render_n} standalone)")
     if extra:
         for line in extra:
             print(f"  {line}")
     print(bar)
+
+
+def bench_render(cam, n: int = 20) -> tuple[float, int]:
+    """Time ``n`` standalone ``cam.render()`` calls with a single CUDA sync
+    on each side. Returns ``(ms_per_render, n)``.
+
+    Use this AFTER the main physics loop to characterize render cost
+    independently of physics. The single-sync pattern is the same one
+    used for the zero-overhead timing block, so the measurement is
+    accurate to within one GPU-roundtrip across all ``n`` frames (cost
+    amortizes for ``n >= ~10``).
+    """
+    import torch
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n):
+        cam.render()
+    torch.cuda.synchronize()
+    wall = time.perf_counter() - t0
+    return (wall / n * 1000.0, n)

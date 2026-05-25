@@ -217,11 +217,13 @@ def main():
     v = car.get_vel().cpu().numpy()
     speed = (v[:, :2] ** 2).sum(axis=1) ** 0.5
 
+    r_ms, r_n = _hud.bench_render(cam, n=20) if cam is not None else (None, None)
     _hud.print_perf_summary(
         sample=f"batched_rollout  (v{sdk_version})",
         completed=not user_quit,
         n_done=n_done, n_target=args.steps, wall=wall,
         batch=args.n_envs, batch_label="env",
+        render_ms=r_ms, render_n=r_n,
         extra=[
             f"warmup     : {args.warmup} steps (not counted)",
             f"spread x   : {p[:,0].min():+.2f} .. {p[:,0].max():+.2f}",

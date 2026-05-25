@@ -131,10 +131,8 @@ def main():
     hud_perf = _hud.PerfMeter(window=60)
 
     def _hud_render(t_sim: float, slip_mm: float):
-        if cam is None:
-            return True
+        # Headless = pure physics (no cam/render); viewer = render + HUD.
         if not args.viewer:
-            cam.render()
             return True
         q = car.get_quat()[0].cpu().numpy()
         roll = _quat_to_roll_deg(q)
@@ -199,10 +197,12 @@ def main():
         print(f"      Likely cause: stability.py StaticFrictionLock anchor / spring-damper")
         print(f"      logic regression, or pacejka.py / core.py wiring change.")
     verdict = "OK" if abs_slip_mm < HOLD_OK_M * 1000 else "REGRESSION"
+    r_ms, r_n = _hud.bench_render(cam, n=20) if cam is not None else (None, None)
     _hud.print_perf_summary(
         sample=f"slope_hold  (v{sdk_version})",
         completed=not user_quit,
         n_done=n_done, n_target=n_hold, wall=wall,
+        render_ms=r_ms, render_n=r_n,
         extra=[
             f"slope      : {slope_deg:+.1f} deg",
             f"lat. slip  : {slip*1000:+.1f} mm  ({verdict})",
