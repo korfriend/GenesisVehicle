@@ -276,8 +276,13 @@ def main():
     # via the viewer_options above; this offscreen camera is independent
     # and runs whether or not the viewer is on.
     # ------------------------------------------------------------------
+    # With env_separate_rigid (args.n_envs > 1 + --viewer), the render returns
+    # a per-env stack — the HUD tiles cells into a grid and downsizes them, so
+    # rendering each cell at 1080p is wasted. Use a modest per-cell res in
+    # that case; keep 1080p when there's only one env to render.
+    cam_res = (640, 360) if (args.viewer and args.n_envs > 1) else (1920, 1080)
     cam = scene.add_camera(
-        res=(1920, 1080),
+        res=cam_res,
         pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
         up=(1.0, 0.0, 0.0),       # +X is "up" on screen (driving away from viewer)
         fov=60, near=0.1, far=cam_h * 4, GUI=False,
@@ -360,6 +365,7 @@ def main():
                 "[ESC] quit",
             ],
             perf_ms=hud_perf.ms_per_step(),
+            grid_per_row=max(1, int(round(math.sqrt(args.n_envs)))) if args.n_envs > 1 else None,
         )
         return _hud.cv2_show("genesis_vehicle city_traffic_ego", frame)
 

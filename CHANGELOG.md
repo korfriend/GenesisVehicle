@@ -10,6 +10,50 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.24] — 2026-05-25
+
+### Fixed — `--viewer` only showed env 0 when `env_separate_rigid=True`
+
+`multi_env_render --viewer` (and `batched_rollout --viewer`,
+`city_traffic_ego --viewer --n_envs N` with `N>1`) was rendering only
+one of the parallel envs and updating at far below the requested rate.
+
+Root cause: Genesis's `cam.render()` returns a per-env stack of shape
+`(N, H, W, 3)` whenever `env_separate_rigid=True`; the v0.5.23
+`_hud.render_hud_frame` only checked `if frame.ndim == 4: frame =
+frame[0]`, silently dropping all but env 0. The "only one car visible"
+bug followed directly.
+
+### Changed
+
+- `_hud.render_hud_frame` now tiles a 4-D per-env stack into a
+  `per_row × ceil(N/per_row)` mosaic. Two new kwargs:
+  - `grid_per_row` — cells per row in the mosaic; default
+    `round(sqrt(N))`.
+  - `max_cell_size` — clamp each cell's longer axis to this many
+    pixels before tiling (default 480). Keeps the displayed mosaic
+    a sane size regardless of camera resolution.
+- `multi_env_render`, `batched_rollout`, `city_traffic_ego` lower the
+  per-cell camera resolution to 640×360 when running with
+  `env_separate_rigid=True`. Rendering at 1920×1080 per env when each
+  cell is downsized to ≤480 px wastes ~10× the GPU + GPU→CPU work and
+  was the main cause of the sub-10 fps display rate the user observed.
+  Headless and single-env paths keep the original 1920×1080.
+- Samples now pass `grid_per_row` matching their build-time
+  `n_envs_per_row` so the HUD layout matches the physics-side grid.
+
+### Effect on the reported case
+
+`multi_env_render --viewer --n_envs 4` (per_row=2, spacing 10):
+- Before: env-0-only view, ~2.5 fps display (1080p × 4 = 8 MP/frame
+  rendered then 7/8 discarded).
+- After: 2×2 grid mosaic (960×540 final), per-cell render at 640×360,
+  display refresh follows the existing `~25 fps render_every` cadence
+  (actual frame-to-frame rate now limited by physics step time, not
+  the render).
+
+---
+
 ## [0.5.23] — 2026-05-25
 
 ### Changed — `--viewer` now opens a cv2 window with live HUD overlay
