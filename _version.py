@@ -4,5 +4,5 @@ Update both ``__version__`` and ``VERSION_INFO`` together; CHANGELOG.md
 must gain a new section for every release.
 """
 
-__version__ = "0.5.15"
-VERSION_INFO = (0, 5, 15)
+__version__ = "0.5.16"
+VERSION_INFO = (0, 5, 16)
