@@ -23,6 +23,25 @@ class VehiclePhysics:
     def reset(env_ids: torch.Tensor | None = None) -> None
 ```
 
+### Multi-vehicle (L2 batching, v0.5.11+)
+
+When K vehicles share ONE scene at DIFFERENT positions (traffic,
+multi-agent, MPPI candidate visualization), `MultiVehiclePhysics` groups
+them by URDF / cfg identity and batches the compute pipeline per kind:
+
+```python
+class MultiVehiclePhysics:
+    def __init__(scene, vehicles: list[tuple[Entity, Sensor, VehicleConfig]])
+    def step(inputs_list: list[VehicleStepInputs]) -> None
+```
+
+Vehicles of the same kind must share the SAME ``cfg`` instance — group
+by passing ``cfg_per_kind[k]`` instead of calling the preset fresh per
+vehicle. ~10% faster than the per-vehicle loop at K=16; bounded by
+Genesis's per-entity ``scene.step()`` cost. For RL/MPPI throughput use
+``n_envs > 1`` instead (L3 batching — see
+[`../samples/perf_vectorization.py`](../samples/perf_vectorization.py)).
+
 State (read-only, all `(n_envs, n_wheels)`):
 
 - `omega` — wheel angular velocities

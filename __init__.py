@@ -107,6 +107,8 @@ _GENESIS_LAZY = {
     "VehiclePhysics": ("genesis_vehicle.core", "VehiclePhysics"),
     "WheelMeta": ("genesis_vehicle.core", "WheelMeta"),
     "PipelineContext": ("genesis_vehicle.core", "PipelineContext"),
+    "MultiVehiclePhysics": ("genesis_vehicle.multi_vehicle", "MultiVehiclePhysics"),
+    "MultiVehicleKindPhysics": ("genesis_vehicle.multi_vehicle", "MultiVehicleKindPhysics"),
     "WheelRayPattern": ("genesis_vehicle.raycast", "WheelRayPattern"),
     "read_distances": ("genesis_vehicle.raycast", "read_distances"),
     "VisualSync": ("genesis_vehicle.visual", "VisualSync"),
@@ -131,6 +133,7 @@ __all__ = [
     "__version__", "VERSION_INFO", "version", "version_info",
     # Driver (lazy)
     "VehiclePhysics", "WheelMeta", "PipelineContext",
+    "MultiVehiclePhysics", "MultiVehicleKindPhysics",
     # Sensor / raycast (lazy)
     "WheelRayPattern", "read_distances",
     # Scene helpers (lazy — thin wrappers around Genesis boilerplate)
