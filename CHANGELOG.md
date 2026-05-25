@@ -10,6 +10,29 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.15] — 2026-05-25
+
+### Added — `docs/batching.md` (L1 / L2 / L3 reference)
+
+The three orthogonal vectorization axes are now a first-class topic in
+the docs and README:
+
+- **README.md** — new top-level "Three-axis vectorization (L1 / L2 / L3)"
+  section above "Installation" with the headline table, rule-of-thumb
+  decision guide, and measured numbers.
+- **docs/batching.md** (new) — full treatment: each axis explained, when
+  it matters, when it doesn't, code patterns, measured speedups
+  (RTX 5070 Laptop), L2 × L3 combined pattern, decision matrix, what's
+  NOT batched.
+- **docs/concepts.md** — "Batched by default" section now sketches the
+  three axes and links to `batching.md`.
+- **docs/index.md** — added "Pick the right batching axis" entry to
+  the landing TOC.
+
+No code changes; doc-only release.
+
+---
+
 ## [0.5.14] — 2026-05-25
 
 ### Added — L2 × L3 combined batching (`n_envs > 1` for MultiVehiclePhysics)

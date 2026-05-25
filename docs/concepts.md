@@ -101,8 +101,22 @@ Selecting which hooks are active is done via a **stability profile**
 (`"control"` / `"raw"` / `"research"`), not by assembling a free-form list.
 See [`stability-profiles.md`](stability-profiles.md) for the why and the how.
 
-## 6. Batched by default
+## 6. Batched by default — three axes
 
 Every state tensor is `(n_envs, n_wheels)` or `(n_envs, 3/4)`. Single-env
 (`n_envs=1`) is just a special case. Scalar OR `(n_envs,)` tensor inputs are
 both accepted. Use `physics.reset(env_ids=...)` for partial reset (RL / MPPI).
+
+There are three orthogonal batching axes:
+
+- **L1** — wheels of ONE vehicle, batched inside `VehiclePhysics` (always on).
+- **L2** — K vehicles of the SAME URDF/cfg in one Genesis env, batched via
+  `MultiVehiclePhysics` (since v0.5.11).
+- **L3** — N parallel envs, batched via `scene.build(n_envs=N)` (since v0.1).
+
+L2 and L3 compose into `MultiVehiclePhysics(scene, vehicles, n_envs=N)`
+for `N·K` total vehicles in one batched compute call (since v0.5.14).
+
+See [`batching.md`](batching.md) for the decision matrix, measured
+speedups, and the L2 × L3 combined pattern (the headline workflow for
+autonomous-driving ego + traffic in MPPI / RL).

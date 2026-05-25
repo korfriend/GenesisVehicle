@@ -1,0 +1,287 @@
+# Batching axes (L1 / L2 / L3)
+
+The SDK has three orthogonal batching axes. Each compresses a Python
+`for`-loop into a single GPU dispatch, but they target different kinds
+of repetition. Knowing which one to reach for is the single biggest
+performance decision in a `genesis_vehicle` codebase.
+
+| Axis | Meaning | Built into | Headline win |
+|---|---|---|---|
+| **L1** | Wheels of ONE vehicle (4–10 wheels) | `VehiclePhysics` (always on) | Wheel loop → batched ops on `(*, n_wheels)` |
+| **L2** | K vehicles of the SAME URDF/cfg in one Genesis env | `MultiVehiclePhysics` | K per-vehicle `step()` calls → 1 batched call per kind |
+| **L3** | N parallel "universes" of the same scene | `scene.build(n_envs=N)` + `VehiclePhysics(n_envs=N)` | N independent rollouts → 1 batched call across envs |
+
+They COMPOSE multiplicatively: L1 is always on; L2 and L3 can be stacked
+via `MultiVehiclePhysics(scene, vehicles, n_envs=N)` for `N·K` total
+vehicles in a single batched compute pipeline.
+
+---
+
+## L1 — wheel batching (transparent)
+
+Every `VehiclePhysics.step()` processes all wheels of the vehicle in
+one batched tensor pipeline. Before v0.5.0 the SDK had a Python loop
+over wheels (one CUDA kernel chain per wheel); v0.5.0 collapsed that
+to a single `(n_envs, n_wheels)` tensor pipeline. There's no
+user-facing knob — using `VehiclePhysics` at all gets you L1.
+
+The compute steps all operate on `(*, n_wheels)`:
+
+```
+raycast       → distances     (n_envs, n_wheels)
+suspension N  → N             (n_envs, n_wheels)
+slip κ, α     → kappa, alpha  (n_envs, n_wheels)
+tire force    → F_long, F_lat (n_envs, n_wheels)
+omega update  → omega         (n_envs, n_wheels)
+chassis force → total_F       (n_envs, 3)
+```
+
+The Pacejka tire model, all stability hooks, and the omega-coupling
+strategy all process every wheel in one call. Nothing to tune.
+
+### When L1 matters
+
+- Always. Even a single vehicle benefits — for a tank with 10 wheels,
+  pre-v0.5.0 you'd pay 10× kernel-launch overhead per step. Now it's 1×.
+
+### See also
+
+- [`samples/quickstart.py`](../samples/quickstart.py) — the smallest
+  VehiclePhysics call (and therefore the smallest L1 use).
+
+---
+
+## L2 — cross-vehicle batching in one env
+
+`MultiVehiclePhysics(scene, vehicles, n_envs=1)` processes K vehicles
+that share one Genesis scene. It groups vehicles by `id(cfg)` (same
+config object → same kind = same URDF + same preset + same wheel
+overrides) and runs a single batched compute per kind:
+
+- **Compute**: Pacejka, hooks, suspension calculation collapse from K
+  separate calls to 1 batched call per kind operating on `(K_kind,
+  n_wheels)` tensors.
+- **State reads**: One `solver.get_links_{pos,quat,vel,ang}(K_idx)`
+  call returns `(N=1, K_kind, ...)` for all K vehicles. No Python loop.
+- **Force / torque writes**: One `solver.apply_links_external_force`
+  call with K link indices applies forces to all K base links.
+- **Sensor reads**: K small `sensor.read()` calls in a Python loop
+  (one raycaster per vehicle — unavoidable per-vehicle I/O).
+- **Visual writes**: K per-entity `VisualSync.step()` calls (each tiny
+  `set_dofs_position`). Negligible vs the compute saving.
+
+### When L2 matters
+
+- **Traffic / multi-agent scenes**: K different vehicles at different
+  positions in one Genesis scene.
+- **Visual demos**: a top-down view of mixed vehicles ([`road_loop.py`](../samples/road_loop.py)).
+- **Mixed-kind comparisons**: 4 FWD + 4 RWD + 4 AWD + 4 Truck in one scene,
+  comparing their behaviors at a glance.
+
+### When L2 does NOT help
+
+- **Pure throughput on one vehicle kind**: just use L3 (`n_envs > 1`).
+  L2 is for "same scene, different positions"; L3 is for "different
+  scenes (universes), same positions".
+- **K = 1 per kind**: L2 has setup overhead. With nothing to batch the
+  default `VehiclePhysics` is faster — see [`samples/perf_multi_vehicle.py`](../samples/perf_multi_vehicle.py)
+  showing 0.95× at K=1.
+
+### Caveats / contracts
+
+- **Vehicles of the same kind must share the SAME cfg INSTANCE** — the
+  dispatcher groups by `id(cfg)`. Call `preset_fn()` once per kind and
+  reuse the returned `VehicleConfig`, don't call it fresh per vehicle:
+
+  ```python
+  # WRONG — each call returns a fresh cfg, so K vehicles → K kinds.
+  for i in range(K):
+      _, _, cfg = add_vehicle(scene, urdf, preset_fn)
+      vehicles.append((ent, sens, cfg))   # ← K different cfgs
+
+  # RIGHT — one cfg per kind, shared across vehicles of that kind.
+  cfg = preset_fn(urdf)
+  for i in range(K):
+      ent, sens, _ = add_vehicle(scene, urdf, preset_fn=None)
+      vehicles.append((ent, sens, cfg))   # ← same instance
+  ```
+
+### See also
+
+- [`samples/perf_multi_vehicle.py`](../samples/perf_multi_vehicle.py) — solver comparison sweep at varying K.
+- [`samples/road_loop.py`](../samples/road_loop.py) — visual demo with `--solver multi_batched`.
+
+---
+
+## L3 — cross-env batching (`n_envs > 1`)
+
+Built into Genesis. `scene.build(n_envs=N)` makes N parallel "universes"
+of the same scene, and `VehiclePhysics(n_envs=N)` treats them as a
+batched compute dimension. Every state read returns an `(N, ...)`
+tensor; per-env inputs are accepted as `(N,)` tensors. One CUDA
+dispatch chain handles all N envs.
+
+This is the workhorse for RL / MPPI: you typically want many parallel
+rollouts of the same vehicle setup with different action sequences.
+
+### When L3 matters
+
+- **RL training**: hundreds or thousands of parallel rollouts is the
+  whole point of policy gradient + GPU throughput.
+- **MPPI candidate evaluation**: 256 candidate action sequences scored
+  in parallel.
+- **Hyperparameter sweeps**: each env runs the scenario with a
+  different cfg perturbation.
+
+### Throughput characteristic
+
+`ms / step` stays roughly constant from `n_envs = 4` upward — Genesis +
+the SDK saturate the GPU, so each additional parallel env is nearly
+free. The headline number on an RTX 5070 Laptop:
+
+| n_envs | ms / step | env-steps / s | per env (μs) | gain |
+|-------:|----------:|--------------:|-------------:|-----:|
+|      1 |     26.3  |            38 |       26 315 | 1.0× |
+|      4 |     36.8  |           109 |        9 196 | 2.9× |
+|     16 |     37.3  |           429 |        2 330 | 11.3× |
+|     64 |     37.9  |         1 691 |          592 | **44.4×** |
+
+(See [`samples/perf_vectorization.py`](../samples/perf_vectorization.py) for the bench script.)
+
+### Visualization caveat
+
+All N envs simulate at the SAME world coordinates (they're parallel
+universes, not spatial offsets). To SEE all N in one render, enable
+
+```python
+vis_options = gs.options.VisOptions(env_separate_rigid=True, ...)
+scene.build(n_envs=N, env_spacing=(dx, dy), n_envs_per_row=K)
+```
+
+— Genesis lays the envs out in a grid for rendering only (physics
+unchanged). See [`samples/multi_env_render.py`](../samples/multi_env_render.py).
+
+### See also
+
+- [`samples/batched_rollout.py`](../samples/batched_rollout.py) — minimal `n_envs > 1` call pattern.
+- [`samples/perf_vectorization.py`](../samples/perf_vectorization.py) — scaling sweep.
+- [`samples/multi_env_render.py`](../samples/multi_env_render.py) — render all envs in a grid.
+
+---
+
+## L2 × L3 combined (`MultiVehiclePhysics(n_envs=N)`)
+
+For autonomous-driving simulation the natural pattern is "K vehicles
+per scenario (ego + traffic agents) × N parallel scenarios (MPPI
+candidates / RL rollouts)". This is L2 and L3 stacked.
+
+Since v0.5.14, `MultiVehiclePhysics(scene, vehicles, n_envs=N)` does
+exactly this: internal compute batch dim is `N·K`, with batched I/O
+along both axes.
+
+### API
+
+```python
+import torch
+from genesis_vehicle import MultiVehiclePhysics, VehicleInputs, ...
+
+# Build the scene as before: K vehicles of one or more kinds, share
+# cfg instance per kind.
+cfg = preset_fn(URDF)
+vehicles = [(add_vehicle(scene, URDF, preset_fn=None, pos=spawn[k])[:2] + (cfg,))
+            for k in range(K)]
+
+# n_envs is now a constructor argument:
+scene.build(n_envs=N)
+mphys = MultiVehiclePhysics(scene, vehicles, n_envs=N)
+
+# Per-vehicle inputs accept (N,) tensors per env, OR scalars (broadcast
+# across all N envs). One step advances N·K vehicles total.
+inputs = [
+    VehicleInputs(throttle=torch.rand(N, device='cuda'),
+                  brake=torch.zeros(N, device='cuda'),
+                  steer=0.0)        # ← scalar broadcasts across envs
+    for _ in range(K)
+]
+mphys.step(inputs)
+scene.step()
+```
+
+### Measured stacking
+
+L2 × L3 stack close to MULTIPLICATIVELY. From [`samples/perf_l2_l3_combined.py`](../samples/perf_l2_l3_combined.py)
+on an RTX 5070 Laptop:
+
+|  K |  N | total | ms/step | per veh (μs) | gain |
+|---:|---:|------:|--------:|-------------:|-----:|
+|  1 |  1 |     1 |   26.3  |       26 315 | 1.0× |
+|  1 |  4 |     4 |   37.8  |        9 458 | 2.8× (L3 only) |
+|  2 |  1 |     2 |   36.0  |       17 992 | 1.5× (L2 only) |
+|  2 |  4 |     8 |   45.8  |        5 724 | **4.6×** (L2 × L3 ≈ 2.8 · 1.5 = 4.2 + GPU bonus) |
+
+The combined gain (4.6×) is close to the product of the individual
+gains (4.2×), with a small bonus from better GPU saturation at the
+larger total batch.
+
+### Use case (autonomous-driving MPPI)
+
+Concretely: each MPPI scenario contains 1 ego + (K−1) traffic agents.
+You evaluate N parallel scenarios per planning step (different ego
+action sequences). With L2 × L3:
+
+- N MPPI rollouts × K vehicles per rollout = `N·K` total
+- One batched compute dispatch per vehicle kind
+- Scales with GPU throughput, not vehicle count
+
+This is the headline workflow the v0.5.14 release was built around.
+
+---
+
+## Decision matrix
+
+| Your scenario | Solver |
+|---|---|
+| 1 vehicle, parallel rollouts for RL / MPPI | `VehiclePhysics(n_envs=N)` (L3) |
+| 1 vehicle, just visualization | `VehiclePhysics` (n_envs=1) |
+| K vehicles in 1 visible scene (traffic demo, multi-kind comparison) | `MultiVehiclePhysics(scene, vehicles)` (L2) |
+| **K vehicles × N parallel scenarios** | **`MultiVehiclePhysics(scene, vehicles, n_envs=N)`** (L2 × L3) |
+| K=1, large N | Use plain `VehiclePhysics(n_envs=N)` — L2 only adds overhead with nothing to batch |
+
+If you find yourself manually Python-looping over vehicles or envs,
+you're probably leaving one of these axes on the table — check the
+table above.
+
+---
+
+## What's NOT batched
+
+- **`scene.step()` cost grows with entity count.** Genesis processes
+  every entity in the scene per step (collision detection, integration).
+  L2 batches the SDK-side compute, not Genesis's entity loop, so the
+  per-step cost still grows roughly linearly with `K_total` (vehicles
+  across all kinds in the scene). This is a Genesis-level constraint;
+  L3 (parallel envs of the same scene) sidesteps it because the entity
+  set is shared across envs.
+- **Cross-kind compute**. Different URDFs / wheel counts / cfgs cannot
+  share one batched call — they're dispatched as separate per-kind
+  batches. With 4 kinds × 4 vehicles each, that's 4 batched calls per
+  step (vs 16 in the per-vehicle pattern).
+- **Sensor reads** in L2 are per-vehicle (one raycaster per vehicle —
+  Genesis doesn't expose a multi-sensor batch API). Cost is small but
+  scales with K.
+- **VisualSync writes** in L2 are per-entity (K small
+  `set_dofs_position` calls). Negligible.
+
+---
+
+## Performance numbers (reference, RTX 5070 Laptop)
+
+| Setup | Sample | Result |
+|---|---|---|
+| L3 sweep | [`samples/perf_vectorization.py`](../samples/perf_vectorization.py) | 44× at n_envs=64 |
+| L2 sweep | [`samples/perf_multi_vehicle.py`](../samples/perf_multi_vehicle.py) | 1.14× at K=2, 1.07× at K=4 (4-kind fleet) |
+| L2 × L3 combined | [`samples/perf_l2_l3_combined.py`](../samples/perf_l2_l3_combined.py) | 4.6× at K=2 N=4 (≈ product of L2 × L3 individual) |
+| Multi-vehicle visual | [`samples/road_loop.py`](../samples/road_loop.py) | 6% faster than per-vehicle loop with full VisualSync (16 vehicles, 4 kinds) |
+
+Re-run the samples on your machine — absolute numbers depend on GPU
+and WSL/native setup.

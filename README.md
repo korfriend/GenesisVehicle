@@ -38,6 +38,38 @@ The full mental model is laid out in
 [`docs/concepts.md`](docs/concepts.md); the API surface lives in
 [`docs/api-reference.md`](docs/api-reference.md).
 
+## Three-axis vectorization (L1 / L2 / L3)
+
+Vehicle simulation has three orthogonal axes you can batch over. The SDK
+hits all three with the same lightweight Python surface:
+
+| Axis | Meaning | API | Batched by | Status |
+|---|---|---|---|---|
+| **L1** | Wheels of ONE vehicle (4-10) | `VehiclePhysics` (built-in) | Compute pipeline runs on `(*, n_wheels)` tensors — no per-wheel Python loop | ✓ since v0.5.0 (always on) |
+| **L2** | K vehicles of the same kind sharing ONE Genesis env | `MultiVehiclePhysics(scene, vehicles)` | One batched compute per kind; per-vehicle I/O via batched solver calls | ✓ since v0.5.11 |
+| **L3** | N parallel Genesis envs (parallel-universe rollouts) | `scene.build(n_envs=N)` + `VehiclePhysics(n_envs=N)` | All env work collapses into one CUDA dispatch chain | ✓ since v0.1 |
+| **L2 × L3** | K vehicles × N parallel envs (`N·K` total) | `MultiVehiclePhysics(scene, vehicles, n_envs=N)` | Combined: compute on `(N·K, n_wheels)` tensors, one batched call per kind | ✓ since v0.5.14 |
+
+**Rule of thumb**:
+- 1 vehicle, many parallel rollouts → **L3** alone (`n_envs > 1`). 44× at N=64.
+- K vehicles visible in one scene (traffic, multi-agent demo) → **L2** alone.
+- K vehicles per scenario × N parallel scenarios (ego + traffic for MPPI) → **L2 + L3 combined**, ~multiplicative speedup.
+
+Measured (RTX 5070 Laptop, see [`docs/batching.md`](docs/batching.md)):
+
+| K | N | total | gain vs (K=1, N=1) |
+|--:|--:|------:|-------------------:|
+| 1 | 4 |     4 | **2.8×** (L3 only) |
+| 2 | 1 |     2 | **1.5×** (L2 only) |
+| 2 | 4 |     8 | **4.6×** (combined ≈ 1.5 × 2.8) |
+| 1 | 64 |  64 | **44×** (L3 push) |
+
+Full design + decision matrix in [`docs/batching.md`](docs/batching.md);
+runnable benchmarks in [`samples/perf_vectorization.py`](samples/perf_vectorization.py)
+(L3), [`samples/perf_multi_vehicle.py`](samples/perf_multi_vehicle.py)
+(L2), [`samples/perf_l2_l3_combined.py`](samples/perf_l2_l3_combined.py)
+(combined).
+
 ## Installation
 
 Requires Python 3.12+ and [Genesis](https://genesis-embodied-ai.github.io/)
@@ -147,6 +179,7 @@ Detailed docs live under [`docs/`](docs/):
 | [`docs/index.md`](docs/index.md) | Documentation home — full TOC |
 | [`docs/quickstart.md`](docs/quickstart.md) | Minimal example, runnable end-to-end |
 | [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855, hook intuition, batched-by-default |
+| [`docs/batching.md`](docs/batching.md) | The L1 / L2 / L3 vectorization axes — when to use which, measured speedups, the L2 × L3 combined pattern |
 | [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default) |
 | [`docs/pipeline-and-hooks.md`](docs/pipeline-and-hooks.md) | Hook insertion points in the 5-step pipeline |
 | [`docs/stability-profiles.md`](docs/stability-profiles.md) | `control` / `raw` / `research` profiles + the "one rule" for MPPI / Real2Sim |
