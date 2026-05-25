@@ -48,6 +48,7 @@ _hud.cv2_cleanup()
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from typing import Optional, Sequence
@@ -110,23 +111,57 @@ def have_cv2() -> bool:
     return cv2 is not None
 
 
+def _tile_grid(arr: np.ndarray, per_row: Optional[int], max_cell_size: Optional[int]) -> np.ndarray:
+    """Tile an (N, H, W, 3) stack into a (R*h, C*w, 3) mosaic.
+
+    Used when ``env_separate_rigid=True`` makes ``cam.render()`` return a
+    stack of per-env frames. ``per_row`` defaults to ``round(sqrt(N))``;
+    cells are downsized to ``max_cell_size`` on their longer axis to
+    keep the mosaic display-sized.
+    """
+    n, h, w, c = arr.shape
+    if per_row is None or per_row <= 0:
+        per_row = max(1, int(round(math.sqrt(n))))
+    n_rows = math.ceil(n / per_row)
+    if max_cell_size is not None and max(h, w) > max_cell_size:
+        scale = max_cell_size / max(h, w)
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        arr = np.stack([cv2.resize(arr[i], (new_w, new_h), interpolation=cv2.INTER_AREA)
+                        for i in range(n)])
+        h, w = new_h, new_w
+    mosaic = np.zeros((n_rows * h, per_row * w, c), dtype=arr.dtype)
+    for i in range(n):
+        r, col = divmod(i, per_row)
+        mosaic[r * h:(r + 1) * h, col * w:(col + 1) * w] = arr[i]
+    return mosaic
+
+
 def render_hud_frame(
     cam,
     *,
     title: str,
     lines: Sequence[str],
     perf_ms: Optional[float] = None,
+    grid_per_row: Optional[int] = None,
+    max_cell_size: Optional[int] = 480,
 ) -> Optional[np.ndarray]:
     """Render one camera frame and overlay the HUD on top.
 
     Args
     ----
-    cam        : Genesis camera (the one created with ``scene.add_camera``).
-    title      : Bold title text line (one line).
-    lines      : Per-sample state lines (throttle, speed, etc.).
-    perf_ms    : Rolling ms/step from ``PerfMeter.ms_per_step()``, drawn as
-                 a cyan footer with computed fps. Pass ``None`` to skip
-                 the perf footer.
+    cam            : Genesis camera (the one created with ``scene.add_camera``).
+    title          : Bold title text line (one line).
+    lines          : Per-sample state lines (throttle, speed, etc.).
+    perf_ms        : Rolling ms/step from ``PerfMeter.ms_per_step()``, drawn as
+                     a cyan footer with computed fps. Pass ``None`` to skip
+                     the perf footer.
+    grid_per_row   : When ``env_separate_rigid=True`` causes the render to
+                     return a per-env stack, lay the cells out ``per_row``
+                     wide. ``None`` → ``round(sqrt(N))``.
+    max_cell_size  : Downsize each cell so its longer axis is at most this
+                     many pixels (default 480). Set ``None`` for no
+                     downsizing — useful for high-res single-env views.
 
     Returns
     -------
@@ -136,10 +171,13 @@ def render_hud_frame(
     if cv2 is None:
         return None
     rgb, *_ = cam.render()
-    frame = rgb.cpu().numpy() if hasattr(rgb, "cpu") else np.array(rgb)
-    if frame.ndim == 4:
-        frame = frame[0]
-    frame = cv2.cvtColor(frame.astype(np.uint8).copy(), cv2.COLOR_RGB2BGR)
+    arr = rgb.cpu().numpy() if hasattr(rgb, "cpu") else np.asarray(rgb)
+    if arr.ndim == 4:
+        # env_separate_rigid → (N, H, W, 3) stack of per-env frames.
+        frame = _tile_grid(arr.astype(np.uint8), grid_per_row, max_cell_size)
+    else:
+        frame = arr.astype(np.uint8)
+    frame = cv2.cvtColor(frame.copy(), cv2.COLOR_RGB2BGR)
 
     h, w = frame.shape[:2]
     n_lines = 1 + len(lines) + (1 if perf_ms is not None else 0)

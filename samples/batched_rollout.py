@@ -109,8 +109,10 @@ def main():
 
     cam = None
     if args.viewer:
+        # env_separate_rigid → N per-env frames. HUD downsizes each cell to
+        # ≤480 px, so a modest per-cell render res is plenty.
         cam = scene.add_camera(
-            res=(1280, 720),
+            res=(640, 360),
             pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
             up=(1.0, 0.0, 0.0), fov=70, near=0.1, far=cam_h * 4, GUI=False,
         )
@@ -157,6 +159,7 @@ def main():
                 "[ESC] quit",
             ],
             perf_ms=hud_perf.ms_per_step(),
+            grid_per_row=per_row,
         )
         return _hud.cv2_show("genesis_vehicle batched_rollout", frame)
 

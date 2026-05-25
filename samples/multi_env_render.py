@@ -111,9 +111,14 @@ def main():
         material=gs.materials.Rigid(friction=1.0),
     )
 
-    # Overhead offscreen camera — image-tensor render for inspection / mp4.
+    # Overhead offscreen camera. With env_separate_rigid=True, this camera
+    # produces N tiled per-env frames; rendering at full 1920×1080 per env is
+    # wasted work because the HUD downsizes each cell to ≤480 px. Use a
+    # modest per-env resolution when viewing the grid, full res when headless
+    # (the caller may want to mp4-record the offscreen frame).
+    cam_res = (640, 360) if args.viewer else (1920, 1080)
     cam = scene.add_camera(
-        res=(1920, 1080),
+        res=cam_res,
         pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
         up=(1.0, 0.0, 0.0),
         fov=70, near=0.1, far=cam_h * 4, GUI=False,
@@ -170,6 +175,7 @@ def main():
                 "[ESC] quit",
             ],
             perf_ms=hud_perf.ms_per_step(),
+            grid_per_row=per_row,
         )
         return _hud.cv2_show("genesis_vehicle multi_env_render", frame)
 
