@@ -26,6 +26,12 @@ since true n_envs batching requires a different scene build).
 
 from __future__ import annotations
 
+# Bootstrap: allow `python path/to/this_file.py` (and `python -m ...`) both.
+import sys, pathlib
+_SDK_PARENT = str(pathlib.Path(__file__).resolve().parents[2])
+if _SDK_PARENT not in sys.path:
+    sys.path.insert(0, _SDK_PARENT)
+
 import argparse
 import math
 import os
