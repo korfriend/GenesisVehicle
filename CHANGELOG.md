@@ -10,6 +10,54 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.16] — 2026-05-25
+
+### Added — `city_traffic_ego` sample (highway ego + traffic scenario)
+
+[`samples/city_traffic_ego.py`](samples/city_traffic_ego.py) — the
+reference setup for "autonomous-driving ego in surrounding traffic"
+workflows. A 4-lane straight highway on a flat plane with:
+
+- **1 ego** — bright red AWD car (sportier body)
+- **7 traffic agents** — 3 RWD blue coupes, 3 FWD small dark-red
+  sedans, 1 yellow 6-wheel truck
+- **Lane-keeping P controller** on every vehicle (target lane center
+  + small yaw correction)
+- **Top-down camera** framing the action area
+- **`--n_envs N`** enables the L2 × L3 combined batching pattern —
+  one MPPI candidate (or RL rollout) per env, all 8·N vehicles
+  processed in batched compute per kind
+
+Measured (RTX 5070 Laptop, 3-second drive, 150 steps):
+
+| n_envs | total batch | ms/step | vehicle-steps/s |
+|-------:|------------:|--------:|----------------:|
+|      1 |           8 |   205.9 |              39 |
+|      4 |          32 |   234.9 |             136 |
+|     16 |         128 |   ~290  |            ~440 |
+
+n_envs=4 costs +14% ms/step for 3.5× more vehicle-steps/s — the
+expected L2 × L3 combined scaling.
+
+The 8 vehicle fleet groups into 4 kinds in `MultiVehiclePhysics`:
+`K per kind = [1, 3, 3, 1]` (ego is its own group because it uses
+a different URDF / cfg from the RWD traffic).
+
+### Usage
+
+```bash
+python -m genesis_vehicle.samples.city_traffic_ego                    # 1 env, visual
+python -m genesis_vehicle.samples.city_traffic_ego --viewer
+python -m genesis_vehicle.samples.city_traffic_ego --n_envs 16        # 16 parallel scenarios
+python -m genesis_vehicle.samples.city_traffic_ego --n_envs 16 --bench
+```
+
+### Docs
+
+- `samples/README.md` — row #9 added.
+
+---
+
 ## [0.5.15] — 2026-05-25
 
 ### Added — `docs/batching.md` (L1 / L2 / L3 reference)
