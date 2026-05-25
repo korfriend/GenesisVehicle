@@ -291,6 +291,37 @@ def print_perf_summary(
     print(bar)
 
 
+def warn_if_unused_camera(cam, *, used: bool, sample: str = "") -> None:
+    """Print a one-line warning when a camera exists but the user is not
+    going to render or record with it.
+
+    Genesis runs a per-step renderer-state sync inside ``scene.step()``
+    whenever any camera is present in the scene — even one whose
+    ``.render()`` is never called. The cost is small per step but
+    compounds over a long run, and it inflates ms/step numbers that
+    are supposed to represent pure physics.
+
+    Pattern (preferred):
+
+        cam = None
+        if args.viewer:
+            cam = scene.add_camera(...)
+
+    Pattern (if you must create the cam first):
+
+        cam = scene.add_camera(...)
+        _hud.warn_if_unused_camera(cam, used=args.viewer or args.record,
+                                   sample="my_sample")
+    """
+    if cam is None or used:
+        return
+    prefix = f"[{sample}] " if sample else ""
+    print(f"{prefix}WARN: camera was created but neither --viewer nor "
+          f"--record is set. Genesis still pays a per-step renderer-state "
+          f"sync inside scene.step() — pure-physics ms/step will be "
+          f"overstated. Gate the add_camera call on args.viewer to fix.")
+
+
 def bench_render(cam, n: int = 20) -> tuple[float, int]:
     """Time ``n`` standalone ``cam.render()`` calls with a single CUDA sync
     on each side. Returns ``(ms_per_render, n)``.

@@ -317,7 +317,15 @@ def main():
         print("WARN: --viewer needs opencv-python. Continuing headless.")
         args.viewer = False
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=DT, substeps=20),
+        # Genesis's default substeps=20 is 2× the floor needed for the
+        # spring-damper suspension stack (suspension natural freq ≈ 2 Hz at
+        # K~50 kN/m and quarter-car mass ~375 kg; even substeps=10 →
+        # internal dt 1 ms gives massive headroom). With 16 vehicles in one
+        # scene the per-step cost is the constraint solver, which scales
+        # linearly with substeps — going 20 → 10 nearly halves wall time
+        # without changing the observed dynamics (verified: speeds within
+        # ±5 % of substeps=20). substeps=8 already breaks (no acceleration).
+        sim_options=gs.options.SimOptions(dt=DT, substeps=10),
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,

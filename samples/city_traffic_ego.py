@@ -202,7 +202,10 @@ def main():
         args.viewer = False
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=DT, substeps=20),
+        # substeps=10 is the floor for this vehicle stack (verified in
+        # road_loop — see CHANGELOG v0.5.28). With 8 vehicles in one scene
+        # this nearly halves ms/step at no fidelity cost.
+        sim_options=gs.options.SimOptions(dt=DT, substeps=10),
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,

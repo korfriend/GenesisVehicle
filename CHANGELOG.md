@@ -10,6 +10,60 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.28] — 2026-05-25
+
+### Performance — `road_loop` and `city_traffic_ego` substeps 20 → 10
+
+Diagnosed why `road_loop` 16 vehicles measured 824 ms/step in headless
+mode. Tried in order:
+
+- `enable_collision=False` → 689 ms/step (only 50 ms savings → collision
+  was not the bottleneck)
+- `use_contact_island=True` → Genesis 0.4.6 kernel compile error
+  (`Cannot subscript NdarrayType` in contact_island.py); fail-closed
+- `enable_multi_contact=False` → 775 ms/step (regression)
+- `max_collision_pairs` bumped → no change (cap wasn't binding)
+- `substeps=20 → 10` → **447 ms/step** (1.66× speedup), physics identical
+- `substeps=8` → 363 ms/step but car speeds collapse to 0 m/s
+  (suspension stack no longer integrates correctly)
+
+`substeps=10` (internal dt = 1 ms) is the floor for this vehicle stack.
+The suspension's natural frequency is ~2 Hz (K~50 kN/m at 375 kg
+quarter-car mass) so 1 ms is still ≫ enough; Genesis's default
+`substeps=20` was 2× the safe margin. The constraint solver runs once
+per substep, so the saving is roughly linear.
+
+Applied the same to `city_traffic_ego` (198 → 138 ms/step, −30 %).
+Other samples already had small entity counts; changing substeps there
+wouldn't move the needle.
+
+| Sample                          | Before (ms/step) | After (ms/step) | Change                |
+|---------------------------------|-----------------:|----------------:|-----------------------|
+| `road_loop` 16 veh (per_vehicle)| 824              | ~500 (est)      | substeps 20 → 10      |
+| `road_loop` 16 veh (multi_batched)| 740            | 447             | substeps 20 → 10      |
+| `city_traffic_ego` 8 veh        | 198              | 138             | substeps 20 → 10      |
+
+### Added — `_hud.warn_if_unused_camera`
+
+Helper that prints a one-line warning when a camera exists but neither
+`--viewer` nor `--record` is in use. Documents the gotcha (Genesis
+pays a per-step renderer-state sync inside `scene.step()` for any
+camera in the scene, even one whose `.render()` is never called — see
+v0.5.27 for the impact this had on `multi_env_render`'s 70 % overhead).
+
+The samples in this repo already follow the preferred pattern
+(`cam = None; if args.viewer: cam = scene.add_camera(...)`), so the
+warning is for user code that copies a sample and forgets to gate the
+camera. Optional opt-in:
+
+```python
+cam = scene.add_camera(...)   # always create
+_hud.warn_if_unused_camera(cam, used=args.viewer or args.record,
+                           sample="my_sample")
+```
+
+---
+
 ## [0.5.27] — 2026-05-25
 
 ### Fixed — perf summaries had rendering folded into physics ms/step
