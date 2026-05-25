@@ -35,8 +35,10 @@ if _SDK_PARENT not in sys.path:
 
 import argparse
 import os
+import time
 
 import numpy as np
+import torch
 import genesis as gs
 
 from genesis_vehicle import (
@@ -124,17 +126,24 @@ def main():
         if step % render_every == 0:
             _render()
 
-    # Phase 2 — open-loop forward throttle.
+    # Phase 2 — open-loop forward throttle. Timed end-to-end with a
+    # single CUDA sync before/after the loop (zero per-step overhead).
+    torch.cuda.synchronize()
+    t_start = time.perf_counter()
     for step in range(n_drive):
         physics.step(VehicleInputs(throttle=0.5, brake=0.0, steer=0.0))
         scene.step()
         if step % render_every == 0:
             _render()
+    torch.cuda.synchronize()
+    wall = time.perf_counter() - t_start
 
     p = car.get_pos()[0].cpu().numpy()
     v = car.get_vel()[0].cpu().numpy()
     print(f"\nFinal pose: x={p[0]:+.2f} y={p[1]:+.2f} z={p[2]:.2f}  "
           f"speed={(v[0]**2 + v[1]**2)**0.5:.2f} m/s")
+    print(f"[timing] {n_drive} steps in {wall:.2f}s  "
+          f"= {wall/n_drive*1000:.2f} ms/step  ({n_drive/wall:.0f} steps/s)")
 
 
 if __name__ == "__main__":

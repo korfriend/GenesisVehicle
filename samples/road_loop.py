@@ -293,8 +293,6 @@ def main():
                     help="Solver: 'per_vehicle' (N VehiclePhysics, Python loop) or "
                          "'multi_batched' (MultiVehiclePhysics — kinds grouped, "
                          "compute pipeline batched within each kind).")
-    ap.add_argument("--bench", action="store_true",
-                    help="Print per-step wall time stats during the drive phase.")
     args = ap.parse_args()
 
     K = args.n_per_kind
@@ -421,23 +419,20 @@ def main():
           f"{math.degrees(-math.atan(3.6 / args.radius)):.1f}° (truck)  "
           f"solver={args.solver}]")
 
+    # Always-on timing — single sync before/after, zero per-step overhead.
     import torch
-    if args.bench:
-        torch.cuda.synchronize()
+    torch.cuda.synchronize()
     t_start = time.perf_counter()
     for step in range(n_steps):
         step_all(drive_inputs)
         scene.step()
         if args.viewer and step % 2 == 0:    # ~25 fps render
             cam.render()
-    if args.bench:
-        torch.cuda.synchronize()
+    torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
-    if args.bench:
-        ms_per_step = wall / n_steps * 1000.0
-        print(f"\n[bench] {n_steps} steps in {wall:.2f}s  "
-              f"= {ms_per_step:6.2f} ms/step  "
-              f"({N_TOTAL * n_steps / wall:.0f} vehicle-steps/s)")
+    print(f"\n[timing] {n_steps} steps in {wall:.2f}s  "
+          f"= {wall/n_steps*1000:6.2f} ms/step  "
+          f"({N_TOTAL * n_steps / wall:,.0f} vehicle-steps/s, solver={args.solver})")
 
     # ------------------------------------------------------------------
     # Final pose summary (one sample per kind — should be near radius).

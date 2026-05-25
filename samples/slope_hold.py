@@ -38,7 +38,9 @@ if _SDK_PARENT not in sys.path:
 import argparse
 import math
 import os
+import time
 
+import torch
 import genesis as gs
 
 from genesis_vehicle import (
@@ -144,11 +146,16 @@ def main():
     print(f"  settled: pos=({p0[0]:+.3f}, {p0[1]:+.3f}, {p0[2]:+.3f}) m   "
           f"roll={roll0:+.2f}°  (expect roll ≈ {-slope_deg:+.1f}° on slope)")
 
+    # Timed end-to-end with a single CUDA sync before/after (zero per-step overhead).
+    torch.cuda.synchronize()
+    t_start = time.perf_counter()
     for step in range(n_hold):
         physics.step(inputs)
         scene.step()
         if cam is not None and step % render_every == 0:
             cam.render()
+    torch.cuda.synchronize()
+    wall = time.perf_counter() - t_start
     p1 = car.get_pos()[0].cpu().numpy()
     slip = float(p1[1]) - y0
     abs_slip_mm = abs(slip) * 1000.0
@@ -163,6 +170,8 @@ def main():
         print(f"  → REGRESSION  ({abs_slip_mm:.1f} mm > {HOLD_OK_M*1000:.0f} mm threshold)")
         print(f"      Likely cause: stability.py StaticFrictionLock anchor / spring-damper")
         print(f"      logic regression, or pacejka.py / core.py wiring change.")
+    print(f"[timing] {n_hold} steps in {wall:.2f}s  "
+          f"= {wall/n_hold*1000:.2f} ms/step  ({n_hold/wall:.0f} steps/s)")
 
 
 if __name__ == "__main__":

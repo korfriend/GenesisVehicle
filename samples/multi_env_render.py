@@ -33,6 +33,7 @@ if _SDK_PARENT not in sys.path:
 import argparse
 import math
 import os
+import time
 
 import numpy as np
 import torch
@@ -156,11 +157,16 @@ def main():
     print(f"[drive {n_steps} steps  (per-env throttle/steer randomized)]")
     render_every = max(1, int(0.04 / DT))    # ~25 fps render
 
+    # Timed end-to-end with a single CUDA sync before/after (zero per-step overhead).
+    torch.cuda.synchronize()
+    t_start = time.perf_counter()
     for step in range(n_steps):
         physics.step(drive)
         scene.step()
         if step % render_every == 0:
             cam.render()
+    torch.cuda.synchronize()
+    wall = time.perf_counter() - t_start
 
     # Final spread — confirm envs diverged.
     p = car.get_pos().cpu().numpy()    # shape (n_envs, 3) in WORLD coords (no grid offset)
@@ -173,6 +179,9 @@ def main():
           f"(range {p[:, 1].max() - p[:, 1].min():.2f} m)")
     print(f"  speed  : {speed.min():.2f} .. {speed.max():.2f} m/s  "
           f"(mean {speed.mean():.2f})")
+    print(f"\n[timing] {n_steps} steps in {wall:.2f}s  "
+          f"= {wall/n_steps*1000:.2f} ms/step  "
+          f"({n_envs*n_steps/wall:,.0f} env-steps/s, batch {n_envs})")
     print(f"\nNote: get_pos() returns the chassis-local world position WITHOUT the")
     print(f"      env_spacing offset (which is a visualization-only transform).")
     print(f"      The renderer adds the offset so all envs appear in their grid cell.")
