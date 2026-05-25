@@ -174,6 +174,33 @@ for your own topology. Every preset takes a keyword-only
 `stability="control" | "raw" | "research"` argument (default `"control"`
 — see [`docs/stability-profiles.md`](docs/stability-profiles.md)).
 
+## Samples
+
+Nine runnable scripts under [`samples/`](samples/) cover the most
+common call patterns. Full catalog with descriptions + viewer support
+in [`samples/README.md`](samples/README.md). All run as Python modules
+right after `git pull` — they depend only on the SDK and the bundled
+[`samples/urdf/car_4w.urdf`](samples/urdf/car_4w.urdf):
+
+```bash
+python -m genesis_vehicle.samples.quickstart            # 1. minimum-viable API
+python -m genesis_vehicle.samples.slope_hold            # 2. StaticFrictionLock regression
+python -m genesis_vehicle.samples.batched_rollout       # 3. n_envs > 1 API (L3)
+python -m genesis_vehicle.samples.road_loop             # 4. multi-vehicle loop (L2)
+python -m genesis_vehicle.samples.perf_vectorization    # 5. L3 scaling bench (headless)
+python -m genesis_vehicle.samples.multi_env_render      # 6. all parallel envs in a grid
+python -m genesis_vehicle.samples.perf_multi_vehicle    # 7. L2 scaling bench (headless)
+python -m genesis_vehicle.samples.perf_l2_l3_combined   # 8. L2 × L3 scaling bench (headless)
+python -m genesis_vehicle.samples.city_traffic_ego      # 9. ego + traffic highway (L2 × L3)
+```
+
+Most scripts accept `--viewer` for an offscreen camera render; the three
+perf benches are intentionally headless (rendering would distort
+throughput numbers). The catalog
+[`samples/README.md`](samples/README.md) has the per-sample viewer
+status and pointers to which sample is the right visual counterpart for
+each benchmark.
+
 ## Documentation
 
 Detailed docs live under [`docs/`](docs/):
@@ -181,6 +208,7 @@ Detailed docs live under [`docs/`](docs/):
 | Page | What's in it |
 |---|---|
 | [`docs/index.md`](docs/index.md) | Documentation home — full TOC |
+| [`samples/README.md`](samples/README.md) | Catalog of all 9 runnable samples + viewer support matrix |
 | [`docs/quickstart.md`](docs/quickstart.md) | Minimal example, runnable end-to-end |
 | [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855, hook intuition, batched-by-default |
 | [`docs/batching.md`](docs/batching.md) | The L1 / L2 / L3 vectorization axes — when to use which, measured speedups, the L2 × L3 combined pattern |
