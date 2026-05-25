@@ -60,6 +60,9 @@ def main():
                     help="Driving duration in seconds (default 8).")
     ap.add_argument("--throttle", type=float, default=0.4,
                     help="Base throttle (per-env value is throttle * (0.5 + rand) (default 0.4).")
+    ap.add_argument("--viewer", action="store_true",
+                    help="Open Genesis's interactive viewer window in addition to the "
+                         "offscreen camera render (otherwise the demo is headless).")
     args = ap.parse_args()
 
     n_envs = int(args.n_envs)
@@ -75,18 +78,32 @@ def main():
     gs.init(backend=gs.gpu, logging_level="warning")
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
 
+    # Camera framing — used both for the offscreen cam below and the
+    # interactive viewer (when --viewer).
+    grid_w = args.spacing * per_row
+    grid_h = args.spacing * n_rows
+    cam_h  = max(grid_w, grid_h) * 1.5
+    viewer_opts = gs.options.ViewerOptions(
+        res=(1280, 720),
+        camera_pos=(0.0, 0.0, cam_h),
+        camera_lookat=(0.0, 0.0, 0.0),
+        camera_up=(1.0, 0.0, 0.0),
+        camera_fov=70,
+    ) if args.viewer else None
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=20),
         rigid_options=gs.options.RigidOptions(
             dt=cfg.dt, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
+        viewer_options=viewer_opts,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10),
             env_separate_rigid=True,        # ← visualization grid layout
         ),
-        show_viewer=False,
+        show_viewer=args.viewer,
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0), plane_size=(args.spacing * per_row * 2,
@@ -98,10 +115,7 @@ def main():
         material=gs.materials.Rigid(friction=1.0),
     )
 
-    # Overhead camera — height scaled so the whole grid fits in view.
-    grid_w = args.spacing * per_row
-    grid_h = args.spacing * n_rows
-    cam_h  = max(grid_w, grid_h) * 1.5
+    # Overhead offscreen camera — image-tensor render for inspection / mp4.
     cam = scene.add_camera(
         res=(1920, 1080),
         pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),

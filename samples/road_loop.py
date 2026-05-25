@@ -313,16 +313,25 @@ def main():
 
     gs.init(backend=gs.gpu, logging_level="warning")
     DT = 0.02
+    cam_height = args.radius * 2.5
+    viewer_opts = gs.options.ViewerOptions(
+        res=(1280, 720),
+        camera_pos=(0.0, 0.0, cam_height),
+        camera_lookat=(0.0, 0.0, 0.0),
+        camera_up=(1.0, 0.0, 0.0),    # +X is "up" on screen
+        camera_fov=60,
+    ) if args.viewer else None
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT, substeps=20),
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
+        viewer_options=viewer_opts,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10)),
-        show_viewer=False,
+        show_viewer=args.viewer,
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0), plane_size=(120.0, 120.0)),
@@ -354,8 +363,9 @@ def main():
         # Same cfg INSTANCE shared across all K vehicles of this kind.
         physics_list.append((ent, sens, cfg_per_kind[kind_idx]))
 
-    # Top-down camera framing the whole loop.
-    cam_height = args.radius * 2.5
+    # Offscreen camera framing the whole loop (for image-tensor render).
+    # The interactive viewer window (when --viewer) is configured via
+    # viewer_options above; this offscreen cam is independent.
     cam = scene.add_camera(
         res=(1280, 720),
         pos=(0.0, 0.0, cam_height), lookat=(0.0, 0.0, 0.0),
