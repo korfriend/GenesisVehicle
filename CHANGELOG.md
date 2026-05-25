@@ -10,6 +10,49 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.20] — 2026-05-25
+
+### Fixed — samples now run via direct file path too
+
+Previously every sample required either `python -m genesis_vehicle.samples.X`
+from the project root OR a `PYTHONPATH` export. Running them by full
+file path —
+
+```bash
+gen_vesis/bin/python genesis_vehicle/samples/city_traffic_ego.py --viewer
+```
+
+— failed with `ModuleNotFoundError: No module named 'genesis_vehicle'`
+because Python only adds the file's own directory to `sys.path`, not
+the SDK's parent.
+
+Fixed by a 3-line bootstrap at the top of each of the 9 samples that
+prepends the SDK parent directory to `sys.path`:
+
+```python
+import sys, pathlib
+_SDK_PARENT = str(pathlib.Path(__file__).resolve().parents[2])
+if _SDK_PARENT not in sys.path:
+    sys.path.insert(0, _SDK_PARENT)
+```
+
+For the 3 perf samples (which re-invoke themselves as subprocesses to
+get a clean GPU per measurement), the same `_SDK_PARENT` is also
+exported as `PYTHONPATH` to the subprocess so the child process can
+resolve `genesis_vehicle` regardless of cwd.
+
+Net effect: all samples now work via any invocation pattern —
+
+```bash
+python -m genesis_vehicle.samples.X            # module form (always worked)
+python path/to/samples/X.py                    # direct file path (new)
+PYTHONPATH=... python ...                       # explicit env var (still works)
+```
+
+All 60 SDK tests still pass.
+
+---
+
 ## [0.5.19] — 2026-05-25
 
 ### Docs — first-class samples link from README

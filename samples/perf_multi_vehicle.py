@@ -42,12 +42,17 @@ Run
 
 from __future__ import annotations
 
+# Bootstrap: allow `python path/to/this_file.py` (and `python -m ...`) both.
+import sys, pathlib
+_SDK_PARENT = str(pathlib.Path(__file__).resolve().parents[2])
+if _SDK_PARENT not in sys.path:
+    sys.path.insert(0, _SDK_PARENT)
+
 import argparse
 import math
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -189,7 +194,9 @@ def _run_one(solver: str, n_per_kind: int,
     ]
     print(f"  [solver={solver:>13}  n_per_kind={n_per_kind:>3}]  "
           f"spawning subprocess...", flush=True)
-    out = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = _SDK_PARENT + os.pathsep + env.get("PYTHONPATH", "")
+    out = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if out.returncode != 0:
         print(f"    FAILED (exit {out.returncode})")
         for line in out.stderr.strip().splitlines()[-5:]:

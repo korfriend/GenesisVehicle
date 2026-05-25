@@ -25,6 +25,14 @@ Run
 
 from __future__ import annotations
 
+# Bootstrap: allow `python path/to/this_file.py` (and `python -m ...`) both.
+# Adds the SDK's parent directory to sys.path so `from genesis_vehicle import ...`
+# resolves regardless of cwd.
+import sys, pathlib
+_SDK_PARENT = str(pathlib.Path(__file__).resolve().parents[2])
+if _SDK_PARENT not in sys.path:
+    sys.path.insert(0, _SDK_PARENT)
+
 import argparse
 import os
 

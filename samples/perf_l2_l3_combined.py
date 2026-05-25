@@ -38,11 +38,16 @@ Run
 
 from __future__ import annotations
 
+# Bootstrap: allow `python path/to/this_file.py` (and `python -m ...`) both.
+import sys, pathlib
+_SDK_PARENT = str(pathlib.Path(__file__).resolve().parents[2])
+if _SDK_PARENT not in sys.path:
+    sys.path.insert(0, _SDK_PARENT)
+
 import argparse
 import os
 import re
 import subprocess
-import sys
 import time
 
 
@@ -142,7 +147,9 @@ def _run_cell(K: int, N: int, warmup: int, steps: int) -> tuple[float, float] | 
            "--internal", "--K", str(K), "--N", str(N),
            "--warmup", str(warmup), "--steps", str(steps)]
     print(f"  [K={K:>3} N={N:>4}  total={K*N:>5}]  spawning...", flush=True)
-    out = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = _SDK_PARENT + os.pathsep + env.get("PYTHONPATH", "")
+    out = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if out.returncode != 0:
         print(f"    FAILED (exit {out.returncode})")
         for line in out.stderr.strip().splitlines()[-3:]:
