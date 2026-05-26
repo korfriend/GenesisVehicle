@@ -121,6 +121,8 @@ class MultiVehicleKindPhysics:
         self.dev = self._proto.dev
         self.fdt = self._proto.fdt
         self.dt = self._proto.dt
+        from .core import _validate_dt_matches_scene
+        _validate_dt_matches_scene(scene, self.dt)
 
         # Re-resolve base link indices: K different links, one per entity.
         # (Same K indices apply to every Genesis env — n_envs is implicit.)
