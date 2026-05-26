@@ -12,7 +12,7 @@ The functions encode the physical contracts the SDK promises:
 
 from __future__ import annotations
 
-from typing import Union
+from typing import Optional, Union
 
 import torch
 
@@ -22,20 +22,62 @@ ScalarOrTensor = Union[torch.Tensor, float, int]
 def brake_torque_signed(
     t_brake: torch.Tensor,
     omega: torch.Tensor,
+    dt: float = 0.0,
+    i_wheel: Optional[torch.Tensor] = None,
     smoothing_scale: float = 0.5,
 ) -> torch.Tensor:
     """Convert a positive-magnitude brake command into a signed torque
-    that opposes wheel rotation.
+    that opposes wheel rotation, **clamped** so a single discrete step
+    cannot reverse the wheel.
 
-    Returns ``t_brake * tanh(omega / smoothing_scale)``, which has the same
-    sign as ``omega``. The pipeline applies it via ``domega -= T_brake_eff``,
-    so the resulting acceleration always points against the wheel's spin.
+    Without clamping (the v0.5.31 behavior), explicit Euler integration
+    of a sign-dependent friction torque can overshoot zero:
 
-    At ``|omega| < smoothing_scale`` the effective torque is reduced (so brake
-    cannot reverse a near-stopped wheel). For a hard hold at rest, use
-    ``StaticFrictionLock`` in addition.
+        omega = +0.1 rad/s, t_brake = 100, I = 0.5, dt = 0.01
+        -> T_brake_eff = 100 * tanh(0.2) ~ 19.7 Nm
+        -> new_omega = 0.1 - 19.7/0.5 * 0.01 = -0.294        (sign flip!)
+        next step: brake_eff = -53 Nm -> new_omega = +0.76  (oscillation grows)
+
+    Visible as "brake sometimes acts like propulsion." Classic stiff-
+    friction-instability. The tanh smoothing only helps inside
+    ``|omega| < smoothing_scale``; beyond that, tanh saturates to ±1 and
+    brake re-introduces the overshoot.
+
+    Fix (when ``dt > 0`` and ``i_wheel`` are passed): cap the magnitude
+    of the brake-induced ω change to ``|omega|``. Equivalently, cap
+    ``|T_brake_eff|`` at ``|omega| * i_wheel / dt`` — the torque that
+    exactly zeroes ω this step. Brake can only decelerate to rest, never
+    past it. The remainder (true static hold) is the
+    ``StaticFrictionLock`` hook's job.
+
+    Args
+    ----
+    t_brake          : positive brake magnitude, shape ``(n_envs, n_wheels)``.
+    omega            : current wheel ang. velocity, same shape.
+    dt               : simulation step. ``0.0`` (default) disables the
+                       clamp and reproduces the legacy tanh-only behavior
+                       — kept for backward compat in existing tests.
+    i_wheel          : per-wheel spin inertia, shape ``(n_wheels,)`` or
+                       broadcastable. Required to compute the cap.
+    smoothing_scale  : tanh transition width (rad/s) for the sub-clamp
+                       regime where |omega| is small enough that tanh
+                       is the dominant attenuation.
+
+    Returns
+    -------
+    Signed torque tensor, same shape as ``t_brake``. Sign matches
+    ``omega``'s; consumer subtracts it from ``domega`` so the
+    acceleration always opposes spin.
     """
-    return t_brake * torch.tanh(omega / smoothing_scale)
+    smooth_signed = t_brake * torch.tanh(omega / smoothing_scale)
+    if dt > 0.0 and i_wheel is not None:
+        # Cap |T_brake_eff| at the torque that exactly zeroes omega this
+        # step. Use raw |omega| so the cap doesn't depend on smoothing.
+        T_cap = torch.abs(omega) * i_wheel / dt
+        smooth_signed = torch.sign(smooth_signed) * torch.minimum(
+            torch.abs(smooth_signed), T_cap,
+        )
+    return smooth_signed
 
 
 def suspension_normal_force(

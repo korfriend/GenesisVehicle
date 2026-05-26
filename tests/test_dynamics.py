@@ -58,6 +58,49 @@ def test_brake_smoothing_scale_changes_response():
     assert eff_sharp.item() > eff_soft.item()
 
 
+def test_brake_clamp_prevents_omega_sign_flip():
+    """Regression: with dt + i_wheel passed, brake torque must be capped
+    so a single forward-Euler step cannot reverse omega's sign. Without
+    the clamp the explicit Euler integrator overshoots zero and the
+    wheel oscillates (brake appears to act as propulsion)."""
+    # Conditions that previously caused overshoot:
+    #   omega = +0.1 rad/s, t_brake = 100 Nm, I = 0.5 kg.m^2, dt = 0.01 s
+    omega   = torch.tensor([0.1, -0.1, 5.0, -5.0])
+    t_brake = torch.tensor([100.0, 100.0, 100.0, 100.0])
+    i_wheel = torch.tensor([0.5, 0.5, 0.5, 0.5])
+    DT = 0.01
+
+    eff = brake_torque_signed(t_brake, omega, dt=DT, i_wheel=i_wheel)
+
+    # 1) Sign always matches omega (brake opposes spin).
+    assert torch.all((eff * omega) >= 0.0), \
+        f"brake torque must have same sign as omega, got eff={eff} omega={omega}"
+
+    # 2) |T_brake_eff| <= |omega| * I / dt for each wheel — i.e. the
+    #    torque is exactly the cap when t_brake exceeds it.
+    cap = torch.abs(omega) * i_wheel / DT     # max non-reversing torque
+    assert torch.all(torch.abs(eff) <= cap + 1e-6), \
+        f"brake torque exceeded cap: eff={eff} cap={cap}"
+
+    # 3) Apply one Euler step: new_omega = omega - eff/I * dt. With the
+    #    clamp, sign(new_omega) == sign(omega) OR new_omega == 0.
+    new_omega = omega - eff / i_wheel * DT
+    same_sign_or_zero = (new_omega * omega >= 0.0) | (torch.abs(new_omega) < 1e-6)
+    assert torch.all(same_sign_or_zero), \
+        f"brake reversed omega: omega={omega} -> new_omega={new_omega}"
+
+
+def test_brake_clamp_legacy_when_dt_zero():
+    """When dt=0 (default), behavior is unchanged from v0.5.31 — only
+    the tanh smoothing applies, no magnitude clamp."""
+    omega = torch.tensor([0.1])
+    t_brake = torch.tensor([100.0])
+    eff = brake_torque_signed(t_brake, omega)     # no dt, no i_wheel
+    # Same as v0.5.31: t_brake * tanh(omega / 0.5) = 100 * tanh(0.2)
+    expected = 100.0 * torch.tanh(torch.tensor(0.2))
+    assert eff.item() == pytest.approx(expected.item(), rel=1e-5)
+
+
 # ---------------------------------------------------------------------------
 # suspension_normal_force
 # ---------------------------------------------------------------------------
