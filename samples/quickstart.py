@@ -65,8 +65,8 @@ def main():
     gs.init(backend=gs.gpu, logging_level="warning")
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=10),
-        rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
+        sim_options=gs.options.SimOptions(dt=cfg.recommended_dt, substeps=10),
+        rigid_options=gs.options.RigidOptions(dt=cfg.recommended_dt, enable_collision=True),
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10)),
@@ -102,7 +102,7 @@ def main():
     scene.build(n_envs=1)
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
 
-    DT = cfg.dt
+    DT = cfg.recommended_dt
     n_settle = int(1.5 / DT)
     n_drive  = int(5.0 / DT)
     render_every = max(1, int(0.04 / DT))    # ~25 fps HUD refresh

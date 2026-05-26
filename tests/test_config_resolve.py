@@ -121,9 +121,9 @@ def test_skidsteer_strategy_validate_fails_for_car():
 
 def test_resolve_preserves_stability_hooks_and_dt():
     hooks = [LowSpeedRegularizer()]
-    cfg = _hjw_basic_config(stability_hooks=hooks, dt=0.01)
+    cfg = _hjw_basic_config(stability_hooks=hooks, recommended_dt=0.01)
     resolved = resolve(cfg)
-    assert resolved.dt == pytest.approx(0.01)
+    assert resolved.recommended_dt == pytest.approx(0.01)
     assert len(resolved.stability_hooks) == 1
     assert isinstance(resolved.stability_hooks[0], LowSpeedRegularizer)
 

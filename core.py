@@ -26,37 +26,42 @@ from .visual import VisualSync
 # even if the user instantiates several VehiclePhysics objects.
 _BANNER_PRINTED = False
 
+# Process-level set of (recommended_dt, scene_dt) pairs we've already warned
+# about. Keeps the warning to one line per distinct mismatch per process,
+# instead of spamming on every VehiclePhysics construction.
+_DT_MISMATCH_WARNED: set[tuple[float, float]] = set()
 
-def _validate_dt_matches_scene(scene: Any, cfg_dt: float) -> None:
-    """Fail loudly when ``cfg.dt`` differs from the actual scene step.
+
+def _resolve_dt_from_scene(scene: Any, recommended_dt: float) -> float:
+    """Return ``scene.sim.dt`` (the authoritative simulation step). If the
+    scene's dt differs from the preset's ``recommended_dt``, emit a
+    one-time-per-process warning so the user knows their physics may be
+    less stable than the preset author tested.
 
     Genesis owns physical time — ``scene.step()`` advances by exactly
-    ``scene.sim.dt`` (== ``SimOptions.dt``) per call. Our hooks integrate
-    cross-step state (wheel ω, stick-slip displacement, ...) using
-    ``cfg.dt``. If the two disagree, the wheels and the chassis evolve
-    on different clocks and the system oscillates or diverges.
-
-    The right pattern is to feed ``cfg.dt`` into ``SimOptions`` (see
-    every sample), so the preset's recommended dt drives both sides.
-    This check catches the case where someone forgets, or hand-builds
-    a scene independently.
+    ``scene.sim.dt`` per call. Our hooks (wheel ω forward-Euler, stick-slip
+    integrator, ...) run once per outer step and must use the same value.
+    By reading ``scene.sim.dt`` directly we make the two impossible to
+    desync structurally; ``recommended_dt`` is advisory only.
     """
     try:
         scene_dt = float(scene.sim.dt)
     except (AttributeError, TypeError):
-        return    # scene not built yet / no .sim.dt — skip check
-    if abs(scene_dt - cfg_dt) > 1e-9:
-        raise ValueError(
-            f"VehicleConfig.dt ({cfg_dt}) does not match scene.sim.dt "
-            f"({scene_dt}). Genesis advances time by scene.sim.dt per "
-            f"scene.step(); if VehiclePhysics integrates wheel omega "
-            f"and stick-slip displacements at a different dt, the "
-            f"wheels and the chassis drift apart (oscillation / "
-            f"velocity divergence). Fix one of:\n"
-            f"  - SimOptions(dt={cfg_dt}, ...)   # follow the preset\n"
-            f"  - cfg.dt = {scene_dt}            # follow the scene\n"
-            f"All bundled samples wire the preset's dt into SimOptions."
-        )
+        # scene not built yet / no .sim.dt — fall back to preset's value
+        # (best we can do until scene.build is called).
+        return float(recommended_dt)
+    if abs(scene_dt - recommended_dt) > 1e-9:
+        key = (round(recommended_dt, 9), round(scene_dt, 9))
+        if key not in _DT_MISMATCH_WARNED:
+            _DT_MISMATCH_WARNED.add(key)
+            print(
+                f"[genesis_vehicle] WARN: scene.sim.dt={scene_dt:g} "
+                f"differs from preset's recommended_dt={recommended_dt:g}. "
+                f"Using scene.sim.dt (Genesis owns time). If hooks oscillate "
+                f"or speed diverges, set SimOptions(dt={recommended_dt:g}, "
+                f"...) or pick a different preset."
+            )
+    return scene_dt
 
 
 def _print_version_banner(resolved: ResolvedConfig, n_envs: int) -> None:
@@ -162,8 +167,9 @@ class VehiclePhysics:
         user_explicit_i_wheel = [w.i_wheel is not None for w in config.wheels]
 
         self.resolved: ResolvedConfig = resolve(config)
-        self.dt = float(self.resolved.dt)
-        _validate_dt_matches_scene(scene, self.dt)
+        # Single source of truth: Genesis owns physical time. We pull dt
+        # from scene.sim.dt; resolved.recommended_dt is advisory only.
+        self.dt = _resolve_dt_from_scene(scene, self.resolved.recommended_dt)
 
         base_name = self.resolved.chassis.base_link_name
         try:

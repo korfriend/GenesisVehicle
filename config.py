@@ -94,14 +94,17 @@ class VehicleConfig:
     tire: Any               # TireModel
     chassis: ChassisConfig = field(default_factory=ChassisConfig)
     stability_hooks: list[Any] = field(default_factory=list)
-    # Simulation step in seconds. MUST equal SimOptions.dt of the scene
-    # this config is used in — VehiclePhysics.__init__ validates and raises
-    # on mismatch. Conventional wiring:
-    #   cfg = car_4w_rwd_ackermann(...)            # preset picks dt
-    #   gs.Scene(sim_options=SimOptions(dt=cfg.dt, ...))
-    # Tank presets generally need >=200 Hz (dt=0.005); cars are fine at
-    # 100 Hz (dt=0.01).
-    dt: float = 1.0 / 48.0
+    # Advisory only — the recommended simulation step size for this preset.
+    # ``VehiclePhysics`` pulls its actual ``self.dt`` from ``scene.sim.dt``
+    # (Genesis owns physical time); ``recommended_dt`` is what the sample
+    # is expected to feed into ``SimOptions``:
+    #   cfg = car_4w_rwd_ackermann(...)            # preset declares dt
+    #   gs.Scene(sim_options=SimOptions(dt=cfg.recommended_dt, ...))
+    # If the user picks a different ``SimOptions.dt``, VehiclePhysics
+    # emits a one-time warning (per process) on the first mismatch but
+    # does not refuse — Genesis's value wins. Tanks generally need
+    # >=200 Hz (recommended_dt=0.005); cars are fine at 100 Hz.
+    recommended_dt: float = 1.0 / 48.0
     enable_visual_sync: bool = True
 
     # Visual suspension joint mode:
@@ -121,6 +124,29 @@ class VehicleConfig:
     # roll.
     visual_spin_enabled: bool = True
 
+    # Deprecated alias kept so existing user code (cfg.dt, cfg.dt = ...)
+    # keeps working through v0.5.x. Will be removed in v0.6.
+    @property
+    def dt(self) -> float:
+        import warnings
+        warnings.warn(
+            "VehicleConfig.dt is deprecated; use VehicleConfig.recommended_dt. "
+            "VehiclePhysics now pulls its actual dt from scene.sim.dt; "
+            "recommended_dt is advisory only (see v0.5.31 CHANGELOG).",
+            DeprecationWarning, stacklevel=2,
+        )
+        return self.recommended_dt
+
+    @dt.setter
+    def dt(self, value: float) -> None:
+        import warnings
+        warnings.warn(
+            "VehicleConfig.dt is deprecated; assign VehicleConfig.recommended_dt "
+            "instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+        self.recommended_dt = float(value)
+
     @classmethod
     def from_urdf(
         cls,
@@ -138,7 +164,18 @@ class VehicleConfig:
 
         wheel_overrides: dict keyed by wheel name -> partial WheelConfig whose
         non-None fields override the URDF-derived values.
+
+        Back-compat: ``dt=`` is accepted as a kwarg and forwarded to
+        ``recommended_dt=`` (emits a DeprecationWarning).
         """
+        if "dt" in kwargs and "recommended_dt" not in kwargs:
+            import warnings
+            warnings.warn(
+                "from_urdf(dt=...) is deprecated; pass recommended_dt=... "
+                "instead. (See v0.5.31 CHANGELOG.)",
+                DeprecationWarning, stacklevel=2,
+            )
+            kwargs["recommended_dt"] = kwargs.pop("dt")
         # Local import to avoid a circular import (urdf imports from config).
         from .urdf import parse_urdf
 
@@ -181,7 +218,7 @@ class ResolvedConfig:
     coupling: Any
     tire: Any
     stability_hooks: list[Any]
-    dt: float
+    recommended_dt: float
     enable_visual_sync: bool
     urdf: Any   # URDFParsedConfig — used by visual layer for joint axis-sign lookup
     visual_susp_mode: str = "auto"
@@ -279,7 +316,7 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
         coupling=config.coupling,
         tire=config.tire,
         stability_hooks=list(config.stability_hooks),
-        dt=config.dt,
+        recommended_dt=config.recommended_dt,
         enable_visual_sync=config.enable_visual_sync,
         urdf=parsed,
         visual_susp_mode=config.visual_susp_mode,

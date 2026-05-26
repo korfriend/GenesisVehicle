@@ -10,6 +10,69 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.31] — 2026-05-26
+
+### Changed — `VehicleConfig.dt` → `VehicleConfig.recommended_dt` (advisory)
+
+v0.5.30 added a validator that raised on `cfg.dt != scene.sim.dt`. The
+two-place duplication was the underlying problem, not the lack of
+validation. v0.5.31 removes the duplication: `VehiclePhysics` now pulls
+`self.dt` directly from `scene.sim.dt` (Genesis owns physical time). The
+preset's old `dt` field is renamed `recommended_dt` and is purely
+advisory — what the sample wires into `SimOptions` so the user gets the
+preset author's recommended physics rate by default.
+
+If `scene.sim.dt != cfg.recommended_dt`, `VehiclePhysics.__init__` emits
+a **one-time-per-process warning** (one line, gated on the
+`(recommended_dt, scene_dt)` pair) and uses `scene.sim.dt`. No more
+hard error — Genesis wins, the user gets a heads-up if their picked dt
+is outside the preset's tested range.
+
+```
+[genesis_vehicle] WARN: scene.sim.dt=0.002 differs from preset's
+recommended_dt=0.0208. Using scene.sim.dt (Genesis owns time). If hooks
+oscillate or speed diverges, set SimOptions(dt=0.0208, ...) or pick a
+different preset.
+```
+
+### Back-compat (kept through v0.5.x, removed in v0.6.0)
+
+- `VehicleConfig.dt` works as a read/write @property aliasing
+  `recommended_dt`, emits `DeprecationWarning`.
+- `VehicleConfig.from_urdf(dt=...)` and the preset constructors that
+  accept `dt=...` forward it to `recommended_dt`, also with
+  `DeprecationWarning`.
+
+Migration path:
+
+```python
+# before (still works, deprecated)
+cfg = car_4w_rwd_ackermann(URDF, dt=0.005, ...)
+scene = gs.Scene(sim_options=SimOptions(dt=cfg.dt, ...))
+
+# after
+cfg = car_4w_rwd_ackermann(URDF, recommended_dt=0.005, ...)
+scene = gs.Scene(sim_options=SimOptions(dt=cfg.recommended_dt, ...))
+```
+
+All bundled samples and presets have been migrated. Tests cover both
+the new and legacy spellings.
+
+### Files
+
+- `genesis_vehicle/config.py` — field rename + `dt` @property alias +
+  `from_urdf(dt=...)` deprecation forwarder
+- `genesis_vehicle/core.py` — `_validate_dt_matches_scene` replaced
+  with `_resolve_dt_from_scene` (returns scene's dt, warns on mismatch)
+- `genesis_vehicle/multi_vehicle.py` — inherits `dt` from prototype
+  (already resolved against scene)
+- `genesis_vehicle/presets.py` — uses `recommended_dt=` directly
+- 4 samples (`quickstart`, `slope_hold`, `multi_env_render`,
+  `batched_rollout`) — `cfg.dt` → `cfg.recommended_dt`
+- `genesis_vehicle/tests/test_config_resolve.py` — assert on new field
+
+---
+
 ## [0.5.30] — 2026-05-26
 
 ### Added — `VehiclePhysics` now validates `cfg.dt` against `scene.sim.dt`

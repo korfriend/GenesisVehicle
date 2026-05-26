@@ -89,8 +89,8 @@ def main():
     cam_h   = max(grid_w, grid_h) * 1.2
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=10),
-        rigid_options=gs.options.RigidOptions(dt=cfg.dt, enable_collision=True),
+        sim_options=gs.options.SimOptions(dt=cfg.recommended_dt, substeps=10),
+        rigid_options=gs.options.RigidOptions(dt=cfg.recommended_dt, enable_collision=True),
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10),
@@ -136,7 +136,7 @@ def main():
 
     # 1.5 s settle, brake held, identical across envs.
     settle_in = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
-    render_every = max(1, int(0.04 / cfg.dt))
+    render_every = max(1, int(0.04 / cfg.recommended_dt))
     hud_perf = _hud.PerfMeter(window=60)
 
     def _hud_render(phase: str, step: int, total: int):
@@ -164,12 +164,12 @@ def main():
         return _hud.cv2_show("genesis_vehicle batched_rollout", frame)
 
     user_quit = False
-    for step in range(int(1.5 / cfg.dt)):
+    for step in range(int(1.5 / cfg.recommended_dt)):
         physics.step(settle_in)
         scene.step()
         hud_perf.tick()
         if step % render_every == 0:
-            if not _hud_render("settle", step, int(1.5 / cfg.dt)):
+            if not _hud_render("settle", step, int(1.5 / cfg.recommended_dt)):
                 user_quit = True
                 break
     if user_quit:
@@ -178,7 +178,7 @@ def main():
         _hud.cv2_cleanup()
         _hud.print_perf_summary(
             sample=f"batched_rollout  (v{sdk_version})",
-            completed=False, n_done=step + 1, n_target=int(1.5 / cfg.dt),
+            completed=False, n_done=step + 1, n_target=int(1.5 / cfg.recommended_dt),
             wall=0.0, batch=args.n_envs, batch_label="env",
             extra=["quit during settle phase — no measured drive timing"],
         )
