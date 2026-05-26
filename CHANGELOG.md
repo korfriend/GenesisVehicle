@@ -10,6 +10,56 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.32] — 2026-05-26
+
+### Fixed — brake torque could overshoot zero and act as propulsion
+
+`brake_torque_signed` previously returned ``t_brake * tanh(omega/0.5)``
+only. tanh smooths the discontinuity around ``omega ≈ 0`` but does
+**not** prevent a single forward-Euler step from reversing ω when
+``t_brake`` is large and ``dt`` non-trivial:
+
+```
+omega = +0.1 rad/s, t_brake = 100 Nm, I = 0.5, dt = 0.01
+T_brake_eff = 100 * tanh(0.2) ≈ 19.7 Nm
+new_omega = 0.1 - 19.7/0.5 * 0.01 = -0.294    # sign flip!
+next step: omega=-0.294 -> T_brake flips -> overshoots to +0.76
+... amplitude grows; user reports brake "acting like propulsion"
+```
+
+Classic stiff-friction instability with explicit Euler. The tanh helps
+inside ``|omega| < smoothing_scale`` but saturates beyond that, so the
+discrete overshoot is unbounded.
+
+Fix: when `brake_torque_signed` is called with the new `dt` and
+`i_wheel` kwargs, the magnitude is capped at
+``|omega| * i_wheel / dt`` — the torque that exactly zeroes ω this
+step. Brake can decelerate to rest but never past it. `core.py` and
+`multi_vehicle.py` now pass these kwargs. The static-hold case
+(``omega → 0`` with brake held) is handed off to `StaticFrictionLock`
+as before.
+
+### Back-compat
+
+The new kwargs default to ``dt=0.0, i_wheel=None`` → clamp disabled,
+behavior exactly matches v0.5.31 (only tanh applies). Existing 8 tests
+in `tests/test_dynamics.py` still pass without modification.
+
+### New tests
+
+`tests/test_dynamics.py`:
+- `test_brake_clamp_prevents_omega_sign_flip` — at ω ∈ {±0.1, ±5}
+  with the canonical overshoot config (t_brake=100, I=0.5, dt=0.01),
+  asserts (a) sign(eff) == sign(ω), (b) |eff| ≤ |ω|·I/dt, (c) one
+  forward-Euler step preserves the sign of ω.
+- `test_brake_clamp_legacy_when_dt_zero` — without dt/i_wheel kwargs,
+  output matches the v0.5.31 tanh-only formula exactly.
+
+62 SDK pytest pass (60 + 2 new). `slope_hold` regression still
+OK (lateral slip 0.1 mm).
+
+---
+
 ## [0.5.31] — 2026-05-26
 
 ### Changed — `VehicleConfig.dt` → `VehicleConfig.recommended_dt` (advisory)

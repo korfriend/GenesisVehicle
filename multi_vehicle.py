@@ -354,9 +354,11 @@ class MultiVehicleKindPhysics:
             hook.apply_post_tire(ctx)
         F_long, F_lat = ctx.F_long, ctx.F_lat
 
-        # (D) Omega update.
-        T_brake_eff = brake_torque_signed(T_brake_pw, p.omega)
+        # (D) Omega update. Pass dt + i_wheel so the brake torque is
+        # clamped against single-step overshoot — see brake_torque_signed
+        # docstring.
         i_w = wm.i_wheel.unsqueeze(0)
+        T_brake_eff = brake_torque_signed(T_brake_pw, p.omega, dt=DT, i_wheel=i_w)
         radius_b = wm.radius.unsqueeze(0)
         domega = (T_drive_pw - T_brake_eff - radius_b * F_long) / i_w
         new_omega = p.omega + domega * DT
