@@ -89,9 +89,9 @@ def main():
     cam_h  = max(grid_w, grid_h) * 1.5
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=cfg.dt, substeps=10),
+        sim_options=gs.options.SimOptions(dt=cfg.recommended_dt, substeps=10),
         rigid_options=gs.options.RigidOptions(
-            dt=cfg.dt, enable_collision=True,
+            dt=cfg.recommended_dt, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
         vis_options=gs.options.VisOptions(
@@ -136,7 +136,7 @@ def main():
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=n_envs)
     device = car.get_pos().device
 
-    DT = cfg.dt
+    DT = cfg.recommended_dt
 
     # Per-env random controls: throttle in [throttle*0.5, throttle*1.5],
     # steer in [-0.3, +0.3] — visible diversity across envs in the grid.

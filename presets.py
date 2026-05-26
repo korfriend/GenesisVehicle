@@ -155,7 +155,7 @@ def car_4w_rwd_ackermann(
         wheel_overrides=_hjw_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
-        dt=1.0 / 48.0,
+        recommended_dt=1.0 / 48.0,
     )
 
 
@@ -180,7 +180,7 @@ def car_4w_fwd_ackermann(
         wheel_overrides=_hjw_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
-        dt=1.0 / 48.0,
+        recommended_dt=1.0 / 48.0,
     )
 
 
@@ -205,7 +205,7 @@ def car_4w_awd_ackermann(
         wheel_overrides=_hjw_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
-        dt=1.0 / 48.0,
+        recommended_dt=1.0 / 48.0,
     )
 
 
@@ -248,7 +248,7 @@ def truck_6w_partial_ackermann(
         tire=PacejkaAnisotropic(eps_v=0.5),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=hooks,
-        dt=1.0 / 48.0,
+        recommended_dt=1.0 / 48.0,
     )
 
 
@@ -311,7 +311,7 @@ def tank_10w_skid_belt(
         wheel_overrides=_kdu_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="tank"),
-        dt=0.005,
+        recommended_dt=0.005,
         visual_susp_mode="control",
         # Tank wheels are cylinder primitives — visible spin doesn't add anything
         # but the extra set_dofs_position call costs ~3-5ms per step (noticeable

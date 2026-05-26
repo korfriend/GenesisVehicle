@@ -120,9 +120,9 @@ class MultiVehicleKindPhysics:
         self.solver = scene.sim.rigid_solver
         self.dev = self._proto.dev
         self.fdt = self._proto.fdt
+        # _proto.dt was already resolved against this scene (proto is built
+        # with the same scene), so just inherit it.
         self.dt = self._proto.dt
-        from .core import _validate_dt_matches_scene
-        _validate_dt_matches_scene(scene, self.dt)
 
         # Re-resolve base link indices: K different links, one per entity.
         # (Same K indices apply to every Genesis env — n_envs is implicit.)
