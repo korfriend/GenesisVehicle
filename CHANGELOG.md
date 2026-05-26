@@ -10,6 +10,50 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.30] — 2026-05-26
+
+### Added — `VehiclePhysics` now validates `cfg.dt` against `scene.sim.dt`
+
+Two dts existed in the system without an explicit relationship:
+
+- `VehicleConfig.dt` — used by hooks inside `VehiclePhysics.step()` to
+  integrate state across steps (wheel ω in `core.py:349`, stick-slip
+  displacement in `stability.py:233`, etc.)
+- `SimOptions.dt` — used by Genesis's `scene.step()` to advance the
+  rigid-body state.
+
+These MUST match. If they don't, the wheels integrate at one rate and
+the chassis integrates at another, and the system oscillates or
+diverges (user-visible as "출렁임"). The samples all do
+``SimOptions(dt=cfg.dt, ...)`` to wire them together, but nothing
+enforced this — a typo or a hand-built scene could silently break.
+
+Fix: `VehiclePhysics.__init__` and `MultiVehiclePhysics.__init__` now
+call ``_validate_dt_matches_scene(scene, cfg.dt)``. On mismatch they
+raise `ValueError` with both fix options spelled out:
+
+```
+ValueError: VehicleConfig.dt (0.02) does not match scene.sim.dt (0.002).
+Genesis advances time by scene.sim.dt per scene.step(); if
+VehiclePhysics integrates wheel omega and stick-slip displacements at
+a different dt, the wheels and the chassis drift apart (oscillation /
+velocity divergence). Fix one of:
+  - SimOptions(dt=0.02, ...)        # follow the preset
+  - cfg.dt = 0.002                  # follow the scene
+All bundled samples wire the preset's dt into SimOptions.
+```
+
+### Why keep `cfg.dt` at all?
+
+The preset's recommended dt is part of its physical character: tank
+presets need 200 Hz (`dt=0.005`) to keep the suspension stack stable,
+car presets are happy at 100 Hz. The preset declares its requirement,
+the sample wires that into both Scene and Physics — DRY, single source
+of truth. The validation in `__init__` is what makes "single source"
+real instead of conventional.
+
+---
+
 ## [0.5.29] — 2026-05-26
 
 ### Performance — substeps=10 across all remaining samples (1.4-2.2× faster)

@@ -94,6 +94,13 @@ class VehicleConfig:
     tire: Any               # TireModel
     chassis: ChassisConfig = field(default_factory=ChassisConfig)
     stability_hooks: list[Any] = field(default_factory=list)
+    # Simulation step in seconds. MUST equal SimOptions.dt of the scene
+    # this config is used in — VehiclePhysics.__init__ validates and raises
+    # on mismatch. Conventional wiring:
+    #   cfg = car_4w_rwd_ackermann(...)            # preset picks dt
+    #   gs.Scene(sim_options=SimOptions(dt=cfg.dt, ...))
+    # Tank presets generally need >=200 Hz (dt=0.005); cars are fine at
+    # 100 Hz (dt=0.01).
     dt: float = 1.0 / 48.0
     enable_visual_sync: bool = True
 

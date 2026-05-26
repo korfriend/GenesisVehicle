@@ -27,6 +27,38 @@ from .visual import VisualSync
 _BANNER_PRINTED = False
 
 
+def _validate_dt_matches_scene(scene: Any, cfg_dt: float) -> None:
+    """Fail loudly when ``cfg.dt`` differs from the actual scene step.
+
+    Genesis owns physical time — ``scene.step()`` advances by exactly
+    ``scene.sim.dt`` (== ``SimOptions.dt``) per call. Our hooks integrate
+    cross-step state (wheel ω, stick-slip displacement, ...) using
+    ``cfg.dt``. If the two disagree, the wheels and the chassis evolve
+    on different clocks and the system oscillates or diverges.
+
+    The right pattern is to feed ``cfg.dt`` into ``SimOptions`` (see
+    every sample), so the preset's recommended dt drives both sides.
+    This check catches the case where someone forgets, or hand-builds
+    a scene independently.
+    """
+    try:
+        scene_dt = float(scene.sim.dt)
+    except (AttributeError, TypeError):
+        return    # scene not built yet / no .sim.dt — skip check
+    if abs(scene_dt - cfg_dt) > 1e-9:
+        raise ValueError(
+            f"VehicleConfig.dt ({cfg_dt}) does not match scene.sim.dt "
+            f"({scene_dt}). Genesis advances time by scene.sim.dt per "
+            f"scene.step(); if VehiclePhysics integrates wheel omega "
+            f"and stick-slip displacements at a different dt, the "
+            f"wheels and the chassis drift apart (oscillation / "
+            f"velocity divergence). Fix one of:\n"
+            f"  - SimOptions(dt={cfg_dt}, ...)   # follow the preset\n"
+            f"  - cfg.dt = {scene_dt}            # follow the scene\n"
+            f"All bundled samples wire the preset's dt into SimOptions."
+        )
+
+
 def _print_version_banner(resolved: ResolvedConfig, n_envs: int) -> None:
     global _BANNER_PRINTED
     if _BANNER_PRINTED:
@@ -131,6 +163,7 @@ class VehiclePhysics:
 
         self.resolved: ResolvedConfig = resolve(config)
         self.dt = float(self.resolved.dt)
+        _validate_dt_matches_scene(scene, self.dt)
 
         base_name = self.resolved.chassis.base_link_name
         try:
