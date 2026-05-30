@@ -10,6 +10,58 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.5.33] — 2026-05-30
+
+### Changed — validated against the Genesis 1.0.0 backend (was 0.4.6)
+
+The Genesis physics backend reached its `1.0.0` release. genesis_vehicle
+is now developed and validated against **genesis-world ≥ 1.0.0**; the
+previously validated floor was `0.4.6`.
+
+**No SDK code change was required.** Every Genesis API surface the SDK
+binds to is signature-compatible between 0.4.6 and 1.0.0 (verified by
+inspecting the installed `genesis-world 1.0.0` source):
+
+| SDK call site | Genesis 1.0.0 symbol | Status |
+|---|---|---|
+| `raycast.WheelRayPattern(RaycastPattern)` overriding `_get_return_shape` / `compute_ray_dirs` / `compute_ray_starts` / `_ray_dirs` / `_ray_starts` | `genesis.options.sensors.raycaster.RaycastPattern` | unchanged base class + hook names |
+| `gs.sensors.Raycaster(pattern=, entity_idx=, max_range=, min_range=, return_world_frame=)` | `genesis.options.sensors.Raycaster` (`KinematicSensorOptionsMixin` + `SimpleSensorOptions`) | all five kwargs still valid |
+| `scene.add_sensor(...)` → `sensor.read().distances` | `Scene.add_sensor`, `RaycasterData.distances` (NamedTuple) | unchanged |
+| `solver.apply_links_external_force(F, links_idx)` / `apply_links_external_torque(T, links_idx)` | `RigidSolver.apply_links_external_*` | unchanged positional signature; default `ref="link_origin"` |
+| `gs.init(backend=gs.gpu, logging_level=...)` | `genesis.init` | unchanged |
+| `gs.options.SimOptions(dt=, substeps=)` / `RigidOptions(enable_collision=, ...)` / `VisOptions(env_separate_rigid=)` | `genesis.options.solvers` / `genesis.options.vis` | all fields present |
+
+The 58 pure-Python tests do not exercise Genesis and are unaffected.
+
+### GPU regression (RTX 5070 Laptop, genesis-world 1.0.0, CUDA)
+
+The default reference frame of `apply_links_external_force` is
+`ref="link_origin"` in 1.0.0. `core.py` measures the torque arm
+`r_vec = wheel_world - entity.get_pos()` from the base-link origin and
+applies `total_F` / `total_T` as a force + pure-torque pair about that
+same origin, so the decomposition is only correct if the force lands at
+the link origin. Confirmed empirically that it does — the validated
+samples reproduce their 0.4.6 numbers:
+
+| Sample | Path | Result on 1.0.0 |
+|---|---|---|
+| `quickstart` | L1 single env | drives straight: `x=+12.43 m`, `y=+0.01 m`, `4.97 m/s` after 240 steps |
+| `slope_hold` | StaticFrictionLock on 20° slope | lateral slip **+0.1 mm / 10 s** (unchanged from v0.5.32); roll settles +20.31° |
+| `batched_rollout` | L3, `n_envs=64` | `sensor.read().distances` → `(64, 4)`; all shapes correct, realistic env spread |
+| `perf_l2_l3_combined` | L2 × L3, up to `K=4 × N=64 = 256` veh | clean, 126× scaling; `MultiVehiclePhysics` batched force/torque apply OK |
+
+### Notes
+
+- `RigidOptions.use_contact_island` still defaults to `False` in 1.0.0.
+  The multi-vehicle samples continue to leave it off — see the v0.5.28
+  entry for the 0.4.6 kernel-compile error that motivated avoiding it;
+  that finding has not been re-validated on 1.0.0, so the samples keep
+  the safe default.
+- Installation docs (`README.md` Installation, `docs/quickstart.md`)
+  now state the `genesis-world ≥ 1.0.0` requirement explicitly.
+
+---
+
 ## [0.5.32] — 2026-05-26
 
 ### Fixed — brake torque could overshoot zero and act as propulsion

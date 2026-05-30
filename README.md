@@ -76,8 +76,11 @@ Visual demos (with `--viewer`):
 
 ## Installation
 
-Requires Python 3.12+ and [Genesis](https://genesis-embodied-ai.github.io/)
-with a CUDA-enabled `torch`.
+Requires Python 3.12+ and
+[Genesis](https://genesis-embodied-ai.github.io/) (`genesis-world ≥ 1.0.0`)
+with a CUDA-enabled `torch`. The SDK is validated against the Genesis
+`1.0.0` backend; see [`CHANGELOG.md`](CHANGELOG.md) for the per-release
+backend-compatibility notes.
 
 The SDK is a single Python package directory; there is no `pip install`
 yet. Clone and add the parent directory to `PYTHONPATH`:

@@ -58,3 +58,8 @@ prints a one-line banner with the version on first construction in a process:
 
 Release history lives in
 [`../CHANGELOG.md`](../CHANGELOG.md).
+
+**Backend compatibility:** validated against the Genesis physics backend
+`genesis-world ≥ 1.0.0`. Per-release backend notes are in
+[`../CHANGELOG.md`](../CHANGELOG.md) (see the 0.5.33 entry for the
+0.4.6 → 1.0.0 bump).

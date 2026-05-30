@@ -1,7 +1,7 @@
 # Quickstart
 
 The shortest working program. Drop a car, drive 10 seconds, print the final
-position. Requires Genesis (CUDA) installed and a 4-wheel-car URDF whose
+position. Requires Genesis (`genesis-world ≥ 1.0.0`, CUDA) installed and a 4-wheel-car URDF whose
 suspension joints follow the SDK's naming convention (see
 [`api-reference.md`](api-reference.md#4-urdf-utilities)).
 
