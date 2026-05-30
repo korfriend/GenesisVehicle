@@ -46,6 +46,8 @@ def version_info() -> tuple[int, int, int]:
     return VERSION_INFO
 
 
+
+
 # --- Eager (no Genesis runtime needed) ---------------------------------------
 
 from .config import (

@@ -12,6 +12,19 @@ running version the first time it is instantiated in a process.
 
 ## [0.5.33] — 2026-05-30
 
+### Added — version banner on first `VehiclePhysics()` construction
+
+`VehiclePhysics.__init__` now prints a single stderr line
+`[genesis_vehicle] vX.Y.Z` the first time it is instantiated in a process
+(module-level `_BANNER_PRINTED` guard prevents duplicates across multiple
+vehicles). Lets users and bug reports confirm which SDK build is loaded
+at runtime without an explicit `print(genesis_vehicle.__version__)`.
+
+Suppress with `GENESIS_VEHICLE_QUIET=1`. The banner does **not** fire on
+plain `import genesis_vehicle` or `genesis_vehicle.version()` — only on
+actual vehicle construction — so doc builds, URDF-only tooling, and unit
+tests that never instantiate a vehicle remain silent.
+
 ### Changed — validated against the Genesis 1.0.0 backend (was 0.4.6)
 
 The Genesis physics backend reached its `1.0.0` release. genesis_vehicle

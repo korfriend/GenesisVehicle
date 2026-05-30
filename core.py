@@ -156,6 +156,13 @@ class VehiclePhysics:
         n_envs: int = 1,
     ):
         assert n_envs >= 1
+        global _BANNER_PRINTED
+        if not _BANNER_PRINTED:
+            import os, sys
+            if not os.environ.get("GENESIS_VEHICLE_QUIET"):
+                print(f"[genesis_vehicle] v{__version__}",
+                      file=sys.stderr, flush=True)
+            _BANNER_PRINTED = True
         self.scene = scene
         self.entity = entity
         self.sensor = sensor
