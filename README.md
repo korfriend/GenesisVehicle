@@ -132,7 +132,7 @@ deliberately does NOT fully encapsulate Genesis; you keep direct access to
 On first `VehiclePhysics` construction, the SDK prints a one-line banner:
 
 ```
-[genesis_vehicle v0.4.0] Initialized: 4 wheels, Ackermann, RWD, Independent, n_envs=1, hooks=[RollingResistance, LowSpeedRegularizer]
+[genesis_vehicle v0.6.0] Initialized: 4 wheels, Ackermann, RWD, Independent, n_envs=1, hooks=[RollingResistance, LowSpeedRegularizer]
 ```
 
 Telling you, at a glance: version, topology, which strategies are wired
@@ -279,7 +279,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-58 pure-Python tests covering URDF parsing, config resolve, strategy math,
+62 pure-Python tests covering URDF parsing, config resolve, strategy math,
 dynamics primitives, version reporting, and stability-profile semantics.
 No Genesis runtime needed — they run on CPU in ~3 s.
 

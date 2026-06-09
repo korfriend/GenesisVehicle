@@ -40,6 +40,8 @@ from genesis_vehicle import (
     truck_6w_partial_ackermann, tank_10w_skid_belt,
     # utilities
     WheelRayPattern, parse_urdf, stability_hooks_for_profile,
+    # per-link transforms (telemetry / animation / attach)
+    get_link_transforms, LinkTransforms,
     # version
     __version__, version, version_info,
 )
@@ -53,7 +55,7 @@ Current SDK version is `genesis_vehicle.__version__`. `VehiclePhysics.__init__`
 prints a one-line banner with the version on first construction in a process:
 
 ```
-[genesis_vehicle v0.4.0] Initialized: 4 wheels, Ackermann, RWD, Independent, n_envs=1, hooks=[RollingResistance, LowSpeedRegularizer]
+[genesis_vehicle v0.6.0] Initialized: 4 wheels, Ackermann, RWD, Independent, n_envs=1, hooks=[RollingResistance, LowSpeedRegularizer]
 ```
 
 Release history lives in

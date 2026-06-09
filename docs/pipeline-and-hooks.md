@@ -26,6 +26,11 @@ VehiclePhysics.step(inputs)
         for hook in stability_hooks if POST_TIRE in hook.slots:
             hook.apply_post_tire(ctx, i)             # RollingResistance, ...
     (D) T_brake_eff = brake_torque_signed(T_brake_pw[:, i], omega[:, i])  (S7.1)
+        # F_long overshoot clamp (v0.6.0, S7.7): cap so friction cannot carry
+        # the wheel past rolling (omega_target = v_long/R) in one step.
+        omega_nofric = omega[:, i] + DT*(T_drive - T_brake_eff)/I_wheel
+        F_long_limit = (omega_nofric - v_long/R) * I_wheel / (DT * R)
+        F_long = clamp_toward_rolling(F_long, F_long_limit)  # see physics-contracts.md S7.7
         domega = (T_drive - T_brake_eff - R * F_long) / I_wheel
         omega[:, i] = clamp(omega[:, i] + DT*domega, ±OMEGA_MAX)
     (E) accumulate F_world, torque into total_F, total_T

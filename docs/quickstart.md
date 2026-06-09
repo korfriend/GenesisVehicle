@@ -69,7 +69,7 @@ Both forms are first-class; pick whichever fits.
 On first `VehiclePhysics` construction, the SDK prints a single line:
 
 ```
-[genesis_vehicle v0.4.0] Initialized: 4 wheels, Ackermann, RWD, Independent, n_envs=1, hooks=[RollingResistance, LowSpeedRegularizer]
+[genesis_vehicle v0.6.0] Initialized: 4 wheels, Ackermann, RWD, Independent, n_envs=1, hooks=[RollingResistance, LowSpeedRegularizer]
 ```
 
 Telling you, at a glance: version, topology, which strategies are wired up,

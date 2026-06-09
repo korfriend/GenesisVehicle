@@ -8,7 +8,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-58 pure-Python tests; no Genesis runtime required. Runs in ~3s on CPU.
+62 pure-Python tests; no Genesis runtime required. Runs in ~3s on CPU.
 
 GPU integration is exercised by user-side demo scripts in your downstream
 project — the SDK's own test suite stays pure-Python so it can run in any
@@ -54,6 +54,7 @@ and that the lazy names (`VehiclePhysics`, `VisualSync`, `WheelRayPattern`,
 | `urdf.py` | `parse_urdf()`, `URDFParsedConfig`, `estimate_spin_inertia_from_genesis` |
 | `dynamics.py` | `brake_torque_signed`, `suspension_normal_force` — pure helpers |
 | `raycast.py` | `WheelRayPattern`, `read_distances()` |
+| `kinematics.py` | `get_link_transforms`, `LinkTransforms` — per-link transforms (world / base / parent frame) |
 | `visual.py` | `VisualSync` (auto-invoked by core; flips URDF axis quirks) |
 | `tire_models/` | `TireModel` ABC + `PacejkaAnisotropic`, `CoulombIsotropic` |
 | `strategies/steering.py` | `SteeringStrategy` + 4 concrete |

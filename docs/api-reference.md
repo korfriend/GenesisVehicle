@@ -298,11 +298,45 @@ suspension_normal_force(
 ) -> torch.Tensor
 
 # --- Version ---
-genesis_vehicle.__version__               # str, e.g. "0.4.0"
-genesis_vehicle.VERSION_INFO              # tuple, e.g. (0, 4, 0)
+genesis_vehicle.__version__               # str, e.g. "0.6.0"
+genesis_vehicle.VERSION_INFO              # tuple, e.g. (0, 6, 0)
 genesis_vehicle.version() -> str          # same as __version__
 genesis_vehicle.version_info() -> tuple   # same as VERSION_INFO
 ```
+
+### 7.5 Per-link transforms (telemetry / animation / attach, v0.6.0)
+
+Genesis exposes only each link's **world** pose. `get_link_transforms`
+composes per-link transforms in the frame you actually want — typically each
+link relative to its **URDF parent** (what an animation rig consumes). Batched
+over `n_envs` and `n_links`, no Python per-link loop.
+
+```python
+get_link_transforms(
+    entity,                       # built Genesis RigidEntity (the vehicle)
+    frame: str = "parent",        # "world" | "base" | "parent"
+    *, envs_idx=None,
+) -> LinkTransforms
+
+# Convenience method bound to the vehicle's entity:
+VehiclePhysics.link_transforms(frame="parent", *, envs_idx=None) -> LinkTransforms
+
+@dataclass
+class LinkTransforms:
+    frame: str                    # the frame pos/quat are in
+    names: list[str]              # link names, entity-local index order
+    parent_local: list[int]       # each link's parent local idx, -1 if root
+    pos: torch.Tensor             # (n_envs, n_links, 3)  (or (n_links,3) single-env)
+    quat: torch.Tensor            # (n_envs, n_links, 4)  wxyz
+    def matrices() -> torch.Tensor   # (..., n_links, 4, 4) homogeneous
+    def index(name: str) -> int      # local index of a link by name
+    n_links: int                     # property
+```
+
+Frames: `"world"` = raw Genesis output; `"base"` = relative to the entity
+base/root link; `"parent"` (default) = relative to each link's immediate URDF
+parent (root → world). See [`physics-contracts.md`](physics-contracts.md) for
+the quaternion/position conventions.
 
 ## 8. Presets
 
