@@ -160,6 +160,32 @@ or `side='R'`).
 Subclass any of the ABCs (`SteeringStrategy`, `DrivetrainStrategy`,
 `CouplingStrategy`, `TireModel`, `StabilityHook`) to add new behaviors.
 
+## Reading per-link transforms (telemetry / animation / attach)
+
+Genesis only gives each link's **world** pose. For telemetry → animation
+retargeting, attaching external sensors/effects, or placing ghost copies you
+usually want each component relative to its **URDF parent**. `get_link_transforms`
+(or `physics.link_transforms(...)`) composes that for you:
+
+```python
+from genesis_vehicle import get_link_transforms
+
+lt = get_link_transforms(car, frame="parent")   # "world" | "base" | "parent"
+lt.names          # ['base_link', 'front_left_axle_carrier', ...]
+lt.parent_local   # parent link's local index per link, -1 for the root
+lt.pos            # (n_envs, n_links, 3)
+lt.quat           # (n_envs, n_links, 4)  wxyz
+lt.matrices()     # (n_envs, n_links, 4, 4)
+```
+
+| `frame` | each link relative to |
+|---|---|
+| `"world"` | world (raw Genesis output) |
+| `"base"` | the entity base/root link |
+| `"parent"` (default) | its immediate URDF parent link (hierarchy-local; root → world) |
+
+Vectorised over `n_envs` and `n_links` — no per-link Python loop.
+
 ## Bundled Presets
 
 Four ready-to-use `VehicleConfig` builders:

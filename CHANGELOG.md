@@ -10,6 +10,85 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.6.0] — 2026-06-09
+
+### Fixed — longitudinal friction-force overshoot clamp (wheel-spin oscillation / "front tire slips at launch")
+
+`VehiclePhysics.step` now caps the tire longitudinal force `F_long` so the
+resulting friction torque cannot carry the wheel **past the rolling speed**
+(`omega_target = v_long / R`) in a single step:
+
+```
+F_long_limit = (omega_nofric − omega_target)·I_wheel / (dt·R)
+omega_nofric > omega_target → F_long ∈ [0, F_long_limit]
+omega_nofric < omega_target → F_long ∈ [F_long_limit, 0]
+```
+
+where `omega_nofric` is the wheel speed after drive/brake but before tire
+friction. This is the tire-friction analogue of the existing
+`brake_torque_signed` anti-overshoot clamp (target `omega = 0`).
+
+**Why.** Explicit-Euler integration of the slip-dependent friction torque is
+stiff near rolling (relaxation rate `R²·C_kappa/(I·|v_long|) → ∞` as
+`v_long → 0`). Below the stability limit it oscillates — the wheel ping-pongs
+across the rolling point (forward force → reverse slip → backward force → …),
+seen as wheel "trembling" and, on undriven wheels, a stuck `kappa ≈ −1` drag
+at launch (the RWD front-tire-slip report). The clamp binds **only near
+rolling** (where `omega_nofric − omega_target` is small), so it kills the
+oscillation while leaving the high-slip saturated regime — driven-wheel launch
+slip — untouched. Verified: `quickstart` launch preserved (x = 12.59 m vs
+12.43 m baseline); 62/62 unit tests pass; JMK / Truck6w / KDU scenarios
+unchanged (HJW slightly slower — removes the spurious overshoot thrust, may
+want per-vehicle torque re-tune). Lets the wheel mass / inertia "band-aid"
+(inflated `i_wheel`) be reverted to realistic values without re-introducing
+the oscillation.
+
+| 약자 | 의미 |
+|---|---|
+| F_long | 종방향 타이어 마찰력 |
+| omega_target | 구름조건 각속도 (= v_long/R) |
+| C_kappa | 종슬립 강성 ∂F_long/∂kappa |
+
+### Added — per-link transforms in world / base / **parent (URDF-hierarchy-local)** frames
+
+New public API `get_link_transforms(entity, frame=...)` (module
+`genesis_vehicle.kinematics`) and the convenience method
+`VehiclePhysics.link_transforms(frame=...)`. Returns a `LinkTransforms`
+dataclass — link `names`, parent topology (`parent_local`), and batched
+`pos (n_envs, n_links, 3)` / `quat (n_envs, n_links, 4)` (wxyz) — plus
+`.matrices()` (4×4) and `.index(name)`.
+
+**Why.** Genesis only exposes each link's **world** pose
+(`get_links_pos`/`get_links_quat`). For telemetry → animation retargeting,
+external sensor/effect attachment, or placing ghost copies you usually want
+each component relative to its **URDF parent** — that is what an animation
+rig's local channels are. The frame choice was previously the caller's to
+compose by hand from world poses + quaternion math.
+
+Frames:
+
+| `frame` | each link expressed relative to |
+|---|---|
+| `"world"`  | world (raw Genesis output) |
+| `"base"`   | the entity base/root link (one frame for the whole vehicle) |
+| `"parent"` (default) | its **immediate parent link** in the URDF tree (hierarchy-local); root → world |
+
+Vectorised over `n_envs` and `n_links` (no Python per-link loop): parent
+poses are gathered and the relative transform is `q_PC = inv(q_WP) ⊗ q_WC`,
+`p_PC = R_WP⁻¹·(p_WC − p_WP)`. Single-env builds return `(n_links, …)`,
+batched builds `(n_envs, n_links, …)`, matching `get_links_pos`. Re-exported
+as `genesis_vehicle.get_link_transforms` / `LinkTransforms` (lazy import —
+needs a built entity).
+
+| 약자 | 의미 |
+|---|---|
+| P / C | Parent link / Child link |
+| W | World frame |
+| `q_WC` | 월드→자식 링크 쿼터니언 (wxyz) |
+| `R_WP` | 월드→부모 링크 회전행렬 |
+
+---
+
 ## [0.5.33] — 2026-05-30
 
 ### Added — version banner on first `VehiclePhysics()` construction
