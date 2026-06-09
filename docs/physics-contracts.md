@@ -114,3 +114,30 @@ The wheel raycaster is not populated until the first `scene.step()`. To
 avoid a NaN cascade, `VehiclePhysics.step()` skips force application on the
 first call when all distances are zero, sets `_prev_init = True`, and runs
 normally from the second step onward.
+
+## 7.7 Longitudinal friction-force overshoot clamp (v0.6.0)
+
+The tire-friction analogue of §7.1. Explicit-Euler integration of the
+slip-dependent friction torque `T_fric = R·F_long` is stiff near rolling
+(its relaxation rate `R²·C_kappa/(I·|v_long|) → ∞` as `v_long → 0`); below
+the stability limit the wheel oscillates across the rolling point
+(forward force → reverse slip → backward force → …), seen as wheel
+"trembling" and a stuck `kappa ≈ −1` drag on undriven wheels at launch.
+
+`VehiclePhysics.step()` caps `F_long` so the friction torque cannot carry
+the wheel **past the rolling speed** `omega_target = v_long/R` in one step:
+
+```
+omega_nofric = omega + DT·(T_drive - T_brake_eff)/I_wheel
+F_long_limit = (omega_nofric - omega_target)·I_wheel / (DT·R)
+omega_nofric > omega_target → F_long ∈ [0, F_long_limit]
+omega_nofric < omega_target → F_long ∈ [F_long_limit, 0]
+```
+
+The clamp binds **only near rolling** (small `omega_nofric − omega_target`),
+so it removes the oscillation while leaving the high-slip saturated regime —
+driven-wheel launch slip — untouched (`quickstart` launch is preserved). The
+**clamped** `F_long` is what is applied to both the wheel-ω update and the
+chassis force, so a custom `TireModel` or parameter-fit sees a force that may
+be reduced from its raw output near rolling. Implementation: inline in
+`core.py` step (D); cf. `brake_torque_signed` (§7.1).
