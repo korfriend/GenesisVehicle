@@ -113,6 +113,8 @@ _GENESIS_LAZY = {
     "MultiVehicleKindPhysics": ("genesis_vehicle.multi_vehicle", "MultiVehicleKindPhysics"),
     "WheelRayPattern": ("genesis_vehicle.raycast", "WheelRayPattern"),
     "read_distances": ("genesis_vehicle.raycast", "read_distances"),
+    "get_link_transforms": ("genesis_vehicle.kinematics", "get_link_transforms"),
+    "LinkTransforms": ("genesis_vehicle.kinematics", "LinkTransforms"),
     "VisualSync": ("genesis_vehicle.visual", "VisualSync"),
     "add_vehicle": ("genesis_vehicle.scene_helpers", "add_vehicle"),
     "make_wheel_raycaster": ("genesis_vehicle.scene_helpers", "make_wheel_raycaster"),
@@ -138,6 +140,8 @@ __all__ = [
     "MultiVehiclePhysics", "MultiVehicleKindPhysics",
     # Sensor / raycast (lazy)
     "WheelRayPattern", "read_distances",
+    # Kinematics — per-link transforms (lazy)
+    "get_link_transforms", "LinkTransforms",
     # Scene helpers (lazy — thin wrappers around Genesis boilerplate)
     "add_vehicle", "make_wheel_raycaster",
     # Visual (lazy)

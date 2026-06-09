@@ -264,6 +264,20 @@ class VehiclePhysics:
         if self.visual is not None:
             self.visual.wheel_visual_angle[idx] = 0.0
 
+    def link_transforms(self, frame: str = "parent", *, envs_idx: Optional[Any] = None):
+        """Per-link transforms of this vehicle's entity in ``frame``.
+
+        Thin wrapper over :func:`genesis_vehicle.kinematics.get_link_transforms`
+        bound to ``self.entity``. ``frame`` is ``"world"``, ``"base"``, or
+        ``"parent"`` (URDF-hierarchy-local; default). Returns a
+        ``LinkTransforms`` (link names + parent topology + batched pos/quat).
+
+        Use for telemetry → animation retargeting, sensor/effect attachment, or
+        placing ghost copies. See the kinematics module docstring for frames.
+        """
+        from .kinematics import get_link_transforms
+        return get_link_transforms(self.entity, frame, envs_idx=envs_idx)
+
     def step(self, inputs: VehicleStepInputs) -> None:
         """Vectorized 5-step pipeline. Per-wheel work is a SINGLE batched
         tensor op set (no Python wheel loop)."""
@@ -392,6 +406,20 @@ class VehiclePhysics:
         i_w = wm.i_wheel.unsqueeze(0)
         T_brake_eff = brake_torque_signed(T_brake_pw, self.omega, dt=DT, i_wheel=i_w)
         radius_b = wm.radius.unsqueeze(0)
+
+        # [Overshoot Clamp] Cap F_long so the resulting friction torque cannot reverse the tire slip direction in one step.
+        omega_target = v_long / radius_b
+        domega_nofric = (T_drive_pw - T_brake_eff) / i_w
+        omega_nofric = self.omega + domega_nofric * DT
+        T_fric_limit = (omega_nofric - omega_target) * i_w / DT
+        F_long_limit = T_fric_limit / radius_b
+
+        F_long = torch.where(
+            omega_nofric > omega_target,
+            torch.maximum(torch.zeros_like(F_long), torch.minimum(F_long, F_long_limit)),
+            torch.minimum(torch.zeros_like(F_long), torch.maximum(F_long, F_long_limit))
+        )
+
         T_friction = radius_b * F_long
         domega = (T_drive_pw - T_brake_eff - T_friction) / i_w
         new_omega = self.omega + domega * DT
