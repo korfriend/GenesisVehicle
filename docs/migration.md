@@ -33,7 +33,7 @@ The inlined `apply_forces_gpu` body becomes:
 
 ```python
 cfg = car_4w_rwd_ackermann(URDF_PATH)
-cfg.dt = 0.02   # JMK runs at 50 Hz
+cfg.recommended_dt = 0.02   # JMK runs at 50 Hz
 physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
 # Step 11 (straight line):
 physics.step(VehicleInputs(throttle=THROTTLE, brake=0, steer=0))
