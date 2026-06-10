@@ -64,7 +64,7 @@ angle accumulators. Pass a `(K,)` long tensor or a `(n_envs,)` bool mask to
 reset only specific environments (RL / MPPI partial reset).
 
 `VehiclePhysics.__init__` prints a one-line version banner the first time
-it's called per process. There is no global "quiet" flag yet.
+it's called per process. Suppress with `GENESIS_VEHICLE_QUIET=1`.
 
 ## 2. Inputs
 
@@ -125,7 +125,7 @@ class VehicleConfig:
     steering, drivetrain, coupling, tire
     chassis: ChassisConfig = field(default_factory=ChassisConfig)
     stability_hooks: list[StabilityHook] = field(default_factory=list)
-    dt: float = 1.0/48.0
+    recommended_dt: float = 1.0/48.0   # `dt` is a deprecated alias (v0.5.31)
     enable_visual_sync: bool = True
 
     @classmethod
