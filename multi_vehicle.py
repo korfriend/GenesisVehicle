@@ -423,6 +423,52 @@ class MultiVehicleKindPhysics:
                 )
 
 
+def group_vehicles_by_cfg(vehicles: Sequence[tuple]):
+    """Group a flat vehicle list by cfg identity (same Python object → same kind).
+
+    Pure function (no Genesis objects touched — only ``veh[2]`` identity is
+    read), so the grouping/dispatch bookkeeping that ``MultiVehiclePhysics``
+    depends on can be unit-tested without a GPU. Returns:
+
+    - ``group_order``: list of cfg-id keys in first-seen order (= kind order)
+    - ``groups``: dict key → list of the vehicles in that kind (caller order
+      within the kind preserved)
+    - ``flat_to_kind``: list of ``(flat_i, kind_idx, slot_idx)``, sorted by
+      ``flat_i`` (the caller's flat index). Maps ``inputs_list[flat_i]`` →
+      kind ``kind_idx`` slot ``slot_idx``.
+    """
+    groups: dict = defaultdict(list)
+    group_order: list = []
+    for veh in vehicles:
+        cfg = veh[2]
+        key = id(cfg)
+        if key not in groups:
+            group_order.append(key)
+        groups[key].append(veh)
+
+    vehicles_list = list(vehicles)
+    flat_to_kind = []
+    for k_i, key in enumerate(group_order):
+        for slot_i, veh in enumerate(groups[key]):
+            flat_i = next(j for j, v in enumerate(vehicles_list) if v is veh)
+            flat_to_kind.append((flat_i, k_i, slot_i))
+    flat_to_kind.sort(key=lambda t: t[0])
+    return group_order, groups, flat_to_kind
+
+
+def rebucket_inputs(inputs_list: Sequence, flat_to_kind, kind_sizes):
+    """Scatter a flat (caller-order) ``inputs_list`` into per-kind slot lists.
+
+    Pure function (no Genesis). ``per_kind[kind_idx][slot_idx] =
+    inputs_list[flat_i]`` for each mapping entry. ``kind_sizes[kind_idx]`` is
+    the number of slots (K) in that kind. Returns a list (length n_kinds) of
+    lists (length K_kind)."""
+    per_kind = [[None] * ks for ks in kind_sizes]
+    for flat_i, kind_idx, slot_idx in flat_to_kind:
+        per_kind[kind_idx][slot_idx] = inputs_list[flat_i]
+    return per_kind
+
+
 class MultiVehiclePhysics:
     """Top-level multi-vehicle driver: groups vehicles by URDF / cfg and
     runs one ``MultiVehicleKindPhysics`` per kind. K vehicles of the same
@@ -458,38 +504,22 @@ class MultiVehiclePhysics:
         # Group by cfg identity (same Python object → same kind). Callers
         # who want grouping by URDF *value* can pass the same cfg instance
         # for matching vehicles (the bundled presets return fresh cfgs per
-        # call, so identity-by-call works — see road_loop.py).
-        groups: dict[int, list[tuple]] = defaultdict(list)
-        group_order = []
-        for veh in vehicles:
-            entity, sensor, cfg = veh
-            key = id(cfg)
-            if key not in groups:
-                group_order.append(key)
-            groups[key].append(veh)
+        # call, so identity-by-call works — see road_loop.py). The grouping
+        # bookkeeping is a pure function (group_vehicles_by_cfg) so it is
+        # unit-tested without Genesis; only kind construction below needs GPU.
+        group_order, groups, self._flat_to_kind = group_vehicles_by_cfg(vehicles)
 
         self.vehicles = list(vehicles)   # preserve caller's order
         self.n_envs = n_envs
         self.kinds = []                  # list of MultiVehicleKindPhysics
         self.kind_slices: list[slice] = []  # per-kind slice into flat inputs
-        # Build per-kind physics, tracking which flat-input indices belong to it.
-        # We need to map: input[i] (caller's flat order) → which kind / which slot.
-        # Simplest: build kinds in groupwise order, then record which flat
-        # indices belong to each kind; dispatch in step() reorders inputs.
-        self._flat_to_kind = []          # length len(vehicles), each = (kind_idx, slot_idx)
-        for k_i, key in enumerate(group_order):
+        for key in group_order:
             kind_vehicles = groups[key]
             entities = [v[0] for v in kind_vehicles]
             sensors  = [v[1] for v in kind_vehicles]
             cfg      = kind_vehicles[0][2]
             self.kinds.append(
                 MultiVehicleKindPhysics(scene, entities, sensors, cfg, n_envs=n_envs))
-            # Find the flat positions of these vehicles in the caller's order.
-            for slot_i, veh in enumerate(kind_vehicles):
-                flat_i = next(j for j, v in enumerate(self.vehicles) if v is veh)
-                self._flat_to_kind.append((flat_i, k_i, slot_i))
-        # Sort by flat_i so we can map quickly in step().
-        self._flat_to_kind.sort(key=lambda t: t[0])
 
     @property
     def n_vehicles(self) -> int:
@@ -510,10 +540,9 @@ class MultiVehiclePhysics:
         assert len(inputs_list) == self.n_vehicles, (
             f"MultiVehiclePhysics expected {self.n_vehicles} inputs, "
             f"got {len(inputs_list)}")
-        # Re-bucket inputs into per-kind slot order.
-        per_kind: list[list] = [[None] * k.K for k in self.kinds]
-        for flat_i, kind_idx, slot_idx in self._flat_to_kind:
-            per_kind[kind_idx][slot_idx] = inputs_list[flat_i]
+        # Re-bucket inputs into per-kind slot order (pure helper — unit-tested).
+        per_kind = rebucket_inputs(
+            inputs_list, self._flat_to_kind, [k.K for k in self.kinds])
         # Dispatch.
         for kind, ins in zip(self.kinds, per_kind):
             kind.step(ins)
