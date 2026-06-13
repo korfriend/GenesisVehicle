@@ -5,7 +5,7 @@ Landing page. Pick the document that matches what you're doing.
 | If you want to... | Start here |
 |---|---|
 | Run something in 1 minute | [`quickstart.md`](quickstart.md) |
-| See all 9 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
+| See all 10 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
 | Build a mental model before reading code | [`concepts.md`](concepts.md) |
 | Pick the right batching axis (L1 / L2 / L3) for your workflow | [`batching.md`](batching.md) |
 | Run the OSC physics server for an external client (Unreal / Unity), or look up the wire schema | [`server.md`](server.md) |
