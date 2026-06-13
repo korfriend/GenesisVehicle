@@ -241,6 +241,7 @@ Detailed docs live under [`docs/`](docs/):
 | [`docs/quickstart.md`](docs/quickstart.md) | Minimal example, runnable end-to-end |
 | [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855, hook intuition, batched-by-default |
 | [`docs/batching.md`](docs/batching.md) | The L1 / L2 / L3 vectorization axes — when to use which, measured speedups, the L2 × L3 combined pattern |
+| [`docs/tire-and-contact.md`](docs/tire-and-contact.md) | Tire model (Pacejka vs Coulomb) & ground-contact mechanism (raycast wheel etc.) — the two axes, standard names, recommendation |
 | [`docs/server.md`](docs/server.md) | OSC physics server for external clients (Unreal / Unity) — purpose, modes, full wire-schema reference |
 | [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default) |
 | [`docs/pipeline-and-hooks.md`](docs/pipeline-and-hooks.md) | Hook insertion points in the 5-step pipeline |
