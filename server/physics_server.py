@@ -24,13 +24,10 @@ if sys.platform == "win32":
     ctypes.CDLL = PatchedCDLL
 
 import time
-import socket
-import json
 import torch
 import argparse
 import numpy as np
 import genesis as gs
-import gc
 
 # HIGH PRIORITY CLASS 설정 (Windows 전용 상수 — 타 플랫폼은 통상 우선순위 유지)
 if sys.platform == "win32":
