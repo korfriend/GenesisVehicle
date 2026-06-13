@@ -54,6 +54,39 @@ strategy all process every wheel in one call. Nothing to tune.
 
 ## L2 — cross-vehicle batching in one env
 
+> **Rule of thumb: for K (> 1) vehicles in one scene, reach for
+> `MultiVehiclePhysics` — do NOT hand-roll a Python loop of K separate
+> `VehiclePhysics` objects.**
+>
+> The manual loop
+> ```python
+> physics = [VehiclePhysics(scene, e, s, cfg) for (e, s) in vehicles]   # ✗ avoid
+> for p, inp in zip(physics, inputs):
+>     p.step(inp)
+> ```
+> is **not wrong** — it produces identical physics — but it leaves L2
+> batching on the table: K separate compute calls, K separate state
+> reads/writes, K Python `step()` round-trips. `MultiVehiclePhysics`
+> ```python
+> mphys = MultiVehiclePhysics(scene, vehicles)                          # ✓ prefer
+> mphys.step(inputs)
+> ```
+> collapses those into one batched compute + one batched read/write per
+> kind. Cleaner API and modestly faster (1.1–1.2× at K = 2–4; the gain is
+> bounded because `scene.step()` itself isn't an L2 axis — see
+> [What's NOT batched](#whats-not-batched)).
+>
+> **When the manual loop is still legitimate:** you need per-vehicle
+> solver operations the batched path doesn't expose the same way —
+> independent per-vehicle external forces / impulses, or per-vehicle
+> teleport+reset mid-rollout. (This is exactly why
+> `genesis_vehicle.server`'s default per-entity mode still loops: the OSC
+> protocol must apply `target_forces` / `AddWorldImpulse` to individual
+> vehicles.) If you don't need those, prefer `MultiVehiclePhysics`.
+>
+> And for K = 1 it's the reverse — just use plain `VehiclePhysics`
+> (L2 has nothing to batch; see [When L2 does NOT help](#when-l2-does-not-help)).
+
 `MultiVehiclePhysics(scene, vehicles, n_envs=1)` processes K vehicles
 that share one Genesis scene. It groups vehicles by `id(cfg)` (same
 config object → same kind = same URDF + same preset + same wheel
