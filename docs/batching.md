@@ -250,12 +250,63 @@ This is the headline workflow the v0.5.14 release was built around.
 | 1 vehicle, parallel rollouts for RL / MPPI | `VehiclePhysics(n_envs=N)` (L3) |
 | 1 vehicle, just visualization | `VehiclePhysics` (n_envs=1) |
 | K vehicles in 1 visible scene (traffic demo, multi-kind comparison) | `MultiVehiclePhysics(scene, vehicles)` (L2) |
-| **K vehicles × N parallel scenarios** | **`MultiVehiclePhysics(scene, vehicles, n_envs=N)`** (L2 × L3) |
+| **K vehicles × N parallel scenarios** | **`MultiVehiclePhysics(scene, vehicles, n_envs=N)`** (L2 × L3) — minimal example: [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) |
 | K=1, large N | Use plain `VehiclePhysics(n_envs=N)` — L2 only adds overhead with nothing to batch |
 
 If you find yourself manually Python-looping over vehicles or envs,
 you're probably leaving one of these axes on the table — check the
 table above.
+
+---
+
+## Why two classes? (`VehiclePhysics` vs `MultiVehiclePhysics`)
+
+A natural question: if `MultiVehiclePhysics` with K = 1 vehicle is just
+`VehiclePhysics`, why are there two classes — couldn't one class branch
+internally?
+
+**They are NOT two parallel implementations.** `MultiVehiclePhysics`
+(via its per-kind worker `MultiVehicleKindPhysics`) is built *on top of*
+`VehiclePhysics`: it constructs a proto `VehiclePhysics(..., n_envs=N·K)`
+and reuses it for all config resolution and batched tensor state
+(`omega`, `wheel_meta`, `resolved`, …). The two classes differ only in
+the **I/O layer**:
+
+| | `VehiclePhysics` | `MultiVehiclePhysics` |
+|---|---|---|
+| Entities | ONE (1 base link, 1 sensor) | K (K base links, K sensors, grouped by cfg) |
+| Force apply | 1 link | K links in one batched call |
+| Sensor read | 1 raycaster | K raycasters stacked |
+| Batch dim | `n_envs` | `n_envs · K` |
+
+So with K = 1, `MultiVehiclePhysics` *is* functionally
+`VehiclePhysics(n_envs=N)` plus a thin K-loop wrapper — your intuition is
+correct.
+
+**Why keep them separate rather than one branching class:**
+
+1. **Common-case ergonomics.** ~90 % of use is ONE vehicle (your car,
+   optionally batched over RL envs). `VehiclePhysics(scene, car, sensor,
+   cfg, n_envs=N)` is the clean API for that. The multi-vehicle path
+   needs a *list of `(entity, sensor, cfg)` tuples* and cfg-identity
+   grouping — folding both input shapes into one constructor would make
+   the simple case carry the complex case's surface area.
+2. **No hot-path tax.** The single-vehicle path skips K-stacking of
+   sensors, scatter-to-K-base-links, and per-kind dispatch — all pure
+   overhead when K = 1.
+3. **Composition over a god-class.** `MultiVehiclePhysics` *delegates* to
+   `VehiclePhysics`; the physics math has one owner.
+
+**Honest caveat (a real maintenance wart):** the `step()` *pipeline*
+(suspension → tire → omega) is currently **mirrored** between
+`VehiclePhysics.step` and `MultiVehicleKindPhysics.step` because the
+multi-entity I/O is interleaved with the math. A physics fix (e.g. the
+v0.6.0 `F_long` overshoot clamp) must be applied to both. A future
+refactor could extract the shared pipeline into a pure function fed by an
+I/O adapter — removing the duplication **without** merging the two
+public classes. Tracked as a cleanup, not a correctness issue (the
+grouping/dispatch bookkeeping is now unit-tested in
+`tests/test_multi_vehicle_grouping.py`).
 
 ---
 
@@ -286,6 +337,7 @@ table above.
 |---|---|---|
 | L3 sweep | [`samples/perf_vectorization.py`](../samples/perf_vectorization.py) | 44× at n_envs=64 |
 | L2 sweep | [`samples/perf_multi_vehicle.py`](../samples/perf_multi_vehicle.py) | 1.14× at K=2, 1.07× at K=4 (4-kind fleet) |
+| L2 × L3 minimal | [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) | shortest runnable L2 × L3 (K interacting × N scenarios, per-scenario control) |
 | L2 × L3 combined | [`samples/perf_l2_l3_combined.py`](../samples/perf_l2_l3_combined.py) | 4.6× at K=2 N=4 (≈ product of L2 × L3 individual) |
 | Multi-vehicle visual | [`samples/road_loop.py`](../samples/road_loop.py) | 6% faster than per-vehicle loop with full VisualSync (16 vehicles, 4 kinds) |
 | L2 × L3 ego+traffic visual | [`samples/city_traffic_ego.py`](../samples/city_traffic_ego.py) | 8 vehicles × 4 envs = 32 batched; 3.5× throughput vs n_envs=1 |

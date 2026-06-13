@@ -10,6 +10,39 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.1] — 2026-06-13
+
+### Added — `samples/l2l3_minimal.py` + L2/L3 docs: API-selection & two-class rationale
+
+- **`samples/l2l3_minimal.py`** — the shortest runnable L2 × L3 program
+  (~90 lines): K interacting vehicles in one world × N parallel scenarios
+  via a single `MultiVehiclePhysics(scene, vehicles, n_envs=N)`. Shows
+  per-(scenario, vehicle) control (lead car brakes in scenario 0 only and
+  diverges from the rolling copies). Fills the gap between the full
+  `city_traffic_ego.py` demo and the `perf_l2_l3_combined.py` benchmark.
+- **`docs/batching.md`** — new "Why two classes? (`VehiclePhysics` vs
+  `MultiVehiclePhysics`)" section: confirms K=1 `MultiVehiclePhysics` ≈
+  `VehiclePhysics(n_envs=N)`, explains that Multi is built *on top of*
+  Single (proto reuse) and they differ only in the I/O layer, why they
+  stay separate (common-case ergonomics, no hot-path tax, composition),
+  and the honest caveat that `step()` math is currently mirrored between
+  the two (a future-cleanup wart, not a correctness issue). Decision
+  matrix + perf table now point to `l2l3_minimal`.
+
+### Changed — `MultiVehiclePhysics` grouping/dispatch extracted to pure functions
+
+`group_vehicles_by_cfg()` and `rebucket_inputs()` are now module-level
+pure functions (no Genesis objects touched), so the kind-grouping and
+flat→(kind, slot) input routing that L2 × L3 depends on is unit-tested
+without a GPU. Behavior unchanged; `MultiVehiclePhysics.__init__` /
+`.step` call the extracted helpers.
+
+- `tests/test_multi_vehicle_grouping.py` — 5 pure-Python tests
+  (single-kind, interleaved kinds, caller-order preservation, input
+  re-bucketing round-trip, single-vehicle). 65 → 70 tests.
+
+---
+
 ## [0.7.0] — 2026-06-13
 
 ### Added — `genesis_vehicle.server` subpackage (OSC physics server, moved in from genesis_unreal_plugin)
