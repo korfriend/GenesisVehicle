@@ -10,6 +10,31 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.2] — 2026-06-13
+
+### Added — docs/server.md (purpose + modes + full OSC schema reference)
+
+Dedicated user doc for the OSC physics server: purpose (Genesis = physics
+truth, external client = render/control), when to use the server vs the
+in-process SDK API, the three modes + CPU/GPU rationale, and a complete
+OSC wire-schema reference (ports, handshake sequence, every inbound/
+outbound address with payload layout, RHS->LHS coordinate conversion, and
+the vehicle mapping JSON keys incl. the steerScale/maxSteerRad note).
+Linked from docs/index.md.
+
+### Changed — genesis_unreal_plugin reduced to a thin launcher
+
+The repo-external `genesis_unreal_plugin/` no longer keeps its own copy of
+the server: `physics_server.py` is now a ~20-line shim that forwards to
+`genesis_vehicle.server`, and the duplicate `osc_manager.py` /
+`genesis_env_builder.py` / `genesis_vehicle_builder.py` were removed (their
+canonical, improved versions live in genesis_vehicle/server/). Prevents
+the edit-the-wrong-copy hazard that previously dropped a perf patch. (The
+plugin folder is outside the SDK git root, so this change is not in this
+commit; it is documented here for traceability.)
+
+---
+
 ## [0.7.1] — 2026-06-13
 
 ### Added — `samples/l2l3_minimal.py` + L2/L3 docs: API-selection & two-class rationale

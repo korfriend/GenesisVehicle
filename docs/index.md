@@ -8,6 +8,7 @@ Landing page. Pick the document that matches what you're doing.
 | See all 9 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
 | Build a mental model before reading code | [`concepts.md`](concepts.md) |
 | Pick the right batching axis (L1 / L2 / L3) for your workflow | [`batching.md`](batching.md) |
+| Run the OSC physics server for an external client (Unreal / Unity), or look up the wire schema | [`server.md`](server.md) |
 | Look up a specific class / function / default | [`api-reference.md`](api-reference.md) |
 | Understand WHERE in the simulation step your hook runs | [`pipeline-and-hooks.md`](pipeline-and-hooks.md) |
 | Pick a stability profile (or understand why it matters for MPPI / Real2Sim) | [`stability-profiles.md`](stability-profiles.md) |
