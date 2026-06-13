@@ -15,13 +15,20 @@ input; Genesis owns the physics truth.
 
 ## 1. Purpose
 
-```
-┌────────────────────┐   OSC/UDP    ┌──────────────────────────────┐
-│  Client (UE/Unity) │ ───────────▶ │  genesis_vehicle.server      │
-│  - renders         │  control in  │  - parse_urdf + VehiclePhysics│
-│  - sends inputs     │ ◀─────────── │  - scene.step()              │
-│  - shows actors     │  state out   │  - streams transforms         │
-└────────────────────┘              └──────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Client["Client (UE / Unity)"]
+        C1["renders"]
+        C2["sends inputs"]
+        C3["shows actors"]
+    end
+    subgraph Server["genesis_vehicle.server"]
+        S1["parse_urdf + VehiclePhysics"]
+        S2["scene.step()"]
+        S3["streams transforms"]
+    end
+    Client -->|"control in (OSC/UDP)"| Server
+    Server -->|"state out (OSC/UDP)"| Client
 ```
 
 The server is **client-agnostic**: any process that speaks the OSC schema
