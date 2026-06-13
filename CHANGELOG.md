@@ -10,6 +10,66 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.0] — 2026-06-13
+
+### Added — `genesis_vehicle.server` subpackage (OSC physics server, moved in from genesis_unreal_plugin)
+
+The UE-bridge physics server now lives inside the SDK as
+`genesis_vehicle/server/` so it is version-controlled with the package
+(previous home `genesis_unreal_plugin/` was an unversioned folder — a
+hand-off overwrite silently dropped a perf patch once). It is a
+client-agnostic OSC/UDP server; UE is just one client.
+
+Run it with:
+
+```bash
+python -m genesis_vehicle.server               # per-entity mode (legacy; heterogeneous / few vehicles, CPU)
+python -m genesis_vehicle.server --multi-env   # L3 batched mode (same-URDF fleet, GPU)
+```
+
+- `server/physics_server.py` — legacy per-entity loop (one entity +
+  `VehiclePhysics(n_envs=1)` per target). Unchanged semantics, plus:
+  Windows-only code (PyInstaller `ctypes.CDLL` patch, `HIGH_PRIORITY_CLASS`)
+  is now platform-guarded so the server also runs on Linux; package-relative
+  imports (no `sys.path` hacks); `capture_state` reads wheel poses via
+  cached link indices + 2 batched `get_links_pos/quat` calls instead of
+  per-wheel `get_link(name)+get_pos+get_quat` (≈6× fewer Genesis calls
+  per step at 100 vehicles) and converts `omega` once per vehicle instead
+  of one `.item()` per wheel.
+- `server/l3_runtime.py` — **new `--multi-env` mode**: N same-URDF,
+  non-interacting targets run as ONE vehicle entity ×
+  `scene.build(n_envs=N)` with a single batched `VehiclePhysics(n_envs=N)`.
+  Measured on the dev laptop (dt=0.02, substeps=2, GPU): 30/50/100 vehicles
+  all ≈ 19 ms/step **including** state capture — vs 1,115 ms/step for the
+  per-entity loop at 30 vehicles on the same GPU (57×). Backend defaults to
+  GPU (`--force-cpu` to override). Known v1 limits (logged at runtime):
+  dynamic obstacles are per-env copies (states sent from env 0),
+  `target_forces` and `AddWorldImpulse/Torque` relative commands are not
+  supported, no lockstep.
+- `server/vehicle_builder.py` — cfg construction extracted into
+  `build_cfg()` shared by both modes; `strip_wheel_collisions()` extracted.
+  **Fixed:** steering-range mapping key mismatch — UE serializes
+  `FGenesisVehicleMapping.SteerScale` as `steerScale`, but only
+  `maxSteerRad` was read, so the UE setting was silently ignored and the
+  preset default (0.7 rad) always applied. `_mapping_steer_rad()` now
+  accepts `maxSteerRad` / `MaxSteerRad` / `steerScale` / `SteerScale`
+  (in that priority).
+- `server/env_builder.py`, `server/osc_manager.py` — moved as-is
+  (osc_manager loses its `sys.path` hacks).
+- `tests/test_server_import.py` — import smoke + steer-key mapping unit
+  tests (auto-skip when genesis/pythonosc absent, so the pure-Python CI
+  story is unchanged). 62 → 65 tests.
+
+Server-only dependencies (`pythonosc`, `psutil`, `trimesh`) are NOT
+required by the SDK core — `genesis_vehicle.server.__init__` is
+intentionally empty so `import genesis_vehicle` works without them.
+
+The old `genesis_unreal_plugin/` copies remain for the team's current
+workflow but `genesis_vehicle/server/` is now the canonical, git-tracked
+home; edit there.
+
+---
+
 ## [0.6.0] — 2026-06-09
 
 ### Fixed — longitudinal friction-force overshoot clamp (wheel-spin oscillation / "front tire slips at launch")
