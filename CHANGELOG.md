@@ -10,6 +10,21 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.4] — 2026-06-13
+
+### Added — docs/tire-and-contact.md (tire models vs ground-contact mechanisms)
+
+New doc separating the two orthogonal axes that are easily conflated:
+tire friction model (Pacejka vs Coulomb) and ground-detection mechanism
+(raycast wheel / shapecast / collider contact / contact-patch), with
+standard names for each. States the recommendation (Pacejka + raycast
+wheel), explains why Coulomb is not a performance win (lighter compute is
+negligible; worse low-speed stability), and clears up the historical
+"Coulomb = collider-vs-collider" confusion — today's `CoulombIsotropic`
+is ray-hit-based, same pipeline as Pacejka. Linked from docs/index.md.
+
+---
+
 ## [0.7.3] — 2026-06-13
 
 ### Fixed — multi-vehicle (L2 / L2×L3) now gets the `F_long` overshoot clamp
