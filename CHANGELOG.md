@@ -10,6 +10,17 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.6] — 2026-06-13
+
+### Changed — docs/server.md architecture diagram → Mermaid
+
+Replaced the ASCII client↔server box diagram with a Mermaid `flowchart`
+(renders as a real diagram on GitHub / VS Code / Obsidian). Other docs'
+text diagrams (the pipeline pseudocode, the README directory tree) are
+intentionally left as text.
+
+---
+
 ## [0.7.5] — 2026-06-13
 
 ### Removed — docs/migration.md
