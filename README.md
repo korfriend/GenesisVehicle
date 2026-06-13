@@ -246,7 +246,6 @@ Detailed docs live under [`docs/`](docs/):
 | [`docs/pipeline-and-hooks.md`](docs/pipeline-and-hooks.md) | Hook insertion points in the 5-step pipeline |
 | [`docs/stability-profiles.md`](docs/stability-profiles.md) | `control` / `raw` / `research` profiles + the "one rule" for MPPI / Real2Sim |
 | [`docs/physics-contracts.md`](docs/physics-contracts.md) | Brake sign, non-negative N, `i_wheel` truth policy, steering / coupling order |
-| [`docs/migration.md`](docs/migration.md) | Mapping legacy 3-variant style code onto the SDK |
 | [`docs/testing.md`](docs/testing.md) | Test inventory + module map |
 
 ## Repository Layout

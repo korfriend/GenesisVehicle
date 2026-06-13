@@ -14,7 +14,6 @@ Landing page. Pick the document that matches what you're doing.
 | Understand WHERE in the simulation step your hook runs | [`pipeline-and-hooks.md`](pipeline-and-hooks.md) |
 | Pick a stability profile (or understand why it matters for MPPI / Real2Sim) | [`stability-profiles.md`](stability-profiles.md) |
 | Verify what the SDK promises about brake sign / N clamp / `i_wheel` truth / steering convention | [`physics-contracts.md`](physics-contracts.md) |
-| Port your HJW / JMK / KDU code onto the SDK | [`migration.md`](migration.md) |
 | See what's tested and where things live | [`testing.md`](testing.md) |
 | Track what changed between versions | [`../CHANGELOG.md`](../CHANGELOG.md) |
 
