@@ -237,10 +237,11 @@ Detailed docs live under [`docs/`](docs/):
 | Page | What's in it |
 |---|---|
 | [`docs/index.md`](docs/index.md) | Documentation home — full TOC |
-| [`samples/README.md`](samples/README.md) | Catalog of all 9 runnable samples + viewer support matrix |
+| [`samples/README.md`](samples/README.md) | Catalog of all 10 runnable samples + viewer support matrix |
 | [`docs/quickstart.md`](docs/quickstart.md) | Minimal example, runnable end-to-end |
 | [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855, hook intuition, batched-by-default |
 | [`docs/batching.md`](docs/batching.md) | The L1 / L2 / L3 vectorization axes — when to use which, measured speedups, the L2 × L3 combined pattern |
+| [`docs/server.md`](docs/server.md) | OSC physics server for external clients (Unreal / Unity) — purpose, modes, full wire-schema reference |
 | [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default) |
 | [`docs/pipeline-and-hooks.md`](docs/pipeline-and-hooks.md) | Hook insertion points in the 5-step pipeline |
 | [`docs/stability-profiles.md`](docs/stability-profiles.md) | `control` / `raw` / `research` profiles + the "one rule" for MPPI / Real2Sim |
@@ -279,8 +280,9 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-62 pure-Python tests covering URDF parsing, config resolve, strategy math,
-dynamics primitives, version reporting, and stability-profile semantics.
+70 pure-Python tests covering URDF parsing, config resolve, strategy math,
+dynamics primitives, version reporting, stability-profile semantics,
+multi-vehicle grouping/input routing, and the server subpackage surface.
 No Genesis runtime needed — they run on CPU in ~3 s.
 
 ## Releases and Versioning

@@ -8,7 +8,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-62 pure-Python tests; no Genesis runtime required. Runs in ~3s on CPU.
+70 pure-Python tests; no Genesis runtime required. Runs in ~3s on CPU.
 
 GPU integration is exercised by user-side demo scripts in your downstream
 project — the SDK's own test suite stays pure-Python so it can run in any
@@ -32,6 +32,8 @@ CI without GPU.
 | Suspension N clamped non-negative | `test_dynamics.py` | strong rebound → `N = 0`, not negative |
 | Suspension air-mask → `N = 0` | `test_dynamics.py` | |
 | Asymmetric damper (compression vs extension) | `test_dynamics.py` | same |c_dot| produces different N when c_compression ≠ c_extension |
+| MultiVehicle grouping / input routing | `test_multi_vehicle_grouping.py` | `group_vehicles_by_cfg` kind grouping + caller-order preservation; `rebucket_inputs` flat→(kind, slot) routing round-trip (the L2×L3 input-routing logic, GPU-free) |
+| Server subpackage import + steer-key mapping | `test_server_import.py` | `genesis_vehicle.server` imports; `steerScale`/`maxSteerRad` mapping-key resolution (auto-skips without genesis/pythonosc) |
 
 ## Public-surface import smoke check
 
