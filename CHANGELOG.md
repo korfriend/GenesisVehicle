@@ -10,6 +10,36 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.3] — 2026-06-13
+
+### Fixed — multi-vehicle (L2 / L2×L3) now gets the `F_long` overshoot clamp
+
+The per-wheel `step()` math was mirrored between `VehiclePhysics.step` and
+`MultiVehicleKindPhysics.step`, and had **silently drifted**: the v0.6.0
+longitudinal-friction overshoot clamp was added to the single-vehicle path
+only. Multi-vehicle (`MultiVehiclePhysics`, i.e. L2 and L2×L3) was missing
+it, so a batched traffic/MPPI scene launched with slightly different wheel
+dynamics than the same vehicle run singly.
+
+Both paths now call one shared `_pipeline.compute_wheel_step`, so the clamp
+(and any future physics fix) applies to both. Verified: a single
+`VehiclePhysics(n_envs=1)` and a `MultiVehiclePhysics` with K=1 now produce
+**identical** trajectories (Δpos = 0.0 mm, Δω = 0.0) over an accel+steer
+sequence — previously they diverged in the acceleration phase.
+
+### Changed — shared per-wheel pipeline extracted to `_pipeline.py`
+
+Sections A–E (suspension → tire → omega → force accumulation → coupling)
+of the ray-wheel step are now a single batch-shape-agnostic pure function
+`compute_wheel_step(...)` in `genesis_vehicle/_pipeline.py`. `core.py` and
+`multi_vehicle.py` both call it; their `step()` methods keep only their own
+I/O (entity/sensor reads, solver force writes, VisualSync). Removes ~120
+lines of duplicated math and the mirror-drift maintenance hazard. No public
+API change; behavior for single-vehicle is byte-identical (math moved
+verbatim).
+
+---
+
 ## [0.7.2] — 2026-06-13
 
 ### Added — docs/server.md (purpose + modes + full OSC schema reference)

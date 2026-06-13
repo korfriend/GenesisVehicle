@@ -11,11 +11,10 @@ from typing import Any, Optional
 
 import torch
 import genesis as gs
-from genesis.utils.geom import transform_by_quat
 
 from ._version import __version__
 from .config import ResolvedConfig, VehicleConfig, resolve
-from .dynamics import brake_torque_signed
+from ._pipeline import compute_wheel_step
 from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import read_distances
 from .urdf import estimate_spin_inertia_from_genesis
@@ -334,132 +333,30 @@ class VehiclePhysics:
             hook.apply_pre_loop(ctx)
 
         # ================================================================
-        # BATCHED PER-WHEEL PIPELINE — no Python loop over wheels
-        # All tensors are (n_envs, n_wheels) or (n_envs, n_wheels, 3).
+        # BATCHED PER-WHEEL PIPELINE — shared with MultiVehicleKindPhysics
+        # via _pipeline.compute_wheel_step (single source of the math).
         # ================================================================
-
-        # World-space wheel positions: transform (n_envs * n, 3) at once.
-        quat_b_flat = quat.unsqueeze(1).expand(n_envs, n, 4).reshape(n_envs * n, 4)
-        wheel_body_flat = self._wheel_body_b.reshape(n_envs * n, 3)
-        wheel_world = (transform_by_quat(wheel_body_flat, quat_b_flat)
-                       .reshape(n_envs, n, 3) + pos.unsqueeze(1))   # (n_envs, n, 3)
-
-        # (A) Compression / asymmetric damper / N.
-        compression = torch.clamp(wm.rest_d.unsqueeze(0) - distances, min=0.0)
-        air_mask = compression <= 0
-        if self._prev_init:
-            raw_rate = (compression - self.prev_compression) / DT
-            rc = wm.comp_rate_clamp.unsqueeze(0)
-            comp_rate = torch.clamp(raw_rate, -rc, rc)
-        else:
-            comp_rate = torch.zeros_like(compression)
-        self.prev_compression = compression.detach().clone()
-
-        c_damp = torch.where(
-            comp_rate > 0.0,
-            wm.c_compression.unsqueeze(0).expand_as(comp_rate),
-            wm.c_extension.unsqueeze(0).expand_as(comp_rate),
+        res = compute_wheel_step(
+            pos=pos, quat=quat, vel=vel, ang=ang, distances=distances,
+            steer_per_wheel=steer_per_wheel,
+            T_drive_pw=T_drive_pw, T_brake_pw=T_brake_pw, omega=self.omega,
+            prev_compression=self.prev_compression, prev_init=self._prev_init,
+            wheel_meta=wm, resolved=self.resolved,
+            wheel_body_b=self._wheel_body_b, up_world=self._up_world,
+            post_tire_hooks=self.post_tire_hooks, ctx=ctx,
+            dt=DT, B=n_envs, n=n,
         )
-        N = wm.k_susp.unsqueeze(0) * compression + c_damp * comp_rate
-        N = torch.clamp(N, min=0.0)
-        N = torch.where(air_mask, torch.zeros_like(N), N)
+        self.prev_compression = res.compression.detach().clone()
+        self.omega = res.new_omega
+        total_F, total_T = res.total_F, res.total_T
 
-        # (B) Wheel-frame fwd/lat (ISO 8855: +steer → fwd rotates +X toward -Y).
-        cs = torch.cos(steer_per_wheel)
-        ss = torch.sin(steer_per_wheel)
-        zer = torch.zeros_like(cs)
-        wheel_fwd_local = torch.stack([cs, -ss, zer], dim=-1)   # (n_envs, n, 3)
-        wheel_lat_local = torch.stack([ss,  cs, zer], dim=-1)
-        wheel_fwd_world = transform_by_quat(
-            wheel_fwd_local.reshape(n_envs * n, 3), quat_b_flat
-        ).reshape(n_envs, n, 3)
-        wheel_lat_world = transform_by_quat(
-            wheel_lat_local.reshape(n_envs * n, 3), quat_b_flat
-        ).reshape(n_envs, n, 3)
-
-        r_vec = wheel_world - pos.unsqueeze(1)                       # (n_envs, n, 3)
-        ang_b = ang.unsqueeze(1).expand(n_envs, n, 3)
-        v_hit = vel.unsqueeze(1) + torch.cross(ang_b, r_vec, dim=-1)  # (n_envs, n, 3)
-        v_long = (v_hit * wheel_fwd_world).sum(dim=-1)               # (n_envs, n)
-        v_lat = (v_hit * wheel_lat_world).sum(dim=-1)
-        v_roll = wm.radius.unsqueeze(0) * self.omega                 # (n_envs, n)
-
-        # (C) Tire force — single batched call.
-        F_long, F_lat, kappa, alpha = self.resolved.tire(
-            v_long, v_lat, v_roll, N, wm,
-        )
-
-        # POST_TIRE stability hooks (batched — one call per hook).
-        ctx.F_long = F_long; ctx.F_lat = F_lat; ctx.N = N
-        ctx.v_long = v_long; ctx.v_lat = v_lat
-        ctx.omega = self.omega; ctx.air_mask = air_mask
-        ctx.omega_override = None
-        ctx.omega_pull_factor = None; ctx.omega_pull_target = None
-        ctx.dt = float(DT)
-        for hook in self.post_tire_hooks:
-            hook.apply_post_tire(ctx)
-        F_long, F_lat = ctx.F_long, ctx.F_lat
-
-        # (D) Omega update. Pass dt + i_wheel so the brake torque is
-        # clamped against single-step overshoot — see brake_torque_signed
-        # docstring for why this matters.
-        i_w = wm.i_wheel.unsqueeze(0)
-        T_brake_eff = brake_torque_signed(T_brake_pw, self.omega, dt=DT, i_wheel=i_w)
-        radius_b = wm.radius.unsqueeze(0)
-
-        # [Overshoot Clamp] Cap F_long so the resulting friction torque cannot reverse the tire slip direction in one step.
-        omega_target = v_long / radius_b
-        domega_nofric = (T_drive_pw - T_brake_eff) / i_w
-        omega_nofric = self.omega + domega_nofric * DT
-        T_fric_limit = (omega_nofric - omega_target) * i_w / DT
-        F_long_limit = T_fric_limit / radius_b
-
-        F_long = torch.where(
-            omega_nofric > omega_target,
-            torch.maximum(torch.zeros_like(F_long), torch.minimum(F_long, F_long_limit)),
-            torch.minimum(torch.zeros_like(F_long), torch.maximum(F_long, F_long_limit))
-        )
-
-        T_friction = radius_b * F_long
-        domega = (T_drive_pw - T_brake_eff - T_friction) / i_w
-        new_omega = self.omega + domega * DT
-        domega_air = (T_drive_pw - T_brake_eff) / i_w
-        new_omega_air = self.omega + domega_air * DT
-        new_omega = torch.where(air_mask, new_omega_air, new_omega)
-        omega_max = float(self.resolved.chassis.omega_max)
-        new_omega = torch.clamp(new_omega, -omega_max, omega_max)
-
-        if ctx.omega_pull_factor is not None and ctx.omega_pull_target is not None:
-            pull = ctx.omega_pull_factor
-            new_omega = new_omega * (1.0 - pull) + ctx.omega_pull_target * pull
-
-        if ctx.omega_override is not None:
-            new_omega = torch.where(
-                ctx.omega_override.active, torch.zeros_like(new_omega), new_omega,
-            )
-
-        self.omega = new_omega
-
-        # (E) Force accumulation (batched).
-        F_world = (
-            N.unsqueeze(-1) * self._up_world.unsqueeze(1)
-            + F_long.unsqueeze(-1) * wheel_fwd_world
-            + F_lat.unsqueeze(-1) * wheel_lat_world
-        )                                                   # (n_envs, n, 3)
-        torque = torch.cross(r_vec, F_world, dim=-1)
-        total_F = F_world.sum(dim=1)                        # (n_envs, 3)
-        total_T = torque.sum(dim=1)
-
-        # Diagnostics (all already (n_envs, n)).
-        self.last_N = N
-        self.last_F_long = F_long
-        self.last_F_lat = F_lat
-        self.last_compression = compression
-        self.last_kappa = kappa
-        self.last_alpha = alpha
-
-        # [COUPLING]
-        self.omega = self.resolved.coupling.apply(self.omega, wm)
+        # Diagnostics (all (n_envs, n)).
+        self.last_N = res.N
+        self.last_F_long = res.F_long
+        self.last_F_lat = res.F_lat
+        self.last_compression = res.compression
+        self.last_kappa = res.kappa
+        self.last_alpha = res.alpha
 
         # [APPLY]
         self.solver.apply_links_external_force(total_F.unsqueeze(1), self.base_idx_list)
