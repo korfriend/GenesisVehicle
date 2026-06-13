@@ -10,6 +10,16 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.5] — 2026-06-13
+
+### Removed — docs/migration.md
+
+Dropped the legacy HJW/JMK/KDU → SDK migration guide (no longer needed).
+Removed its links from docs/index.md and README.md; the one cross-reference
+in physics-contracts.md (KDU steer-sign flip) is now stated inline.
+
+---
+
 ## [0.7.4] — 2026-06-13
 
 ### Added — docs/tire-and-contact.md (tire models vs ground-contact mechanisms)

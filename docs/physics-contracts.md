@@ -67,9 +67,9 @@ the estimation pipeline.
   right side (`left_cmd > right_cmd` via
   `left_cmd = throttle + steer_gain * steer`).
 
-KDU's legacy `+steer = LEFT` is **not** carried forward; KDU demo callsites
-must flip the sign in migration. See
-[`migration.md`](migration.md#from-kdu-kduphysicspy).
+KDU's legacy `+steer = LEFT` is **not** carried forward; skid-steer here is
+`+steer = right` (ISO 8855), so any code ported from a `+steer = LEFT`
+convention must flip the steer sign.
 
 ### URDF authoring recommendation — steer joint axis = `(0, 0, -1)`
 
