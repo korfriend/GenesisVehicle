@@ -26,8 +26,14 @@ class VehiclePhysics:
 ### Multi-vehicle (L2 batching, v0.5.11+)
 
 When K vehicles share ONE scene at DIFFERENT positions (traffic,
-multi-agent, MPPI candidate visualization), `MultiVehiclePhysics` groups
-them by URDF / cfg identity and batches the compute pipeline per kind:
+multi-agent, MPPI candidate visualization), use `MultiVehiclePhysics` —
+**not** a hand-rolled Python loop of K separate `VehiclePhysics` objects.
+The loop is correct but leaves L2 batching on the table (K compute calls,
+K state reads/writes); `MultiVehiclePhysics` groups vehicles by URDF / cfg
+identity and batches the compute pipeline per kind. (Exception: if you
+need per-vehicle solver ops — independent external forces/impulses, or
+per-vehicle teleport mid-rollout — the loop is still legitimate; see
+[`batching.md`](batching.md#l2--cross-vehicle-batching-in-one-env).)
 
 ```python
 class MultiVehiclePhysics:

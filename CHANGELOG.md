@@ -24,10 +24,17 @@ running version the first time it is instantiated in a process.
   `MultiVehiclePhysics`)" section: confirms K=1 `MultiVehiclePhysics` ≈
   `VehiclePhysics(n_envs=N)`, explains that Multi is built *on top of*
   Single (proto reuse) and they differ only in the I/O layer, why they
-  stay separate (common-case ergonomics, no hot-path tax, composition),
-  and the honest caveat that `step()` math is currently mirrored between
-  the two (a future-cleanup wart, not a correctness issue). Decision
-  matrix + perf table now point to `l2l3_minimal`.
+  stay separate (common-case ergonomics; composition), and the honest
+  caveat that `step()` math is currently mirrored between the two (a
+  future-cleanup wart, not a correctness issue). Decision matrix + perf
+  table now point to `l2l3_minimal`.
+- **`docs/batching.md` + `docs/api-reference.md`** — explicit guidance: for
+  K > 1 vehicles in one scene, prefer `MultiVehiclePhysics` over a manual
+  Python loop of K `VehiclePhysics` objects (the loop is correct but skips
+  L2 batching). Documents the one legitimate exception (per-vehicle solver
+  ops — independent forces/impulses or mid-rollout teleport — which is why
+  `genesis_vehicle.server`'s per-entity mode still loops) and that K = 1
+  should just use plain `VehiclePhysics`.
 
 ### Changed — `MultiVehiclePhysics` grouping/dispatch extracted to pure functions
 
