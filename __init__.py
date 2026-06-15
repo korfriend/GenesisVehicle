@@ -116,7 +116,7 @@ _GENESIS_LAZY = {
     "get_link_transforms": ("genesis_vehicle.kinematics", "get_link_transforms"),
     "LinkTransforms": ("genesis_vehicle.kinematics", "LinkTransforms"),
     "VisualJointSync": ("genesis_vehicle.visual", "VisualJointSync"),
-    "RenderTransforms": ("genesis_vehicle.core", "RenderTransforms"),
+    "VisualPartsTransforms": ("genesis_vehicle.core", "VisualPartsTransforms"),
     "add_vehicle": ("genesis_vehicle.scene_helpers", "add_vehicle"),
     "make_wheel_raycaster": ("genesis_vehicle.scene_helpers", "make_wheel_raycaster"),
 }
@@ -144,7 +144,7 @@ __all__ = [
     # Kinematics — per-link transforms (lazy)
     "get_link_transforms", "LinkTransforms",
     # Render feed for external engines (lazy)
-    "RenderTransforms",
+    "VisualPartsTransforms",
     # Scene helpers (lazy — thin wrappers around Genesis boilerplate)
     "add_vehicle", "make_wheel_raycaster",
     # Visual joint sync for the Genesis viewer (lazy)

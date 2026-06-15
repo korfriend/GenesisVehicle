@@ -10,6 +10,28 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.10] — 2026-06-16
+
+### Changed — `render_transforms` → `visual_parts_transforms` (`RenderTransforms` → `VisualPartsTransforms`)
+
+Renamed the one-call render feed (method + dataclass) for a clearer name that
+says what it returns: the visual parts (chassis + wheels) of the vehicle. No
+behavior change. Old names existed for v0.7.8–0.7.9 only; no alias kept
+(the SDK/server/team code is updated). `__init__` export, `_check_import`,
+and docs unified on the new name.
+
+### Added — one-time perf advisory when `VisualJointSync` is enabled
+
+On first construction of a `VisualJointSync` (i.e. `enable_visual_sync=True`,
+the default), the SDK logs a one-time-per-process `[genesis_vehicle] PERF:`
+line to stderr: it drives the URDF wheel joints through the engine's
+articulated-body FK every step (~ms/step, the dominant SDK cost at scale) and
+is only needed for the Genesis viewer — external / headless users should set
+`enable_visual_sync=False` and read `visual_parts_transforms` /
+`wheel_visual_transforms` instead. Silence with `GENESIS_VEHICLE_QUIET=1`.
+
+---
+
 ## [0.7.9] — 2026-06-16
 
 ### Removed — `VisualSync` alias (use `VisualJointSync`)

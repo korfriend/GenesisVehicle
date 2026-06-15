@@ -378,16 +378,17 @@ actually cleaner — it has no substep jitter during hard impacts/steer). Assume
 the conventional ray-wheel axes the presets use (steer about chassis +z,
 suspension along ±z, spin about the wheel axle +y).
 
-### 7.7 One-call render feed (`render_transforms`, v0.7.8)
+### 7.7 One-call visual-parts feed (`visual_parts_transforms`, v0.7.8; renamed v0.7.10)
 
 The high-level convenience for an external renderer: chassis **and** wheels in
-one call, VisualJointSync-independent.
+one call, VisualJointSync-independent. (Named `render_transforms` in v0.7.8–0.7.9;
+renamed to `visual_parts_transforms` in v0.7.10.)
 
 ```python
-VehiclePhysics.render_transforms(frame="world", *, envs_idx=None) -> RenderTransforms
+VehiclePhysics.visual_parts_transforms(frame="world", *, envs_idx=None) -> VisualPartsTransforms
 
 @dataclass
-class RenderTransforms:
+class VisualPartsTransforms:
     frame: str                  # wheels' frame ("world" | "local")
     chassis_pos: torch.Tensor   # (n_envs, 3)       real dynamics, always world
     chassis_quat: torch.Tensor  # (n_envs, 4) wxyz
@@ -407,7 +408,16 @@ one-stop feed for a UE / Unity bridge — no `get_link`, no VisualJointSync.
 > The name is explicit on purpose — it drives the **wheel** visual joints
 > (spin/steer/suspension) for the **Genesis viewer** only; it never moves the
 > chassis and does not affect physics. External renderers don't need it at
-> all — use `render_transforms` / `wheel_visual_transforms`.
+> all — use `visual_parts_transforms` / `wheel_visual_transforms`.
+
+> **Perf advisory (v0.7.10):** when `VisualJointSync` is active
+> (`enable_visual_sync=True`, the default) it logs a one-time-per-process
+> `[genesis_vehicle] PERF:` warning to stderr — it drives the URDF wheel joints
+> through the engine's articulated-body FK every step (~ms/step, the dominant
+> SDK cost at scale) and is only needed for the **Genesis viewer**. For an
+> external renderer or any headless run, set `enable_visual_sync=False` and read
+> wheel poses from `visual_parts_transforms` / `wheel_visual_transforms`
+> (closed-form, ~µs). Silence the warning with `GENESIS_VEHICLE_QUIET=1`.
 
 ## 8. Presets
 

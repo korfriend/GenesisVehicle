@@ -193,9 +193,9 @@ class PipelineContext:
 
 
 @dataclass
-class RenderTransforms:
+class VisualPartsTransforms:
     """One-stop render feed for an external engine (UE / Unity), produced by
-    :meth:`VehiclePhysics.render_transforms`. VisualJointSync-independent.
+    :meth:`VehiclePhysics.visual_parts_transforms`. VisualJointSync-independent.
 
     ``chassis_*`` is the real dynamics pose (always world). ``wheel_*`` is the
     closed-form visual pose in ``frame`` (``"world"`` absolute, or ``"local"``
@@ -505,8 +505,8 @@ class VehiclePhysics:
         world_quat = _quat_mul(cquat_b, local_quat)
         return world_pos, world_quat
 
-    def render_transforms(self, frame: str = "world", *,
-                          envs_idx: Optional[Any] = None) -> "RenderTransforms":
+    def visual_parts_transforms(self, frame: str = "world", *,
+                          envs_idx: Optional[Any] = None) -> "VisualPartsTransforms":
         """One call returning everything an external renderer needs for this
         vehicle: the chassis pose **and** the wheel visual poses. Fully
         VisualJointSync-independent (works headless).
@@ -518,7 +518,7 @@ class VehiclePhysics:
         relative to the chassis (attach wheel meshes under the chassis
         component). The chassis is always world.
 
-        Returns a :class:`RenderTransforms`. This is the recommended feed for a
+        Returns a :class:`VisualPartsTransforms`. This is the recommended feed for a
         UE / Unity bridge — one call per vehicle, no get_link, no VisualJointSync.
         """
         cpos = self.entity.get_pos(envs_idx=envs_idx) if envs_idx is not None else self.entity.get_pos()
@@ -526,7 +526,7 @@ class VehiclePhysics:
         if cpos.dim() == 1:
             cpos = cpos.unsqueeze(0); cquat = cquat.unsqueeze(0)
         wp, wq = self.wheel_visual_transforms(frame, envs_idx=envs_idx)
-        return RenderTransforms(
+        return VisualPartsTransforms(
             frame=frame, chassis_pos=cpos, chassis_quat=cquat,
             wheel_names=[w.name for w in self.resolved.wheels],
             wheel_pos=wp, wheel_quat=wq,
