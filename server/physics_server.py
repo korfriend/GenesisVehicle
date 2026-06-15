@@ -125,8 +125,8 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
                 ctrl = controllers[tid]
                 # [VISUAL] SDK closed-form wheel pose: steer + suspension + spin
                 # baked into pos/quat, computed WITHOUT driving Genesis joints
-                # (works even with VisualSync off). Replaces the get_link read,
-                # which required VisualSync on and returned a rest pose otherwise.
+                # (works even with VisualJointSync off). Replaces the get_link read,
+                # which required VisualJointSync on and returned a rest pose otherwise.
                 # The quat already includes spin → send w_angle=0 (UE uses the
                 # quat directly; no separate spin to re-apply).
                 if hasattr(ctrl, 'wheel_visual_transforms'):

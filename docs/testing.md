@@ -57,7 +57,7 @@ and that the lazy names (`VehiclePhysics`, `VisualJointSync`, `WheelRayPattern`,
 | `dynamics.py` | `brake_torque_signed`, `suspension_normal_force` — pure helpers |
 | `raycast.py` | `WheelRayPattern`, `read_distances()` |
 | `kinematics.py` | `get_link_transforms`, `LinkTransforms` — per-link transforms (world / base / parent frame) |
-| `visual.py` | `VisualJointSync` (viewer wheel-joint driver; `VisualSync` = deprecated alias). Auto-invoked by core; flips URDF axis quirks |
+| `visual.py` | `VisualJointSync` (viewer wheel-joint driver). Auto-invoked by core; flips URDF axis quirks |
 | `tire_models/` | `TireModel` ABC + `PacejkaAnisotropic`, `CoulombIsotropic` |
 | `strategies/steering.py` | `SteeringStrategy` + 4 concrete |
 | `strategies/drivetrain.py` | `DrivetrainStrategy` + 4 concrete |

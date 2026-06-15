@@ -10,6 +10,19 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.9] — 2026-06-16
+
+### Removed — `VisualSync` alias (use `VisualJointSync`)
+
+The deprecated `VisualSync` alias added in v0.7.8 is removed — the class is
+now only `VisualJointSync`. Dropped from `__init__` exports and
+`_check_import`; all internal/doc references unified on `VisualJointSync`.
+External code that imported `VisualSync` must switch to `VisualJointSync`
+(it was a one-release alias). The bundled `genesis_unreal_plugin` / D:\ team
+server do not import it, so they are unaffected.
+
+---
+
 ## [0.7.8] — 2026-06-16
 
 ### Added — `VehiclePhysics.render_transforms(frame=...)` + `RenderTransforms`
