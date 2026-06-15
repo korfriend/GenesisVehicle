@@ -37,7 +37,7 @@ VehiclePhysics.step(inputs)
 
 [4] CouplingStrategy.apply(omega, meta)              # post-loop, pre-force-apply
 [5] solver.apply_links_external_force/torque (chassis)
-[6] VisualJointSync (if enabled — viewer wheel joints; ext. renderers use render_transforms)
+[6] VisualJointSync (if enabled — viewer wheel joints; ext. renderers use visual_parts_transforms)
 ```
 
 ## Hook slots

@@ -33,12 +33,38 @@ import torch
 _SUSP_VIS_KP = 1.0e7
 _SUSP_VIS_KV = 1.0e5
 
+# One-time-per-process perf advisory when VisualJointSync is active.
+_PERF_WARNED = False
+
+
+def _warn_perf_once() -> None:
+    global _PERF_WARNED
+    if _PERF_WARNED:
+        return
+    _PERF_WARNED = True
+    import os, sys
+    if os.environ.get("GENESIS_VEHICLE_QUIET"):
+        return
+    print(
+        "[genesis_vehicle] PERF: VisualJointSync is ENABLED — it drives the URDF "
+        "wheel visual joints through the engine's articulated-body FK every step "
+        "(~ms/step overhead; the dominant SDK cost at scale). It is only needed "
+        "for the Genesis viewer. For an external renderer (UE / Unity), or any "
+        "headless run, set enable_visual_sync=False and read wheel poses from "
+        "VehiclePhysics.visual_parts_transforms() / wheel_visual_transforms() "
+        "(closed-form, ~µs). Silence with GENESIS_VEHICLE_QUIET=1.",
+        file=sys.stderr, flush=True,
+    )
+
 
 class VisualJointSync:
     """Drives a vehicle's URDF WHEEL visual joints (spin, steer, suspension) to
     match physics state, for the Genesis viewer. Wheels only — never the
     chassis. Cosmetic (no force feedback). External renderers should use
-    ``VehiclePhysics.wheel_visual_transforms`` instead (viewer-independent)."""
+    ``VehiclePhysics.wheel_visual_transforms`` instead (viewer-independent).
+
+    Emits a one-time-per-process performance advisory on construction (it is the
+    dominant SDK cost at scale, and is unnecessary for external/headless use)."""
 
     def __init__(
         self,
@@ -49,6 +75,7 @@ class VisualJointSync:
         dtype: Any,
         wheel_mesh_radius: Optional[float] = None,
     ):
+        _warn_perf_once()
         self.entity = entity
         self.resolved = resolved
         self.n_envs = n_envs
