@@ -137,7 +137,7 @@ class MultiVehicleKindPhysics:
             base_idx_list, dtype=torch.long, device=self.dev,
         )
 
-        # Replace the proto's VisualSync with K per-entity VisualSync objects,
+        # Replace the proto's VisualJointSync with K per-entity VisualJointSync objects,
         # each one bound to its own entity and built for the actual Genesis
         # n_envs. Compute output gets sliced (N, n_wheels) per entity for
         # each visual.step(). (See the [VISUAL] block at the bottom of step().)
@@ -317,7 +317,7 @@ class MultiVehicleKindPhysics:
         self._apply_force_torque_batched(total_F, total_T)
         p._prev_init = True
 
-        # [VISUAL] — per-entity Python loop over K VisualSync objects, each
+        # [VISUAL] — per-entity Python loop over K VisualJointSync objects, each
         # built with n_envs=N. Compute outputs are flat (NK, n_wheels); we
         # reshape to (N, K, n_wheels) and slice the k-th vehicle's slab
         # ((N, n_wheels)) to feed its visual.step(). With N=1 this is the

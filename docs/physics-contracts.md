@@ -89,7 +89,7 @@ from above = right turn — matches `+steer`. Using `(0, 0, 1)` instead makes
 +joint_angle = CCW = left turn, which is **opposite-handed** to the SDK's
 user-facing convention.
 
-`VisualSync` does compensate either way (`visual_cmd = -phys * sign`), so
+`VisualJointSync` does compensate either way (`visual_cmd = -phys * sign`), so
 existing URDFs with `(0, 0, 1)` still render correctly. The recommendation
 is only for NEW URDFs: declaring `(0, 0, -1)` keeps URDF joint values and
 user-facing steer values in the same sign domain, which makes URDF-side
@@ -98,7 +98,7 @@ inspection / debugging less surprising.
 Examples in this repo:
 - `HJW/urdf/car_raywheel.urdf` — `(0, 0, -1)` ✓ (matches recommendation)
 - `GeneVehicle_Truck6w/urdf/truck_6w.urdf` — `(0, 0, -1)` ✓ (fixed in v0.5.4)
-- `JMK/URDF/test_v1_raywheel.urdf` — `(0, 0, 1)` (external author; SDK handles via VisualSync sign flip)
+- `JMK/URDF/test_v1_raywheel.urdf` — `(0, 0, 1)` (external author; SDK handles via VisualJointSync sign flip)
 
 ## 7.5 Coupling order
 

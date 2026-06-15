@@ -101,7 +101,7 @@ overrides) and runs a single batched compute per kind:
   call with K link indices applies forces to all K base links.
 - **Sensor reads**: K small `sensor.read()` calls in a Python loop
   (one raycaster per vehicle — unavoidable per-vehicle I/O).
-- **Visual writes**: K per-entity `VisualSync.step()` calls (each tiny
+- **Visual writes**: K per-entity `VisualJointSync.step()` calls (each tiny
   `set_dofs_position`). Negligible vs the compute saving.
 
 ### When L2 matters
@@ -359,7 +359,7 @@ grouping/dispatch bookkeeping is now unit-tested in
 - **Sensor reads** in L2 are per-vehicle (one raycaster per vehicle —
   Genesis doesn't expose a multi-sensor batch API). Cost is small but
   scales with K.
-- **VisualSync writes** in L2 are per-entity (K small
+- **VisualJointSync writes** in L2 are per-entity (K small
   `set_dofs_position` calls). Negligible.
 
 ---
@@ -372,7 +372,7 @@ grouping/dispatch bookkeeping is now unit-tested in
 | L2 sweep | [`samples/perf_multi_vehicle.py`](../samples/perf_multi_vehicle.py) | 1.14× at K=2, 1.07× at K=4 (4-kind fleet) |
 | L2 × L3 minimal | [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) | shortest runnable L2 × L3 (K interacting × N scenarios, per-scenario control) |
 | L2 × L3 combined | [`samples/perf_l2_l3_combined.py`](../samples/perf_l2_l3_combined.py) | 4.6× at K=2 N=4 (≈ product of L2 × L3 individual) |
-| Multi-vehicle visual | [`samples/road_loop.py`](../samples/road_loop.py) | 6% faster than per-vehicle loop with full VisualSync (16 vehicles, 4 kinds) |
+| Multi-vehicle visual | [`samples/road_loop.py`](../samples/road_loop.py) | 6% faster than per-vehicle loop with full VisualJointSync (16 vehicles, 4 kinds) |
 | L2 × L3 ego+traffic visual | [`samples/city_traffic_ego.py`](../samples/city_traffic_ego.py) | 8 vehicles × 4 envs = 32 batched; 3.5× throughput vs n_envs=1 |
 
 Re-run the samples on your machine — absolute numbers depend on GPU

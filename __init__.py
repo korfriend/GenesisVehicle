@@ -116,7 +116,6 @@ _GENESIS_LAZY = {
     "get_link_transforms": ("genesis_vehicle.kinematics", "get_link_transforms"),
     "LinkTransforms": ("genesis_vehicle.kinematics", "LinkTransforms"),
     "VisualJointSync": ("genesis_vehicle.visual", "VisualJointSync"),
-    "VisualSync": ("genesis_vehicle.visual", "VisualSync"),   # deprecated alias
     "RenderTransforms": ("genesis_vehicle.core", "RenderTransforms"),
     "add_vehicle": ("genesis_vehicle.scene_helpers", "add_vehicle"),
     "make_wheel_raycaster": ("genesis_vehicle.scene_helpers", "make_wheel_raycaster"),
@@ -148,8 +147,8 @@ __all__ = [
     "RenderTransforms",
     # Scene helpers (lazy — thin wrappers around Genesis boilerplate)
     "add_vehicle", "make_wheel_raycaster",
-    # Visual joint sync for the Genesis viewer (lazy; VisualSync = deprecated alias)
-    "VisualJointSync", "VisualSync",
+    # Visual joint sync for the Genesis viewer (lazy)
+    "VisualJointSync",
     # Config
     "VehicleConfig", "WheelConfig", "ChassisConfig", "ResolvedConfig", "ConfigError",
     "resolve",

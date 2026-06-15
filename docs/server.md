@@ -154,11 +154,11 @@ After build, the server also emits topology once:
 > **Wheel pose source (v0.7.7+):** the server fills the per-wheel `wPx..wQw`
 > from `VehiclePhysics.wheel_visual_transforms("world")` — a closed-form pose
 > that already includes steer + suspension + spin and works regardless of
-> VisualSync (the server runs headless, so VisualSync is off). The trailing
+> VisualJointSync (the server runs headless, so VisualJointSync is off). The trailing
 > `spinAngle` is therefore sent as `0` (spin is baked into the wheel quat — the
 > client uses the quat directly and must NOT re-apply spin). Earlier versions
 > read `entity.get_link(wheel)`, which returned a frozen rest pose with
-> VisualSync off (no suspension travel / no steer). See
+> VisualJointSync off (no suspension travel / no steer). See
 > [`api-reference.md`](api-reference.md#76-wheel-visual-pose-for-external-renderers-wheel_visual_transforms-v077).
 | `/Genesis/Dynamic/StateBulk` | chunked `id, Px,Py,Pz, Qx,Qy,Qz,Qw` | dynamic obstacle transforms |
 | `/Genesis/Init/TimeDilation` | `ratio:f` | tells the client to slow playback when the loop can't hit real-time (`ratio = dt / loop_avg`) |

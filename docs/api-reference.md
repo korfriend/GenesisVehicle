@@ -44,7 +44,7 @@ class MultiVehiclePhysics:
 Vehicles of the same kind must share the SAME ``cfg`` instance — group
 by passing ``cfg_per_kind[k]`` instead of calling the preset fresh per
 vehicle. ~6% faster than the per-vehicle loop at K=16 with full
-VisualSync, ~10% if visuals are off; bounded by Genesis's per-entity
+VisualJointSync, ~10% if visuals are off; bounded by Genesis's per-entity
 ``scene.step()`` cost. For RL/MPPI throughput use ``n_envs > 1`` instead
 (L3 batching — see
 [`../samples/perf_vectorization.py`](../samples/perf_vectorization.py)).
@@ -346,15 +346,15 @@ the quaternion/position conventions.
 
 > **For wheel VISUAL pose, prefer `wheel_visual_transforms` (below), not
 > `link_transforms`.** `link_transforms` reads the engine's link state, which
-> reflects steering/suspension/spin only when VisualSync is ON (it drives those
-> joints). Called with VisualSync off, it returns the rest pose and emits a
+> reflects steering/suspension/spin only when VisualJointSync is ON (it drives those
+> joints). Called with VisualJointSync off, it returns the rest pose and emits a
 > one-time warning.
 
 ### 7.6 Wheel visual pose for external renderers (`wheel_visual_transforms`, v0.7.7)
 
 Closed-form per-wheel VISUAL transform — steer + suspension + spin applied —
 computed **without driving Genesis joints**, so it works whether or not
-VisualSync is enabled. This is the intended feed for an external renderer
+VisualJointSync is enabled. This is the intended feed for an external renderer
 (Unreal / Unity): the SDK owns the steer-sign / spin-axis / suspension
 conventions, so the client just places the wheel.
 
@@ -381,7 +381,7 @@ suspension along ±z, spin about the wheel axle +y).
 ### 7.7 One-call render feed (`render_transforms`, v0.7.8)
 
 The high-level convenience for an external renderer: chassis **and** wheels in
-one call, VisualSync-independent.
+one call, VisualJointSync-independent.
 
 ```python
 VehiclePhysics.render_transforms(frame="world", *, envs_idx=None) -> RenderTransforms
@@ -397,17 +397,17 @@ class RenderTransforms:
 ```
 
 The chassis is the real **dynamics** pose (`get_pos/get_quat`, always world —
-the physical truth, unaffected by VisualSync). The wheels are the closed-form
+the physical truth, unaffected by VisualJointSync). The wheels are the closed-form
 visual pose (`wheel_visual_transforms`). `frame` applies to the wheels:
 `"world"` absolute, `"local"` relative to the chassis. This is the recommended
-one-stop feed for a UE / Unity bridge — no `get_link`, no VisualSync.
+one-stop feed for a UE / Unity bridge — no `get_link`, no VisualJointSync.
 
-> **Naming (v0.7.8):** the viewer-side wheel-joint driver class was renamed
-> `VisualSync` → **`VisualJointSync`** to make its scope explicit — it drives
-> the **wheel** visual joints (spin/steer/suspension) for the **Genesis
-> viewer** only; it never moves the chassis and does not affect physics.
-> `VisualSync` remains as a deprecated alias. External renderers don't need it
-> at all — use `render_transforms` / `wheel_visual_transforms`.
+> **Naming:** the viewer-side wheel-joint driver class is **`VisualJointSync`**
+> (renamed from `VisualSync` in v0.7.8; the old alias was removed in v0.7.9).
+> The name is explicit on purpose — it drives the **wheel** visual joints
+> (spin/steer/suspension) for the **Genesis viewer** only; it never moves the
+> chassis and does not affect physics. External renderers don't need it at
+> all — use `render_transforms` / `wheel_visual_transforms`.
 
 ## 8. Presets
 

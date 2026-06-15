@@ -81,7 +81,7 @@ class L3State:
 
         차체 pos/quat 2회 + SDK 닫힌형 wheel_visual_transforms 1회로 N대 전체를
         읽는다. 바퀴 pos/quat 은 steer+suspension+spin 이 모두 반영된 visual 포즈
-        (VisualSync on/off 무관). spin 은 quat 에 포함되므로 w_angle=0."""
+        (VisualJointSync on/off 무관). spin 은 quat 에 포함되므로 w_angle=0."""
         bp = self.car.get_pos()
         bq = self.car.get_quat()
         if hasattr(bp, 'cpu'):

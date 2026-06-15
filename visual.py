@@ -19,8 +19,6 @@ non-scope, important:
 Suspension visualisation: if the URDF prismatic joint declares non-zero
 dynamics (KDU pattern), we use control_dofs_position with high kp/kv;
 otherwise (HJW pattern, dynamics=0) we use set_dofs_position directly.
-
-``VisualSync`` is kept as a deprecated alias of ``VisualJointSync``.
 """
 
 from __future__ import annotations
@@ -205,8 +203,3 @@ class VisualJointSync:
             self.entity.control_dofs_position(
                 joint_pos, dofs_idx_local=self._susp_ctrl_dofs,
             )
-
-
-# Deprecated alias — the class was renamed in v0.7.8 to make its scope explicit
-# (it syncs the WHEEL visual joints for the viewer, not the chassis/physics).
-VisualSync = VisualJointSync
