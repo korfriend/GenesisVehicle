@@ -10,6 +10,31 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.8] — 2026-06-16
+
+### Added — `VehiclePhysics.render_transforms(frame=...)` + `RenderTransforms`
+
+One-call render feed for an external engine (UE / Unity): chassis pose **and**
+wheel visual poses together, VisualSync-independent. The chassis is the real
+dynamics pose (`get_pos/get_quat`, always world); the wheels are the closed-
+form visual pose (`wheel_visual_transforms`). `frame` applies to the wheels
+(`"world"` / `"local"`). Returns a `RenderTransforms` dataclass (chassis_pos/
+quat, wheel_names, wheel_pos/quat). The recommended bridge feed — one call per
+vehicle, no `get_link`, no VisualSync.
+
+### Changed — `VisualSync` renamed to `VisualJointSync` (alias kept)
+
+The viewer-side class was renamed to make its scope explicit: it drives the
+**wheel** visual joints (spin/steer/suspension) for the **Genesis viewer**
+only — it never moves the chassis (real dynamics) and does not affect physics.
+External renderers don't need it (use `render_transforms` /
+`wheel_visual_transforms`). `VisualSync` remains as a **deprecated alias**, so
+existing code keeps working. Internal references, `__init__` exports,
+`_check_import`, and docs updated; the class docstring now spells out the
+scope/non-scope.
+
+---
+
 ## [0.7.7] — 2026-06-16
 
 ### Added — `VehiclePhysics.wheel_visual_transforms(frame=...)` (closed-form wheel visual pose)

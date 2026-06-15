@@ -43,7 +43,7 @@ python -m genesis_vehicle.tests._check_import
 
 Imports every symbol from the top-level package and prints the version +
 the lazy-import names. Confirms that the eager surface loads without Genesis
-and that the lazy names (`VehiclePhysics`, `VisualSync`, `WheelRayPattern`,
+and that the lazy names (`VehiclePhysics`, `VisualJointSync`, `WheelRayPattern`,
 ...) are properly registered.
 
 ## Module map
@@ -57,7 +57,7 @@ and that the lazy names (`VehiclePhysics`, `VisualSync`, `WheelRayPattern`,
 | `dynamics.py` | `brake_torque_signed`, `suspension_normal_force` — pure helpers |
 | `raycast.py` | `WheelRayPattern`, `read_distances()` |
 | `kinematics.py` | `get_link_transforms`, `LinkTransforms` — per-link transforms (world / base / parent frame) |
-| `visual.py` | `VisualSync` (auto-invoked by core; flips URDF axis quirks) |
+| `visual.py` | `VisualJointSync` (viewer wheel-joint driver; `VisualSync` = deprecated alias). Auto-invoked by core; flips URDF axis quirks |
 | `tire_models/` | `TireModel` ABC + `PacejkaAnisotropic`, `CoulombIsotropic` |
 | `strategies/steering.py` | `SteeringStrategy` + 4 concrete |
 | `strategies/drivetrain.py` | `DrivetrainStrategy` + 4 concrete |

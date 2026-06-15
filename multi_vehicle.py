@@ -55,7 +55,7 @@ from .core import VehiclePhysics, PipelineContext
 from ._pipeline import compute_wheel_step
 from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import read_distances
-from .visual import VisualSync
+from .visual import VisualJointSync
 
 
 def _quat_rotate(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
@@ -142,10 +142,10 @@ class MultiVehicleKindPhysics:
         # n_envs. Compute output gets sliced (N, n_wheels) per entity for
         # each visual.step(). (See the [VISUAL] block at the bottom of step().)
         self._proto.visual = None
-        self.visuals: list[VisualSync] = []
+        self.visuals: list[VisualJointSync] = []
         if self._proto.resolved.enable_visual_sync:
             for ent in entities:
-                self.visuals.append(VisualSync(
+                self.visuals.append(VisualJointSync(
                     entity=ent, resolved=self._proto.resolved,
                     n_envs=n_envs, device=self.dev, dtype=self.fdt,
                 ))

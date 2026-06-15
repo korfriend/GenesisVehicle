@@ -378,6 +378,37 @@ actually cleaner — it has no substep jitter during hard impacts/steer). Assume
 the conventional ray-wheel axes the presets use (steer about chassis +z,
 suspension along ±z, spin about the wheel axle +y).
 
+### 7.7 One-call render feed (`render_transforms`, v0.7.8)
+
+The high-level convenience for an external renderer: chassis **and** wheels in
+one call, VisualSync-independent.
+
+```python
+VehiclePhysics.render_transforms(frame="world", *, envs_idx=None) -> RenderTransforms
+
+@dataclass
+class RenderTransforms:
+    frame: str                  # wheels' frame ("world" | "local")
+    chassis_pos: torch.Tensor   # (n_envs, 3)       real dynamics, always world
+    chassis_quat: torch.Tensor  # (n_envs, 4) wxyz
+    wheel_names: list[str]       # n_wheels (mesh mapping)
+    wheel_pos: torch.Tensor      # (n_envs, n_wheels, 3)  closed-form visual pose
+    wheel_quat: torch.Tensor     # (n_envs, n_wheels, 4)
+```
+
+The chassis is the real **dynamics** pose (`get_pos/get_quat`, always world —
+the physical truth, unaffected by VisualSync). The wheels are the closed-form
+visual pose (`wheel_visual_transforms`). `frame` applies to the wheels:
+`"world"` absolute, `"local"` relative to the chassis. This is the recommended
+one-stop feed for a UE / Unity bridge — no `get_link`, no VisualSync.
+
+> **Naming (v0.7.8):** the viewer-side wheel-joint driver class was renamed
+> `VisualSync` → **`VisualJointSync`** to make its scope explicit — it drives
+> the **wheel** visual joints (spin/steer/suspension) for the **Genesis
+> viewer** only; it never moves the chassis and does not affect physics.
+> `VisualSync` remains as a deprecated alias. External renderers don't need it
+> at all — use `render_transforms` / `wheel_visual_transforms`.
+
 ## 8. Presets
 
 Every preset takes a keyword-only `stability` argument that picks the

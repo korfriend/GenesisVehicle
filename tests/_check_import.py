@@ -28,7 +28,8 @@ print(f"  version_info() = {version_info()}")
 print("eager surface imports OK")
 
 lazy_names = ["VehiclePhysics", "WheelMeta", "PipelineContext",
-              "WheelRayPattern", "read_distances", "VisualSync",
+              "WheelRayPattern", "read_distances",
+              "VisualJointSync", "VisualSync", "RenderTransforms",
               "add_vehicle", "make_wheel_raycaster"]
 for name in lazy_names:
     assert name in genesis_vehicle.__all__, f"{name} missing from __all__"

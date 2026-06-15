@@ -264,7 +264,7 @@ genesis_vehicle/
 ├── urdf.py                         parse_urdf() + URDFParsedConfig
 ├── raycast.py                      WheelRayPattern
 ├── dynamics.py                     brake_torque_signed / suspension_normal_force
-├── visual.py                       VisualSync
+├── visual.py                       VisualJointSync (viewer wheel-joint driver)
 ├── tire_models/                    TireModel ABC + Pacejka + Coulomb
 ├── strategies/                     steering / drivetrain / coupling / stability
 ├── presets.py                      4 ready-to-use VehicleConfig builders

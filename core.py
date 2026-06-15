@@ -21,7 +21,7 @@ from ._pipeline import compute_wheel_step
 from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import read_distances
 from .urdf import estimate_spin_inertia_from_genesis
-from .visual import VisualSync
+from .visual import VisualJointSync
 
 
 # Process-level flag so the version banner prints at most once per process,
@@ -192,6 +192,23 @@ class PipelineContext:
     wheel_meta: Any = None
 
 
+@dataclass
+class RenderTransforms:
+    """One-stop render feed for an external engine (UE / Unity), produced by
+    :meth:`VehiclePhysics.render_transforms`. VisualSync-independent.
+
+    ``chassis_*`` is the real dynamics pose (always world). ``wheel_*`` is the
+    closed-form visual pose in ``frame`` (``"world"`` absolute, or ``"local"``
+    relative to the chassis — attach wheels under the chassis component).
+    Tensors keep a leading ``n_envs`` dim (1 for a single-env build)."""
+    frame: str                       # wheels' frame ("world" | "local")
+    chassis_pos: torch.Tensor        # (n_envs, 3)
+    chassis_quat: torch.Tensor       # (n_envs, 4)  wxyz
+    wheel_names: list                # length n_wheels (renderer mesh mapping)
+    wheel_pos: torch.Tensor          # (n_envs, n_wheels, 3)
+    wheel_quat: torch.Tensor         # (n_envs, n_wheels, 4)  wxyz
+
+
 class VehiclePhysics:
     """Top-level vehicle physics driver. One instance per vehicle entity."""
 
@@ -267,9 +284,9 @@ class VehiclePhysics:
         self.last_kappa = torch.zeros(n_envs, n_wheels, device=self.dev, dtype=self.fdt)
         self.last_alpha = torch.zeros(n_envs, n_wheels, device=self.dev, dtype=self.fdt)
 
-        self.visual: Optional[VisualSync] = None
+        self.visual: Optional[VisualJointSync] = None
         if self.resolved.enable_visual_sync:
-            self.visual = VisualSync(
+            self.visual = VisualJointSync(
                 entity=entity, resolved=self.resolved,
                 n_envs=n_envs, device=self.dev, dtype=self.fdt,
             )
@@ -487,6 +504,33 @@ class VehiclePhysics:
         ).reshape(N, n, 3)
         world_quat = _quat_mul(cquat_b, local_quat)
         return world_pos, world_quat
+
+    def render_transforms(self, frame: str = "world", *,
+                          envs_idx: Optional[Any] = None) -> "RenderTransforms":
+        """One call returning everything an external renderer needs for this
+        vehicle: the chassis pose **and** the wheel visual poses. Fully
+        VisualSync-independent (works headless).
+
+        The chassis comes from real dynamics (``entity.get_pos/get_quat`` —
+        always world, the physical truth). The wheels come from
+        :meth:`wheel_visual_transforms` (closed-form steer + suspension + spin).
+        ``frame`` applies to the WHEELS: ``"world"`` = absolute, ``"local"`` =
+        relative to the chassis (attach wheel meshes under the chassis
+        component). The chassis is always world.
+
+        Returns a :class:`RenderTransforms`. This is the recommended feed for a
+        UE / Unity bridge — one call per vehicle, no get_link, no VisualSync.
+        """
+        cpos = self.entity.get_pos(envs_idx=envs_idx) if envs_idx is not None else self.entity.get_pos()
+        cquat = self.entity.get_quat(envs_idx=envs_idx) if envs_idx is not None else self.entity.get_quat()
+        if cpos.dim() == 1:
+            cpos = cpos.unsqueeze(0); cquat = cquat.unsqueeze(0)
+        wp, wq = self.wheel_visual_transforms(frame, envs_idx=envs_idx)
+        return RenderTransforms(
+            frame=frame, chassis_pos=cpos, chassis_quat=cquat,
+            wheel_names=[w.name for w in self.resolved.wheels],
+            wheel_pos=wp, wheel_quat=wq,
+        )
 
     def step(self, inputs: VehicleStepInputs) -> None:
         """Vectorized 5-step pipeline. Per-wheel work is a SINGLE batched
