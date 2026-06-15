@@ -115,7 +115,9 @@ _GENESIS_LAZY = {
     "read_distances": ("genesis_vehicle.raycast", "read_distances"),
     "get_link_transforms": ("genesis_vehicle.kinematics", "get_link_transforms"),
     "LinkTransforms": ("genesis_vehicle.kinematics", "LinkTransforms"),
-    "VisualSync": ("genesis_vehicle.visual", "VisualSync"),
+    "VisualJointSync": ("genesis_vehicle.visual", "VisualJointSync"),
+    "VisualSync": ("genesis_vehicle.visual", "VisualSync"),   # deprecated alias
+    "RenderTransforms": ("genesis_vehicle.core", "RenderTransforms"),
     "add_vehicle": ("genesis_vehicle.scene_helpers", "add_vehicle"),
     "make_wheel_raycaster": ("genesis_vehicle.scene_helpers", "make_wheel_raycaster"),
 }
@@ -142,10 +144,12 @@ __all__ = [
     "WheelRayPattern", "read_distances",
     # Kinematics — per-link transforms (lazy)
     "get_link_transforms", "LinkTransforms",
+    # Render feed for external engines (lazy)
+    "RenderTransforms",
     # Scene helpers (lazy — thin wrappers around Genesis boilerplate)
     "add_vehicle", "make_wheel_raycaster",
-    # Visual (lazy)
-    "VisualSync",
+    # Visual joint sync for the Genesis viewer (lazy; VisualSync = deprecated alias)
+    "VisualJointSync", "VisualSync",
     # Config
     "VehicleConfig", "WheelConfig", "ChassisConfig", "ResolvedConfig", "ConfigError",
     "resolve",

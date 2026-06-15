@@ -1,13 +1,26 @@
-"""Visual sync layer.
+"""Wheel visual-joint sync layer (for the Genesis viewer).
 
-Drives URDF spin / steer / suspension joints to match the physics state, so the
-viewer shows wheels rotating, steered, and ground-following. The forces on the
-chassis come from VehiclePhysics's apply_links_external_force; this layer is
-purely cosmetic (does NOT double-apply).
+`VisualJointSync` drives the URDF **wheel** spin / steer / suspension joints
+(via ``set_dofs_position`` — kinematic, no force) so that the **Genesis
+viewer** shows wheels rotating, steered, and ground-following. Scope and
+non-scope, important:
+
+- It only touches the WHEEL visual joints. It does NOT move the chassis —
+  the chassis (base link) is driven by real dynamics
+  (``apply_links_external_force``) and is read with ``entity.get_pos/get_quat``
+  regardless of whether this runs.
+- It is purely cosmetic: it does NOT feed back into the dynamics (no
+  double-apply of suspension force).
+- It exists for the Genesis-native viewer. An **external renderer (UE /
+  Unity) does NOT need it** — use ``VehiclePhysics.wheel_visual_transforms``
+  (closed-form, viewer-independent) instead; that is also cleaner (no
+  substep jitter during hard transients).
 
 Suspension visualisation: if the URDF prismatic joint declares non-zero
 dynamics (KDU pattern), we use control_dofs_position with high kp/kv;
 otherwise (HJW pattern, dynamics=0) we use set_dofs_position directly.
+
+``VisualSync`` is kept as a deprecated alias of ``VisualJointSync``.
 """
 
 from __future__ import annotations
@@ -23,8 +36,11 @@ _SUSP_VIS_KP = 1.0e7
 _SUSP_VIS_KV = 1.0e5
 
 
-class VisualSync:
-    """Synchronises URDF visual joints (spin, steer, suspension) with physics state."""
+class VisualJointSync:
+    """Drives a vehicle's URDF WHEEL visual joints (spin, steer, suspension) to
+    match physics state, for the Genesis viewer. Wheels only — never the
+    chassis. Cosmetic (no force feedback). External renderers should use
+    ``VehiclePhysics.wheel_visual_transforms`` instead (viewer-independent)."""
 
     def __init__(
         self,
@@ -189,3 +205,8 @@ class VisualSync:
             self.entity.control_dofs_position(
                 joint_pos, dofs_idx_local=self._susp_ctrl_dofs,
             )
+
+
+# Deprecated alias — the class was renamed in v0.7.8 to make its scope explicit
+# (it syncs the WHEEL visual joints for the viewer, not the chassis/physics).
+VisualSync = VisualJointSync
