@@ -8,7 +8,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-70 pure-Python tests; no Genesis runtime required. Runs in ~3s on CPU.
+78 pure-Python tests; no Genesis runtime required. Runs in ~3s on CPU.
 
 GPU integration is exercised by user-side demo scripts in your downstream
 project — the SDK's own test suite stays pure-Python so it can run in any

@@ -10,6 +10,48 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.7] — 2026-06-16
+
+### Added — `VehiclePhysics.wheel_visual_transforms(frame=...)` (closed-form wheel visual pose)
+
+New getter returning each wheel's VISUAL transform (steer + suspension +
+spin applied) **without driving Genesis joints** — works whether or not
+VisualSync is enabled. The blessed feed for an external renderer (UE /
+Unity): `frame="local"` gives the pose relative to the chassis (attach the
+wheel under the chassis component → it rides rigidly), `frame="world"` the
+absolute pose. Computed closed-form (~µs/wheel) instead of the engine's
+articulated-body FK; verified to match `entity.get_link(wheel)` in the
+steady regime (≈3 mm / 0.04°, the residual being get_link's own kinematic-
+suspension substep jitter, from which the closed-form is free).
+
+Why this exists: reading `entity.get_link(wheel)` only reflects steering/
+suspension/spin when VisualSync is ON (it drives those URDF joints). Teams
+that disabled VisualSync for performance but kept reading get_link saw
+wheels frozen at the rest pose (no suspension travel, no steer). This getter
+decouples the visual pose from VisualSync and from the engine.
+
+- `core.py`: `wheel_visual_transforms`, plus `last_steer_per_wheel` and a
+  `wheel_spin_angle` accumulator (maintained every step so the getter works
+  headless), and quaternion helpers `_quat_axis_angle` / `_quat_mul` /
+  `_susp_visual_offset` (the suspension formula shared with VisualSync).
+- `link_transforms()` now emits a one-time warning if called with VisualSync
+  disabled (wheel links are at the rest pose then) — pointing to
+  `wheel_visual_transforms`.
+- `tests/test_quat_helpers.py`: 8 pure-Python tests for the quaternion /
+  suspension-offset math. 70 → 78 tests.
+
+### Changed — `genesis_vehicle.server` feeds wheels from `wheel_visual_transforms`
+
+`server/physics_server.py` and `server/l3_runtime.py` now build wheel state
+from `ctrl.wheel_visual_transforms("world")` instead of `get_link` reads +
+a separately-accumulated spin angle. The pos/quat already include
+steer/suspension/spin, so the per-wheel spin scalar is sent as 0 (the client
+uses the quat directly). Fixes the "no suspension travel / wrong wheel
+rotation" symptom when running the server headless (VisualSync off), and
+drops the now-unused wheel-link-index cache.
+
+---
+
 ## [0.7.6] — 2026-06-13
 
 ### Changed — docs/server.md architecture diagram → Mermaid
