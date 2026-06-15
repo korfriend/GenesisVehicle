@@ -280,7 +280,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-70 pure-Python tests covering URDF parsing, config resolve, strategy math,
+78 pure-Python tests covering URDF parsing, config resolve, strategy math,
 dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, and the server subpackage surface.
 No Genesis runtime needed — they run on CPU in ~3 s.

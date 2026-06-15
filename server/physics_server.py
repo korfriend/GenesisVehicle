@@ -88,12 +88,6 @@ def slerp(q0, q1, t):
     return s0 * q0 + s1 * q1
 
 
-# [PERF] 바퀴 링크 local index 캐시 (tid -> [idx_local, ...], resolved.wheels 순서).
-# 매 스텝 × 매 바퀴 get_link(이름) 조회를 없애기 위해 1회만 계산해 재사용한다.
-# 엔티티는 빌드 후 불변이므로 런타임 내내 유효 (reset 시에도 링크 구조는 그대로).
-_WHEEL_LINK_CACHE = {}
-
-
 def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles=None, sim_dt=0.02, update_angles=False):
     """
     Captures positions and rotations for all target entities (including wheels if active)
@@ -129,56 +123,22 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
             wheels_states = []
             if is_urdf_active and controllers and tid in controllers:
                 ctrl = controllers[tid]
-                tentity = target_entities[tid]
-                resolved_obj = getattr(ctrl, 'resolved', None)
-                if resolved_obj and hasattr(resolved_obj, 'wheels'):
-                    wheels_list = resolved_obj.wheels
-                    n_w = len(wheels_list)
-                    if accumulated_wheel_angles is not None and tid not in accumulated_wheel_angles:
-                        accumulated_wheel_angles[tid] = [0.0] * n_w
-
-                    # [PERF] 바퀴별 get_link(이름)+get_pos+get_quat 개별 호출(바퀴당 3회) 대신
-                    # 링크 인덱스를 캐시하고 배치 호출 2회로 전체 바퀴를 한 번에 읽는다.
-                    # (100대 × 4바퀴 기준: 스텝당 1,200회 → 200회. GPU 백엔드에선 sync도 함께 격감)
-                    idxs = _WHEEL_LINK_CACHE.get(tid)
-                    if idxs is None:
-                        try:
-                            idxs = [tentity.get_link(w.name).idx_local for w in wheels_list]
-                        except Exception:
-                            idxs = []
-                        _WHEEL_LINK_CACHE[tid] = idxs
-
-                    if idxs:
-                        try:
-                            wp_all = tentity.get_links_pos(links_idx_local=idxs)
-                            wq_all = tentity.get_links_quat(links_idx_local=idxs)
-                            if hasattr(wp_all, 'cpu'):
-                                wp_all = wp_all.cpu().numpy()
-                                wq_all = wq_all.cpu().numpy()
-                            if wp_all.ndim > 2: wp_all = wp_all[0]   # (n_envs, n_w, 3) → (n_w, 3)
-                            if wq_all.ndim > 2: wq_all = wq_all[0]
-
-                            # [PERF] omega 도 바퀴별 .item() (바퀴당 1회 sync) 대신 1회 일괄 변환
-                            om_row = None
-                            if hasattr(ctrl, 'omega'):
-                                try:
-                                    om = ctrl.omega
-                                    om_row = om.detach().cpu().numpy()[0] if hasattr(om, 'cpu') else np.asarray(om)[0]
-                                except Exception:
-                                    om_row = None
-
-                            current_angles = accumulated_wheel_angles[tid] if accumulated_wheel_angles is not None else None
-                            for j in range(n_w):
-                                w_omega = float(om_row[j]) if (om_row is not None and j < len(om_row)) else 0.0
-                                w_angle = 0.0
-                                if current_angles is not None and j < len(current_angles):
-                                    if update_angles:
-                                        # Accumulate spin angle (w_omega is rad/s, sim_dt is s)
-                                        current_angles[j] = (current_angles[j] + w_omega * sim_dt) % (2.0 * np.pi)
-                                    w_angle = current_angles[j]
-                                wheels_states.append((wp_all[j].copy(), wq_all[j].copy(), w_angle))
-                        except Exception:
-                            pass
+                # [VISUAL] SDK closed-form wheel pose: steer + suspension + spin
+                # baked into pos/quat, computed WITHOUT driving Genesis joints
+                # (works even with VisualSync off). Replaces the get_link read,
+                # which required VisualSync on and returned a rest pose otherwise.
+                # The quat already includes spin → send w_angle=0 (UE uses the
+                # quat directly; no separate spin to re-apply).
+                if hasattr(ctrl, 'wheel_visual_transforms'):
+                    try:
+                        wp_all, wq_all = ctrl.wheel_visual_transforms("world")
+                        if hasattr(wp_all, 'cpu'):
+                            wp_all = wp_all.cpu().numpy(); wq_all = wq_all.cpu().numpy()
+                        wp_all = wp_all[0]; wq_all = wq_all[0]   # env 0 (single-env)
+                        for j in range(wp_all.shape[0]):
+                            wheels_states.append((wp_all[j].copy(), wq_all[j].copy(), 0.0))
+                    except Exception:
+                        pass
             state['targets'][tid] = (p, q, wheels_states)
             
     # 2. Dynamic obstacles

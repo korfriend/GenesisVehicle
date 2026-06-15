@@ -71,40 +71,31 @@ class L3State:
         self.tids = list(tids)                  # env index 순서의 target id
         self.n_envs = n_envs
         self.sim_dt = sim_dt
-        wheels = physics.resolved.wheels
-        self.n_wheels = len(wheels)
-        self.wheel_idx = [car.get_link(w.name).idx_local for w in wheels]
-        self.angles = np.zeros((n_envs, self.n_wheels), dtype=np.float64)
+        self.n_wheels = len(physics.resolved.wheels)
 
     def reset_angles(self):
-        self.angles[:] = 0.0
+        pass   # spin is owned by the SDK (wheel_visual_transforms); nothing to reset here
 
     def capture(self, dynamic_obstacles, ue_driven_obstacle_ids, update_angles):
-        """legacy capture_state 와 동일한 구조의 state dict 를 배치 읽기로 생성.
+        """state dict 를 배치 읽기로 생성.
 
-        배치 호출 5회(차체 pos/quat, 바퀴 pos/quat, omega)로 N대 전체를 읽는다."""
+        차체 pos/quat 2회 + SDK 닫힌형 wheel_visual_transforms 1회로 N대 전체를
+        읽는다. 바퀴 pos/quat 은 steer+suspension+spin 이 모두 반영된 visual 포즈
+        (VisualSync on/off 무관). spin 은 quat 에 포함되므로 w_angle=0."""
         bp = self.car.get_pos()
         bq = self.car.get_quat()
-        wp = self.car.get_links_pos(links_idx_local=self.wheel_idx)
-        wq = self.car.get_links_quat(links_idx_local=self.wheel_idx)
         if hasattr(bp, 'cpu'):
             bp = bp.cpu().numpy(); bq = bq.cpu().numpy()
-            wp = wp.cpu().numpy(); wq = wq.cpu().numpy()
         bp = np.atleast_2d(bp); bq = np.atleast_2d(bq)
-        if wp.ndim == 2:    # n_envs=1 빌드에서 (n_wheels, 3) 로 나오는 경우
-            wp = wp[None]; wq = wq[None]
 
-        om = getattr(self.physics, 'omega', None)
-        if om is not None:
-            om = om.detach().cpu().numpy() if hasattr(om, 'cpu') else np.asarray(om)
-            om = np.atleast_2d(om)
-        if update_angles and om is not None:
-            self.angles = (self.angles + om * self.sim_dt) % (2.0 * np.pi)
+        wp, wq = self.physics.wheel_visual_transforms("world")   # (N, n, 3/4)
+        if hasattr(wp, 'cpu'):
+            wp = wp.cpu().numpy(); wq = wq.cpu().numpy()
 
         state = {'targets': {}, 'dynamic_obstacles': {}}
         for k, tid in enumerate(self.tids):
             wheels_states = [
-                (wp[k, j].copy(), wq[k, j].copy(), float(self.angles[k, j]))
+                (wp[k, j].copy(), wq[k, j].copy(), 0.0)
                 for j in range(self.n_wheels)
             ]
             state['targets'][tid] = (bp[k].copy(), bq[k].copy(), wheels_states)

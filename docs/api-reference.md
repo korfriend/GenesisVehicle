@@ -344,6 +344,40 @@ base/root link; `"parent"` (default) = relative to each link's immediate URDF
 parent (root → world). See [`physics-contracts.md`](physics-contracts.md) for
 the quaternion/position conventions.
 
+> **For wheel VISUAL pose, prefer `wheel_visual_transforms` (below), not
+> `link_transforms`.** `link_transforms` reads the engine's link state, which
+> reflects steering/suspension/spin only when VisualSync is ON (it drives those
+> joints). Called with VisualSync off, it returns the rest pose and emits a
+> one-time warning.
+
+### 7.6 Wheel visual pose for external renderers (`wheel_visual_transforms`, v0.7.7)
+
+Closed-form per-wheel VISUAL transform — steer + suspension + spin applied —
+computed **without driving Genesis joints**, so it works whether or not
+VisualSync is enabled. This is the intended feed for an external renderer
+(Unreal / Unity): the SDK owns the steer-sign / spin-axis / suspension
+conventions, so the client just places the wheel.
+
+```python
+VehiclePhysics.wheel_visual_transforms(frame="world", *, envs_idx=None)
+    -> (pos, quat)
+    # pos  (n_envs, n_wheels, 3)
+    # quat (n_envs, n_wheels, 4)  wxyz, includes steer + spin
+```
+
+- `frame="local"` — pose **relative to the chassis** (attach the wheel mesh
+  under the chassis component and set this as its relative transform → the
+  wheel rides the chassis rigidly, no detach). Recommended for hierarchy-based
+  renderers.
+- `frame="world"` — absolute pose (place the mesh directly).
+
+The quat already carries spin, so a client should NOT additionally rotate the
+wheel. Costs a few quaternion ops per wheel (~µs) vs the engine's articulated-
+body FK; matches `get_link(wheel)` in the steady regime (the closed-form is
+actually cleaner — it has no substep jitter during hard impacts/steer). Assumes
+the conventional ray-wheel axes the presets use (steer about chassis +z,
+suspension along ±z, spin about the wheel axle +y).
+
 ## 8. Presets
 
 Every preset takes a keyword-only `stability` argument that picks the
