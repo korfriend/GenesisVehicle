@@ -378,6 +378,14 @@ actually cleaner — it has no substep jitter during hard impacts/steer). Assume
 the conventional ray-wheel axes the presets use (steer about chassis +z,
 suspension along ±z, spin about the wheel axle +y).
 
+Works for all bundled vehicle classes — **4-wheel cars, 6-wheel trucks
+(`PartialAckermann`, front-axle steer), and 10-wheel skid-steer tanks**
+(verified vs `get_link`: car/truck ≈ 3.5 mm / 0.04°, tank ≈ 0.6 mm / 0°).
+Non-steered wheels get steer 0; the spin component honors
+`enable_visual_spin` / the preset's `visual_spin_enabled` (skid-steer/tank
+presets disable it — cylindrical road wheels have no visible spin — so the
+closed-form omits spin too, matching the viewer).
+
 ### 7.7 One-call visual-parts feed (`visual_parts_transforms`, v0.7.8; renamed v0.7.10)
 
 The high-level convenience for an external renderer: chassis **and** wheels in

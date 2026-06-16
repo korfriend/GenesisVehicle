@@ -10,6 +10,23 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.11] — 2026-06-16
+
+### Fixed — `wheel_visual_transforms` / `visual_parts_transforms` now correct for trucks & tanks
+
+The closed-form wheel visual pose now honors `visual_spin_enabled`: skid-steer
+/ tank presets (`tank_10w_skid_belt`) disable the wheel spin visual (cylindrical
+road wheels — spin is invisible), and the closed-form previously baked spin
+into the wheel quat anyway, disagreeing with the viewer. It now omits spin when
+disabled, matching `VisualJointSync`. Verified against `get_link` (VisualJointSync
+on) across all bundled vehicle classes: 4-wheel car ≈ 3.5 mm / 0.04°, 6-wheel
+truck (`truck_6w_partial_ackermann`, front-axle steer) ≈ 3.5 mm / 0.04°,
+10-wheel skid-steer tank (`tank_10w_skid_belt`) ≈ 0.6 mm / 0°. Trucks already
+worked (same conventional axes as cars); tanks needed the spin-flag fix. No API
+change.
+
+---
+
 ## [0.7.10] — 2026-06-16
 
 ### Changed — `render_transforms` → `visual_parts_transforms` (`RenderTransforms` → `VisualPartsTransforms`)
