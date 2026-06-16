@@ -315,6 +315,11 @@ class VehiclePhysics:
         strokes = [float(w.rest_stroke) for w in self.resolved.wheels
                    if getattr(w, "rest_stroke", None) is not None]
         self._l_susp = float(sum(strokes) / len(strokes)) if strokes else 0.10
+        # Skid-steer/tank presets disable the wheel spin visual (cylindrical
+        # road wheels — spin is invisible). Match VisualJointSync so the
+        # closed-form pose agrees: no spin baked into the quat when disabled.
+        self._visual_spin_enabled = bool(
+            getattr(self.resolved, "visual_spin_enabled", True))
 
         # Capture each wheel link's REST pose relative to the chassis (joints
         # still at 0 — no step / VisualJointSync yet). wheel_visual_transforms then
@@ -474,7 +479,8 @@ class VehiclePhysics:
         steer_z = -self.last_steer_per_wheel                                 # (N, n)
         susp_off = _susp_visual_offset(
             self.last_distances, self._mesh_radius, self._l_susp)            # (N, n)
-        spin = self.wheel_spin_angle                                         # (N, n)
+        spin = (self.wheel_spin_angle if self._visual_spin_enabled
+                else torch.zeros_like(self.wheel_spin_angle))                # (N, n)
 
         rest_pos = self._rest_wheel_pos_local.unsqueeze(0)                   # (1, n, 3)
         rest_quat = self._rest_wheel_quat_local.unsqueeze(0)                 # (1, n, 4)
