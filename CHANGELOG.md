@@ -10,6 +10,49 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.13] — 2026-06-17
+
+두 건의 팀 리포트 대응: (1) SDK 제공 physics server가 기존 서버 대비 느림
+(CPU·1대 기준 4–5 ms → 14–15 ms/step), (2) 서스펜션 시각 clamp가 0.19 m로
+고정되어 있어 큰 행정(stroke) 차량의 서스펜션 움직임이 소극적으로 보임.
+
+### Fixed — 서버가 헤드리스/외부 렌더 시 `VisualJointSync`를 끔 (성능)
+
+원인: SDK의 `physics_server` / `l3_runtime`가 `VisualJointSync`를 켠 채로
+구동되고 있었음. `VisualJointSync`는 매 step마다 URDF 휠 visual 조인트를
+엔진의 articulated-body FK로 구동(~ms/step) — Genesis 뷰어 전용이며, 외부
+렌더러(UE/Unity)나 헤드리스 실행에는 불필요하다. 기존(빠른) 서버는 이미
+`enable_visual_sync=False`로 돌고 있었던 것이 차이의 원인.
+
+- `vehicle_builder.build_vehicle(*, enable_visual_sync=False)` 키워드 추가;
+  빌드 후 `cfg.enable_visual_sync`에 반영.
+- `physics_server` / `l3_runtime`: `enable_visual_sync = not args.headless`.
+  헤드리스(=외부 UE 렌더)에서는 `VisualJointSync`를 끄고, 휠 포즈는 닫힌형
+  `wheel_visual_transforms("world")`로 캡처(per-step 엔진 FK 비용 제거).
+
+기존 서버와 동일하게 `enable_visual_sync=False` 경로로 맞춰져 step 시간이
+정상화된다. 뷰어가 필요한 경우(`--headless` 미지정)에만 켜진다.
+
+### Fixed — 서스펜션 시각 clamp가 휠별 `rest_stroke` 기준으로 (고정 0.19 제거)
+
+`core._susp_visual_offset`와 `visual.VisualJointSync`의 서스펜션 시각 오프셋이
+`±0.19 m`로 하드코딩되어, 행정이 0.19 m를 넘는 차량(트럭·탱크 등)의 휠
+움직임이 잘려 소극적으로 보였다. 이제 clamp는 **휠별 자기 행정**
+(`rest_d − radius`, 최소 0.02 m)을 사용한다.
+
+- `core._susp_visual_offset(clamp=…)`가 텐서 clamp를 허용(스칼라도 호환 —
+  헬퍼의 단위테스트 기본값은 0.19 유지).
+- `VehiclePhysics.__init__`: `self._susp_clamp = clamp(rest_d − radius, ≥0.02)`
+  를 만들어 getter / `wheel_visual_transforms`에 전달.
+- `multi_vehicle`도 동일한 per-wheel clamp 사용.
+- `VisualJointSync`(set-path)도 동일한 per-wheel clamp 적용 — 뷰어와 닫힌형
+  `wheel_visual_transforms`의 등가성이 유지된다.
+
+행정이 0.19 m 이하인 차량(예: 기본 car 프리셋)은 동작 변화 없음. 0.19 m를
+넘는 차량만 가시 행정이 복원된다.
+
+---
+
 ## [0.7.12] — 2026-06-17
 
 ### Added — multi-vehicle (L2 / L2×L3) wheel visual transforms
