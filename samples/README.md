@@ -23,6 +23,23 @@ they're trying to measure. The visual equivalents are in their
 respective docstring pointers (multi_env_render for L3, road_loop for
 L2 with `--solver multi_batched`, city_traffic_ego for L2 × L3).
 
+### `--viewer` drives `enable_visual_sync` (v0.7.14+)
+
+`VehicleConfig.enable_visual_sync` defaults to **`False`** (v0.7.14; it was
+`True` through v0.7.13). It drives the URDF wheel visual joints through the
+engine each step so the **Genesis viewer** shows wheels spinning/steering —
+~ms/step, only worth paying when something actually renders. So every
+`--viewer`-capable sample here sets `cfg.enable_visual_sync = args.viewer`:
+
+- **with `--viewer`** → on, so the cv2 HUD frames show animated wheels.
+- **headless (default)** → off, so the `[timing]` ms/step number reflects
+  pure physics (faster, undistorted).
+
+If you copy a sample as a starting point and render through your own path
+(or the Genesis viewer), set `cfg.enable_visual_sync = True` yourself — the
+SDK no longer turns it on for you. For an **external** renderer (UE / Unity)
+keep it off and read poses from `wheel_visual_transforms()` (closed-form).
+
 ## Bundled asset
 
 - [`urdf/car_4w.urdf`](urdf/car_4w.urdf) — 1.2-ton 4-wheel RWD sedan,
