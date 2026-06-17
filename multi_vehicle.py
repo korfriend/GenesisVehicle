@@ -44,14 +44,19 @@ the right tool — see `samples/perf_vectorization.py`.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from typing import Any, Sequence
 
 import torch
 import genesis as gs
+from genesis.utils.geom import transform_by_quat
 
 from .config import VehicleConfig
-from .core import VehiclePhysics, PipelineContext
+from .core import (
+    VehiclePhysics, PipelineContext, VisualPartsTransforms,
+    _quat_axis_angle, _quat_mul, _susp_visual_offset,
+)
 from ._pipeline import compute_wheel_step
 from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import read_distances
@@ -308,6 +313,14 @@ class MultiVehicleKindPhysics:
         p.omega = res.new_omega
         total_F, total_T = res.total_F, res.total_T
 
+        # Visual-pose bookkeeping on the proto (so wheel_visual_transforms works
+        # for the multi-vehicle path too — same as VehiclePhysics.step).
+        p.last_steer_per_wheel = steer_per_wheel
+        two_pi = 2.0 * math.pi
+        p.wheel_spin_angle = (
+            (p.wheel_spin_angle + p.omega * DT) + math.pi
+        ) % two_pi - math.pi
+
         # Diagnostics.
         p.last_N = res.N; p.last_F_long = res.F_long; p.last_F_lat = res.F_lat
         p.last_compression = res.compression
@@ -316,6 +329,7 @@ class MultiVehicleKindPhysics:
         # [APPLY]  — single batched solver call for K vehicles.
         self._apply_force_torque_batched(total_F, total_T)
         p._prev_init = True
+        p._stepped_once = True
 
         # [VISUAL] — per-entity Python loop over K VisualJointSync objects, each
         # built with n_envs=N. Compute outputs are flat (NK, n_wheels); we
@@ -338,6 +352,57 @@ class MultiVehicleKindPhysics:
                     omega_NK[:, k_i, :].contiguous(),
                     DT,
                 )
+
+    def wheel_visual_transforms(self, frame: str = "world"):
+        """Closed-form wheel visual poses for this kind's K vehicles (× n_envs),
+        the multi-vehicle analogue of ``VehiclePhysics.wheel_visual_transforms``.
+
+        Returns ``(pos, quat)`` shaped ``(n_envs, K, n_wheels, 3)`` and
+        ``(n_envs, K, n_wheels, 4)`` (env-major). VisualJointSync-independent;
+        steer + suspension + spin baked in (spin honors ``visual_spin_enabled``).
+        ``frame="local"`` is relative to each vehicle's chassis, ``"world"``
+        absolute."""
+        if frame not in ("world", "local"):
+            raise ValueError(f"frame must be 'world' or 'local', got {frame!r}")
+        p = self._proto
+        NK, N, K = self.NK, self.n_envs, self.K
+        n = p.wheel_meta.n_wheels
+        if p._rest_wheel_pos_local is None:
+            # All K vehicles share the kind's URDF → rest pose (relative to base)
+            # is identical; capture from the first entity.
+            p._capture_rest_wheel_pose(self.entities[0])
+        rest_pos = p._rest_wheel_pos_local.unsqueeze(0)            # (1, n, 3)
+        rest_quat = p._rest_wheel_quat_local.unsqueeze(0)          # (1, n, 4)
+
+        if not p._stepped_once:
+            local_pos = rest_pos.expand(NK, n, 3).contiguous()
+            local_quat = rest_quat.expand(NK, n, 4).contiguous()
+        else:
+            steer_z = -p.last_steer_per_wheel                      # (NK, n)
+            susp_off = _susp_visual_offset(
+                p.last_distances, p._mesh_radius, p._l_susp)        # (NK, n)
+            spin = (p.wheel_spin_angle if p._visual_spin_enabled
+                    else torch.zeros_like(p.wheel_spin_angle))
+            z_off = torch.stack(
+                [torch.zeros_like(susp_off), torch.zeros_like(susp_off), susp_off],
+                dim=-1)
+            local_pos = rest_pos + z_off                           # (NK, n, 3)
+            local_quat = _quat_mul(
+                rest_quat,
+                _quat_mul(_quat_axis_angle("z", steer_z), _quat_axis_angle("y", spin)),
+            )
+
+        if frame == "local":
+            return local_pos.reshape(N, K, n, 3), local_quat.reshape(N, K, n, 4)
+
+        # World: compose with each vehicle's chassis (base-link) pose.
+        pos, quat, _vel, _ang = self._read_state_batched()         # (NK, 3), (NK, 4)
+        cqb = quat.unsqueeze(1).expand(NK, n, 4)
+        world_pos = pos.unsqueeze(1) + transform_by_quat(
+            local_pos.reshape(NK * n, 3), cqb.reshape(NK * n, 4)
+        ).reshape(NK, n, 3)
+        world_quat = _quat_mul(cqb, local_quat)
+        return world_pos.reshape(N, K, n, 3), world_quat.reshape(N, K, n, 4)
 
 
 def group_vehicles_by_cfg(vehicles: Sequence[tuple]):
@@ -463,3 +528,33 @@ class MultiVehiclePhysics:
         # Dispatch.
         for kind, ins in zip(self.kinds, per_kind):
             kind.step(ins)
+
+    def wheel_visual_transforms(self, frame: str = "world"):
+        """Closed-form wheel visual poses for every vehicle, in the caller's flat
+        order. Returns a list (length ``n_vehicles``) of ``(pos, quat)`` tuples,
+        each ``(n_envs, n_wheels, 3)`` / ``(n_envs, n_wheels, 4)``. Per-vehicle
+        because kinds may differ in wheel count. VisualJointSync-independent."""
+        kind_out = [k.wheel_visual_transforms(frame) for k in self.kinds]   # (N,K,n,·)
+        out = [None] * self.n_vehicles
+        for flat_i, kind_idx, slot_idx in self._flat_to_kind:
+            wp, wq = kind_out[kind_idx]
+            out[flat_i] = (wp[:, slot_idx], wq[:, slot_idx])
+        return out
+
+    def visual_parts_transforms(self, frame: str = "world"):
+        """One-call render feed per vehicle (chassis + wheels), caller flat order.
+        Returns a list (length ``n_vehicles``) of ``VisualPartsTransforms``.
+        Chassis = real dynamics pose; wheels = closed-form visual pose."""
+        wheels = self.wheel_visual_transforms(frame)
+        kind_of = {flat_i: kind_idx for flat_i, kind_idx, _ in self._flat_to_kind}
+        out = []
+        for i, (ent, _sensor, _cfg) in enumerate(self.vehicles):
+            cpos = ent.get_pos(); cquat = ent.get_quat()
+            if cpos.dim() == 1:
+                cpos = cpos.unsqueeze(0); cquat = cquat.unsqueeze(0)
+            names = [w.name for w in self.kinds[kind_of[i]].resolved.wheels]
+            wp, wq = wheels[i]
+            out.append(VisualPartsTransforms(
+                frame=frame, chassis_pos=cpos, chassis_quat=cquat,
+                wheel_names=names, wheel_pos=wp, wheel_quat=wq))
+        return out
