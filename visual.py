@@ -169,6 +169,29 @@ class VisualJointSync:
             entity.set_dofs_kp(kp=kp_arr, dofs_idx_local=self._susp_ctrl_dofs)
             entity.set_dofs_kv(kv=kv_arr, dofs_idx_local=self._susp_ctrl_dofs)
 
+        # Precompute steer axis signs (was rebuilt as a fresh tensor every step).
+        self._steer_signs = (
+            torch.tensor(self.steer_axis_signs, device=device, dtype=dtype).unsqueeze(0)
+            if self.steer_dofs else None)
+
+        # Batched-write plan. spin + steer + suspension(set-path) all go through
+        # set_dofs_position, and EACH solver call triggers a full collider reset
+        # + constraint reset + forward-kinematics pass over every link & geom.
+        # Issuing 3 separate calls per step therefore pays for 3 FK passes; we
+        # combine them into ONE call (one FK pass) — the dominant VisualJointSync
+        # cost at n=1. control_dofs_position (PD, heavy wheels) uses a different
+        # API and stays separate. The position tensors are concatenated in the
+        # SAME order the dof indices are gathered here.
+        self._batch_spin = bool(self.spin_enabled and self._spin_dofs_valid)
+        batch_dofs: list[int] = []
+        if self._batch_spin:
+            batch_dofs += list(self._spin_dofs_valid)
+        if self.steer_dofs:
+            batch_dofs += list(self.steer_dofs)
+        if self._susp_set_dofs:
+            batch_dofs += list(self._susp_set_dofs)
+        self._batch_set_dofs = batch_dofs if batch_dofs else None
+
         # Visual-state accumulators.
         self.wheel_visual_angle = torch.zeros(n_envs, self.n_wheels, device=device, dtype=dtype)
 
@@ -179,57 +202,57 @@ class VisualJointSync:
         omega: torch.Tensor,              # (n_envs, n_wheels)
         dt: float,
     ) -> None:
-        # Spin joints — skip entirely when disabled (saves a Genesis call per
-        # step + a few tensor ops). Useful for cylindrical wheels (e.g. tank
-        # sprockets/road wheels) where rotation isn't visible anyway.
-        if self.spin_enabled and self._spin_dofs_valid:
-            # Integrate spin angle and wrap to [-pi, pi]. In-place to avoid
-            # allocating a fresh tensor every step.
+        # Build the per-group position tensors, then issue ONE set_dofs_position
+        # for all of spin + steer + suspension(set-path). Concatenation order
+        # MUST match self._batch_set_dofs (spin, steer, susp — same conditions).
+        parts: list[torch.Tensor] = []
+
+        # Spin — integrate angle and wrap to [-pi, pi]. Skipped entirely when
+        # disabled (e.g. tank cylindrical wheels: rotation isn't visible).
+        if self._batch_spin:
             self.wheel_visual_angle.add_(omega * dt)
             two_pi = 2.0 * math.pi
             self.wheel_visual_angle = (
                 (self.wheel_visual_angle + math.pi) % two_pi
             ) - math.pi
-            spin_cmd = self.wheel_visual_angle[:, self._spin_idx_valid]
-            self.entity.set_dofs_position(
-                spin_cmd, self._spin_dofs_valid, zero_velocity=False,
-            )
+            parts.append(self.wheel_visual_angle[:, self._spin_idx_valid])
 
-        # Steer joints. Physics-side `steer_per_wheel` is ISO 8855 (+ = right
-        # turn, computed as wheel fwd tilted from +X toward -Y). The URDF
-        # joint angle that produces a CW visual rotation (= right turn from
-        # above) depends on the URDF axis z sign:
-        #   axis (0, 0,  1): +joint = CCW = LEFT  → visual_cmd = -phys
-        #   axis (0, 0, -1): +joint = CW  = RIGHT → visual_cmd = +phys
-        # Unified: visual_cmd = -phys * sign  (sign = +1 for (0,0,1), -1 for (0,0,-1))
+        # Steer. Physics-side `steer_per_wheel` is ISO 8855 (+ = right turn). The
+        # URDF joint angle for a CW (right) visual rotation depends on the axis z
+        # sign: visual_cmd = -phys * sign (sign = +1 for (0,0,1), -1 for (0,0,-1)).
         if self.steer_dofs:
-            cols = self.steer_wheel_idx
-            phys = steer_per_wheel[:, cols]
-            signs = torch.tensor(
-                self.steer_axis_signs, device=self.device, dtype=self.dtype
-            ).unsqueeze(0)
-            visual_cmd = -phys * signs
-            self.entity.set_dofs_position(
-                visual_cmd, self.steer_dofs, zero_velocity=False,
-            )
+            phys = steer_per_wheel[:, self.steer_wheel_idx]
+            parts.append(-phys * self._steer_signs)
 
-        # Suspension joints. set_dofs_position path (HJW): joint_pos = mesh_radius - hit_distance.
+        # Suspension, set_dofs_position path (HJW): joint_pos = mesh_radius - hit.
+        susp_joint_pos = None
         if self._susp_set_dofs:
             d = distances[:, self._susp_set_idx]
             air = (d <= 1e-6) | (d >= 19.9)
-            joint_pos = self.wheel_mesh_radius - d
-            joint_pos = torch.where(air, torch.full_like(joint_pos, -self.l_susp), joint_pos)
+            jp = self.wheel_mesh_radius - d
+            jp = torch.where(air, torch.full_like(jp, -self.l_susp), jp)
             if self._susp_set_clamp is not None:
-                joint_pos = torch.maximum(
-                    -self._susp_set_clamp,
-                    torch.minimum(self._susp_set_clamp, joint_pos),
-                )
+                jp = torch.maximum(
+                    -self._susp_set_clamp, torch.minimum(self._susp_set_clamp, jp))
+            susp_joint_pos = jp
+            parts.append(jp)
+
+        # Single batched write — one solver collider/constraint reset + one FK
+        # pass for all visual joints, instead of one per group.
+        if self._batch_set_dofs is not None:
+            combined = parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
             self.entity.set_dofs_position(
-                joint_pos, self._susp_set_dofs, zero_velocity=False,
+                combined, self._batch_set_dofs, zero_velocity=False,
             )
-            # Drift suppression: zero suspension joint velocity.
-            zero_v = torch.zeros_like(joint_pos)
-            self.entity.set_dofs_velocity(zero_v, self._susp_set_dofs)
+
+        # Suspension drift suppression: zero the susp joint velocity. skip_forward
+        # avoids an extra velocity FK pass (the position write above already ran
+        # forward kinematics; the joint is cosmetic).
+        if susp_joint_pos is not None:
+            self.entity.set_dofs_velocity(
+                torch.zeros_like(susp_joint_pos), self._susp_set_dofs,
+                skip_forward=True,
+            )
 
         # Suspension joints. control_dofs_position path (heavy wheels):
         # Use the SAME ground-following formula as the set_dofs_position path
