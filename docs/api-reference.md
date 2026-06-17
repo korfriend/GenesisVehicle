@@ -435,11 +435,18 @@ single `VehiclePhysics` at K=1 (Δ = 0).
 > **Perf advisory (v0.7.10):** when `VisualJointSync` is active
 > (`enable_visual_joint_sync=True`) it logs a one-time-per-process
 > `[genesis_vehicle] PERF:` warning to stderr — it drives the URDF wheel joints
-> through the engine's articulated-body FK every step (~ms/step, the dominant
-> SDK cost at scale) and is only needed for the **Genesis viewer**. For an
-> external renderer or any headless run, set `enable_visual_joint_sync=False` and read
-> wheel poses from `visual_parts_transforms` / `wheel_visual_transforms`
-> (closed-form, ~µs). Silence the warning with `GENESIS_VEHICLE_QUIET=1`.
+> through the engine's articulated-body forward kinematics every step and is
+> only needed for the **Genesis viewer**. For an external renderer or any
+> headless run, set `enable_visual_joint_sync=False` and read wheel poses from
+> `visual_parts_transforms` / `wheel_visual_transforms` (closed-form, ~µs).
+> Silence the warning with `GENESIS_VEHICLE_QUIET=1`.
+>
+> **v0.7.16** cut this cost ≈5× by batching spin + steer + suspension into a
+> single `set_dofs_position` call per step (each call triggers a full
+> collider/constraint reset + FK pass, so 3 calls = 3 passes). Measured on CPU
+> at 1 vehicle the tax dropped from **+4.46 ms/step** (1.53×) to **+0.85 ms/step**
+> (1.10×). It is lower, not free — the closed-form path is still ~µs and the
+> right choice for headless / external rendering.
 
 ## 8. Presets
 

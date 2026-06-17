@@ -101,8 +101,11 @@ overrides) and runs a single batched compute per kind:
   call with K link indices applies forces to all K base links.
 - **Sensor reads**: K small `sensor.read()` calls in a Python loop
   (one raycaster per vehicle — unavoidable per-vehicle I/O).
-- **Visual writes**: K per-entity `VisualJointSync.step()` calls (each tiny
-  `set_dofs_position`). Negligible vs the compute saving.
+- **Visual writes**: K per-entity `VisualJointSync.step()` calls (only when
+  `enable_visual_joint_sync=True`). Each lowers to **one** `set_dofs_position`
+  per entity — v0.7.16 batches spin + steer + suspension into a single call, so
+  one engine collider/constraint reset + FK pass per entity (was 3). Cost scales
+  with K; for headless / external rendering leave it off (closed-form, ~µs).
 
 ### When L2 matters
 
@@ -359,8 +362,10 @@ grouping/dispatch bookkeeping is now unit-tested in
 - **Sensor reads** in L2 are per-vehicle (one raycaster per vehicle —
   Genesis doesn't expose a multi-sensor batch API). Cost is small but
   scales with K.
-- **VisualJointSync writes** in L2 are per-entity (K small
-  `set_dofs_position` calls). Negligible.
+- **VisualJointSync writes** in L2 are per-entity: one batched
+  `set_dofs_position` each (v0.7.16 — spin + steer + suspension combined), so
+  one engine FK pass per entity, scaling with K. Only when
+  `enable_visual_joint_sync=True`.
 
 ---
 
