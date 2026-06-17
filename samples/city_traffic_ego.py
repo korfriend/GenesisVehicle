@@ -234,9 +234,9 @@ def main():
     cfg_traffic = [tk[2](traffic_urdfs[i], stability="control")
                    for i, tk in enumerate(TRAFFIC_KINDS)]
     # VisualJointSync is off by default; enable it only when rendering (--viewer).
-    cfg_ego.enable_visual_sync = args.viewer
+    cfg_ego.enable_visual_joint_sync = args.viewer
     for _cfg in cfg_traffic:
-        _cfg.enable_visual_sync = args.viewer
+        _cfg.enable_visual_joint_sync = args.viewer
 
     vehicles = []                # list[(entity, sensor, cfg)]
     target_lanes = []            # parallel list: target Y per vehicle for lane-keeping

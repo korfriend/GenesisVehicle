@@ -349,7 +349,7 @@ def main():
     # VisualJointSync is off by default; enable it only when rendering (--viewer)
     # so the per-kind cfgs animate wheels in the cv2 frames.
     for _cfg in cfg_per_kind:
-        _cfg.enable_visual_sync = args.viewer
+        _cfg.enable_visual_joint_sync = args.viewer
 
     # Spawn vehicles, interleaved around the loop so kinds are mixed visually.
     physics_list = []

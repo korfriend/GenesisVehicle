@@ -148,7 +148,7 @@ class MultiVehicleKindPhysics:
         # each visual.step(). (See the [VISUAL] block at the bottom of step().)
         self._proto.visual = None
         self.visuals: list[VisualJointSync] = []
-        if self._proto.resolved.enable_visual_sync:
+        if self._proto.resolved.enable_visual_joint_sync:
             for ent in entities:
                 self.visuals.append(VisualJointSync(
                     entity=ent, resolved=self._proto.resolved,

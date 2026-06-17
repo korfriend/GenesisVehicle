@@ -132,7 +132,7 @@ class VehicleConfig:
     chassis: ChassisConfig = field(default_factory=ChassisConfig)
     stability_hooks: list[StabilityHook] = field(default_factory=list)
     recommended_dt: float = 1.0/48.0   # `dt` is a deprecated alias (v0.5.31)
-    enable_visual_sync: bool = False   # v0.7.14: default flipped (was True)
+    enable_visual_joint_sync: bool = False   # v0.7.14: default flipped (was True)
     susp_visual_clamp: float | None = None   # v0.7.14: None=per-wheel rest_stroke
 
     @classmethod
@@ -426,18 +426,18 @@ single `VehiclePhysics` at K=1 (Δ = 0).
 > chassis and does not affect physics. External renderers don't need it at
 > all — use `visual_parts_transforms` / `wheel_visual_transforms`.
 
-> **Default (v0.7.14):** `enable_visual_sync` defaults to **`False`** (was
+> **Default (v0.7.14):** `enable_visual_joint_sync` defaults to **`False`** (was
 > `True` through v0.7.13). The dominant path — headless / external UE·Unity
-> renderer — does not need it, so it is now opt-in: set `enable_visual_sync=True`
+> renderer — does not need it, so it is now opt-in: set `enable_visual_joint_sync=True`
 > only when you actually open the Genesis viewer (or pass `--viewer` in a sample).
 > The server sets it automatically (`= not args.headless`).
 
 > **Perf advisory (v0.7.10):** when `VisualJointSync` is active
-> (`enable_visual_sync=True`) it logs a one-time-per-process
+> (`enable_visual_joint_sync=True`) it logs a one-time-per-process
 > `[genesis_vehicle] PERF:` warning to stderr — it drives the URDF wheel joints
 > through the engine's articulated-body FK every step (~ms/step, the dominant
 > SDK cost at scale) and is only needed for the **Genesis viewer**. For an
-> external renderer or any headless run, set `enable_visual_sync=False` and read
+> external renderer or any headless run, set `enable_visual_joint_sync=False` and read
 > wheel poses from `visual_parts_transforms` / `wheel_visual_transforms`
 > (closed-form, ~µs). Silence the warning with `GENESIS_VEHICLE_QUIET=1`.
 

@@ -113,7 +113,7 @@ class VehicleConfig:
     # actually open the Genesis viewer (`gs.Scene(show_viewer=True)` or a sample
     # `--viewer`). Leaving it on headless is a silent ~ms/step perf trap (it is
     # the dominant SDK cost at scale). See VisualJointSync / docs/server.md.
-    enable_visual_sync: bool = False
+    enable_visual_joint_sync: bool = False
 
     # Visual suspension joint mode:
     #   "auto"       — per-joint decision based on URDF <dynamics> presence (legacy default)
@@ -236,7 +236,7 @@ class ResolvedConfig:
     tire: Any
     stability_hooks: list[Any]
     recommended_dt: float
-    enable_visual_sync: bool
+    enable_visual_joint_sync: bool
     urdf: Any   # URDFParsedConfig — used by visual layer for joint axis-sign lookup
     visual_susp_mode: str = "auto"
     visual_spin_enabled: bool = True
@@ -341,7 +341,7 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
         tire=config.tire,
         stability_hooks=list(config.stability_hooks),
         recommended_dt=config.recommended_dt,
-        enable_visual_sync=config.enable_visual_sync,
+        enable_visual_joint_sync=config.enable_visual_joint_sync,
         urdf=parsed,
         visual_susp_mode=config.visual_susp_mode,
         visual_spin_enabled=config.visual_spin_enabled,
