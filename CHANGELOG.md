@@ -10,6 +10,47 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.16] — 2026-06-18
+
+### Performance — `VisualJointSync` batches its per-step joint writes (≈5× less overhead)
+
+Investigating why `VisualJointSync` costs so much even at 1 vehicle: each
+`entity.set_dofs_position` call lowers to `solver.set_dofs_position`, which does
+a **collider reset + constraint-solver reset + a full forward-kinematics pass
+over every link and geom** — every call. `VisualJointSync.step` issued these
+separately for spin, steer, and suspension (plus a `set_dofs_velocity`), so a
+single step paid for 3–4 collider/constraint resets and FK passes.
+
+Now spin + steer + suspension(set-path) are concatenated and written with **one
+`set_dofs_position` call** (one FK pass instead of three), and the
+drift-suppression `set_dofs_velocity` passes `skip_forward=True` (no extra
+velocity FK). `control_dofs_position` (PD, heavy wheels) uses a different API
+and stays separate. Also precomputes the steer-axis-sign tensor once instead of
+per step.
+
+Measured (CPU, 1 vehicle, `car_4w_rwd_ackermann`):
+
+| | ms/step | VisualJointSync tax |
+|---|---|---|
+| physics only | 8.30 | — |
+| + VisualJointSync (before) | 12.81 | **+4.46** (1.53×) |
+| + VisualJointSync (after)  | 9.16  | **+0.85** (1.10×) |
+
+~5× reduction in the per-step tax. Applies to both `VehiclePhysics` and
+`MultiVehicleKindPhysics` (both drive a per-entity `VisualJointSync`).
+
+Correctness unchanged: the final joint state is identical (same values, one call
+instead of three — only the wasted intermediate FK passes are removed). Verified
+on CPU that the closed-form `wheel_visual_transforms` still matches the
+engine-driven `get_link` (Δpos ≈ 4.3 mm steady-state jitter, Δquat = 0.0°).
+
+Note: this lowers the cost but does not eliminate it — for headless / external
+(UE) runs keep `enable_visual_joint_sync=False` and read poses from the
+closed-form `wheel_visual_transforms` (~µs). The Genesis native viewer still
+needs `VisualJointSync` (the closed-form cannot drive the viewer).
+
+---
+
 ## [0.7.15] — 2026-06-17
 
 ### Changed — `enable_visual_sync` → **`enable_visual_joint_sync`** (rename, breaking)
