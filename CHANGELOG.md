@@ -10,6 +10,49 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.14] — 2026-06-17
+
+v0.7.13 후속 — 팀 피드백 반영: (1) `VisualJointSync`는 Genesis 뷰어 전용인데
+default가 켜져 있어 헤드리스/외부 렌더에서 조용히 성능을 먹는다 → default를
+끈다. (2) 서스펜션 시각 clamp가 파생값으로 고정되지 말고 사용자가 설정할 수
+있어야 한다 → config 필드로 노출.
+
+### Changed — `enable_visual_sync` default가 `True` → **`False`** (breaking)
+
+`VisualJointSync`(URDF 휠 visual 조인트를 엔진 FK로 매 step 구동)는 **Genesis
+네이티브 뷰어에서만** 필요하다. 닫힌형 `wheel_visual_transforms`는 뷰어를
+갱신하지 못하므로(포즈 텐서를 반환만 함) 외부 렌더러(UE/Unity) 전용이고,
+Genesis 뷰어는 여전히 `VisualJointSync`가 필요하다. 주 사용처가 헤드리스/외부
+렌더인 점, default-ON이 조용한 성능 함정(0.7.13 서버 14ms 사건)인 점을 고려해
+**opt-in**으로 전환했다.
+
+- `VehicleConfig.enable_visual_sync` 기본값 `False`.
+- Genesis 뷰어가 필요할 때만 명시적으로 `True`로 설정 (또는 샘플 `--viewer`).
+- 서버는 이미 `enable_visual_sync = not args.headless`로 명시 설정 → 영향 없음.
+- 샘플 6종(`quickstart`/`slope_hold`/`multi_env_render`/`batched_rollout`/
+  `road_loop`/`city_traffic_ego`)은 `--viewer`일 때만 켜도록 수정. 헤드리스
+  실행은 더 빨라진다(닫힌형 경로).
+
+마이그레이션: Genesis 뷰어로 휠 애니메이션을 보던 코드는 `cfg.enable_visual_sync
+= True`를 명시해야 한다(안 하면 휠이 rest 포즈로 고정 — 차체는 정상 구동).
+
+### Added — `VehicleConfig.susp_visual_clamp` (서스펜션 시각 clamp 설정화)
+
+0.7.13에서 clamp를 휠별 `rest_stroke`로 자동 산출하도록 했는데, 파생값에
+가두지 말고 설정 가능해야 한다는 피드백. clamp는 레이캐스트 스파이크에 대한
+**시각 안전 한계**(물리 한계 아님)다.
+
+- `susp_visual_clamp: Optional[float] = None`
+  - `None`(기본) → **auto**: 휠별 = 자기 `rest_stroke` (= `rest_d − radius`,
+    최소 0.02 m). `rest_d`는 정의상 `radius + rest_stroke`이므로 결국 그 휠의
+    행정 그 자체. 0.02 m 바닥값은 행정 ≈ 0인 휠이 rest에 얼어붙는 것 방지.
+  - `float`(예: `0.30`) → 모든 휠에 균일 clamp.
+  - `≤ 0` → `ConfigError`.
+- `core` / `multi_vehicle` / `VisualJointSync`가 동일 값을 사용 → 닫힌형
+  `wheel_visual_transforms`와 뷰어의 등가성 유지.
+
+---
+
 ## [0.7.13] — 2026-06-17
 
 두 건의 팀 리포트 대응: (1) SDK 제공 physics server가 기존 서버 대비 느림

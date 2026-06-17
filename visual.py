@@ -145,12 +145,17 @@ class VisualJointSync:
         self._susp_set_idx = [i for (i, _, u) in susp_triples if not u]
         self._susp_ctrl_dofs = [d for (_, d, u) in susp_triples if u]
         self._susp_ctrl_idx = [i for (i, _, u) in susp_triples if u]
-        # Per-wheel suspension-offset clamp = each wheel's own stroke (was a
-        # fixed ±0.19, which muted larger-travel vehicles). Kept consistent with
-        # core._susp_visual_offset so the viewer matches wheel_visual_transforms.
-        set_strokes = [max(0.02, float(self.wheels[i].rest_stroke)
-                           if self.wheels[i].rest_stroke is not None else 0.10)
-                       for i in self._susp_set_idx]
+        # Suspension-offset clamp. Kept consistent with core._susp_visual_offset
+        # so the viewer matches the closed-form wheel_visual_transforms.
+        #   resolved.susp_visual_clamp is None -> per-wheel = own rest_stroke
+        #     (min 0.02 m); a float -> uniform clamp. Replaces the old fixed 0.19.
+        _clamp_override = getattr(resolved, "susp_visual_clamp", None)
+        if _clamp_override is not None:
+            set_strokes = [float(_clamp_override) for _ in self._susp_set_idx]
+        else:
+            set_strokes = [max(0.02, float(self.wheels[i].rest_stroke)
+                               if self.wheels[i].rest_stroke is not None else 0.10)
+                           for i in self._susp_set_idx]
         self._susp_set_clamp = (
             torch.tensor(set_strokes, device=device, dtype=dtype).unsqueeze(0)
             if set_strokes else None)
