@@ -226,10 +226,10 @@ python -m genesis_vehicle.samples.city_traffic_ego      # 9. ego + traffic highw
 Most scripts accept `--viewer` for an offscreen camera render; the three
 perf benches are intentionally headless (rendering would distort
 throughput numbers). Since v0.7.14 the samples set
-`cfg.enable_visual_sync = args.viewer` (it defaults to `False` now), so
+`cfg.enable_visual_joint_sync = args.viewer` (it defaults to `False` now), so
 headless runs skip the per-step viewer-joint FK and report pure-physics
 timing. The catalog [`samples/README.md`](samples/README.md) has the
-per-sample viewer status, the `--viewer` ↔ `enable_visual_sync` note, and
+per-sample viewer status, the `--viewer` ↔ `enable_visual_joint_sync` note, and
 pointers to which sample is the right visual counterpart for each benchmark.
 
 ## Documentation

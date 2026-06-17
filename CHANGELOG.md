@@ -10,89 +10,121 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.15] — 2026-06-17
+
+### Changed — `enable_visual_sync` → **`enable_visual_joint_sync`** (rename, breaking)
+
+Renamed the flag to match the class it gates, `VisualJointSync`. The flag
+toggles `VisualJointSync` (which drives the URDF wheel **joints**), not a
+`VisualSync`, so `enable_visual_joint_sync` is the accurate name. No alias is
+kept — same policy as the `VisualSync` alias removal in 0.7.9.
+
+- `VehicleConfig.enable_visual_sync` → `VehicleConfig.enable_visual_joint_sync`
+  (default stays `False` from 0.7.14).
+- Updated the `ResolvedConfig` field, the `resolve()` mapping, the `core` /
+  `multi_vehicle` consumers, and the `VisualJointSync` perf-advisory text.
+- Server: `vehicle_builder.build_vehicle(*, enable_visual_joint_sync=False)`
+  keyword, and the `physics_server` / `l3_runtime` `= not args.headless` setter.
+- All 6 `--viewer` samples: `cfg.enable_visual_joint_sync = args.viewer`.
+- Docs updated (`api-reference.md`, `README.md`, `samples/README.md`). The
+  0.7.13/0.7.14 CHANGELOG entries keep the old name (it is what those versions
+  actually shipped).
+
+Migration: replace `cfg.enable_visual_sync` with `cfg.enable_visual_joint_sync`.
+The old name no longer exists (AttributeError).
+
+---
+
 ## [0.7.14] — 2026-06-17
 
-v0.7.13 후속 — 팀 피드백 반영: (1) `VisualJointSync`는 Genesis 뷰어 전용인데
-default가 켜져 있어 헤드리스/외부 렌더에서 조용히 성능을 먹는다 → default를
-끈다. (2) 서스펜션 시각 clamp가 파생값으로 고정되지 말고 사용자가 설정할 수
-있어야 한다 → config 필드로 노출.
+Follow-up to v0.7.13 team feedback: (1) `VisualJointSync` is viewer-only but
+defaulted ON, silently costing performance in headless / external-render runs
+→ flip the default off. (2) The suspension visual clamp should be settable, not
+locked to a derived value → expose it as a config field.
 
-### Changed — `enable_visual_sync` default가 `True` → **`False`** (breaking)
+### Changed — `enable_visual_sync` default `True` → **`False`** (breaking)
 
-`VisualJointSync`(URDF 휠 visual 조인트를 엔진 FK로 매 step 구동)는 **Genesis
-네이티브 뷰어에서만** 필요하다. 닫힌형 `wheel_visual_transforms`는 뷰어를
-갱신하지 못하므로(포즈 텐서를 반환만 함) 외부 렌더러(UE/Unity) 전용이고,
-Genesis 뷰어는 여전히 `VisualJointSync`가 필요하다. 주 사용처가 헤드리스/외부
-렌더인 점, default-ON이 조용한 성능 함정(0.7.13 서버 14ms 사건)인 점을 고려해
-**opt-in**으로 전환했다.
+`VisualJointSync` (drives the URDF wheel visual joints through engine FK every
+step) is only needed for the **Genesis native viewer**. The closed-form
+`wheel_visual_transforms` cannot update the Genesis viewer (it only returns
+pose tensors), so it is for external renderers (UE / Unity), while the Genesis
+viewer still needs `VisualJointSync`. Given the dominant path is headless /
+external render, and default-ON is a silent perf trap (the 0.7.13 server 14ms
+case), the flag is now **opt-in**.
 
-- `VehicleConfig.enable_visual_sync` 기본값 `False`.
-- Genesis 뷰어가 필요할 때만 명시적으로 `True`로 설정 (또는 샘플 `--viewer`).
-- 서버는 이미 `enable_visual_sync = not args.headless`로 명시 설정 → 영향 없음.
-- 샘플 6종(`quickstart`/`slope_hold`/`multi_env_render`/`batched_rollout`/
-  `road_loop`/`city_traffic_ego`)은 `--viewer`일 때만 켜도록 수정. 헤드리스
-  실행은 더 빨라진다(닫힌형 경로).
+- `VehicleConfig.enable_visual_sync` defaults to `False`.
+- Set it `True` explicitly only when opening the Genesis viewer (or a sample
+  `--viewer`).
+- The server already sets it explicitly (`= not args.headless`) → unaffected.
+- The 6 samples (`quickstart` / `slope_hold` / `multi_env_render` /
+  `batched_rollout` / `road_loop` / `city_traffic_ego`) enable it only with
+  `--viewer`. Headless runs are now faster (closed-form path).
 
-마이그레이션: Genesis 뷰어로 휠 애니메이션을 보던 코드는 `cfg.enable_visual_sync
-= True`를 명시해야 한다(안 하면 휠이 rest 포즈로 고정 — 차체는 정상 구동).
+Migration: code that relied on Genesis-viewer wheel animation must set
+`cfg.enable_visual_sync = True` (otherwise wheels freeze at the rest pose — the
+chassis still drives normally).
 
-### Added — `VehicleConfig.susp_visual_clamp` (서스펜션 시각 clamp 설정화)
+### Added — `VehicleConfig.susp_visual_clamp` (suspension visual clamp is settable)
 
-0.7.13에서 clamp를 휠별 `rest_stroke`로 자동 산출하도록 했는데, 파생값에
-가두지 말고 설정 가능해야 한다는 피드백. clamp는 레이캐스트 스파이크에 대한
-**시각 안전 한계**(물리 한계 아님)다.
+0.7.13 derived the clamp per-wheel from `rest_stroke`; feedback was that it
+should be configurable rather than locked to a derived value. The clamp is a
+**visual safety bound** against raycast spikes, not a physics limit.
 
 - `susp_visual_clamp: Optional[float] = None`
-  - `None`(기본) → **auto**: 휠별 = 자기 `rest_stroke` (= `rest_d − radius`,
-    최소 0.02 m). `rest_d`는 정의상 `radius + rest_stroke`이므로 결국 그 휠의
-    행정 그 자체. 0.02 m 바닥값은 행정 ≈ 0인 휠이 rest에 얼어붙는 것 방지.
-  - `float`(예: `0.30`) → 모든 휠에 균일 clamp.
+  - `None` (default) → **auto**: per-wheel = that wheel's `rest_stroke`
+    (= `rest_d − radius`, min 0.02 m). Since `rest_d ≡ radius + rest_stroke`,
+    this is just the wheel's own stroke. The 0.02 m floor keeps a ~zero-stroke
+    wheel from freezing at rest.
+  - `float` (e.g. `0.30`) → uniform clamp on every wheel.
   - `≤ 0` → `ConfigError`.
-- `core` / `multi_vehicle` / `VisualJointSync`가 동일 값을 사용 → 닫힌형
-  `wheel_visual_transforms`와 뷰어의 등가성 유지.
+- `core` / `multi_vehicle` / `VisualJointSync` share the value, so the
+  closed-form `wheel_visual_transforms` stays equal to what the viewer drives.
 
 ---
 
 ## [0.7.13] — 2026-06-17
 
-두 건의 팀 리포트 대응: (1) SDK 제공 physics server가 기존 서버 대비 느림
-(CPU·1대 기준 4–5 ms → 14–15 ms/step), (2) 서스펜션 시각 clamp가 0.19 m로
-고정되어 있어 큰 행정(stroke) 차량의 서스펜션 움직임이 소극적으로 보임.
+Two team reports addressed: (1) the SDK-provided physics server is slower than
+the team's existing server (CPU, 1 vehicle: 4–5 ms vs 14–15 ms/step), and
+(2) the suspension visual clamp is fixed at 0.19 m, muting large-travel
+vehicles.
 
-### Fixed — 서버가 헤드리스/외부 렌더 시 `VisualJointSync`를 끔 (성능)
+### Fixed — server disables `VisualJointSync` when headless / external-render (perf)
 
-원인: SDK의 `physics_server` / `l3_runtime`가 `VisualJointSync`를 켠 채로
-구동되고 있었음. `VisualJointSync`는 매 step마다 URDF 휠 visual 조인트를
-엔진의 articulated-body FK로 구동(~ms/step) — Genesis 뷰어 전용이며, 외부
-렌더러(UE/Unity)나 헤드리스 실행에는 불필요하다. 기존(빠른) 서버는 이미
-`enable_visual_sync=False`로 돌고 있었던 것이 차이의 원인.
+Cause: the SDK's `physics_server` / `l3_runtime` ran with `VisualJointSync`
+ON. `VisualJointSync` drives the URDF wheel visual joints through the engine's
+articulated-body FK every step (~ms/step) — viewer-only, and unnecessary for an
+external renderer (UE / Unity) or any headless run. The team's existing (fast)
+server was already running with `enable_visual_sync=False`; that was the
+difference.
 
-- `vehicle_builder.build_vehicle(*, enable_visual_sync=False)` 키워드 추가;
-  빌드 후 `cfg.enable_visual_sync`에 반영.
+- `vehicle_builder.build_vehicle(*, enable_visual_sync=False)` keyword added;
+  applied to `cfg.enable_visual_sync` after build.
 - `physics_server` / `l3_runtime`: `enable_visual_sync = not args.headless`.
-  헤드리스(=외부 UE 렌더)에서는 `VisualJointSync`를 끄고, 휠 포즈는 닫힌형
-  `wheel_visual_transforms("world")`로 캡처(per-step 엔진 FK 비용 제거).
+  Headless (= external UE render) turns `VisualJointSync` off and captures wheel
+  poses via the closed-form `wheel_visual_transforms("world")` (no per-step
+  engine FK cost).
 
-기존 서버와 동일하게 `enable_visual_sync=False` 경로로 맞춰져 step 시간이
-정상화된다. 뷰어가 필요한 경우(`--headless` 미지정)에만 켜진다.
+Step time is normalized to the same `enable_visual_sync=False` path as the
+existing server. It is only on when the viewer is needed (`--headless` omitted).
 
-### Fixed — 서스펜션 시각 clamp가 휠별 `rest_stroke` 기준으로 (고정 0.19 제거)
+### Fixed — suspension visual clamp is per-wheel `rest_stroke` (removed fixed 0.19)
 
-`core._susp_visual_offset`와 `visual.VisualJointSync`의 서스펜션 시각 오프셋이
-`±0.19 m`로 하드코딩되어, 행정이 0.19 m를 넘는 차량(트럭·탱크 등)의 휠
-움직임이 잘려 소극적으로 보였다. 이제 clamp는 **휠별 자기 행정**
-(`rest_d − radius`, 최소 0.02 m)을 사용한다.
+`core._susp_visual_offset` and `visual.VisualJointSync` hardcoded a `±0.19 m`
+suspension visual offset, so vehicles whose travel exceeds 0.19 m (trucks /
+tanks) had their wheel motion clipped and looked muted. The clamp is now each
+wheel's **own stroke** (`rest_d − radius`, min 0.02 m).
 
-- `core._susp_visual_offset(clamp=…)`가 텐서 clamp를 허용(스칼라도 호환 —
-  헬퍼의 단위테스트 기본값은 0.19 유지).
-- `VehiclePhysics.__init__`: `self._susp_clamp = clamp(rest_d − radius, ≥0.02)`
-  를 만들어 getter / `wheel_visual_transforms`에 전달.
-- `multi_vehicle`도 동일한 per-wheel clamp 사용.
-- `VisualJointSync`(set-path)도 동일한 per-wheel clamp 적용 — 뷰어와 닫힌형
-  `wheel_visual_transforms`의 등가성이 유지된다.
+- `core._susp_visual_offset(clamp=…)` accepts a tensor clamp (a scalar still
+  works — the helper's unit-test default stays 0.19).
+- `VehiclePhysics.__init__`: builds `self._susp_clamp = clamp(rest_d − radius,
+  ≥0.02)` and passes it to the getter / `wheel_visual_transforms`.
+- `multi_vehicle` uses the same per-wheel clamp.
+- `VisualJointSync` (set path) applies the same per-wheel clamp — keeping the
+  viewer equal to the closed-form `wheel_visual_transforms`.
 
-행정이 0.19 m 이하인 차량(예: 기본 car 프리셋)은 동작 변화 없음. 0.19 m를
-넘는 차량만 가시 행정이 복원된다.
+Vehicles with stroke ≤ 0.19 m (e.g. the default car preset) are unchanged; only
+those exceeding 0.19 m get their visible travel restored.
 
 ---
 

@@ -459,13 +459,13 @@ def print_resolved_table(target_id, resolved_cfg):
 
 def build_vehicle(scene, target_entities, controllers, target_id, target_info,
                   urdf_path, mapping, ue_friction, ue_restitution, vis_mode,
-                  *, enable_visual_sync=False):
+                  *, enable_visual_joint_sync=False):
     """
     지정된 URDF 경로 및 매핑 설정을 기반으로 GenesisVehicle 객체를 빌드하여 씬에 로딩하고
     조향(Steer)/동력(Drive)/서스펜션(Suspension)을 동적 자동 튜닝 및 인스턴스화합니다.
     (per-entity 경로 — 차량마다 엔티티 + VehiclePhysics(n_envs=1) 1개씩)
 
-    enable_visual_sync: Genesis 뷰어용 VisualJointSync 구동 여부. 서버는 외부
+    enable_visual_joint_sync: Genesis 뷰어용 VisualJointSync 구동 여부. 서버는 외부
     렌더(UE)가 그리고 wheel_visual_transforms(닫힌형)로 capture하므로 기본 False
     (VisualJointSync의 매-스텝 FK ~ms 오버헤드 제거). Genesis 뷰어를 띄울 때만 True.
     """
@@ -497,7 +497,7 @@ def build_vehicle(scene, target_entities, controllers, target_id, target_info,
 
     # 차량 설정 구성 (L3 경로와 공유되는 단일 소스)
     cfg = build_cfg(urdf_path, mapping, t_fric, target_id=target_id)
-    cfg.enable_visual_sync = enable_visual_sync   # 헤드리스/외부렌더면 False (성능)
+    cfg.enable_visual_joint_sync = enable_visual_joint_sync   # 헤드리스/외부렌더면 False (성능)
 
     # Initialize VehiclePhysics SDK
     sensor = scene.target_sensors[target_id]

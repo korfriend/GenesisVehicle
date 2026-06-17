@@ -134,7 +134,7 @@ def main():
         center_envs_at_origin=True,
     )
     # VisualJointSync is off by default; enable it only when rendering (--viewer).
-    cfg.enable_visual_sync = args.viewer
+    cfg.enable_visual_joint_sync = args.viewer
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=n_envs)
     device = car.get_pos().device
 

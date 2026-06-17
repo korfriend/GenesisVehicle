@@ -369,7 +369,7 @@ def main():
                 vis_mode=args.vis_mode,
                 # VisualJointSync only when the Genesis viewer is shown; headless
                 # uses closed-form wheel_visual_transforms (no per-step FK cost).
-                enable_visual_sync=not args.headless,
+                enable_visual_joint_sync=not args.headless,
             )
         else:
             # 일반 타겟 빌딩

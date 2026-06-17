@@ -292,7 +292,7 @@ class VehiclePhysics:
         self.last_alpha = torch.zeros(n_envs, n_wheels, device=self.dev, dtype=self.fdt)
 
         self.visual: Optional[VisualJointSync] = None
-        if self.resolved.enable_visual_sync:
+        if self.resolved.enable_visual_joint_sync:
             self.visual = VisualJointSync(
                 entity=entity, resolved=self.resolved,
                 n_envs=n_envs, device=self.dev, dtype=self.fdt,
