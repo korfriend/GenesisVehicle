@@ -47,10 +47,12 @@ def _warn_perf_once() -> None:
         return
     print(
         "[genesis_vehicle] PERF: VisualJointSync is ENABLED — it drives the URDF "
-        "wheel visual joints through the engine's articulated-body FK every step "
-        "(~ms/step overhead; the dominant SDK cost at scale). It is only needed "
-        "for the Genesis viewer. For an external renderer (UE / Unity), or any "
-        "headless run, set enable_visual_joint_sync=False and read wheel poses from "
+        "wheel visual joints through the engine's articulated-body forward "
+        "kinematics every step (one collider/constraint reset + FK pass per "
+        "entity; batched into a single set_dofs_position in v0.7.16, ~0.85 ms/step "
+        "per vehicle on CPU). It is only needed for the Genesis viewer. For an "
+        "external renderer (UE / Unity), or any headless run, set "
+        "enable_visual_joint_sync=False and read wheel poses from "
         "VehiclePhysics.visual_parts_transforms() / wheel_visual_transforms() "
         "(closed-form, ~µs). Silence with GENESIS_VEHICLE_QUIET=1.",
         file=sys.stderr, flush=True,
