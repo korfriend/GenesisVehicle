@@ -380,7 +380,7 @@ class MultiVehicleKindPhysics:
         else:
             steer_z = -p.last_steer_per_wheel                      # (NK, n)
             susp_off = _susp_visual_offset(
-                p.last_distances, p._mesh_radius, p._l_susp)        # (NK, n)
+                p.last_distances, p._mesh_radius, p._l_susp, p._susp_clamp)  # (NK, n)
             spin = (p.wheel_spin_angle if p._visual_spin_enabled
                     else torch.zeros_like(p.wheel_spin_angle))
             z_off = torch.stack(

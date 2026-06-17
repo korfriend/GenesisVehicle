@@ -145,6 +145,15 @@ class VisualJointSync:
         self._susp_set_idx = [i for (i, _, u) in susp_triples if not u]
         self._susp_ctrl_dofs = [d for (_, d, u) in susp_triples if u]
         self._susp_ctrl_idx = [i for (i, _, u) in susp_triples if u]
+        # Per-wheel suspension-offset clamp = each wheel's own stroke (was a
+        # fixed ±0.19, which muted larger-travel vehicles). Kept consistent with
+        # core._susp_visual_offset so the viewer matches wheel_visual_transforms.
+        set_strokes = [max(0.02, float(self.wheels[i].rest_stroke)
+                           if self.wheels[i].rest_stroke is not None else 0.10)
+                       for i in self._susp_set_idx]
+        self._susp_set_clamp = (
+            torch.tensor(set_strokes, device=device, dtype=dtype).unsqueeze(0)
+            if set_strokes else None)
 
         # Set high kp/kv on control-path suspension joints (KDU pattern).
         if self._susp_ctrl_dofs:
@@ -205,7 +214,11 @@ class VisualJointSync:
             air = (d <= 1e-6) | (d >= 19.9)
             joint_pos = self.wheel_mesh_radius - d
             joint_pos = torch.where(air, torch.full_like(joint_pos, -self.l_susp), joint_pos)
-            joint_pos = torch.clamp(joint_pos, -0.19, 0.19)
+            if self._susp_set_clamp is not None:
+                joint_pos = torch.maximum(
+                    -self._susp_set_clamp,
+                    torch.minimum(self._susp_set_clamp, joint_pos),
+                )
             self.entity.set_dofs_position(
                 joint_pos, self._susp_set_dofs, zero_velocity=False,
             )

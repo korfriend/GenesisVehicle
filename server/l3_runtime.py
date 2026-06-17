@@ -207,6 +207,9 @@ def run_l3(args):
     )
     sensor = make_wheel_raycaster(scene, car, urdf_path)
     cfg = vehicle_builder.build_cfg(urdf_path, mapping, t_fric, target_id="L3-shared")
+    # VisualJointSync only for the Genesis viewer; headless uses the closed-form
+    # wheel_visual_transforms capture (skip the per-step engine FK cost).
+    cfg.enable_visual_sync = not args.headless
 
     # 4. 배치 빌드 + 컨트롤러 1개 (SDK 네이티브 배치 경로 — monkey patch 불필요)
     scene.build(n_envs=n_envs)

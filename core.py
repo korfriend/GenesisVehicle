@@ -61,17 +61,24 @@ def _quat_mul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 def _susp_visual_offset(distance: torch.Tensor, mesh_radius: float,
-                        l_susp: float, clamp: float = 0.19) -> torch.Tensor:
+                        l_susp: float, clamp=0.19) -> torch.Tensor:
     """Vertical wheel-mesh offset (chassis +z) from ray hit distance.
 
     Mirror of the suspension command in ``visual.VisualJointSync.step`` (joint_pos =
     mesh_radius − distance; air → −l_susp; clamp). Kept here so the closed-form
     ``wheel_visual_transforms`` matches what VisualJointSync drives into the URDF
     joints. If you change one, change the other (the equivalence is unit-checked
-    against ``entity.get_link`` in tests/smoke)."""
+    against ``entity.get_link`` in tests/smoke).
+
+    ``clamp`` bounds the offset to ±clamp. It should be the **per-wheel
+    suspension stroke** (so a vehicle whose travel exceeds the old fixed 0.19 m
+    is not visually muted) — pass a ``(n_wheels,)`` / broadcastable tensor.
+    A scalar is also accepted (the helper's unit-test default is 0.19)."""
     air = (distance <= 1e-6) | (distance >= 19.9)
     jp = mesh_radius - distance
     jp = torch.where(air, torch.full_like(jp, -l_susp), jp)
+    if torch.is_tensor(clamp):
+        return torch.maximum(-clamp, torch.minimum(clamp, jp))
     return torch.clamp(jp, -clamp, clamp)
 
 # Process-level set of (recommended_dt, scene_dt) pairs we've already warned
@@ -315,6 +322,11 @@ class VehiclePhysics:
         strokes = [float(w.rest_stroke) for w in self.resolved.wheels
                    if getattr(w, "rest_stroke", None) is not None]
         self._l_susp = float(sum(strokes) / len(strokes)) if strokes else 0.10
+        # Per-wheel visual suspension-offset clamp = the wheel's actual stroke
+        # (rest_d − radius). Replaces a fixed ±0.19 m, which muted the visual on
+        # vehicles whose suspension travels further. (1, n_wheels) for broadcast.
+        susp_stroke = (self.wheel_meta.rest_d - self.wheel_meta.radius)
+        self._susp_clamp = torch.clamp(susp_stroke, min=0.02).unsqueeze(0)
         # Skid-steer/tank presets disable the wheel spin visual (cylindrical
         # road wheels — spin is invisible). Match VisualJointSync so the
         # closed-form pose agrees: no spin baked into the quat when disabled.
@@ -478,7 +490,8 @@ class VehiclePhysics:
         # axis sign cancels — do NOT multiply by it here.
         steer_z = -self.last_steer_per_wheel                                 # (N, n)
         susp_off = _susp_visual_offset(
-            self.last_distances, self._mesh_radius, self._l_susp)            # (N, n)
+            self.last_distances, self._mesh_radius, self._l_susp,
+            self._susp_clamp)                                               # (N, n)
         spin = (self.wheel_spin_angle if self._visual_spin_enabled
                 else torch.zeros_like(self.wheel_spin_angle))                # (N, n)
 
