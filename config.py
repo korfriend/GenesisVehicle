@@ -105,7 +105,15 @@ class VehicleConfig:
     # does not refuse — Genesis's value wins. Tanks generally need
     # >=200 Hz (recommended_dt=0.005); cars are fine at 100 Hz.
     recommended_dt: float = 1.0 / 48.0
-    enable_visual_sync: bool = True
+    # Drive the URDF wheel visual joints (spin/steer/suspension) through the
+    # engine each step so the **Genesis native viewer** shows wheels moving.
+    # Default False: the dominant path (headless / external UE·Unity renderer)
+    # does NOT need it — read poses from wheel_visual_transforms() (closed-form,
+    # ~µs) instead, which works regardless of this flag. Set True ONLY when you
+    # actually open the Genesis viewer (`gs.Scene(show_viewer=True)` or a sample
+    # `--viewer`). Leaving it on headless is a silent ~ms/step perf trap (it is
+    # the dominant SDK cost at scale). See VisualJointSync / docs/server.md.
+    enable_visual_sync: bool = False
 
     # Visual suspension joint mode:
     #   "auto"       — per-joint decision based on URDF <dynamics> presence (legacy default)
@@ -123,6 +131,15 @@ class VehicleConfig:
     # /step savings in interactive mode. Cars keep it True so mesh wheels visibly
     # roll.
     visual_spin_enabled: bool = True
+
+    # Visual suspension-offset clamp (metres). Bounds how far the wheel mesh may
+    # visually travel from rest in wheel_visual_transforms / VisualJointSync — a
+    # safety bound against raycast spikes, NOT a physics limit.
+    #   None  -> auto: per-wheel = that wheel's rest_stroke (min 0.02 m). Scales
+    #            with the vehicle, so large-travel rigs aren't muted.
+    #   float -> uniform clamp applied to every wheel (e.g. 0.30).
+    # (The old hardcoded 0.19 m is what muted trucks/tanks; None restores travel.)
+    susp_visual_clamp: Optional[float] = None
 
     # Deprecated alias kept so existing user code (cfg.dt, cfg.dt = ...)
     # keeps working through v0.5.x. Will be removed in v0.6.
@@ -223,6 +240,7 @@ class ResolvedConfig:
     urdf: Any   # URDFParsedConfig — used by visual layer for joint axis-sign lookup
     visual_susp_mode: str = "auto"
     visual_spin_enabled: bool = True
+    susp_visual_clamp: Optional[float] = None
 
 
 def _merge_wheel(base: WheelConfig, override: WheelConfig) -> WheelConfig:
@@ -308,6 +326,12 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
             f"got {config.visual_susp_mode!r}"
         )
 
+    if config.susp_visual_clamp is not None and config.susp_visual_clamp <= 0:
+        raise ConfigError(
+            f"susp_visual_clamp must be > 0 (metres) or None (auto), "
+            f"got {config.susp_visual_clamp!r}"
+        )
+
     return ResolvedConfig(
         wheels=merged,
         chassis=chassis,
@@ -321,4 +345,5 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
         urdf=parsed,
         visual_susp_mode=config.visual_susp_mode,
         visual_spin_enabled=config.visual_spin_enabled,
+        susp_visual_clamp=config.susp_visual_clamp,
     )

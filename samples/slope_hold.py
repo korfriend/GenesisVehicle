@@ -122,6 +122,8 @@ def main():
         )
 
     scene.build(n_envs=1)
+    # VisualJointSync is off by default; enable it only when rendering (--viewer).
+    cfg.enable_visual_sync = args.viewer
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
 
     DT = cfg.recommended_dt

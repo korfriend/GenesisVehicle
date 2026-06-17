@@ -100,6 +100,9 @@ def main():
         )
 
     scene.build(n_envs=1)
+    # VisualJointSync (Genesis-viewer wheel animation) is off by default; turn it
+    # on only when we actually render the cv2 HUD frames (--viewer).
+    cfg.enable_visual_sync = args.viewer
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
 
     DT = cfg.recommended_dt

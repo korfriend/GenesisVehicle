@@ -124,6 +124,8 @@ def main():
         print(f"  viewer grid: {per_row} × {n_rows} cells, spacing {args.grid_spacing} m")
     else:
         scene.build(n_envs=args.n_envs)
+    # VisualJointSync is off by default; enable it only when rendering (--viewer).
+    cfg.enable_visual_sync = args.viewer
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=args.n_envs)
     device = car.get_pos().device
 

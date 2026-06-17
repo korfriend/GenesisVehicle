@@ -322,11 +322,21 @@ class VehiclePhysics:
         strokes = [float(w.rest_stroke) for w in self.resolved.wheels
                    if getattr(w, "rest_stroke", None) is not None]
         self._l_susp = float(sum(strokes) / len(strokes)) if strokes else 0.10
-        # Per-wheel visual suspension-offset clamp = the wheel's actual stroke
-        # (rest_d − radius). Replaces a fixed ±0.19 m, which muted the visual on
-        # vehicles whose suspension travels further. (1, n_wheels) for broadcast.
-        susp_stroke = (self.wheel_meta.rest_d - self.wheel_meta.radius)
-        self._susp_clamp = torch.clamp(susp_stroke, min=0.02).unsqueeze(0)
+        # Visual suspension-offset clamp (a safety bound vs raycast spikes, not a
+        # physics limit). Override via VehicleConfig.susp_visual_clamp:
+        #   None  -> auto: per-wheel = that wheel's stroke (rest_d − radius), with
+        #            a 0.02 m floor so a ~zero-stroke wheel isn't frozen.
+        #   float -> uniform clamp on every wheel.
+        # Replaces the old fixed ±0.19 m, which muted large-travel vehicles.
+        # (1, n_wheels) for broadcast against (n_envs, n_wheels) offsets.
+        _clamp_override = getattr(self.resolved, "susp_visual_clamp", None)
+        if _clamp_override is not None:
+            susp_stroke = torch.full_like(self.wheel_meta.rest_d,
+                                          float(_clamp_override))
+        else:
+            susp_stroke = torch.clamp(
+                self.wheel_meta.rest_d - self.wheel_meta.radius, min=0.02)
+        self._susp_clamp = susp_stroke.unsqueeze(0)
         # Skid-steer/tank presets disable the wheel spin visual (cylindrical
         # road wheels — spin is invisible). Match VisualJointSync so the
         # closed-form pose agrees: no spin baked into the quat when disabled.
