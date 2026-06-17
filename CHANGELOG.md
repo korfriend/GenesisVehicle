@@ -10,6 +10,31 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.12] — 2026-06-17
+
+### Added — multi-vehicle (L2 / L2×L3) wheel visual transforms
+
+`wheel_visual_transforms` / `visual_parts_transforms` were only on the
+single-vehicle `VehiclePhysics`; the multi-vehicle path didn't expose them
+(the report: "not yet updated for multi_vehicle"). Now:
+
+- `MultiVehicleKindPhysics.step` maintains the visual-pose state on its proto
+  (`last_steer_per_wheel`, accumulated `wheel_spin_angle`, `_stepped_once`) —
+  the same bookkeeping `VehiclePhysics.step` does.
+- `MultiVehicleKindPhysics.wheel_visual_transforms(frame)` → closed-form
+  `(n_envs, K, n_wheels, 3/4)` (rest pose captured from the kind's first
+  entity — identical across the kind's same-URDF vehicles; honors
+  `visual_spin_enabled`).
+- `MultiVehiclePhysics.wheel_visual_transforms(frame)` → per-vehicle list
+  (caller order) of `(pos, quat)`; `visual_parts_transforms(frame)` → per-
+  vehicle list of `VisualPartsTransforms` (chassis + wheels).
+
+Verified: single `VehiclePhysics` vs `MultiVehiclePhysics` at K=1 produce
+**identical** wheel visual transforms (Δpos = 0, Δquat = 0); K=2 × n_envs=2
+returns correct per-vehicle shapes. No change to the single-vehicle API.
+
+---
+
 ## [0.7.11] — 2026-06-16
 
 ### Fixed — `wheel_visual_transforms` / `visual_parts_transforms` now correct for trucks & tanks

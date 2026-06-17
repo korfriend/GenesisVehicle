@@ -411,6 +411,13 @@ visual pose (`wheel_visual_transforms`). `frame` applies to the wheels:
 `"world"` absolute, `"local"` relative to the chassis. This is the recommended
 one-stop feed for a UE / Unity bridge — no `get_link`, no VisualJointSync.
 
+**Multi-vehicle (L2 / L2×L3):** `MultiVehiclePhysics` exposes the same two
+methods — `wheel_visual_transforms(frame)` returns a **list** (length
+`n_vehicles`, caller order) of `(pos, quat)` each `(n_envs, n_wheels, 3/4)`,
+and `visual_parts_transforms(frame)` a list of `VisualPartsTransforms`
+(per-vehicle, since kinds may differ in wheel count). Verified identical to a
+single `VehiclePhysics` at K=1 (Δ = 0).
+
 > **Naming:** the viewer-side wheel-joint driver class is **`VisualJointSync`**
 > (renamed from `VisualSync` in v0.7.8; the old alias was removed in v0.7.9).
 > The name is explicit on purpose — it drives the **wheel** visual joints
