@@ -241,6 +241,19 @@ def main():
     parser.add_argument("--vis_mode", type=str, default="collision", choices=["visual", "collision"], help="Visualization mode for the scene (default: collision)")
     parser.add_argument("--override_dt", type=float, default=None, help="Override simulation time step (dt) in seconds (e.g. 0.01 for 100Hz)")
     parser.add_argument("--no-target-collision", action="store_true", help="Disable collision between target entities")
+    parser.add_argument("--road-raycast-only", action="store_true",
+                        help="Load complex road/terrain meshes ([Complex]) as VISUAL raycast "
+                             "targets with no collision geometry. Skips CoACD convex "
+                             "decomposition and the chassis-vs-road narrow-phase entirely; "
+                             "the ray-cast wheels still follow the surface. Big win for large "
+                             "chassis (e.g. tanks) on complex maps.")
+    parser.add_argument("--structures-as-primitive", action="store_true",
+                        help="Replace every MESH collider (obstacles/structures) with its "
+                             "bounding BOX. Mesh colliders carry a per-geom SDF processed each "
+                             "step even with zero contact (~0.6ms/mesh on CPU → 100s of "
+                             "structures = 100s of ms). Box collision is analytic (~0 when not "
+                             "touching), so cost scales with actual contacts, not structure "
+                             "count. Use with --road-raycast-only (roads stay raycast surfaces).")
     parser.add_argument("--multi-env", action="store_true",
                         help="L3 batched mode: N identical, non-interacting vehicles as n_envs=N "
                              "(one vehicle entity, GPU-batched). Requires all targets to share one URDF.")
@@ -408,7 +421,9 @@ def main():
         ue_friction=ue_friction,
         ue_restitution=ue_restitution,
         vis_mode=args.vis_mode,
-        verbose=args.verbose
+        verbose=args.verbose,
+        road_raycast_only=args.road_raycast_only,
+        structures_as_primitive=args.structures_as_primitive,
     )
     entities_to_set_mass.extend(extra_mass_entities)
 
