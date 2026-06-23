@@ -31,14 +31,72 @@ def make_double_sided_mesh(mesh, thickness=0.02):
     new_mesh = trimesh.Trimesh(vertices=new_vertices, faces=all_faces)
     new_mesh.remove_degenerate_faces()
     new_mesh.remove_duplicate_faces()
-    
+
     return new_mesh
 
-def build_obstacles(scene, init_data, ue_friction, ue_restitution, vis_mode, verbose=False):
+
+def _rotate_vec_by_quat(v, q):
+    """Rotate vector ``v`` (3,) by quaternion ``q`` = (w, x, y, z) — Genesis
+    convention. Uses the standard t = 2·(q_xyz × v); v' = v + w·t + q_xyz × t."""
+    w, x, y, z = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+    qv = np.array([x, y, z], dtype=np.float64)
+    t = 2.0 * np.cross(qv, v)
+    return v + w * t + np.cross(qv, t)
+
+
+def mesh_to_primitive_box(mesh_path, pos, quat, scale, fixed):
+    """Replace a mesh collider with its **local axis-aligned bounding box**,
+    emitted as a ``gs.morphs.Box`` primitive.
+
+    Why: Genesis collides meshes via a per-geom SDF that is processed EVERY step
+    regardless of contact (measured ~0.6 ms/mesh on CPU, even with zero contact).
+    A Box is collided analytically (``box_box_detection``) and costs ~0 when not
+    touching — so hundreds/thousands of structures scale with *actual contacts*,
+    not total count. The box rides the entity's ``quat``, so a building that is
+    axis-aligned in its own local frame still gets a correctly oriented box
+    (effectively an OBB) once the entity rotation is applied.
+
+    Returns a ``gs.morphs.Box``. Raises on mesh-load failure (caller falls back).
+    """
+    mesh = trimesh.load(mesh_path)
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.dump(concatenate=True)
+    lo, hi = mesh.bounds                       # local AABB (3,), (3,)
+    extents = np.asarray(hi, float) - np.asarray(lo, float)
+    center = (np.asarray(hi, float) + np.asarray(lo, float)) * 0.5
+    sx, sy, sz = float(scale[0]), float(scale[1]), float(scale[2])
+    box_size = (max(extents[0] * sx, 0.01),
+                max(extents[1] * sy, 0.01),
+                max(extents[2] * sz, 0.01))
+    # Local (scaled) center offset, rotated into world by the entity quat.
+    off_local = np.array([center[0] * sx, center[1] * sy, center[2] * sz], float)
+    off_world = _rotate_vec_by_quat(off_local, quat)
+    box_pos = [pos[0] + off_world[0], pos[1] + off_world[1], pos[2] + off_world[2]]
+    return gs.morphs.Box(size=box_size, pos=box_pos, quat=quat, fixed=fixed)
+
+def build_obstacles(scene, init_data, ue_friction, ue_restitution, vis_mode,
+                    verbose=False, road_raycast_only=False,
+                    structures_as_primitive=False):
     """
     언리얼 엔진으로부터 수신한 초기 장애물 리스트를 파싱하여
     물질 특성(마찰력, 반발력 등)과 충돌 기하(SDF/Box/Convex 등)를 자동 튜닝하여
     Genesis 물리 씬에 배치합니다.
+
+    road_raycast_only=True 이면 복합 도로/지형 메쉬(obs_type==5 + [Complex])를
+    **KINEMATIC 비주얼 메쉬**(material.Kinematic(use_visual_raycasting=True))로
+    로드합니다. 레이캐스트-휠 모델에서는 차체가 서스펜션 힘으로 떠 있고 휠은
+    레이캐스트로 지면을 따라가므로, 도로는 "광선에 맞기만" 하면 되고 강체 충돌
+    바디일 필요가 없습니다. Kinematic solver에 두면 그 레이캐스트 BVH가
+    maybe_static=True 가 되어 **매 스텝 rebuild가 스킵**됩니다(차량이 rigid solver
+    에서 움직여도). 이 경로는 CoACD·narrow-phase뿐 아니라 **레이캐스터의 per-frame
+    BVH 재빌드**까지 제거해, 큰 맵에서 step당 수십~수백 ms를 없앱니다.
+
+    structures_as_primitive=True 이면 **모든 메쉬 콜라이더**(obs_type==5 / convex /
+    complex)를 그 bounding box(``gs.morphs.Box`` primitive)로 대체합니다. 메쉬는
+    geom당 SDF를 매 스텝 처리해(접촉 0이어도 ~0.6 ms/mesh) 구조물 수에 비례해
+    느려지지만, Box는 해석적 충돌이라 안 닿으면 ~0 입니다. 즉 구조물이 수백~수천
+    개여도 "실제 닿는 몇 개"의 비용만 들게 됩니다. (도로는 box가 부적합하니
+    road_raycast_only 가 우선 처리하고, 그 외 메쉬 구조물만 box로 바뀝니다.)
     """
     global created_temp_files
     obstacles = []
@@ -142,50 +200,88 @@ def build_obstacles(scene, init_data, ue_friction, ue_restitution, vis_mode, ver
                 do_decimate = False
                 mesh_to_load = mesh_path
                 is_road = "[Complex" in col_src or is_user_complex
-                
-                if is_road:
+                rc_only = road_raycast_only and is_road
+
+                if rc_only:
+                    # [Raycast-Only Road] No collision geometry → no CoACD, no
+                    # chassis-vs-road narrow-phase. The mesh is added with a
+                    # Kinematic + use_visual_raycasting material (set below) so the
+                    # wheel raycaster hits it AND its BVH is static-skipped each
+                    # step. Downward wheel rays hit the up-facing road surface;
+                    # Surface(double_sided=...) handles rendering, so we skip the
+                    # geometry-doubling preprocessing too (keeps the visual BVH small).
+                    print(f"    -> [Raycast-Only] Road loaded as KINEMATIC visual mesh "
+                          f"(no collision/CoACD, static-skipped BVH): {os.path.basename(mesh_path)}")
+                    morph = gs.morphs.Mesh(
+                        file=mesh_path,
+                        scale=size,
+                        pos=pos,
+                        quat=quat,
+                        fixed=is_fixed,
+                        align=False,
+                        collision=False,
+                        visualization=True,
+                        convexify=False,
+                        decimate=False,
+                    )
+                elif structures_as_primitive:
+                    # [Primitive Override] Replace the mesh collider with its
+                    # bounding box → analytic collision, no per-geom SDF cost.
                     try:
-                        import tempfile
-                        print(f"    -> [Trimesh] Pre-processing complex road (Double-sided): {os.path.basename(mesh_path)}")
-                        mesh = trimesh.load(mesh_path)
-                        if isinstance(mesh, trimesh.Scene):
-                            mesh = mesh.dump(concatenate=True)
-                            
-                        mesh = make_double_sided_mesh(mesh, thickness=0.001)
-                        
-                        temp_fd, temp_mesh_path = tempfile.mkstemp(suffix='.obj')
-                        os.close(temp_fd)
-                        mesh.export(temp_mesh_path)
-                        created_temp_files.append(temp_mesh_path)
-                        
-                        mesh_to_load = temp_mesh_path
+                        morph = mesh_to_primitive_box(
+                            mesh_path, pos, quat, size, is_fixed)
+                        bs = morph.size
+                        print(f"    -> [Primitive] Mesh collider replaced by BOX "
+                              f"(size={bs[0]:.2f}x{bs[1]:.2f}x{bs[2]:.2f}, no SDF): "
+                              f"{os.path.basename(mesh_path)}")
                     except Exception as e:
-                        print(f" [Genesis] [Warning] Failed to preprocess road mesh with trimesh ({e}). Fallback to original mesh.")
-                        mesh_to_load = mesh_path
-
-                if "[Complex" in col_src or is_user_complex:
-                    should_convexify = True
-                    error_threshold = 0.01
-                    coacd_opt = gs.options.CoacdOptions(threshold=0.03, extrude_margin=0.0, preprocess_mode="off", merge=False)
-                    print(f"    -> [Optimize] Applying Fast & Zero-Margin CoACD for road (Threshold=0.03, Res=1000, ExtrudeMrg=0.0, Preprocess=off, Merge=off)...")
+                        print(f" [Genesis] [Warning] mesh→box failed ({e}); "
+                              f"fallback to Box(scale).")
+                        morph = gs.morphs.Box(size=size, pos=pos, quat=quat, fixed=is_fixed)
                 else:
-                    should_convexify = True
-                    error_threshold = float('inf')
-                    coacd_opt = None
-                    print(f"    -> [Optimize] Loading exact Unreal Convex Hulls without CoACD merging.")
+                    if is_road:
+                        try:
+                            import tempfile
+                            print(f"    -> [Trimesh] Pre-processing complex road (Double-sided): {os.path.basename(mesh_path)}")
+                            mesh = trimesh.load(mesh_path)
+                            if isinstance(mesh, trimesh.Scene):
+                                mesh = mesh.dump(concatenate=True)
 
-                morph = gs.morphs.Mesh(
-                    file=mesh_to_load,
-                    scale=size,
-                    pos=pos,
-                    quat=quat,
-                    fixed=is_fixed,
-                    align=False,
-                    convexify=should_convexify,
-                    decompose_object_error_threshold=error_threshold,
-                    coacd_options=coacd_opt,
-                    decimate=do_decimate
-                )
+                            mesh = make_double_sided_mesh(mesh, thickness=0.001)
+
+                            temp_fd, temp_mesh_path = tempfile.mkstemp(suffix='.obj')
+                            os.close(temp_fd)
+                            mesh.export(temp_mesh_path)
+                            created_temp_files.append(temp_mesh_path)
+
+                            mesh_to_load = temp_mesh_path
+                        except Exception as e:
+                            print(f" [Genesis] [Warning] Failed to preprocess road mesh with trimesh ({e}). Fallback to original mesh.")
+                            mesh_to_load = mesh_path
+
+                    if "[Complex" in col_src or is_user_complex:
+                        should_convexify = True
+                        error_threshold = 0.01
+                        coacd_opt = gs.options.CoacdOptions(threshold=0.03, extrude_margin=0.0, preprocess_mode="off", merge=False)
+                        print(f"    -> [Optimize] Applying Fast & Zero-Margin CoACD for road (Threshold=0.03, Res=1000, ExtrudeMrg=0.0, Preprocess=off, Merge=off)...")
+                    else:
+                        should_convexify = True
+                        error_threshold = float('inf')
+                        coacd_opt = None
+                        print(f"    -> [Optimize] Loading exact Unreal Convex Hulls without CoACD merging.")
+
+                    morph = gs.morphs.Mesh(
+                        file=mesh_to_load,
+                        scale=size,
+                        pos=pos,
+                        quat=quat,
+                        fixed=is_fixed,
+                        align=False,
+                        convexify=should_convexify,
+                        decompose_object_error_threshold=error_threshold,
+                        coacd_options=coacd_opt,
+                        decimate=do_decimate
+                    )
             else:
                 print(f" [Genesis] [WARNING] Mesh file not found: {mesh_path}. Fallback to Box.")
                 morph = gs.morphs.Box(size=size, pos=pos, quat=quat, fixed=is_fixed)
@@ -198,13 +294,27 @@ def build_obstacles(scene, init_data, ue_friction, ue_restitution, vis_mode, ver
         }
         current_color = obs_colors.get(obs_type, (0.7, 0.7, 0.7, 0.5))
         
-        mat = gs.materials.Rigid(
-            friction=obs_friction,
-            coup_restitution=obs_restitution,
-            sdf_cell_size=10000.0
-        )
-        
         is_road_mesh = (obs_type == 5 and ("[Complex" in col_src or is_user_complex))
+        rc_only_mesh = road_raycast_only and is_road_mesh
+
+        if rc_only_mesh:
+            # [Raycast-Only Road] Route the road to the KINEMATIC solver with
+            # use_visual_raycasting=True. The wheel raycaster casts against both
+            # the rigid and kinematic solvers, but the kinematic solver's BVH is
+            # `maybe_static` (no physics-movable link) → its rebuild is SKIPPED
+            # every step, even while the vehicle moves in the rigid solver. A
+            # Rigid material here would land in the rigid solver's BVH, which is
+            # rebuilt every step (a moving vehicle makes it non-static), so the
+            # road's triangles would be re-fitted each frame for nothing. Kinematic
+            # gives no rigid contact (fine: ray-cast wheels + suspension hold the
+            # chassis, the road need not be a contact body).
+            mat = gs.materials.Kinematic(use_visual_raycasting=True)
+        else:
+            mat = gs.materials.Rigid(
+                friction=obs_friction,
+                coup_restitution=obs_restitution,
+                sdf_cell_size=10000.0,
+            )
         
         obs_entity = scene.add_entity(
             morph,

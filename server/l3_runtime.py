@@ -192,6 +192,8 @@ def run_l3(args):
             scene=scene, init_data=init_data,
             ue_friction=ue_friction, ue_restitution=ue_restitution,
             vis_mode=args.vis_mode, verbose=args.verbose,
+            road_raycast_only=getattr(args, "road_raycast_only", False),
+            structures_as_primitive=getattr(args, "structures_as_primitive", False),
         )
 
     # 차량: 엔티티 1개 + Raycaster 1개 + 공유 cfg

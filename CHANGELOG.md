@@ -10,6 +10,53 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.7.17] — 2026-06-24
+
+### Performance — server collider options for large maps (`--road-raycast-only`, `--structures-as-primitive`)
+
+| abbr | meaning |
+|---|---|
+| BVH | Bounding Volume Hierarchy (ray/collision acceleration tree) |
+| SDF | Signed Distance Field (mesh-collider contact representation) |
+| CoACD | Convex Approximate Convex Decomposition (concave mesh → many convex hulls) |
+
+Diagnosing a report of ~150 ms/step with a vehicle on a map carrying a few
+hundred imported structure meshes. The rigid contact solver was **not** the
+cost (it handles fixed, non-contacting mesh geoms for ~free). The cost is the
+**wheel `Raycaster`**: upstream Genesis rebuilds **one flat collision BVH over
+every collision face in the rigid solver — including all fixed/static geometry
+— on every `scene.step`** (the static-rebuild skip added upstream only engages
+when *all* solver links are fixed, which a moving vehicle defeats; the proper
+fix is upstream PR #2878, static/dynamic BVH split, still in review). So per-step
+cost scaled with the *total triangle count of all mesh colliders*, contact or
+not. Reproduced standalone (genesis + trimesh): 300 torus structures, nothing
+hit, add a raycaster → **+135 ms/step on CPU**; the same as `Box` primitives →
+flat.
+
+Two opt-in server flags (both default off; no behavior change unless passed):
+
+- **`--road-raycast-only`** — load complex road/terrain meshes (`[Complex]`) as
+  a **`Kinematic`** entity with **`use_visual_raycasting=True`** instead of a
+  rigid collision mesh. The wheel raycaster casts against both the rigid and
+  kinematic solvers, but the kinematic solver's BVH is `maybe_static` (no
+  physics-movable link) → its rebuild is **skipped every step** even while the
+  vehicle moves. The ray-cast wheels still follow the surface (the chassis is
+  held by suspension forces, so the road need not be a contact body). This also
+  skips CoACD and the chassis-vs-road narrow-phase. Verified end-to-end (SDK car
+  on a 28k-face road, genesis 1.2.0): car drives + stays up; **scene.step 6.3 ms
+  vs 19.6 ms** for the earlier rigid+visual-raycast path (which still rebuilt in
+  the rigid BVH).
+
+- **`--structures-as-primitive`** — replace every mesh collider with its
+  bounding `Box` (`mesh_to_primitive_box`: local AABB, scaled, with the entity
+  quat applied → effectively an OBB). Box collision is analytic (no per-geom
+  SDF), and a box contributes few faces to the rebuilt BVH. For structures that
+  must physically block the vehicle (rigid contact still needed), this keeps
+  them cheap; cost then scales with *actual contacts*, not structure count.
+
+A standalone reproduction + an upstream issue write-up are kept outside the SDK
+repo (`genesis_raycaster_bvh_repro.py`, `genesis_raycaster_bvh_issue.md`).
+
 ## [0.7.16] — 2026-06-18
 
 ### Performance — `VisualJointSync` batches its per-step joint writes (≈5× less overhead)
