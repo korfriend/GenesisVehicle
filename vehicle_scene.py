@@ -6,7 +6,7 @@ touches ``gs.init`` / ``scene.build`` / ``scene.step`` / sensor reads directly.
 
 Two raycast modes (``raycast_mode=``):
 
-- ``"raywheel"`` (default) — the ray-wheel-dedicated raycast optimization. The
+- ``"dual_scene"`` (default) — the ray-wheel-dedicated raycast optimization. The
   terrain is raycast in a SEPARATE scene where it lives as a *kinematic* body,
   so its BVH is built **once** and never re-fit (``maybe_static``), and the cast
   is shared across batch envs. Physics/collision (incl. rollover) run in the
@@ -16,31 +16,31 @@ Two raycast modes (``raycast_mode=``):
   against the static BVH; the distances are fed into the main-scene physics via
   :meth:`VehiclePhysics.step(distances=...) <genesis_vehicle.core.VehiclePhysics.step>`.
 
-- ``"inline"`` — classic: one scene, each vehicle owns a wheel raycaster that
+- ``"single_scene"`` — classic: one scene, each vehicle owns a wheel raycaster that
   casts against everything (terrain + vehicle). The raycast BVH is **re-fit
   every step** because the vehicle moves, so the per-step cost scales with
   terrain face count.
 
-Why ``"raywheel"`` is the default (see ``docs/two-scene-raycast.md``): complex
+Why ``"dual_scene"`` is the default (see ``docs/two-scene-raycast.md``): complex
 terrain is the common case, and keeping the terrain BVH static stops the wheel
 raycast from re-fitting it each step. The win is small at ``n_envs=1`` on GPU
 (~1–1.3x; ~1.5–5.5x on CPU) but **grows strongly with L3 batch size** because the
-static BVH is shared across envs (split is ~flat in ``n_envs``, inline re-fits
-per env): GPU full-step **1.03x @1, 1.57x @64, 3.40x @256 envs** on a 51k-face
-terrain. ``"raywheel"`` is also more *accurate* on non-convex mesh terrain (a
-rigid mesh is convexified for collision, so an inline rigid-mesh raycast hits the
+static BVH is shared across envs (dual_scene is ~flat in ``n_envs``, single_scene
+re-fits per env): GPU full-step **1.03x @1, 1.57x @64, 3.40x @256 envs** on a 51k-face
+terrain. ``"dual_scene"`` is also more *accurate* on non-convex mesh terrain (a
+rigid mesh is convexified for collision, so a single_scene rigid-mesh raycast hits the
 convex bulge while the kinematic raycast hits the true surface). It costs ~2x
-terrain memory and is marginally slower than ``"inline"`` only on small/flat
-terrain at ``n_envs=1`` — use ``raycast_mode="inline"`` there.
+terrain memory and is marginally slower than ``"single_scene"`` only on small/flat
+terrain at ``n_envs=1`` — use ``raycast_mode="single_scene"`` there.
 
-The legacy names ``"split"`` / ``"single"`` are accepted as aliases for
-``"raywheel"`` / ``"inline"``.
+The legacy names ``"raywheel"`` / ``"inline"`` and ``"split"`` / ``"single"`` are
+accepted as aliases for ``"dual_scene"`` / ``"single_scene"``.
 
 Scope: one or more vehicles (L2 — each gets its own proxy + sensor in the
 raycast scene; they still collide in the main scene), L3 (``n_envs >= 1``)
 batching, static *terrain/mesh* raycast targets (``add_static`` /
 ``add_static_terrain``), and dynamic raycast obstacles the wheels must sense
-(``add_obstacle`` — a synced rigid mirror in the raycast scene's rigid solver,
+(``add_dynamic`` — a synced rigid mirror in the raycast scene's rigid solver,
 so only its small BVH re-fits while the terrain stays static).
 """
 
@@ -292,7 +292,7 @@ class VehicleScene:
         surface), whereas the kinematic raycast surface stays exact.
 
         VehicleScene owns the scene routing: the collision body lands in the main
-        scene (rigid) and, in raywheel mode, a kinematic raycast mirror lands in
+        scene (rigid) and, in dual_scene mode, a kinematic raycast mirror lands in
         the raycast scene. Callers never touch the underlying scenes.
         """
         self._require_not_built()
