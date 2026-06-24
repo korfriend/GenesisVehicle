@@ -477,27 +477,19 @@ def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
 
     temp_path = strip_wheel_collisions(urdf_path)
     target_morph = gs.morphs.URDF(file=temp_path, pos=t_pos, quat=t_quat, fixed=False, align=False)
-
-    # 디버그 색상 (Semi-transparent red for Mesh)
-    t_color = (1.0, 0.3, 0.3, 0.5)
-
-    t_entity = vs.main_scene.add_entity(
-        target_morph,
-        material=gs.materials.Rigid(friction=t_fric, coup_restitution=t_rest, sdf_cell_size=10000.0),
-        surface=gs.surfaces.Rough(color=t_color),
-        vis_mode=vis_mode
-    )
-
-    target_entities[target_id] = t_entity
-    print(f" [Genesis] Created Vehicle Target {target_id} at {t_pos}")
+    t_color = (1.0, 0.3, 0.3, 0.5)   # 디버그 색상 (semi-transparent red)
 
     # 차량 설정 구성 (L3 경로와 공유되는 단일 소스)
     cfg = build_cfg(urdf_path, mapping, t_fric, target_id=target_id)
     cfg.enable_visual_joint_sync = enable_visual_joint_sync   # 헤드리스/외부렌더면 False (성능)
 
-    # VehicleScene 에 등록 — wheel raycaster + VehiclePhysics(n_envs=1) 는 vs.build() 에서.
-    veh = vs.add_vehicle(urdf_path, cfg=cfg, entity=t_entity,
-                         name=f"target_{target_id}")
+    # VehicleScene 이 엔티티를 main 씬에 빌드 + raycaster/proxy/VehiclePhysics 를
+    # vs.build() 에서 생성. 호출측은 씬을 직접 만지지 않는다.
+    veh = vs.add_vehicle(
+        urdf_path, cfg=cfg, morph=target_morph,
+        material=gs.materials.Rigid(friction=t_fric, coup_restitution=t_rest, sdf_cell_size=10000.0),
+        surface=gs.surfaces.Rough(color=t_color), vis_mode=vis_mode,
+        name=f"target_{target_id}")
     vehicles[target_id] = veh
-
-    return t_entity
+    target_entities[target_id] = veh.entity
+    print(f" [Genesis] Created Vehicle Target {target_id} at {t_pos}")

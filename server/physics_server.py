@@ -357,7 +357,9 @@ def main():
     # 바닥면(Plane) 생성
     plane = None
     if not args.no_floor:
-        plane = scene.add_entity(gs.morphs.Plane(), material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution))
+        plane = vs.add_static(morph=gs.morphs.Plane(),
+                              material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution),
+                              name="ground")
     
     # [MULTI-TARGET INITIALIZATION]
     if osc.urdf_init_request and osc.urdf_init_request.get('path'):
