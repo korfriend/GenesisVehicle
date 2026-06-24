@@ -10,6 +10,76 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.0] — 2026-06-25
+
+### Changed — full server encapsulation behind `VehicleScene`
+
+The OSC physics server no longer touches a Genesis scene directly — **all**
+geometry (floor, vehicles, obstacles, generic targets) is registered through
+`VehicleScene.add_*`, and VehicleScene owns the inline-vs-two-scene routing.
+
+- **Per-entity path ported** (`server/physics_server.py`): builds via
+  `VehicleScene(raycast_mode="single_scene")` (interacting vehicles, n_envs=1, CPU,
+  where the two-scene raycast has no benefit). With the earlier L3 port, **both**
+  server paths now run on `VehicleScene`. The server no longer constructs
+  `VehiclePhysics` / `VehicleInputs` directly.
+- **`env_builder.build_obstacles(vs, …)`** registers every obstacle through
+  `add_static` (b_dynamic 0) / `add_dynamic` (1 = physics, 2 = UE-driven). The
+  obstacle-mirror gap is closed: all obstacles — not just roads — become
+  wheel-raycast targets in two-scene mode. Roads use `collision_morph` (convex)
+  + `wheel_raycast_morph` (detailed). Supersedes single-scene `--road-raycast-only`.
+- `add_vehicle` / `add_static` / `add_dynamic` gained `morph=` / `surface=` /
+  `vis_mode=` (and `add_dynamic` `mass=`) so callers build entities through
+  VehicleScene rather than poking `main_scene` and passing a pre-built entity.
+
+### Changed — `VehicleScene` naming pass (BREAKING, pre-1.0)
+
+Old names accepted only where noted; otherwise these are hard renames.
+
+- `raycast_mode` values `"raywheel"` / `"inline"` → **`"dual_scene"` /
+  `"single_scene"`** (legacy `raywheel`/`inline`/`split`/`single` still accepted
+  as aliases).
+- `add_obstacle` → **`add_dynamic`**; the `Obstacle` handle → **`DynamicBody`**;
+  the `vs.obstacles` property → **`vs.dynamics`**.
+- `add_dynamic`: the `dynamic` param → **`physics`** (`True` = moves under
+  physics; `False` = you teleport via `set_pose`); the `raycast` param →
+  **`wheel_raycast`** and now **defaults to `False`** (a moving body is
+  collide-only unless you opt the wheels into sensing it).
+- `add_static`: the `raycast` toggle is **removed** (a static body is always a
+  wheel-raycast target); `raycast_morph` → **`wheel_raycast_morph`**.
+- `add_static_terrain` **removed** (it was a pure alias of `add_static(morph=)`;
+  no heightfield-specific behavior).
+- Handle fields unified: `Vehicle.entity` → **`entity_main`**;
+  `Obstacle.entity` / `.mirror` → `DynamicBody.entity_main` / `.entity_raycast`
+  (StaticBody already used these).
+- `is_two_scene` property removed — use the `raycast_mode` string.
+
+### Added — parameter guards (logged warnings)
+
+- `add_dynamic(wheel_raycast=True)` on a non-primitive (mesh) morph in two-scene
+  mode: its synced mirror BVH re-fits every step (cost ∝ face count); prefer a
+  primitive collider.
+- Two-scene-only options used in single_scene (no raycast scene): a warning fires
+  for `add_dynamic(wheel_raycast=True)` (no effect — a rigid body is already a
+  raycast target via the main scene) and `add_static(wheel_raycast_morph=…)` (the
+  detailed-raycast/coarse-collider split needs two bodies, so it is ignored).
+
+### Docs
+
+- `docs/api-reference.md` §0.1 (per-method parameter tables) and §0.2
+  (parameter → behavior matrix for `add_static` and `add_dynamic`, each with the
+  single_scene caveat that one scene makes every rigid body a raycast target and
+  `collision=False` cannot be honored).
+- `two-scene-raycast.md`, the `VehicleScene` docstrings, and the
+  `two_scene_terrain` sample updated to the new names.
+
+### Notes
+
+OSC round-trip behavior (UE / Unity client) is unchanged at the wire level but
+remains untested headless — needs UE integration testing. 78 pytest pass.
+
+---
+
 ## [0.8.0] — 2026-06-24
 
 ### Added — `VehicleScene` unified API + ray-wheel two-scene raycast (default)
