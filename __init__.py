@@ -122,7 +122,7 @@ _GENESIS_LAZY = {
     "VehicleScene": ("genesis_vehicle.vehicle_scene", "VehicleScene"),
     "Vehicle": ("genesis_vehicle.vehicle_scene", "Vehicle"),
     "StaticBody": ("genesis_vehicle.vehicle_scene", "StaticBody"),
-    "Obstacle": ("genesis_vehicle.vehicle_scene", "Obstacle"),
+    "DynamicBody": ("genesis_vehicle.vehicle_scene", "DynamicBody"),
 }
 
 
@@ -152,7 +152,7 @@ __all__ = [
     # Scene helpers (lazy — thin wrappers around Genesis boilerplate)
     "add_vehicle", "make_wheel_raycaster",
     # Unified high-level API (lazy) — VehicleScene is the center of the SDK
-    "VehicleScene", "Vehicle", "StaticBody", "Obstacle",
+    "VehicleScene", "Vehicle", "StaticBody", "DynamicBody",
     # Visual joint sync for the Genesis viewer (lazy)
     "VisualJointSync",
     # Config

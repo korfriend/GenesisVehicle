@@ -491,5 +491,5 @@ def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
         surface=gs.surfaces.Rough(color=t_color), vis_mode=vis_mode,
         name=f"target_{target_id}")
     vehicles[target_id] = veh
-    target_entities[target_id] = veh.entity
+    target_entities[target_id] = veh.entity_main
     print(f" [Genesis] Created Vehicle Target {target_id} at {t_pos}")
