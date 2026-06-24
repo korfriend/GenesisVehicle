@@ -10,6 +10,97 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.8.0] — 2026-06-24
+
+### Added — `VehicleScene` unified API + ray-wheel two-scene raycast (default)
+
+| abbr | meaning |
+|---|---|
+| BVH | Bounding Volume Hierarchy (ray/collision acceleration tree) |
+| FK | Forward Kinematics (link world transforms from base/joint state) |
+| re-cast | shooting rays through an existing BVH (cheap, ~flat in face count) |
+| rebuild | re-fitting the BVH from all faces (scales with face count) |
+
+New high-level entry point `VehicleScene` (plus `Vehicle` / `StaticBody` /
+`Obstacle` handles) that owns the Genesis scene(s), registered vehicles / static
+bodies / obstacles, and the per-step loop — no manual `gs.init` / `scene.build` /
+`scene.step` / `sensor.read`. The existing `VehiclePhysics` / `add_vehicle` / presets are
+unchanged and used internally.
+
+`raycast_mode="raywheel"` (**default**) raycasts the terrain in a **separate
+scene** as a *kinematic* body, so its BVH is built once and never re-fit (and is
+shared across batch envs), while collision/rollover keep the terrain as a *rigid*
+body in the main scene. Each step the chassis pose is mirrored onto a rigid,
+fixed, collision-free proxy in the raycast scene; `raycast_scene.step()` re-casts
+against the static BVH; the distances are fed to the main-scene physics.
+`raycast_mode="inline"` reproduces the classic one-scene behavior. The legacy
+names `"split"` / `"single"` are accepted as aliases. See
+`docs/two-scene-raycast.md`.
+
+- **`VehiclePhysics.step(inputs, distances=None)`** — new optional `distances`
+  arg injects externally-measured wheel-ground distances (the hook the split
+  mode uses). `distances=None` reads `self.sensor` exactly as before — fully
+  backward compatible. `sensor=None` is now allowed when distances are injected.
+
+### Performance (CPU)
+
+`raycast_mode` changes only the *raycast* cost; vehicle physics is shared.
+Measured single vs split (tank/car, flat terrain, CPU):
+
+| terrain faces | raycast single (rebuild) | raycast split (re-cast) | full-step ratio |
+|---|---|---|---|
+| 3 k   | ~4 ms  | ~2.5 ms | 0.94x (split slightly slower) |
+| 51 k  | ~17 ms | ~2.5 ms | 2.79x |
+| 205 k | ~44 ms | ~2.5 ms | 5.49x |
+
+The *raycast* cost stops scaling with face count (rebuild → flat re-cast, up to
+~18x cheaper at 205 k); the *full-step* speedup is smaller because the shared
+vehicle physics (~6 ms) dominates once the rebuild is gone. `raywheel` is
+slightly slower than `inline` on small/flat terrain and costs ~2x terrain memory.
+
+On **GPU at `n_envs=1`** the gap is much smaller — the rebuild parallelizes, so
+single barely grows with face count and split's two-scene/launch overhead
+dominates: full-step **0.98x @13 k, 1.10x @51 k, 1.31x @205 k**.
+
+**But split's GPU win grows strongly with L3 batch size** because the static
+terrain BVH is built once and shared across envs (split is ~flat in `n_envs`,
+single re-fits per env): full-step **1.03x @1, 1.13x @16, 1.57x @64, 3.40x @256
+envs** (51 k-face terrain; split 42 → 8576 env-steps/s ≈ near-linear vs single
+41 → 2521). So **`raywheel` is the default** (complex terrain is the common case
+and the win grows with `n_envs`); switch to `inline` only for a flat ground at
+`n_envs=1`. `VehicleScene` supports `n_envs > 1` (L3). The cast is already shared
+across envs (so split is ~flat in `n_envs`), but the BVH *allocation* still
+replicates per env, hitting a memory ceiling at very high `n_envs`
+(Genesis #2914 lifts it).
+
+Split also helps independent of speed via the accuracy benefit on non-convex
+mesh (a rigid mesh is convexified for collision, so a single-scene rigid-mesh
+raycast hits the convex bulge while the split kinematic raycast hits the true
+surface). Pose/distance output is identical to `inline` mode (verified:
+|Δx| < 1e-3 m on a 2 s drive, CPU and GPU, n_envs=1).
+
+### Notes
+
+- An earlier exploratory "no-step" two-scene benchmark reported ~30–47x; that was
+  an artifact of a *stationary* proxy (whose stale sensor cache happened to be
+  correct) and a physics-free scene. `sensor.read()` returns a cache filled by
+  `scene.step()`, so a moving proxy needs a `scene.step()` to re-cast. The
+  corrected mechanism and honest numbers are above.
+- Scope: one or more vehicles (L2 — each gets its own proxy + sensor, still
+  colliding in the main scene), L3 (`n_envs >= 1`), static terrain/mesh targets
+  (`add_static` / `add_static_terrain`), and **dynamic raycast obstacles** the
+  wheels must sense (`add_obstacle` — ramp / curb / moving platform). In raywheel
+  mode the obstacle gets a rigid mirror in the raycast scene's *rigid* solver (a
+  separate BVH context from the kinematic terrain), re-synced each step via
+  `obstacle.set_pose(...)`, so only its small BVH re-fits while the terrain stays
+  static. Verified: the wheel distance tracks the obstacle and matches `inline`
+  as it moves. Server unification (`--road-raycast-only` → `VehicleScene`) is the
+  remaining follow-up.
+- Upstream-correct fix (no second scene): Genesis splitting the rigid BVH into
+  static + dynamic subsets — Genesis issue #2878 (open).
+
+---
+
 ## [0.7.17] — 2026-06-24
 
 ### Performance — server collider options for large maps (`--road-raycast-only`, `--structures-as-primitive`)

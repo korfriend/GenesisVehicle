@@ -5,10 +5,11 @@ Landing page. Pick the document that matches what you're doing.
 | If you want to... | Start here |
 |---|---|
 | Run something in 1 minute | [`quickstart.md`](quickstart.md) |
-| See all 10 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
+| See all 11 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
 | Build a mental model before reading code | [`concepts.md`](concepts.md) |
 | Pick the right batching axis (L1 / L2 / L3) for your workflow | [`batching.md`](batching.md) |
 | Choose a tire model (Pacejka vs Coulomb) and understand the ground-contact mechanism | [`tire-and-contact.md`](tire-and-contact.md) |
+| Drive from one unified `VehicleScene` object, and cut the wheel-raycast cost on heavy static terrain | [`two-scene-raycast.md`](two-scene-raycast.md) |
 | Run the OSC physics server for an external client (Unreal / Unity), or look up the wire schema | [`server.md`](server.md) |
 | Look up a specific class / function / default | [`api-reference.md`](api-reference.md) |
 | Understand WHERE in the simulation step your hook runs | [`pipeline-and-hooks.md`](pipeline-and-hooks.md) |

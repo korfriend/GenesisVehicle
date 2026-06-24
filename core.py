@@ -561,9 +561,25 @@ class VehiclePhysics:
             wheel_pos=wp, wheel_quat=wq,
         )
 
-    def step(self, inputs: VehicleStepInputs) -> None:
+    def step(self, inputs: VehicleStepInputs,
+             distances: Optional[torch.Tensor] = None) -> None:
         """Vectorized 5-step pipeline. Per-wheel work is a SINGLE batched
-        tensor op set (no Python wheel loop)."""
+        tensor op set (no Python wheel loop).
+
+        Parameters
+        ----------
+        inputs : VehicleStepInputs | VehicleInputs
+            Throttle/brake/steer for this step.
+        distances : torch.Tensor, optional
+            Externally-supplied wheel-ground ray distances, shape
+            ``(n_envs, n_wheels)`` (``(n_wheels,)`` accepted for a single env).
+            When given, the pipeline uses these instead of reading
+            ``self.sensor`` — this is the hook :class:`VehicleScene` "split"
+            mode uses to feed distances measured in a SEPARATE static-terrain
+            raycast scene (whose BVH is built once, never re-fit per step; see
+            ``docs/two-scene-raycast.md``). When ``None`` (default) the sensor
+            is read exactly as before — fully backward compatible.
+        """
         steering = self.resolved.steering
         if not isinstance(inputs, steering.InputType):
             if isinstance(inputs, VehicleInputs):
@@ -595,8 +611,20 @@ class VehiclePhysics:
 
         ctx = PipelineContext(throttle=throttle, brake=brake, wheel_meta=wm)
 
-        # [RAYCAST]
-        distances = read_distances(self.sensor, n_envs)
+        # [RAYCAST] — distances may be injected by an external raycast source
+        # (VehicleScene "split" mode reads them from a separate kinematic-terrain
+        # scene whose BVH is static). When omitted, read this vehicle's own
+        # sensor exactly as before.
+        if distances is None:
+            if self.sensor is None:
+                raise ValueError(
+                    "VehiclePhysics.step() needs wheel-ground distances: this "
+                    "instance was built with sensor=None, so pass distances= "
+                    "(shape (n_envs, n_wheels)) from your raycast source."
+                )
+            distances = read_distances(self.sensor, n_envs)
+        else:
+            distances = self._coerce_distances(distances)
         self.last_distances = distances.detach().clone()
         if not self._prev_init and torch.all(distances < 1e-6):
             self._prev_init = True
@@ -701,6 +729,24 @@ class VehiclePhysics:
             pb_x=_t("pb_x"), pc_x=_t("pc_x"), pe_x=_t("pe_x"),
             pb_y=_t("pb_y"), pc_y=_t("pc_y"), pe_y=_t("pe_y"),
         )
+
+    def _coerce_distances(self, distances: Any) -> torch.Tensor:
+        """Normalize externally-injected wheel-ground distances to
+        ``(n_envs, n_wheels)`` on this driver's device/dtype. Accepts a
+        ``(n_wheels,)`` vector (single env) or ``(n_envs, n_wheels)``."""
+        d = distances
+        if not torch.is_tensor(d):
+            d = torch.as_tensor(d)
+        d = d.to(device=self.dev, dtype=self.fdt)
+        if d.dim() == 1:
+            d = d.unsqueeze(0)
+        n = self.wheel_meta.n_wheels
+        if tuple(d.shape) != (self.n_envs, n):
+            raise ValueError(
+                f"injected distances must be (n_envs, n_wheels)="
+                f"({self.n_envs}, {n}); got {tuple(d.shape)}"
+            )
+        return d.contiguous()
 
     def _scalar_to_envs(self, x: Any) -> torch.Tensor:
         if torch.is_tensor(x):
