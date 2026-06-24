@@ -31,19 +31,21 @@ class VehicleScene:
 
     # --- registration (before build) ---
     def add_vehicle(urdf_path, preset=None, *, pos=(0,0,1), quat=None,
-                    material=None, stability="control", name=None,
-                    raycaster_max_range=20.0,
+                    material=None, surface=None, vis_mode=None,
+                    stability="control", name=None, raycaster_max_range=20.0,
                     cfg=None, morph=None) -> Vehicle
     #   preset (fn→cfg) OR a pre-built cfg=; and a morph= the VehicleScene
     #   builds into an entity internally (custom material/surface, e.g. the L3
     #   server) OR built from urdf_path. urdf_path always gives the wheel
     #   positions.
-    def add_static(*, morph=None, raycast_morph=None, collision_morph=None,
-                   collision=True, raycast=True, material=None, name=None) -> StaticBody
-    def add_static_terrain(morph, **kwargs) -> StaticBody     # alias of add_static(morph=)
+    def add_static(*, morph=None, wheel_raycast_morph=None, collision_morph=None,
+                   collision=True, material=None, surface=None, vis_mode=None,
+                   name=None) -> StaticBody
+    #   a static body is ALWAYS a wheel-raycast target (no raycast= toggle).
     def add_ground_plane(*, friction=0.85) -> StaticBody
-    def add_dynamic(morph, *, physics=False, raycast=True,    # a body wheels must SENSE
-                    material=None, name=None) -> Obstacle
+    def add_dynamic(morph, *, physics=True, wheel_raycast=False,   # collide-only by default;
+                    material=None, surface=None, vis_mode=None,    # set wheel_raycast=True only
+                    mass=None, name=None) -> DynamicBody           # for a surface wheels must sense
 
     def build() -> None
     def step() -> None
@@ -53,24 +55,24 @@ class VehicleScene:
     raycast_scene: gs.Scene | None       # dual_scene mode only (None for single_scene)
     vehicles: list[Vehicle]              # property
     statics: list[StaticBody]            # property
-    obstacles: list[Obstacle]            # property
+    dynamics: list[DynamicBody]          # property
 
 class Vehicle:                           # handle returned by add_vehicle
     def set_inputs(throttle=0.0, brake=0.0, steer=0.0) -> Vehicle
     def get_pos() / get_quat() / get_vel() / get_ang()   # (n_envs, ...) main-scene truth
     distances                            # property: last (n_envs, n_wheels) wheel-ground d
-    entity, physics, sensor, cfg, proxy  # underlying objects
+    entity_main, physics, sensor, cfg, proxy  # underlying objects
 
 class StaticBody:                        # handle returned by add_static
     name; is_static; has_collision; has_raycast
     entity_main                          # rigid collision entity (main scene)
     entity_raycast                       # kinematic raycast entity (raycast scene; dual_scene)
 
-class Obstacle:                          # handle returned by add_dynamic
+class DynamicBody:                       # handle returned by add_dynamic
     name; is_dynamic; has_raycast
     entity_main                          # rigid body in the main scene (physics)
     entity_raycast                       # synced raycast target in the raycast scene (dual_scene)
-    def set_pose(pos=None, quat=None)    # move a user-controlled obstacle (raycast target follows)
+    def set_pose(pos=None, quat=None)    # move a user-controlled body (raycast target follows)
 ```
 
 `raycast_mode="dual_scene"` (default) raycasts static terrain in a separate scene
@@ -79,9 +81,126 @@ The legacy names `"raywheel"`/`"inline"` and `"split"`/`"single"` are accepted a
 aliases for `"dual_scene"`/`"single_scene"`. Use `collision_morph` to give a
 coarse/convex collider while raycasting a detailed surface (non-convex meshes are
 convexified for collision, so a single_scene rigid-mesh raycast hits the convex bulge
-— the dual_scene kinematic raycast stays exact). Scope: one or more vehicles (L2),
-L3 (`n_envs >= 1`), static terrain/mesh targets, and dynamic raycast obstacles
-(`add_dynamic`).
+— the dual_scene kinematic raycast stays exact). A static body is always a
+wheel-raycast target; use `wheel_raycast_morph` to raycast a detailed surface
+while colliding against `collision_morph`. `add_dynamic` adds a moving body that
+is collide-only by default — pass `wheel_raycast=True` only for a moving surface
+the wheels must sense/drive onto (ramp, moving platform); on a non-primitive
+(mesh) morph that logs a warning, since its mirror BVH re-fits every step
+(prefer a primitive Box/Sphere/Cylinder collider). Scope: one or more vehicles
+(L2), L3 (`n_envs >= 1`), static terrain/mesh targets, and dynamic raycast
+targets (`add_dynamic`).
+
+### 0.1 Parameters per method
+
+**`VehicleScene(...)`**
+
+| param | default | meaning |
+|---|---|---|
+| `n_envs` | `1` | L3 batch size (parallel envs) |
+| `dt` | `1/200` | sim step time (s) |
+| `backend` | `"gpu"` | `"gpu"`/`"cpu"`; ignored if `init_genesis=False` |
+| `raycast_mode` | `"dual_scene"` | `"dual_scene"` (separate static-BVH raycast scene) / `"single_scene"` (one scene). Aliases: `raywheel`/`split`, `inline`/`single` |
+| `gravity` | `(0,0,-9.81)` | world gravity |
+| `substeps` | `4` | engine solver substeps per `step()` |
+| `sim_options` / `rigid_options` / `vis_options` | `None` | inject Genesis option objects (else built from the args above) |
+| `show_viewer` | `False` | open the Genesis viewer |
+| `init_genesis` | `True` | call `gs.init` (set `False` if the process already did) |
+
+**`add_vehicle(urdf_path, preset=None, *, …)`** — registers a driven vehicle (always collides + always wheel-raycast).
+
+| param | default | meaning |
+|---|---|---|
+| `urdf_path` | — | URDF; always parsed for wheel positions |
+| `preset` | `None` | preset fn → cfg. Pass this **or** `cfg=` |
+| `cfg` | `None` | pre-built `VehicleConfig` (e.g. server `build_cfg`) |
+| `morph` | `None` | entity morph built internally (custom collider/visual); else built from `urdf_path` |
+| `pos` / `quat` | `(0,0,1)` / `None` | spawn pose when `morph` is not given |
+| `material` / `surface` / `vis_mode` | `None` | passed to the main-scene `add_entity` |
+| `stability` | `"control"` | stability profile passed to `preset` |
+| `raycaster_max_range` | `20.0` | wheel ray max length (m) |
+| `name` | `None` | handle label |
+
+**`add_static(*, …)`** — a body that never moves; **always a wheel-raycast target**.
+
+| param | default | meaning |
+|---|---|---|
+| `morph` | `None` | one morph for both collision + raycast |
+| `collision_morph` | `None` | coarse/convex collider (overrides `morph` for collision) |
+| `wheel_raycast_morph` | `None` | detailed surface the wheel rays hit (overrides `morph` for raycast) |
+| `collision` | `True` | build a main-scene rigid collider (see matrix for the `False` + single_scene caveat) |
+| `material` / `surface` / `vis_mode` | `None` | passed to `add_entity` |
+| `name` | `None` | handle label |
+
+**`add_dynamic(morph, *, …)`** — a moving body; **collide-only by default**.
+
+| param | default | meaning |
+|---|---|---|
+| `morph` | — | the body geometry |
+| `physics` | `True` | `True`: free rigid (moves under physics). `False`: fixed base you teleport via `handle.set_pose` (e.g. UE-driven) |
+| `wheel_raycast` | `False` | `True`: wheels can sense / drive onto it (adds a synced raycast mirror in dual_scene). On a non-primitive morph this logs a re-fit-cost warning |
+| `mass` | `None` | override mass (applied after build; only meaningful for `physics=True`) |
+| `material` / `surface` / `vis_mode` | `None` | passed to `add_entity` |
+| `name` | `None` | handle label |
+
+**`add_ground_plane(*, friction=0.85)`** — convenience for `add_static(morph=Plane(...))`.
+
+### 0.2 Parameter → behavior matrix
+
+What each registration produces. **Collides** = the chassis physically collides
+with it in the main scene; **Wheels sense** = the wheel rays detect it as ground;
+**Mirror** = where the wheel-raycast target lives.
+
+**`add_static`** (the `collision` flag × `raycast_mode`):
+
+| `collision` | `raycast_mode` | main scene | raycast scene | collides | wheels sense |
+|---|---|---|---|---|---|
+| `True` (default) | `dual_scene` | rigid (`collision_morph`) | kinematic mirror (`wheel_raycast_morph`) | ✅ | ✅ |
+| `True` | `single_scene` | rigid — serves both roles | — (same body) | ✅ | ✅ |
+| `False` | `dual_scene` | — (none) | kinematic mirror | ❌ | ✅ |
+| `False` | `single_scene` | rigid (raycast target) ⚠️ | — | ⚠️ **yes** | ✅ |
+
+⚠️ **single_scene caveat:** with one scene the raycast target *is* a rigid body,
+so `collision=False` cannot be honored — it still collides. For a true
+no-collision raycast surface use `dual_scene` (kinematic mirror, no collider).
+
+**`add_dynamic`** — `physics` sets motion; `wheel_raycast` only controls the
+**dual_scene** raycast mirror (see the caveat below):
+
+| `physics` | motion | main scene |
+|---|---|---|
+| `True` (default) | moves under physics | rigid, free |
+| `False` | you teleport via `set_pose` (e.g. UE-driven) | rigid, fixed |
+
+| `wheel_raycast` | `raycast_mode` | raycast scene | wheels sense |
+|---|---|---|---|
+| `False` (default) | `dual_scene` | — (no mirror) | ❌ |
+| `False` | `single_scene` | — (same scene) | ⚠️ **yes** |
+| `True` | `dual_scene` | **synced** rigid mirror | ✅ |
+| `True` | `single_scene` | — (same scene) | ✅ |
+
+In every case the body **collides** (it is a rigid body in the main scene).
+
+⚠️ **single_scene caveat:** with one scene the wheel rays cast against the whole
+main scene, so *every* rigid body is a raycast target regardless of
+`wheel_raycast` — the flag can only suppress sensing in `dual_scene` (by not
+building the mirror). For "collide but the wheels ignore it" you need
+`dual_scene` + `wheel_raycast=False`.
+
+The dual_scene mirror for a `wheel_raycast=True` dynamic body is a *rigid* body in
+the raycast scene's rigid solver (re-synced every `step`), so only its own small
+BVH re-fits — the heavy static terrain BVH stays untouched. That re-fit cost
+scales with the morph's face count, which is why a non-primitive morph warns.
+
+**`add_vehicle`** — always collides (main-scene rigid) and the wheels always
+raycast (a proxy + wheel sensor in the raycast scene in dual_scene; the sensor
+rides the entity directly in single_scene). Moves under physics.
+
+**Server mapping** (`server/env_builder.py`, from the UE `b_dynamic` field):
+`0` static structure/road → `add_static`; `1` physics-dynamic → `add_dynamic(physics=True)`;
+`2` UE-driven → `add_dynamic(physics=False)`. Server obstacles are collide-only
+(`wheel_raycast` left `False`); roads carry the wheel surface via `add_static`'s
+`collision_morph` (convex) + `wheel_raycast_morph` (detailed).
 
 ## 1. `VehiclePhysics` — the driver
 

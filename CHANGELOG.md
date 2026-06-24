@@ -22,8 +22,8 @@ running version the first time it is instantiated in a process.
 | rebuild | re-fitting the BVH from all faces (scales with face count) |
 
 New high-level entry point `VehicleScene` (plus `Vehicle` / `StaticBody` /
-`Obstacle` handles) that owns the Genesis scene(s), registered vehicles / static
-bodies / obstacles, and the per-step loop — no manual `gs.init` / `scene.build` /
+`DynamicBody` handles) that owns the Genesis scene(s), registered vehicles / static
+bodies / dynamic bodies, and the per-step loop — no manual `gs.init` / `scene.build` /
 `scene.step` / `sensor.read`. The existing `VehiclePhysics` / `add_vehicle` / presets are
 unchanged and used internally.
 
@@ -88,12 +88,13 @@ surface). Pose/distance output is identical to `single_scene` mode (verified:
   corrected mechanism and honest numbers are above.
 - Scope: one or more vehicles (L2 — each gets its own proxy + sensor, still
   colliding in the main scene), L3 (`n_envs >= 1`), static terrain/mesh targets
-  (`add_static` / `add_static_terrain`), and **dynamic raycast obstacles** the
-  wheels must sense (`add_dynamic` — ramp / curb / moving platform). In dual_scene
-  mode the obstacle gets a rigid mirror in the raycast scene's *rigid* solver (a
+  (`add_static`), and **dynamic raycast targets** the wheels must sense
+  (`add_dynamic` — ramp / curb / moving platform; collide-only by default, pass
+  `wheel_raycast=True` to make it a raycast target). In dual_scene mode the
+  dynamic body gets a rigid mirror in the raycast scene's *rigid* solver (a
   separate BVH context from the kinematic terrain), re-synced each step via
   `handle.set_pose(...)`, so only its small BVH re-fits while the terrain stays
-  static. Verified: the wheel distance tracks the obstacle and matches `single_scene`
+  static. Verified: the wheel distance tracks the body and matches `single_scene`
   as it moves.
 - **`add_vehicle(cfg=, morph=)`** — register a vehicle the caller built itself
   (custom URDF / material / surface) with a pre-built `cfg`, instead of a
