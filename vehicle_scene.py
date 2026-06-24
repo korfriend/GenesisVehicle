@@ -447,21 +447,15 @@ class VehicleScene:
                 self.main_scene, veh.entity, sensor, veh.cfg, n_envs=self.n_envs)
         self._built = True
 
-    def measure_distances(self) -> dict:
-        """Return ``{vehicle: wheel-ground distances}`` for the upcoming step.
+    def _measure_distances(self) -> dict:
+        """Internal: return ``{vehicle: wheel-ground distances}`` for the step.
 
-        Raywheel mode: mirror each chassis pose onto its proxy + sync obstacle
-        mirrors, step the raycast scene ONCE (refreshes ray origins; the static
-        road/terrain BVH is skipped, only the cast runs), and read each sensor →
-        ``(n_envs, n_wheels)``. Inline mode: ``{vehicle: None}`` (each vehicle
-        reads its own sensor inside ``physics.step``).
+        Raywheel: mirror each chassis pose onto its proxy + sync obstacle
+        mirrors, step the raycast scene ONCE (re-cast against the static BVH),
+        read each sensor → ``(n_envs, n_wheels)``. Inline: ``{vehicle: None}``.
 
-        Exposed so a caller that drives the main step itself (e.g. the OSC L3
-        server, which interleaves pose overrides / state capture) can do::
-
-            dists = vs.measure_distances()
-            veh.physics.step(inputs, distances=dists[veh])
-            vs.main_scene.step()
+        NOT a getter — it re-syncs poses and CASTS (advances the raycast scene),
+        so it must run exactly once per :meth:`step`. ``step`` is the only caller.
         """
         self._require_built()
         if not self._two_scene:
@@ -478,12 +472,12 @@ class VehicleScene:
     def step(self) -> None:
         """One simulation step.
 
-        Raywheel mode: ``measure_distances`` (sync proxies/mirrors + re-cast the
-        static raycast scene), feed each vehicle's main-scene physics, advance
-        the main scene. Inline mode: each vehicle reads its own sensor.
+        Raywheel mode: sync proxies/obstacle mirrors + re-cast the static raycast
+        scene, feed each vehicle's main-scene physics, advance the main scene.
+        Inline mode: each vehicle reads its own sensor.
         """
         self._require_built()
-        dists = self.measure_distances()
+        dists = self._measure_distances()
         for veh in self._vehicles:
             veh.physics.step(veh._inputs, distances=dists[veh])
         self.main_scene.step()
