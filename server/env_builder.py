@@ -312,7 +312,7 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
                 rc_morph = gs.morphs.Mesh(file=mesh_path, scale=size, pos=pos, quat=quat,
                                           fixed=is_fixed, align=False, collision=False,
                                           visualization=True, convexify=False, decimate=False)
-                handle = vs.add_static(collision_morph=morph, raycast_morph=rc_morph,
+                handle = vs.add_static(collision_morph=morph, wheel_raycast_morph=rc_morph,
                                        material=mat, surface=surface, vis_mode=vis_mode,
                                        name=f"obs_{obs_id}")
             else:
@@ -332,6 +332,6 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
             dynamic_obstacles[obs_id] = obs_entity
             initial_dynamic_states[obs_id] = (np.array(pos, dtype=np.float32), np.array(quat, dtype=np.float32))
 
-    # Obstacle masses are applied by VehicleScene (add_obstacle mass=); the
+    # Obstacle masses are applied by VehicleScene (add_dynamic mass=); the
     # returned list stays empty for back-compat with the call sites.
     return obstacles, dynamic_obstacles, initial_dynamic_states, ue_driven_obstacle_ids, entities_to_set_mass

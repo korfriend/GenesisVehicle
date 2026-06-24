@@ -220,7 +220,7 @@ def run_l3(args):
         material=gs.materials.Rigid(friction=t_fric, coup_restitution=0.0, sdf_cell_size=10000.0),
         surface=gs.surfaces.Rough(color=(1.0, 0.3, 0.3, 0.5)), vis_mode=args.vis_mode,
         name="L3-shared")
-    car = veh.entity
+    car = veh.entity_main
 
     # 4. 배치 빌드 — VehicleScene 이 main + raycast 씬을 함께 빌드하고 VehiclePhysics 생성
     vs.build()

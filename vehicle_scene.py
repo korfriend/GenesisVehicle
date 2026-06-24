@@ -38,14 +38,15 @@ accepted as aliases for ``"dual_scene"`` / ``"single_scene"``.
 
 Scope: one or more vehicles (L2 — each gets its own proxy + sensor in the
 raycast scene; they still collide in the main scene), L3 (``n_envs >= 1``)
-batching, static *terrain/mesh* raycast targets (``add_static`` /
-``add_static_terrain``), and dynamic raycast obstacles the wheels must sense
-(``add_dynamic`` — a synced rigid mirror in the raycast scene's rigid solver,
-so only its small BVH re-fits while the terrain stays static).
+batching, static *terrain/mesh* raycast targets (``add_static``, always a
+raycast target), and moving bodies (``add_dynamic``; ``raycast=True`` opt-in adds
+a synced rigid mirror in the raycast scene's rigid solver, so only its small BVH
+re-fits while the terrain stays static).
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -55,6 +56,13 @@ from .core import VehiclePhysics
 from .inputs import VehicleInputs
 from .raycast import WheelRayPattern, read_distances
 from .urdf import parse_urdf
+
+_logger = logging.getLogger("genesis_vehicle.vehicle_scene")
+
+# Genesis primitive morph types (closed-form colliders) whose raycast BVH is
+# trivially cheap — anything outside this set is a mesh/heightfield whose BVH
+# re-fit cost scales with face count (see add_dynamic's guard).
+_PRIMITIVE_MORPHS = frozenset({"Box", "Sphere", "Cylinder", "Capsule", "Plane"})
 
 # gs.init is process-global and may be called at most once. Track it so several
 # VehicleScenes (or a user who already called gs.init) don't double-initialize.
@@ -117,7 +125,7 @@ class StaticBody:
 
 
 @dataclass
-class Obstacle:
+class DynamicBody:
     """Handle for a registered moving body the wheels may need to *sense*
     (raycast), not just collide with (returned by :meth:`VehicleScene.add_dynamic`).
     Unlike a StaticBody its ``entity_raycast`` is re-synced every step, so it
@@ -159,7 +167,7 @@ class Vehicle:
         self._quat = quat
         self._material = material
         # filled during VehicleScene.add_vehicle / build
-        self.entity: Any = None        # main-scene rigid URDF entity
+        self.entity_main: Any = None   # main-scene rigid URDF entity
         self.physics: Optional[VehiclePhysics] = None
         self.sensor: Any = None        # wheel raycaster (main in single, raycast-scene in split)
         self.proxy: Any = None         # raycast-scene pose carrier (split only)
@@ -175,16 +183,16 @@ class Vehicle:
 
     # ---- pose accessors (main scene = physical truth) ----
     def get_pos(self):
-        return self.entity.get_pos()
+        return self.entity_main.get_pos()
 
     def get_quat(self):
-        return self.entity.get_quat()
+        return self.entity_main.get_quat()
 
     def get_vel(self):
-        return self.entity.get_vel()
+        return self.entity_main.get_vel()
 
     def get_ang(self):
-        return self.entity.get_ang()
+        return self.entity_main.get_ang()
 
     @property
     def distances(self):
@@ -196,8 +204,8 @@ class Vehicle:
         """Mirror the main chassis base pose onto the raycast-scene proxy.
         ``set_pos``/``set_quat`` run FK, so the wheel ray origins update without
         stepping the raycast scene."""
-        p = self.entity.get_pos()
-        q = self.entity.get_quat()
+        p = self.entity_main.get_pos()
+        q = self.entity_main.get_quat()
         if p.dim() > 1:          # (n_envs, 3) — single-env keeps a leading dim
             if p.shape[0] == 1:
                 p, q = p[0], q[0]
@@ -262,7 +270,7 @@ class VehicleScene:
 
         self._vehicles: list[Vehicle] = []
         self._statics: list[StaticBody] = []
-        self._obstacles: list[Obstacle] = []
+        self._dynamics: list[DynamicBody] = []
         self._pending_mass: list = []   # (entity, mass) applied after build()
 
     # -----------------------------------------------------------------
@@ -273,19 +281,21 @@ class VehicleScene:
         self,
         *,
         morph: Any = None,
-        raycast_morph: Any = None,
+        wheel_raycast_morph: Any = None,
         collision_morph: Any = None,
         collision: bool = True,
-        raycast: bool = True,
         material: Any = None,
         surface: Any = None,
         vis_mode: Any = None,
         name: Optional[str] = None,
     ) -> StaticBody:
-        """Register a static body (terrain / mesh / plane / primitive).
+        """Register a static body (terrain / mesh / plane / primitive). A static
+        body is **always a wheel-raycast target** (the wheels drive on it) — there
+        is no toggle here; use :meth:`add_dynamic` for a moving body the wheels
+        only collide with.
 
-        Provide one ``morph`` for both roles, or split into ``raycast_morph``
-        (detailed surface the wheels cast against) and ``collision_morph``
+        Provide one ``morph`` for both roles, or split into ``wheel_raycast_morph``
+        (detailed surface the wheel rays cast against) and ``collision_morph``
         (coarse/convex body the chassis collides with). Splitting is recommended
         for high-poly or non-convex meshes: a rigid mesh is auto-convexified for
         collision (so a rigid-mesh raycast hits the convex bulge, not the true
@@ -296,20 +306,20 @@ class VehicleScene:
         the raycast scene. Callers never touch the underlying scenes.
         """
         self._require_not_built()
-        if morph is None and raycast_morph is None and collision_morph is None:
-            raise ValueError("add_static: provide morph (or raycast_morph/collision_morph).")
-        rc_morph = raycast_morph or morph
+        if morph is None and wheel_raycast_morph is None and collision_morph is None:
+            raise ValueError("add_static: provide morph (or wheel_raycast_morph/collision_morph).")
+        rc_morph = wheel_raycast_morph or morph
         col_morph = collision_morph or morph
         name = name or f"static_{len(self._statics)}"
 
-        body = StaticBody(name=name, has_collision=bool(collision), has_raycast=bool(raycast))
+        body = StaticBody(name=name, has_collision=bool(collision), has_raycast=True)
 
         if collision and col_morph is not None:
             mat = material if material is not None else gs.materials.Rigid()
             body.entity_main = self.main_scene.add_entity(
                 col_morph, **_add_kwargs(mat, surface, vis_mode))
 
-        if raycast and rc_morph is not None:
+        if rc_morph is not None:
             if self._two_scene:
                 # Kinematic visual-raycast body in the raycast scene → static BVH.
                 body.entity_raycast = self.raycast_scene.add_entity(
@@ -327,11 +337,6 @@ class VehicleScene:
         self._statics.append(body)
         return body
 
-    def add_static_terrain(self, morph: Any, **kwargs) -> StaticBody:
-        """Convenience alias for a heightfield/terrain morph. Same as
-        :meth:`add_static` with ``morph=``."""
-        return self.add_static(morph=morph, **kwargs)
-
     def add_ground_plane(self, *, friction: float = 0.85) -> StaticBody:
         """Convenience: an infinite flat ground (raycast + collision)."""
         return self.add_static(morph=gs.morphs.Plane(),
@@ -343,40 +348,52 @@ class VehicleScene:
         morph: Any,
         *,
         physics: bool = True,
-        raycast: bool = True,
+        wheel_raycast: bool = False,
         material: Any = None,
         surface: Any = None,
         vis_mode: Any = None,
         mass: Optional[float] = None,
         name: Optional[str] = None,
-    ) -> Obstacle:
-        """Register a MOVING body the wheels may need to **sense** (drive onto /
-        over), not just collide with — e.g. a ramp, curb, or moving platform.
-        Use :meth:`add_static` for bodies that never move.
+    ) -> DynamicBody:
+        """Register a MOVING body. By default the wheels only **collide** with it
+        (``wheel_raycast=False`` — e.g. another vehicle or a dynamic prop). Set
+        ``wheel_raycast=True`` only for a moving surface the wheels must **sense /
+        drive onto** (a ramp or moving platform). Use :meth:`add_static` for bodies
+        that never move (those are always wheel-raycast targets).
 
         ``physics=True`` (default): a free rigid body that moves under physics.
         ``physics=False``: a fixed body you teleport yourself with
-        ``handle.set_pose(...)`` (e.g. an externally / UE-driven obstacle).
+        ``handle.set_pose(...)`` (e.g. an externally / UE-driven body).
 
-        With ``raycast=True`` in dual_scene mode a synced rigid raycast mirror is
-        added to the raycast scene (re-synced every ``step``; re-fits only its own
-        small BVH, leaving the terrain static). In single_scene mode the one
-        main-scene rigid body is already the raycast target. VehicleScene owns the
-        routing — the caller never touches a scene.
+        With ``wheel_raycast=True`` in dual_scene mode a synced rigid raycast
+        mirror is added to the raycast scene (re-synced every ``step``; re-fits
+        only its own small BVH, leaving the terrain static). In single_scene mode
+        the one main-scene rigid body is already the raycast target. VehicleScene
+        owns the routing — the caller never touches a scene.
+
+        Guard: a wheel-raycast dynamic body re-fits its BVH every step, so a
+        non-primitive (mesh) morph logs a warning — prefer a primitive collider.
         """
         self._require_not_built()
-        name = name or f"dynamic_{len(self._obstacles)}"
+        name = name or f"dynamic_{len(self._dynamics)}"
         mat = material if material is not None else gs.materials.Rigid()
 
-        obs = Obstacle(name=name, is_dynamic=bool(physics),
-                       has_raycast=bool(raycast))
+        if wheel_raycast and type(morph).__name__ not in _PRIMITIVE_MORPHS:
+            _logger.warning(
+                "add_dynamic(%r): wheel_raycast=True on a non-primitive (%s) morph — "
+                "the mirror's BVH re-fits every step (cost grows with face count). "
+                "Prefer a primitive collider (Box/Sphere/Cylinder) for a wheel_raycast "
+                "dynamic body.", name, type(morph).__name__)
+
+        obs = DynamicBody(name=name, is_dynamic=bool(physics),
+                          has_raycast=bool(wheel_raycast))
         main_morph = _clone_morph(morph, fixed=not physics)
         obs.entity_main = self.main_scene.add_entity(
             main_morph, **_add_kwargs(mat, surface, vis_mode))
         if mass is not None:
             self._pending_mass.append((obs.entity_main, float(mass)))
 
-        if raycast and self._two_scene:
+        if wheel_raycast and self._two_scene:
             # Rigid + fixed + collision mirror in the raycast scene's RIGID
             # solver (a separate BVH context from the kinematic terrain), so
             # re-syncing it each step re-fits only this small body.
@@ -384,7 +401,7 @@ class VehicleScene:
             obs.entity_raycast = self.raycast_scene.add_entity(
                 mirror_morph, **_add_kwargs(gs.materials.Rigid(), surface, vis_mode))
 
-        self._obstacles.append(obs)
+        self._dynamics.append(obs)
         return obs
 
     def add_vehicle(
@@ -431,7 +448,7 @@ class VehicleScene:
             if quat is not None:
                 morph_kw["quat"] = quat
             morph = gs.morphs.URDF(**morph_kw)
-        veh.entity = self.main_scene.add_entity(
+        veh.entity_main = self.main_scene.add_entity(
             morph, **_add_kwargs(material, surface, vis_mode))
 
         if self._two_scene:
@@ -458,7 +475,7 @@ class VehicleScene:
         else:
             veh.sensor = self.main_scene.add_sensor(gs.sensors.Raycaster(
                 pattern=WheelRayPattern(wheel_positions),
-                entity_idx=veh.entity.idx,
+                entity_idx=veh.entity_main.idx,
                 max_range=raycaster_max_range, min_range=0.0, return_world_frame=True))
 
         self._vehicles.append(veh)
@@ -484,7 +501,7 @@ class VehicleScene:
         for veh in self._vehicles:
             sensor = None if self._two_scene else veh.sensor
             veh.physics = VehiclePhysics(
-                self.main_scene, veh.entity, sensor, veh.cfg, n_envs=self.n_envs)
+                self.main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
 
         # Apply any per-obstacle mass overrides now that entities are built.
         for entity, mass in self._pending_mass:
@@ -506,9 +523,9 @@ class VehicleScene:
             return {veh: None for veh in self._vehicles}
         for veh in self._vehicles:
             veh._sync_proxy()
-        for obs in self._obstacles:
+        for obs in self._dynamics:
             if obs.entity_raycast is not None:
-                self._sync_obstacle(obs)
+                self._sync_dynamic(obs)
         self.raycast_scene.step()
         return {veh: read_distances(veh.sensor, self.n_envs)
                 for veh in self._vehicles}
@@ -546,11 +563,11 @@ class VehicleScene:
         return list(self._statics)
 
     @property
-    def obstacles(self) -> list:
-        return list(self._obstacles)
+    def dynamics(self) -> list:
+        return list(self._dynamics)
 
     # ---- internals ----
-    def _sync_obstacle(self, obs: "Obstacle") -> None:
+    def _sync_dynamic(self, obs: "DynamicBody") -> None:
         """Mirror an obstacle's main-scene pose onto its raycast-scene mirror so
         the wheels' rays see it at its current position."""
         p = obs.entity_main.get_pos()

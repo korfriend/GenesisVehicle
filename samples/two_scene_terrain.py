@@ -6,7 +6,7 @@ Demonstrates both raycast modes and (with ``--compare``) times them head to head
 
 What this demonstrates
 ----------------------
-- ``VehicleScene`` as the single entry point: ``add_static_terrain`` +
+- ``VehicleScene`` as the single entry point: ``add_static`` +
   ``add_vehicle`` + ``build`` + a loop of ``veh.set_inputs(...) / vs.step()``.
 - ``raycast_mode="dual_scene"`` (default): the terrain is raycast in a separate
   scene as a *kinematic* body (BVH built once, never re-fit, shared across batch
@@ -66,7 +66,7 @@ def run(mode: str, backend: str, horizontal_scale: float, n_envs: int = 1,
     # car_4w_rwd_ackermann recommends dt=1/48 with substeps=10 (internal ~2 ms).
     vs = VehicleScene(backend=backend, raycast_mode=mode, dt=1.0 / 48.0,
                       substeps=10, n_envs=n_envs)
-    vs.add_static_terrain(_terrain(horizontal_scale))
+    vs.add_static(morph=_terrain(horizontal_scale))
     veh = vs.add_vehicle(URDF_PATH, car_4w_rwd_ackermann, pos=(0.0, 0.0, 3.0))
     vs.build()
     n_faces = int(vs.main_scene.rigid_solver.faces_info.geom_idx.shape[0])
