@@ -27,7 +27,7 @@ import numpy as np
 import torch
 import genesis as gs
 
-from genesis_vehicle import VehicleInputs, VehicleScene
+from genesis_vehicle import VehicleScene
 
 from .osc_manager import OSCManager
 from . import env_builder
@@ -251,10 +251,9 @@ def run_l3(args):
     print(" [INFO] [GENESIS] [L3] 하드웨어 연산 성능 실측 프로파일링 중...")
     print("="*50)
     warmup_starts = time.perf_counter()
-    idle_inputs = VehicleInputs(throttle=0.0, brake=0.0, steer=0.0)
     for _ in range(5):
-        physics.step(idle_inputs, distances=vs.measure_distances()[veh])
-        scene.step()
+        veh.set_inputs(throttle=0.0, brake=0.0, steer=0.0)
+        vs.step()                       # = sync proxy/mirrors + raycast + physics + main.step
         if not use_cpu:
             torch.cuda.synchronize()
     avg_step_time = (time.perf_counter() - warmup_starts) / 5.0
@@ -434,7 +433,7 @@ def run_l3(args):
                         last_printed_inputs[tid] = curr_inp
                         print(f" [DEBUG] Vehicle {tid} (env {k}) Inputs: steer={s:.3f}, throttle={t:.3f}, brake={b:.3f}")
 
-            inputs = VehicleInputs(
+            veh.set_inputs(
                 steer=torch.as_tensor(steer_arr, device=gs.device),
                 throttle=torch.as_tensor(throttle_arr, device=gs.device),
                 brake=torch.as_tensor(brake_arr, device=gs.device),
@@ -443,8 +442,7 @@ def run_l3(args):
             prev_state = curr_state
             physics_start = time.perf_counter()
             try:
-                physics.step(inputs, distances=vs.measure_distances()[veh])
-                scene.step()
+                vs.step()               # measure_distances + physics.step(distances) + main.step
             except gs.GenesisException as e:
                 if "Viewer closed" in str(e):
                     print("\n [Genesis] 시각화 창이 닫혔습니다. 정상 종료합니다.")
