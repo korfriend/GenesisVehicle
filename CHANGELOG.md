@@ -102,9 +102,13 @@ surface). Pose/distance output is identical to `inline` mode (verified:
   `VehicleScene` (raywheel) — the road is rigid in the main scene (collision /
   rollover) with a kinematic raycast mirror, superseding the single-scene
   `--road-raycast-only` on the L3 path. (`env_builder.build_obstacles` gained
-  `raycast_scene=` for the road mirror.) Per-entity (non-L3) `physics_server`
-  and non-road obstacle mirroring remain follow-ups; the OSC round-trip needs UE
-  integration testing.
+  `raycast_scene=` for the road mirror.) The **per-entity (non-L3) path** is also
+  ported — `physics_server` builds via `VehicleScene(raycast_mode="inline")`
+  (interacting vehicles at n_envs=1 on CPU, where the two-scene raycast has no
+  benefit), `build_vehicle` registers via `add_vehicle(cfg=, entity=)`, and the
+  loop uses `veh.set_inputs(...)` + `vs.step()` — so the server no longer
+  constructs `VehiclePhysics` / `VehicleInputs` directly. Non-road obstacle
+  mirroring remains a follow-up; the OSC round-trip needs UE integration testing.
 - Upstream-correct fix (no second scene): Genesis splitting the rigid BVH into
   static + dynamic subsets — Genesis issue #2878 (open).
 
