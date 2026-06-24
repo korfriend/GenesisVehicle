@@ -17,7 +17,7 @@ import genesis as gs
 import torch
 
 from genesis_vehicle import (
-    make_wheel_raycaster, VehiclePhysics, VehicleInputs, VehicleConfig, parse_urdf,
+    VehicleConfig, parse_urdf,
     AWD, PartialAckermann, Independent, PacejkaAnisotropic,
     RollingResistance, LowSpeedRegularizer
 )
@@ -457,13 +457,14 @@ def print_resolved_table(target_id, resolved_cfg):
     print("=========================================================================================================\n")
 
 
-def build_vehicle(scene, target_entities, controllers, target_id, target_info,
+def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
                   urdf_path, mapping, ue_friction, ue_restitution, vis_mode,
                   *, enable_visual_joint_sync=False):
     """
-    지정된 URDF 경로 및 매핑 설정을 기반으로 GenesisVehicle 객체를 빌드하여 씬에 로딩하고
-    조향(Steer)/동력(Drive)/서스펜션(Suspension)을 동적 자동 튜닝 및 인스턴스화합니다.
-    (per-entity 경로 — 차량마다 엔티티 + VehiclePhysics(n_envs=1) 1개씩)
+    지정된 URDF 경로 및 매핑 설정을 기반으로 차량 엔티티를 vs.main_scene 에 로딩하고
+    cfg 를 동적 자동 튜닝하여 VehicleScene 에 등록합니다.
+    (per-entity 경로 — 차량마다 엔티티 1개. proxy/sensor/VehiclePhysics 는 vs.build()
+    에서 생성되므로, controllers 는 호출측이 build 후 채운다.)
 
     enable_visual_joint_sync: Genesis 뷰어용 VisualJointSync 구동 여부. 서버는 외부
     렌더(UE)가 그리고 wheel_visual_transforms(닫힌형)로 capture하므로 기본 False
@@ -480,7 +481,7 @@ def build_vehicle(scene, target_entities, controllers, target_id, target_info,
     # 디버그 색상 (Semi-transparent red for Mesh)
     t_color = (1.0, 0.3, 0.3, 0.5)
 
-    t_entity = scene.add_entity(
+    t_entity = vs.main_scene.add_entity(
         target_morph,
         material=gs.materials.Rigid(friction=t_fric, coup_restitution=t_rest, sdf_cell_size=10000.0),
         surface=gs.surfaces.Rough(color=t_color),
@@ -490,21 +491,13 @@ def build_vehicle(scene, target_entities, controllers, target_id, target_info,
     target_entities[target_id] = t_entity
     print(f" [Genesis] Created Vehicle Target {target_id} at {t_pos}")
 
-    # Attach Raycaster for GenesisVehicle
-    if not hasattr(scene, 'target_sensors'):
-        scene.target_sensors = {}
-    scene.target_sensors[target_id] = make_wheel_raycaster(scene, t_entity, urdf_path)
-
     # 차량 설정 구성 (L3 경로와 공유되는 단일 소스)
     cfg = build_cfg(urdf_path, mapping, t_fric, target_id=target_id)
     cfg.enable_visual_joint_sync = enable_visual_joint_sync   # 헤드리스/외부렌더면 False (성능)
 
-    # Initialize VehiclePhysics SDK
-    sensor = scene.target_sensors[target_id]
-    ctrl = VehiclePhysics(scene, t_entity, sensor, cfg, n_envs=1)
-    controllers[target_id] = ctrl
-
-    # Print the final resolved vehicle physics settings
-    print_resolved_table(target_id, ctrl.resolved)
+    # VehicleScene 에 등록 — wheel raycaster + VehiclePhysics(n_envs=1) 는 vs.build() 에서.
+    veh = vs.add_vehicle(urdf_path, cfg=cfg, entity=t_entity,
+                         name=f"target_{target_id}")
+    vehicles[target_id] = veh
 
     return t_entity

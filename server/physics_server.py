@@ -39,7 +39,7 @@ if sys.platform == "win32":
 
 from .osc_manager import OSCManager
 from genesis_vehicle import (
-    VehicleInputs, PacejkaAnisotropic
+    PacejkaAnisotropic, VehicleScene
 )
 
 # 쪼갠 모듈들 임포트 (패키지 내부 모듈 — 기존 코드의 참조 이름을 유지하기 위한 별칭)
@@ -321,14 +321,16 @@ def main():
         'restitution': ue_restitution
     }
     
-    # 4. Genesis Scene Setup
-    scene = gs.Scene(
-        show_viewer=not args.headless,
-        sim_options=gs.options.SimOptions(
-            gravity=(0, 0, ue_gravity),
-            dt=ue_dt,
-            substeps=2
-        ),
+    # 4. Genesis Scene Setup — VehicleScene(inline) for unified vehicle handling.
+    # Per-entity mode is interacting vehicles at n_envs=1 on CPU, where the
+    # two-scene raycast has no benefit, so inline == one scene == prior behavior.
+    # ``scene`` is aliased to vs.main_scene so all existing scene.add_entity(...)
+    # calls are untouched; only build()/step() route through vs. Genesis is
+    # already initialized above, so init_genesis=False.
+    vs = VehicleScene(
+        n_envs=1, dt=ue_dt, backend="cpu", raycast_mode="inline",
+        gravity=(0, 0, ue_gravity), substeps=2, show_viewer=not args.headless,
+        init_genesis=False,
         rigid_options=gs.options.RigidOptions(
             enable_self_collision=False,
             enable_adjacent_collision=False,
@@ -341,11 +343,13 @@ def main():
             use_hibernation=True, # [최적화] Sleep 모드 활성화
             broadphase_traversal=gs.broadphase_traversal.SAP, # [최적화] Sweep-and-Prune
             max_collision_pairs=2048, # [최적화] 충돌 쌍 사전할당
-        )
+        ),
     )
+    scene = vs.main_scene   # alias — keep all existing scene.add_entity(...) calls
     
     target_entities = {}
-    controllers = {}
+    controllers = {}        # {tid: VehiclePhysics} — populated after vs.build()
+    vehicles = {}           # {tid: Vehicle handle} — for set_inputs in the loop
     entities_to_set_mass = []
     is_urdf_active = False
     urdf_path = ""
@@ -369,10 +373,10 @@ def main():
         if is_urdf_active:
             # 헬퍼 모듈을 이용해 URDF 차량 세팅 및 Raycaster 인스턴스화 수행
             mapping = osc.urdf_init_request.get('mapping', {})
-            t_entity = genesis_vehicle_builder.build_vehicle(
-                scene=scene,
+            genesis_vehicle_builder.build_vehicle(
+                vs=vs,
                 target_entities=target_entities,
-                controllers=controllers,
+                vehicles=vehicles,
                 target_id=target_id,
                 target_info=target_info,
                 urdf_path=urdf_path,
@@ -436,10 +440,16 @@ def main():
                     geom._contype = (1 << (idx + 1))
                     geom._conaffinity = 1
 
-    scene.build()
+    vs.build()      # builds vs.main_scene + constructs each vehicle's VehiclePhysics
     print(f" [DEBUG] Total rigid geoms after build: {scene.sim.rigid_solver.n_geoms}")
     print(f" [DEBUG] Total rigid links after build: {scene.sim.rigid_solver.n_links}")
-    
+
+    # VehiclePhysics is created inside vs.build(); populate the controllers dict
+    # the OSC / state-capture code reads, and print the resolved table now.
+    for tid, veh in vehicles.items():
+        controllers[tid] = veh.physics
+        genesis_vehicle_builder.print_resolved_table(tid, veh.physics.resolved)
+
     # 텐서 관련 Monkey Patch 적용
     genesis_vehicle_builder.apply_monkey_patches(scene)
 
@@ -709,7 +719,7 @@ def main():
                         last_urdf_inputs = recv['urdf_inputs']
 
                 if isinstance(last_urdf_inputs, dict):
-                    for tid, ctrl in controllers.items():
+                    for tid, veh in vehicles.items():
                         steer = throttle = brake = 0.0
                         if tid in last_urdf_inputs:
                             raw_in = list(last_urdf_inputs[tid])
@@ -721,22 +731,21 @@ def main():
                                 steer    = float(raw_in[0])
                                 throttle = float(raw_in[1])
                                 brake    = float(raw_in[2])
-                                
-                        inputs = VehicleInputs(steer=steer, throttle=throttle, brake=brake)
-                        
+
+                        # Stored on the handle; vs.step() (below) applies them.
+                        veh.set_inputs(steer=steer, throttle=throttle, brake=brake)
+
                         curr_inp = (round(steer, 3), round(throttle, 3), round(brake, 3))
                         if last_printed_inputs.get(tid) != curr_inp:
                             last_printed_inputs[tid] = curr_inp
                             print(f" [DEBUG] Vehicle {tid} Inputs: steer={steer:.3f}, throttle={throttle:.3f}, brake={brake:.3f}")
-                            
-                        ctrl.step(inputs)
             
             # 이전 물리 상태 보존
             prev_state = curr_state
             
             try:
                 physics_start = time.perf_counter()
-                scene.step()
+                vs.step()       # applies each vehicle's inputs (physics) + steps the scene
                 physics_end = time.perf_counter()
                 last_step_time = physics_end
                 physics_dur_total += (physics_end - physics_start)
