@@ -74,9 +74,8 @@ def mesh_to_primitive_box(mesh_path, pos, quat, scale, fixed):
     box_pos = [pos[0] + off_world[0], pos[1] + off_world[1], pos[2] + off_world[2]]
     return gs.morphs.Box(size=box_size, pos=box_pos, quat=quat, fixed=fixed)
 
-def build_obstacles(scene, init_data, ue_friction, ue_restitution, vis_mode,
-                    verbose=False, road_raycast_only=False,
-                    structures_as_primitive=False, raycast_scene=None):
+def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
+                    verbose=False, structures_as_primitive=False):
     """
     언리얼 엔진으로부터 수신한 초기 장애물 리스트를 파싱하여
     물질 특성(마찰력, 반발력 등)과 충돌 기하(SDF/Box/Convex 등)를 자동 튜닝하여
@@ -295,54 +294,44 @@ def build_obstacles(scene, init_data, ue_friction, ue_restitution, vis_mode,
         current_color = obs_colors.get(obs_type, (0.7, 0.7, 0.7, 0.5))
         
         is_road_mesh = (obs_type == 5 and ("[Complex" in col_src or is_user_complex))
-        rc_only_mesh = road_raycast_only and is_road_mesh
+        surface = gs.surfaces.Rough(color=current_color, double_sided=is_road_mesh)
+        mat = gs.materials.Rigid(friction=obs_friction,
+                                 coup_restitution=obs_restitution, sdf_cell_size=10000.0)
 
-        if rc_only_mesh:
-            # [Raycast-Only Road] Route the road to the KINEMATIC solver with
-            # use_visual_raycasting=True. The wheel raycaster casts against both
-            # the rigid and kinematic solvers, but the kinematic solver's BVH is
-            # `maybe_static` (no physics-movable link) → its rebuild is SKIPPED
-            # every step, even while the vehicle moves in the rigid solver. A
-            # Rigid material here would land in the rigid solver's BVH, which is
-            # rebuilt every step (a moving vehicle makes it non-static), so the
-            # road's triangles would be re-fitted each frame for nothing. Kinematic
-            # gives no rigid contact (fine: ray-cast wheels + suspension hold the
-            # chassis, the road need not be a contact body).
-            mat = gs.materials.Kinematic(use_visual_raycasting=True)
+        # Route through VehicleScene — it owns the inline-vs-raywheel scene
+        # distribution (collision body in main + a static/synced raycast mirror in
+        # the raycast scene). The caller never touches a scene.
+        #   b_dynamic 0 = static structure/road  -> add_static
+        #   b_dynamic 1 = physics-dynamic         -> add_obstacle(dynamic=True)
+        #   b_dynamic 2 = UE-driven (OSC set_pos) -> add_obstacle(dynamic=False)
+        if b_dynamic == 0:
+            if is_road_mesh and mesh_path and os.path.exists(mesh_path):
+                # Road: convexified collision (morph, from CoACD above) + a DETAILED
+                # kinematic raycast surface, so the wheels hit the true surface, not
+                # the convex bulge. add_static splits collision vs raycast.
+                rc_morph = gs.morphs.Mesh(file=mesh_path, scale=size, pos=pos, quat=quat,
+                                          fixed=is_fixed, align=False, collision=False,
+                                          visualization=True, convexify=False, decimate=False)
+                handle = vs.add_static(collision_morph=morph, raycast_morph=rc_morph,
+                                       material=mat, surface=surface, vis_mode=vis_mode,
+                                       name=f"obs_{obs_id}")
+            else:
+                handle = vs.add_static(morph=morph, material=mat, surface=surface,
+                                       vis_mode=vis_mode, name=f"obs_{obs_id}")
+            obs_entity = handle.entity_main
         else:
-            mat = gs.materials.Rigid(
-                friction=obs_friction,
-                coup_restitution=obs_restitution,
-                sdf_cell_size=10000.0,
-            )
-        
-        obs_entity = scene.add_entity(
-            morph,
-            material=mat,
-            surface=gs.surfaces.Rough(color=current_color, double_sided=is_road_mesh),
-            vis_mode=vis_mode
-        )
+            handle = vs.add_obstacle(morph, dynamic=(b_dynamic == 1),
+                                     material=mat, surface=surface, vis_mode=vis_mode,
+                                     mass=(obs_mass if b_dynamic == 1 else None),
+                                     name=f"obs_{obs_id}")
+            obs_entity = handle.entity
+
         obstacles.append(obs_entity)
 
-        # [Two-scene road] When a raycast_scene is provided, the road is RIGID in
-        # the main scene (collision / rollover); mirror it as a KINEMATIC
-        # visual-raycast mesh in the raycast scene so the wheel rays hit a static
-        # BVH there (see docs/two-scene-raycast.md). Only for road meshes, and
-        # not when rc_only already put it in the (single-scene) raycast form.
-        if raycast_scene is not None and is_road_mesh and not rc_only_mesh \
-                and mesh_path and os.path.exists(mesh_path):
-            raycast_scene.add_entity(
-                gs.morphs.Mesh(file=mesh_path, scale=size, pos=pos, quat=quat,
-                               fixed=is_fixed, align=False, collision=False,
-                               visualization=True, convexify=False, decimate=False),
-                material=gs.materials.Kinematic(use_visual_raycasting=True),
-                surface=gs.surfaces.Rough(color=current_color, double_sided=True))
-        
         if b_dynamic in [1, 2]:
             dynamic_obstacles[obs_id] = obs_entity
             initial_dynamic_states[obs_id] = (np.array(pos, dtype=np.float32), np.array(quat, dtype=np.float32))
 
-        if not is_fixed:
-            entities_to_set_mass.append((obs_entity, obs_mass))
-
+    # Obstacle masses are applied by VehicleScene (add_obstacle mass=); the
+    # returned list stays empty for back-compat with the call sites.
     return obstacles, dynamic_obstacles, initial_dynamic_states, ue_driven_obstacle_ids, entities_to_set_mass

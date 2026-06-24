@@ -185,8 +185,7 @@ def run_l3(args):
         rigid_options=_rigid_opts, show_viewer=not args.headless,
         init_genesis=False,
     )
-    scene = vs.main_scene
-    raycast_scene = vs.raycast_scene
+    scene = vs.main_scene   # alias for sim reads / sim_options tweaks (not entity adds)
 
     plane = None
     if not args.no_floor:
@@ -199,12 +198,10 @@ def run_l3(args):
 
     obstacles, dynamic_obstacles, initial_dynamic_states, ue_driven_obstacle_ids, extra_mass_entities = \
         env_builder.build_obstacles(
-            scene=scene, init_data=init_data,
+            vs=vs, init_data=init_data,
             ue_friction=ue_friction, ue_restitution=ue_restitution,
             vis_mode=args.vis_mode, verbose=args.verbose,
-            road_raycast_only=False,   # road RIGID in main (collision); mirror handles raycast
             structures_as_primitive=getattr(args, "structures_as_primitive", False),
-            raycast_scene=raycast_scene,
         )
 
     # 차량: cfg + morph 만 넘기면 VehicleScene 이 main 엔티티 + raycast proxy/sensor 를
