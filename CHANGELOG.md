@@ -94,8 +94,17 @@ surface). Pose/distance output is identical to `inline` mode (verified:
   separate BVH context from the kinematic terrain), re-synced each step via
   `obstacle.set_pose(...)`, so only its small BVH re-fits while the terrain stays
   static. Verified: the wheel distance tracks the obstacle and matches `inline`
-  as it moves. Server unification (`--road-raycast-only` → `VehicleScene`) is the
-  remaining follow-up.
+  as it moves.
+- **`add_vehicle(cfg=, entity=)`** — register a vehicle the caller built itself
+  (custom URDF / material / surface) with a pre-built `cfg`, instead of a
+  `preset` fn. `urdf_path` is still used for the wheel positions.
+- **Server L3 unification**: `server/l3_runtime.py` now builds via
+  `VehicleScene` (raywheel) — the road is rigid in the main scene (collision /
+  rollover) with a kinematic raycast mirror, superseding the single-scene
+  `--road-raycast-only` on the L3 path. (`env_builder.build_obstacles` gained
+  `raycast_scene=` for the road mirror.) Per-entity (non-L3) `physics_server`
+  and non-road obstacle mirroring remain follow-ups; the OSC round-trip needs UE
+  integration testing.
 - Upstream-correct fix (no second scene): Genesis splitting the rigid BVH into
   static + dynamic subsets — Genesis issue #2878 (open).
 
