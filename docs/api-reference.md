@@ -163,6 +163,9 @@ with it in the main scene; **Wheels sense** = the wheel rays detect it as ground
 ⚠️ **single_scene caveat:** with one scene the raycast target *is* a rigid body,
 so `collision=False` cannot be honored — it still collides. For a true
 no-collision raycast surface use `dual_scene` (kinematic mirror, no collider).
+Likewise `wheel_raycast_morph` (a detailed raycast surface separate from the
+collider) needs the two bodies of dual_scene, so it is **ignored in single_scene
+and logs a warning**.
 
 **`add_dynamic`** — `physics` sets motion; `wheel_raycast` only controls the
 **dual_scene** raycast mirror (see the caveat below):
@@ -185,7 +188,8 @@ In every case the body **collides** (it is a rigid body in the main scene).
 main scene, so *every* rigid body is a raycast target regardless of
 `wheel_raycast` — the flag can only suppress sensing in `dual_scene` (by not
 building the mirror). For "collide but the wheels ignore it" you need
-`dual_scene` + `wheel_raycast=False`.
+`dual_scene` + `wheel_raycast=False`. Setting `wheel_raycast=True` in
+single_scene therefore has no effect and **logs a warning**.
 
 The dual_scene mirror for a `wheel_raycast=True` dynamic body is a *rigid* body in
 the raycast scene's rigid solver (re-synced every `step`), so only its own small

@@ -312,6 +312,16 @@ class VehicleScene:
         col_morph = collision_morph or morph
         name = name or f"static_{len(self._statics)}"
 
+        if not self._two_scene and wheel_raycast_morph is not None:
+            # The split (detailed raycast surface vs coarse collider) needs the two
+            # bodies of dual_scene. In single_scene one rigid body serves both roles,
+            # so the collision geometry is the raycast target and this is dropped.
+            _logger.warning(
+                "add_static(%r): wheel_raycast_morph only applies in dual_scene (a "
+                "separate kinematic raycast surface). In single_scene the one rigid "
+                "body is both collider and raycast target, so a distinct "
+                "wheel_raycast_morph is ignored.", name)
+
         body = StaticBody(name=name, has_collision=bool(collision), has_raycast=True)
 
         if collision and col_morph is not None:
@@ -378,12 +388,22 @@ class VehicleScene:
         name = name or f"dynamic_{len(self._dynamics)}"
         mat = material if material is not None else gs.materials.Rigid()
 
-        if wheel_raycast and type(morph).__name__ not in _PRIMITIVE_MORPHS:
+        if wheel_raycast and not self._two_scene:
+            # wheel_raycast adds a dedicated raycast-scene mirror, which only
+            # exists in dual_scene. In single_scene there is no raycast scene, and
+            # a rigid body is already a wheel-raycast target via the main scene, so
+            # the flag changes nothing.
+            _logger.warning(
+                "add_dynamic(%r): wheel_raycast=True has no effect in single_scene "
+                "mode — there is no raycast scene to mirror into, and the rigid body "
+                "is already a wheel-raycast target via the main scene. The flag only "
+                "adds a dedicated mirror in dual_scene.", name)
+        elif wheel_raycast and type(morph).__name__ not in _PRIMITIVE_MORPHS:
             _logger.warning(
                 "add_dynamic(%r): wheel_raycast=True on a non-primitive (%s) morph — "
-                "the mirror's BVH re-fits every step (cost grows with face count). "
-                "Prefer a primitive collider (Box/Sphere/Cylinder) for a wheel_raycast "
-                "dynamic body.", name, type(morph).__name__)
+                "the dual_scene mirror's BVH re-fits every step (cost grows with face "
+                "count). Prefer a primitive collider (Box/Sphere/Cylinder) for a "
+                "wheel_raycast dynamic body.", name, type(morph).__name__)
 
         obs = DynamicBody(name=name, is_dynamic=bool(physics),
                           has_raycast=bool(wheel_raycast))
