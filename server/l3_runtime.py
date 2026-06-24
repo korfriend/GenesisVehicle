@@ -190,11 +190,12 @@ def run_l3(args):
 
     plane = None
     if not args.no_floor:
-        plane = scene.add_entity(gs.morphs.Plane(),
-                                 material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution))
-        # Kinematic floor mirror so the wheels sense flat ground in the raycast scene.
-        raycast_scene.add_entity(gs.morphs.Plane(),
-                                 material=gs.materials.Kinematic(use_visual_raycasting=True))
+        # VehicleScene routes the floor: rigid in main + kinematic raycast mirror
+        # (raywheel) — no manual main/raycast handling here.
+        plane = vs.add_static(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution),
+            name="ground")
 
     obstacles, dynamic_obstacles, initial_dynamic_states, ue_driven_obstacle_ids, extra_mass_entities = \
         env_builder.build_obstacles(
@@ -206,25 +207,23 @@ def run_l3(args):
             raycast_scene=raycast_scene,
         )
 
-    # 차량: 엔티티 1개 + Raycaster 1개 + 공유 cfg
+    # 차량: cfg + morph 만 넘기면 VehicleScene 이 main 엔티티 + raycast proxy/sensor 를
+    # 만들고 build 에서 VehiclePhysics(sensor=None, 거리 주입)를 구성한다.
     first_info = target_dict[tids[0]]
     t_fric = first_info.get('friction', ue_friction)
     temp_urdf = vehicle_builder.strip_wheel_collisions(urdf_path)
-    car = scene.add_entity(
-        gs.morphs.URDF(file=temp_urdf, pos=first_info.get('pos', [0, 0, 2]),
-                       quat=first_info.get('quat', [1, 0, 0, 0]), fixed=False, align=False),
-        material=gs.materials.Rigid(friction=t_fric, coup_restitution=0.0, sdf_cell_size=10000.0),
-        surface=gs.surfaces.Rough(color=(1.0, 0.3, 0.3, 0.5)),
-        vis_mode=args.vis_mode,
-    )
     cfg = vehicle_builder.build_cfg(urdf_path, mapping, t_fric, target_id="L3-shared")
     # VisualJointSync only for the Genesis viewer; headless uses the closed-form
     # wheel_visual_transforms capture (skip the per-step engine FK cost).
     cfg.enable_visual_joint_sync = not args.headless
-    # Register with VehicleScene: it adds the raycast-scene proxy + wheel sensor
-    # and (at build) constructs the VehiclePhysics with sensor=None (distances
-    # are injected from the raycast scene each step).
-    veh = vs.add_vehicle(urdf_path, cfg=cfg, entity=car, name="L3-shared")
+    veh = vs.add_vehicle(
+        urdf_path, cfg=cfg,
+        morph=gs.morphs.URDF(file=temp_urdf, pos=first_info.get('pos', [0, 0, 2]),
+                             quat=first_info.get('quat', [1, 0, 0, 0]), fixed=False, align=False),
+        material=gs.materials.Rigid(friction=t_fric, coup_restitution=0.0, sdf_cell_size=10000.0),
+        surface=gs.surfaces.Rough(color=(1.0, 0.3, 0.3, 0.5)), vis_mode=args.vis_mode,
+        name="L3-shared")
+    car = veh.entity
 
     # 4. 배치 빌드 — VehicleScene 이 main + raycast 씬을 함께 빌드하고 VehiclePhysics 생성
     vs.build()
