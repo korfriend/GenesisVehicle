@@ -88,6 +88,19 @@ def _clone_morph(morph, **updates):
         return morph
 
 
+def _add_kwargs(material=None, surface=None, vis_mode=None):
+    """Build the kwargs for ``scene.add_entity`` omitting any that are None, so
+    callers can pass-through optional material / surface / vis_mode uniformly."""
+    kw = {}
+    if material is not None:
+        kw["material"] = material
+    if surface is not None:
+        kw["surface"] = surface
+    if vis_mode is not None:
+        kw["vis_mode"] = vis_mode
+    return kw
+
+
 @dataclass
 class StaticBody:
     """Handle for a registered static body. ``is_static``/``has_collision``/
@@ -247,6 +260,7 @@ class VehicleScene:
         self._vehicles: list[Vehicle] = []
         self._statics: list[StaticBody] = []
         self._obstacles: list[Obstacle] = []
+        self._pending_mass: list = []   # (entity, mass) applied after build()
 
     # -----------------------------------------------------------------
     # Registration (before build)
@@ -261,6 +275,8 @@ class VehicleScene:
         collision: bool = True,
         raycast: bool = True,
         material: Any = None,
+        surface: Any = None,
+        vis_mode: Any = None,
         name: Optional[str] = None,
     ) -> StaticBody:
         """Register a static body (terrain / mesh / plane / primitive).
@@ -271,6 +287,10 @@ class VehicleScene:
         for high-poly or non-convex meshes: a rigid mesh is auto-convexified for
         collision (so a rigid-mesh raycast hits the convex bulge, not the true
         surface), whereas the kinematic raycast surface stays exact.
+
+        VehicleScene owns the scene routing: the collision body lands in the main
+        scene (rigid) and, in raywheel mode, a kinematic raycast mirror lands in
+        the raycast scene. Callers never touch the underlying scenes.
         """
         self._require_not_built()
         if morph is None and raycast_morph is None and collision_morph is None:
@@ -283,18 +303,22 @@ class VehicleScene:
 
         if collision and col_morph is not None:
             mat = material if material is not None else gs.materials.Rigid()
-            body.entity_main = self.main_scene.add_entity(col_morph, material=mat)
+            body.entity_main = self.main_scene.add_entity(
+                col_morph, **_add_kwargs(mat, surface, vis_mode))
 
         if raycast and rc_morph is not None:
             if self._two_scene:
                 # Kinematic visual-raycast body in the raycast scene → static BVH.
                 body.entity_raycast = self.raycast_scene.add_entity(
-                    rc_morph, material=gs.materials.Kinematic(use_visual_raycasting=True))
+                    rc_morph, **_add_kwargs(
+                        gs.materials.Kinematic(use_visual_raycasting=True),
+                        surface, vis_mode))
             else:
                 # single mode: the rigid collision body IS the raycast target.
                 if body.entity_main is None:
                     mat = material if material is not None else gs.materials.Rigid()
-                    body.entity_main = self.main_scene.add_entity(rc_morph, material=mat)
+                    body.entity_main = self.main_scene.add_entity(
+                        rc_morph, **_add_kwargs(mat, surface, vis_mode))
                 body.entity_raycast = body.entity_main
 
         self._statics.append(body)
@@ -318,6 +342,9 @@ class VehicleScene:
         dynamic: bool = False,
         raycast: bool = True,
         material: Any = None,
+        surface: Any = None,
+        vis_mode: Any = None,
+        mass: Optional[float] = None,
         name: Optional[str] = None,
     ) -> Obstacle:
         """Register an obstacle the wheels may need to **sense** (drive onto /
@@ -328,6 +355,8 @@ class VehicleScene:
         ``raycast=True`` in raywheel mode a synced rigid mirror is added to the
         raycast scene so the wheels' rays hit it; the mirror is re-synced every
         ``step`` and re-fits only its own small BVH, leaving the terrain static.
+        In inline mode the single main-scene rigid body is already a raycast
+        target. VehicleScene owns the routing — the caller never touches a scene.
         """
         self._require_not_built()
         name = name or f"obstacle_{len(self._obstacles)}"
@@ -336,7 +365,10 @@ class VehicleScene:
         obs = Obstacle(name=name, is_dynamic=bool(dynamic),
                        has_raycast=bool(raycast))
         main_morph = _clone_morph(morph, fixed=not dynamic)
-        obs.entity = self.main_scene.add_entity(main_morph, material=mat)
+        obs.entity = self.main_scene.add_entity(
+            main_morph, **_add_kwargs(mat, surface, vis_mode))
+        if mass is not None:
+            self._pending_mass.append((obs.entity, float(mass)))
 
         if raycast and self._two_scene:
             # Rigid + fixed + collision mirror in the raycast scene's RIGID
@@ -344,7 +376,7 @@ class VehicleScene:
             # re-syncing it each step re-fits only this small body.
             mirror_morph = _clone_morph(morph, fixed=True, collision=True)
             obs.mirror = self.raycast_scene.add_entity(
-                mirror_morph, material=gs.materials.Rigid())
+                mirror_morph, **_add_kwargs(gs.materials.Rigid(), surface, vis_mode))
 
         self._obstacles.append(obs)
         return obs
@@ -357,19 +389,24 @@ class VehicleScene:
         pos: tuple = (0.0, 0.0, 1.0),
         quat: Optional[tuple] = None,
         material: Any = None,
+        surface: Any = None,
+        vis_mode: Any = None,
         stability: str = "control",
         name: Optional[str] = None,
         raycaster_max_range: float = 20.0,
         cfg: Any = None,
+        morph: Any = None,
         entity: Any = None,
     ) -> Vehicle:
-        """Register a vehicle. The rigid entity goes in the main scene; in
-        raywheel mode a kinematic proxy + wheel sensor go in the raycast scene.
+        """Register a vehicle. VehicleScene builds the rigid entity in the main
+        scene and, in raywheel mode, the kinematic proxy + wheel sensor in the
+        raycast scene — the caller never touches a scene.
 
-        Provide ``preset`` (a preset fn → cfg) OR a pre-built ``cfg``. Provide a
-        pre-built ``entity`` (already added to ``main_scene`` with custom
-        material / surface / vis_mode, e.g. by the L3 server) OR let it be built
-        from ``urdf_path``. ``urdf_path`` is always used for the wheel positions.
+        cfg: ``preset`` (a preset fn → cfg) OR a pre-built ``cfg``.
+        entity geometry: pass ``morph`` (e.g. ``gs.morphs.URDF(stripped_path,…)``,
+        built internally with ``material`` / ``surface`` / ``vis_mode``), or let
+        it be built from ``urdf_path``. ``entity`` is a legacy escape hatch for a
+        caller-built entity. ``urdf_path`` always gives the wheel positions.
         """
         self._require_not_built()
         if cfg is None and preset is None:
@@ -385,14 +422,15 @@ class VehicleScene:
         veh._n_envs = self.n_envs
 
         if entity is not None:
-            veh.entity = entity        # caller already added it to main_scene
+            veh.entity = entity        # legacy escape hatch: caller-built entity
         else:
-            morph_kw = dict(file=urdf_path, pos=pos)
-            if quat is not None:
-                morph_kw["quat"] = quat
-            morph = gs.morphs.URDF(**morph_kw)
-            veh.entity = (self.main_scene.add_entity(morph) if material is None
-                          else self.main_scene.add_entity(morph, material=material))
+            if morph is None:
+                morph_kw = dict(file=urdf_path, pos=pos)
+                if quat is not None:
+                    morph_kw["quat"] = quat
+                morph = gs.morphs.URDF(**morph_kw)
+            veh.entity = self.main_scene.add_entity(
+                morph, **_add_kwargs(material, surface, vis_mode))
 
         if self._two_scene:
             # raycast scene: lightweight pose-carrier proxy + wheel sensor.
@@ -445,6 +483,10 @@ class VehicleScene:
             sensor = None if self._two_scene else veh.sensor
             veh.physics = VehiclePhysics(
                 self.main_scene, veh.entity, sensor, veh.cfg, n_envs=self.n_envs)
+
+        # Apply any per-obstacle mass overrides now that entities are built.
+        for entity, mass in self._pending_mass:
+            entity.set_mass(mass)
         self._built = True
 
     def _measure_distances(self) -> dict:
@@ -504,6 +546,16 @@ class VehicleScene:
     @property
     def obstacles(self) -> list:
         return list(self._obstacles)
+
+    @property
+    def is_two_scene(self) -> bool:
+        """True in raywheel mode (a separate static raycast scene exists;
+        ``raycast_scene`` is non-None). False in inline mode (one scene).
+        Callers should normally NOT branch on this — register geometry via
+        ``add_static`` / ``add_obstacle`` / ``add_vehicle`` and let VehicleScene
+        route it to the right scene(s). Exposed for diagnostics / introspection
+        (``raycast_mode`` gives the string form)."""
+        return self._two_scene
 
     # ---- internals ----
     def _sync_obstacle(self, obs: "Obstacle") -> None:
