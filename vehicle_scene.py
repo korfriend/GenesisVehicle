@@ -118,27 +118,29 @@ class StaticBody:
 
 @dataclass
 class Obstacle:
-    """Handle for a registered obstacle — a body the wheels may need to *sense*
-    (raycast), not just collide with. Unlike a StaticBody its raycast mirror is
-    re-synced every step, so it tracks a moving / dynamic obstacle.
+    """Handle for a registered moving body the wheels may need to *sense*
+    (raycast), not just collide with (returned by :meth:`VehicleScene.add_dynamic`).
+    Unlike a StaticBody its ``entity_raycast`` is re-synced every step, so it
+    tracks the body as it moves.
 
-    In raywheel mode the mirror is a rigid, fixed, *collision-enabled* body in
-    the raycast scene's RIGID solver — a separate BVH context from the kinematic
-    terrain, so re-fitting it each step does NOT disturb the static terrain BVH.
+    In dual_scene mode ``entity_raycast`` is a rigid, fixed, collision-enabled
+    body in the raycast scene's RIGID solver — a separate BVH context from the
+    kinematic terrain, so re-fitting it each step does NOT disturb the static
+    terrain BVH. In single_scene mode it is None (the main entity is the target).
     """
     name: str
     is_dynamic: bool
     has_raycast: bool
-    entity: Any = None            # rigid body in the main scene (physics)
-    mirror: Any = None            # synced raycast target in the raycast scene
+    entity_main: Any = None       # rigid body in the main scene (physics)
+    entity_raycast: Any = None    # synced raycast target in the raycast scene
 
     def set_pose(self, pos=None, quat=None, *, zero_velocity=True):
-        """Move a user-controlled obstacle in the main scene (the mirror follows
-        on the next ``VehicleScene.step``)."""
+        """Move a user-controlled body in the main scene (the raycast mirror
+        follows on the next ``VehicleScene.step``)."""
         if pos is not None:
-            self.entity.set_pos(pos, zero_velocity=zero_velocity)
+            self.entity_main.set_pos(pos, zero_velocity=zero_velocity)
         if quat is not None:
-            self.entity.set_quat(quat, zero_velocity=zero_velocity)
+            self.entity_main.set_quat(quat, zero_velocity=zero_velocity)
 
 
 class Vehicle:
@@ -213,7 +215,7 @@ class VehicleScene:
         n_envs: int = 1,
         dt: float = 1.0 / 200.0,
         backend: str = "gpu",
-        raycast_mode: str = "raywheel",
+        raycast_mode: str = "dual_scene",
         gravity: tuple = (0.0, 0.0, -9.81),
         substeps: int = 4,
         sim_options: Any = None,
@@ -223,12 +225,13 @@ class VehicleScene:
         init_genesis: bool = True,
     ) -> None:
         # Back-compat aliases for the pre-rename names.
-        raycast_mode = {"split": "raywheel", "single": "inline"}.get(
-            raycast_mode, raycast_mode)
-        if raycast_mode not in ("raywheel", "inline"):
+        raycast_mode = {"raywheel": "dual_scene", "split": "dual_scene",
+                        "inline": "single_scene", "single": "single_scene"}.get(
+                            raycast_mode, raycast_mode)
+        if raycast_mode not in ("dual_scene", "single_scene"):
             raise ValueError(
-                f"raycast_mode must be 'raywheel' (optimized, default) or "
-                f"'inline' (classic), got {raycast_mode!r}")
+                f"raycast_mode must be 'dual_scene' (default) or 'single_scene', "
+                f"got {raycast_mode!r}")
         if n_envs < 1:
             raise ValueError(f"n_envs must be >= 1, got {n_envs}")
         # L3 batching: both scenes build with the same n_envs; the proxy and the
@@ -238,7 +241,7 @@ class VehicleScene:
         self.dt = dt
         self.backend = backend
         self.raycast_mode = raycast_mode
-        self._two_scene = raycast_mode == "raywheel"
+        self._two_scene = raycast_mode == "dual_scene"
         self._built = False
 
         if init_genesis:
@@ -335,11 +338,11 @@ class VehicleScene:
                                material=gs.materials.Rigid(friction=friction),
                                name="ground")
 
-    def add_obstacle(
+    def add_dynamic(
         self,
         morph: Any,
         *,
-        dynamic: bool = False,
+        physics: bool = True,
         raycast: bool = True,
         material: Any = None,
         surface: Any = None,
@@ -347,35 +350,38 @@ class VehicleScene:
         mass: Optional[float] = None,
         name: Optional[str] = None,
     ) -> Obstacle:
-        """Register an obstacle the wheels may need to **sense** (drive onto /
+        """Register a MOVING body the wheels may need to **sense** (drive onto /
         over), not just collide with — e.g. a ramp, curb, or moving platform.
+        Use :meth:`add_static` for bodies that never move.
 
-        ``dynamic=True`` makes the main-scene body free (moves under physics);
-        otherwise it is fixed (teleport it with ``obstacle.set_pose``). With
-        ``raycast=True`` in raywheel mode a synced rigid mirror is added to the
-        raycast scene so the wheels' rays hit it; the mirror is re-synced every
-        ``step`` and re-fits only its own small BVH, leaving the terrain static.
-        In inline mode the single main-scene rigid body is already a raycast
-        target. VehicleScene owns the routing — the caller never touches a scene.
+        ``physics=True`` (default): a free rigid body that moves under physics.
+        ``physics=False``: a fixed body you teleport yourself with
+        ``handle.set_pose(...)`` (e.g. an externally / UE-driven obstacle).
+
+        With ``raycast=True`` in dual_scene mode a synced rigid raycast mirror is
+        added to the raycast scene (re-synced every ``step``; re-fits only its own
+        small BVH, leaving the terrain static). In single_scene mode the one
+        main-scene rigid body is already the raycast target. VehicleScene owns the
+        routing — the caller never touches a scene.
         """
         self._require_not_built()
-        name = name or f"obstacle_{len(self._obstacles)}"
+        name = name or f"dynamic_{len(self._obstacles)}"
         mat = material if material is not None else gs.materials.Rigid()
 
-        obs = Obstacle(name=name, is_dynamic=bool(dynamic),
+        obs = Obstacle(name=name, is_dynamic=bool(physics),
                        has_raycast=bool(raycast))
-        main_morph = _clone_morph(morph, fixed=not dynamic)
-        obs.entity = self.main_scene.add_entity(
+        main_morph = _clone_morph(morph, fixed=not physics)
+        obs.entity_main = self.main_scene.add_entity(
             main_morph, **_add_kwargs(mat, surface, vis_mode))
         if mass is not None:
-            self._pending_mass.append((obs.entity, float(mass)))
+            self._pending_mass.append((obs.entity_main, float(mass)))
 
         if raycast and self._two_scene:
             # Rigid + fixed + collision mirror in the raycast scene's RIGID
             # solver (a separate BVH context from the kinematic terrain), so
             # re-syncing it each step re-fits only this small body.
             mirror_morph = _clone_morph(morph, fixed=True, collision=True)
-            obs.mirror = self.raycast_scene.add_entity(
+            obs.entity_raycast = self.raycast_scene.add_entity(
                 mirror_morph, **_add_kwargs(gs.materials.Rigid(), surface, vis_mode))
 
         self._obstacles.append(obs)
@@ -396,17 +402,16 @@ class VehicleScene:
         raycaster_max_range: float = 20.0,
         cfg: Any = None,
         morph: Any = None,
-        entity: Any = None,
     ) -> Vehicle:
         """Register a vehicle. VehicleScene builds the rigid entity in the main
-        scene and, in raywheel mode, the kinematic proxy + wheel sensor in the
+        scene and, in dual_scene mode, the kinematic proxy + wheel sensor in the
         raycast scene — the caller never touches a scene.
 
         cfg: ``preset`` (a preset fn → cfg) OR a pre-built ``cfg``.
         entity geometry: pass ``morph`` (e.g. ``gs.morphs.URDF(stripped_path,…)``,
         built internally with ``material`` / ``surface`` / ``vis_mode``), or let
-        it be built from ``urdf_path``. ``entity`` is a legacy escape hatch for a
-        caller-built entity. ``urdf_path`` always gives the wheel positions.
+        it be built from ``urdf_path``. ``urdf_path`` always gives the wheel
+        positions.
         """
         self._require_not_built()
         if cfg is None and preset is None:
@@ -421,16 +426,13 @@ class VehicleScene:
         veh._two_scene = self._two_scene
         veh._n_envs = self.n_envs
 
-        if entity is not None:
-            veh.entity = entity        # legacy escape hatch: caller-built entity
-        else:
-            if morph is None:
-                morph_kw = dict(file=urdf_path, pos=pos)
-                if quat is not None:
-                    morph_kw["quat"] = quat
-                morph = gs.morphs.URDF(**morph_kw)
-            veh.entity = self.main_scene.add_entity(
-                morph, **_add_kwargs(material, surface, vis_mode))
+        if morph is None:
+            morph_kw = dict(file=urdf_path, pos=pos)
+            if quat is not None:
+                morph_kw["quat"] = quat
+            morph = gs.morphs.URDF(**morph_kw)
+        veh.entity = self.main_scene.add_entity(
+            morph, **_add_kwargs(material, surface, vis_mode))
 
         if self._two_scene:
             # raycast scene: lightweight pose-carrier proxy + wheel sensor.
@@ -505,7 +507,7 @@ class VehicleScene:
         for veh in self._vehicles:
             veh._sync_proxy()
         for obs in self._obstacles:
-            if obs.mirror is not None:
+            if obs.entity_raycast is not None:
                 self._sync_obstacle(obs)
         self.raycast_scene.step()
         return {veh: read_distances(veh.sensor, self.n_envs)
@@ -547,26 +549,16 @@ class VehicleScene:
     def obstacles(self) -> list:
         return list(self._obstacles)
 
-    @property
-    def is_two_scene(self) -> bool:
-        """True in raywheel mode (a separate static raycast scene exists;
-        ``raycast_scene`` is non-None). False in inline mode (one scene).
-        Callers should normally NOT branch on this — register geometry via
-        ``add_static`` / ``add_obstacle`` / ``add_vehicle`` and let VehicleScene
-        route it to the right scene(s). Exposed for diagnostics / introspection
-        (``raycast_mode`` gives the string form)."""
-        return self._two_scene
-
     # ---- internals ----
     def _sync_obstacle(self, obs: "Obstacle") -> None:
         """Mirror an obstacle's main-scene pose onto its raycast-scene mirror so
         the wheels' rays see it at its current position."""
-        p = obs.entity.get_pos()
-        q = obs.entity.get_quat()
+        p = obs.entity_main.get_pos()
+        q = obs.entity_main.get_quat()
         if p.dim() > 1 and p.shape[0] == 1:
             p, q = p[0], q[0]
-        obs.mirror.set_pos(p, relative=False)
-        obs.mirror.set_quat(q, relative=False)
+        obs.entity_raycast.set_pos(p, relative=False)
+        obs.entity_raycast.set_quat(q, relative=False)
 
     def _require_not_built(self) -> None:
         if self._built:

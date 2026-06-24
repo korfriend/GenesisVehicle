@@ -8,28 +8,28 @@ What this demonstrates
 ----------------------
 - ``VehicleScene`` as the single entry point: ``add_static_terrain`` +
   ``add_vehicle`` + ``build`` + a loop of ``veh.set_inputs(...) / vs.step()``.
-- ``raycast_mode="raywheel"`` (default): the terrain is raycast in a separate
+- ``raycast_mode="dual_scene"`` (default): the terrain is raycast in a separate
   scene as a *kinematic* body (BVH built once, never re-fit, shared across batch
   envs) while collision/rollover run in the main scene with the terrain as a
-  *rigid* body. The wheel distances are identical to ``"inline"`` mode; only the
+  *rigid* body. The wheel distances are identical to ``"single_scene"`` mode; only the
   per-step raycast cost differs.
 
-Why raywheel helps (and when it does not)
+Why dual_scene helps (and when it does not)
 -----------------------------------------
-The ``"inline"`` (one-scene) wheel raycaster re-fits a BVH over every face each
-step (the vehicle moves → the solver is non-static). ``"raywheel"`` keeps the
+The ``"single_scene"`` (one-scene) wheel raycaster re-fits a BVH over every face each
+step (the vehicle moves → the solver is non-static). ``"dual_scene"`` keeps the
 terrain BVH static, so the *raycast* cost stops scaling with terrain face count
 AND with ``n_envs`` (the static BVH is shared across envs). The win grows with
 both: marginal at ``n_envs=1`` on GPU (~1x), large for batched rollouts
-(~3.4x @256 envs). ``"inline"`` can be marginally faster only on small/flat
+(~3.4x @256 envs). ``"single_scene"`` can be marginally faster only on small/flat
 terrain at ``n_envs=1``. See ``docs/two-scene-raycast.md``.
 
 Run
 ---
-    python -m genesis_vehicle.samples.two_scene_terrain                 # raywheel (default)
-    python -m genesis_vehicle.samples.two_scene_terrain --mode inline
-    python -m genesis_vehicle.samples.two_scene_terrain --compare           # raywheel vs inline
-    python -m genesis_vehicle.samples.two_scene_terrain --compare --n-envs 64  # L3: raywheel pulls ahead
+    python -m genesis_vehicle.samples.two_scene_terrain                 # dual_scene (default)
+    python -m genesis_vehicle.samples.two_scene_terrain --mode single_scene
+    python -m genesis_vehicle.samples.two_scene_terrain --compare           # dual_scene vs single_scene
+    python -m genesis_vehicle.samples.two_scene_terrain --compare --n-envs 64  # L3: dual_scene pulls ahead
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ def run(mode: str, backend: str, horizontal_scale: float, n_envs: int = 1,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["raywheel", "inline"], default="raywheel")
+    ap.add_argument("--mode", choices=["dual_scene", "single_scene"], default="dual_scene")
     ap.add_argument("--cpu", action="store_true", help="Use the CPU backend.")
     ap.add_argument("--compare", action="store_true",
                     help="Run single AND split, print pose match + timing.")
@@ -120,8 +120,8 @@ def main():
               f"{r['ms']:.3f} ms/step  ({args.n_envs / r['ms'] * 1e3:.0f} env-steps/s)")
         return
 
-    ri = run("inline", backend, args.horizontal_scale, args.n_envs, measure=True)
-    rr = run("raywheel", backend, args.horizontal_scale, args.n_envs, measure=True)
+    ri = run("single_scene", backend, args.horizontal_scale, args.n_envs, measure=True)
+    rr = run("dual_scene", backend, args.horizontal_scale, args.n_envs, measure=True)
     print(f"\n{'mode':>9} | {'faces':>7} | {'x':>7} | {'speed':>6} | {'ms/step':>8} | "
           f"{'env-steps/s':>11}")
     print("-" * 64)
@@ -131,7 +131,7 @@ def main():
               f"{args.n_envs / r['ms'] * 1e3:>11.0f}")
     dx = abs(ri["x"] - rr["x"])
     print(f"\npose match (|Δx|={dx:.3f} m): {'OK' if dx < 0.5 else 'DIVERGED'}")
-    print(f"raywheel speedup vs inline: {ri['ms'] / rr['ms']:.2f}x  "
+    print(f"dual_scene speedup vs single_scene: {ri['ms'] / rr['ms']:.2f}x  "
           f"(grows with n_envs and terrain face count; ~1x at n_envs=1 on GPU)")
 
 
