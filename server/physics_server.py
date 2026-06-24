@@ -410,25 +410,24 @@ def main():
                 target_morph = gs.morphs.Box(size=size, pos=t_pos, quat=t_quat)
 
             t_color = (1.0, 0.8, 0.1, 0.6)
-            t_entity = scene.add_entity(
-                target_morph,
+            # Generic (non-vehicle) target — a free rigid body the OSC layer
+            # teleports. Routed through VehicleScene like any obstacle.
+            _obs = vs.add_obstacle(
+                target_morph, dynamic=True,
                 material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution, sdf_cell_size=10000.0),
-                surface=gs.surfaces.Rough(color=t_color),
-                vis_mode=args.vis_mode
-            )
-            target_entities[target_id] = t_entity
-            entities_to_set_mass.append((t_entity, target_info.get('mass', 1.0)))
+                surface=gs.surfaces.Rough(color=t_color), vis_mode=args.vis_mode,
+                mass=target_info.get('mass', 1.0), name=f"target_{target_id}")
+            target_entities[target_id] = _obs.entity
             print(f" [Genesis] Created Target {target_id} at {t_pos}")
             
     # 5. 언리얼 엔진 환경 동기화 (헬퍼 모듈에 위임)
     obstacles, dynamic_obstacles, initial_dynamic_states, ue_driven_obstacle_ids, extra_mass_entities = genesis_env_builder.build_obstacles(
-        scene=scene,
+        vs=vs,
         init_data=init_data,
         ue_friction=ue_friction,
         ue_restitution=ue_restitution,
         vis_mode=args.vis_mode,
         verbose=args.verbose,
-        road_raycast_only=args.road_raycast_only,
         structures_as_primitive=args.structures_as_primitive,
     )
     entities_to_set_mass.extend(extra_mass_entities)
