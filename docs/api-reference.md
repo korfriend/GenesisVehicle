@@ -24,7 +24,7 @@ notes in [`two-scene-raycast.md`](two-scene-raycast.md).
 ```python
 class VehicleScene:
     def __init__(*, n_envs=1, dt=1/200, backend="gpu",
-                 raycast_mode="raywheel",          # "raywheel" (default) | "inline"
+                 raycast_mode="dual_scene",        # "dual_scene" (default) | "single_scene"
                  gravity=(0,0,-9.81), substeps=4,
                  sim_options=None, rigid_options=None, vis_options=None,
                  show_viewer=False, init_genesis=True)
@@ -33,23 +33,24 @@ class VehicleScene:
     def add_vehicle(urdf_path, preset=None, *, pos=(0,0,1), quat=None,
                     material=None, stability="control", name=None,
                     raycaster_max_range=20.0,
-                    cfg=None, entity=None) -> Vehicle
-    #   preset (fn→cfg) OR a pre-built cfg=; and a pre-built entity= already
-    #   added to main_scene (custom material/surface, e.g. the L3 server) OR
-    #   built from urdf_path. urdf_path always gives the wheel positions.
+                    cfg=None, morph=None) -> Vehicle
+    #   preset (fn→cfg) OR a pre-built cfg=; and a morph= the VehicleScene
+    #   builds into an entity internally (custom material/surface, e.g. the L3
+    #   server) OR built from urdf_path. urdf_path always gives the wheel
+    #   positions.
     def add_static(*, morph=None, raycast_morph=None, collision_morph=None,
                    collision=True, raycast=True, material=None, name=None) -> StaticBody
     def add_static_terrain(morph, **kwargs) -> StaticBody     # alias of add_static(morph=)
     def add_ground_plane(*, friction=0.85) -> StaticBody
-    def add_obstacle(morph, *, dynamic=False, raycast=True,   # a body wheels must SENSE
-                     material=None, name=None) -> Obstacle
+    def add_dynamic(morph, *, physics=False, raycast=True,    # a body wheels must SENSE
+                    material=None, name=None) -> Obstacle
 
     def build() -> None
     def step() -> None
     def reset() -> None
 
     main_scene: gs.Scene                 # physics/collision
-    raycast_scene: gs.Scene | None       # raywheel mode only (None for inline)
+    raycast_scene: gs.Scene | None       # dual_scene mode only (None for single_scene)
     vehicles: list[Vehicle]              # property
     statics: list[StaticBody]            # property
     obstacles: list[Obstacle]            # property
@@ -63,23 +64,24 @@ class Vehicle:                           # handle returned by add_vehicle
 class StaticBody:                        # handle returned by add_static
     name; is_static; has_collision; has_raycast
     entity_main                          # rigid collision entity (main scene)
-    entity_raycast                       # kinematic raycast entity (raycast scene; raywheel)
+    entity_raycast                       # kinematic raycast entity (raycast scene; dual_scene)
 
-class Obstacle:                          # handle returned by add_obstacle
+class Obstacle:                          # handle returned by add_dynamic
     name; is_dynamic; has_raycast
-    entity                               # rigid body in the main scene (physics)
-    mirror                               # synced raycast target in the raycast scene (raywheel)
-    def set_pose(pos=None, quat=None)    # move a user-controlled obstacle (mirror follows)
+    entity_main                          # rigid body in the main scene (physics)
+    entity_raycast                       # synced raycast target in the raycast scene (dual_scene)
+    def set_pose(pos=None, quat=None)    # move a user-controlled obstacle (raycast target follows)
 ```
 
-`raycast_mode="raywheel"` (default) raycasts static terrain in a separate scene
-(BVH built once, shared across envs); `"inline"` is the classic one scene.
-Legacy `"split"`/`"single"` are accepted aliases. Use `collision_morph` to give a
+`raycast_mode="dual_scene"` (default) raycasts static terrain in a separate scene
+(BVH built once, shared across envs); `"single_scene"` is the classic one scene.
+The legacy names `"raywheel"`/`"inline"` and `"split"`/`"single"` are accepted as
+aliases for `"dual_scene"`/`"single_scene"`. Use `collision_morph` to give a
 coarse/convex collider while raycasting a detailed surface (non-convex meshes are
-convexified for collision, so an inline rigid-mesh raycast hits the convex bulge
-— the raywheel kinematic raycast stays exact). Scope: one or more vehicles (L2),
+convexified for collision, so a single_scene rigid-mesh raycast hits the convex bulge
+— the dual_scene kinematic raycast stays exact). Scope: one or more vehicles (L2),
 L3 (`n_envs >= 1`), static terrain/mesh targets, and dynamic raycast obstacles
-(`add_obstacle`).
+(`add_dynamic`).
 
 ## 1. `VehiclePhysics` — the driver
 
@@ -92,7 +94,7 @@ class VehiclePhysics:
 
 `step(distances=...)` injects externally-measured wheel-ground distances
 (shape `(n_envs, n_wheels)`) instead of reading `self.sensor` — the hook
-`VehicleScene`'s raywheel mode uses. `distances=None` reads the sensor as before
+`VehicleScene`'s dual_scene mode uses. `distances=None` reads the sensor as before
 (`sensor=None` is then allowed at construction).
 
 ### Multi-vehicle (L2 batching, v0.5.11+)

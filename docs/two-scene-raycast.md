@@ -14,10 +14,11 @@ Genesis scene(s), the registered vehicles and static bodies, and the per-step
 loop, so you never call `gs.init` / `scene.build` / `scene.step` / `sensor.read`
 directly. It also hosts the two-scene raycast optimization.
 
-**Modes.** `raycast_mode="raywheel"` (default) is the ray-wheel-dedicated
-optimization described below; `raycast_mode="inline"` is the classic one-scene
-path. The legacy names `"split"` / `"single"` are accepted as aliases. In the
-tables below, "single" = `inline`, "split" = `raywheel`.
+**Modes.** `raycast_mode="dual_scene"` (default) is the ray-wheel-dedicated
+optimization described below; `raycast_mode="single_scene"` is the classic
+one-scene path. The legacy names `"raywheel"` / `"inline"` and `"split"` /
+`"single"` are accepted as aliases for `"dual_scene"` / `"single_scene"`. In the
+tables below, "single" = `single_scene`, "split" = `dual_scene`.
 
 ## The problem it solves
 
@@ -37,7 +38,7 @@ with terrain face count:
 The **re-cast** (actually shooting the rays) is cheap and ~flat (~2.5 ms,
 independent of face count). The expensive part is the **rebuild**.
 
-## The mechanism (`raycast_mode="raywheel"`, the default)
+## The mechanism (`raycast_mode="dual_scene"`, the default)
 
 Put the terrain in a **separate raycast scene** as a *kinematic* body (raycast
 target, no physics) so its BVH is `maybe_static` → **built once, never re-fit**.
@@ -57,7 +58,7 @@ flowchart TB
   T2 -- "wheel distances (re-cast)" --> V
 ```
 
-Per `vs.step()` in split mode:
+Per `vs.step()` in dual_scene mode:
 
 1. Mirror each vehicle's chassis base pose onto its raycast-scene **proxy**
    (`proxy.set_pos` runs FK).
@@ -109,9 +110,9 @@ API; the public `scene.step()` is used for robustness.
 - The **full-step** speedup is smaller because the shared vehicle physics
   (~6 ms here) does not change; it dominates once the rebuild is gone.
 - On **small/flat terrain split is slightly slower** (two scenes + ~2x terrain
-  memory). It is still the **default** (`raywheel`) because complex terrain is
-  the common case and the win grows with `n_envs`; switch to `inline` only for a
-  flat ground at `n_envs=1`.
+  memory). It is still the **default** (`dual_scene`) because complex terrain is
+  the common case and the win grows with `n_envs`; switch to `single_scene` only
+  for a flat ground at `n_envs=1`.
 
 ### Performance on GPU (n_envs=1) — much smaller gap
 
@@ -145,9 +146,9 @@ scales ~linearly. The speedup therefore grows strongly with batch size
 
 Split scales near-linearly (42 → 8576 env-steps/s ≈ 204x for 256x envs); single
 scales sublinearly (41 → 2521 ≈ 61x) because each env adds rebuild cost.
-**For batched RL / MPPI / Real2Sim rollouts (high `n_envs`), `raywheel` (the
+**For batched RL / MPPI / Real2Sim rollouts (high `n_envs`), `dual_scene` (the
 default) is clearly the right mode.** Only a flat-ground, `n_envs=1` interactive
-sim is marginally better on `inline`.
+sim is marginally better on `single_scene`.
 
 Caveat: split replicates the terrain BVH per env, so at very high `n_envs` it
 hits a memory ceiling (≈512 envs for a 51 k-face terrain here). Genesis #2914
@@ -162,7 +163,7 @@ Split also helps independent of speed via (a) very-high-poly terrain on GPU and
 from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 import genesis as gs
 
-vs = VehicleScene(backend="gpu", raycast_mode="raywheel", dt=1/48, substeps=10)  # default
+vs = VehicleScene(backend="gpu", raycast_mode="dual_scene", dt=1/48, substeps=10)  # default
 
 # Static body: rigid in main (collision) + kinematic in raycast (static BVH).
 # Provide collision_morph for a coarse/convex collider while raycasting a
@@ -180,7 +181,7 @@ for t in range(N):
     pos = car.get_pos()
 ```
 
-`raycast_mode="inline"` uses one scene with the classic per-vehicle wheel
+`raycast_mode="single_scene"` uses one scene with the classic per-vehicle wheel
 raycaster and reproduces the prior SDK behavior; prefer it for a flat ground at
 `n_envs=1`.
 
@@ -191,18 +192,18 @@ Runnable demo: `python -m genesis_vehicle.samples.two_scene_terrain --compare`.
 Supported:
 
 - **One or more vehicles (L2)** — each gets its own proxy + sensor in the
-  raycast scene and they still collide in the main scene (verified: raywheel
-  matches inline pose-for-pose with two cars).
+  raycast scene and they still collide in the main scene (verified: dual_scene
+  matches single_scene pose-for-pose with two cars).
 - **L3 (`n_envs >= 1`) batching** — one proxy per env; the static terrain BVH is
   shared across envs.
 - **Static terrain/mesh raycast targets** — `add_static` / `add_static_terrain`.
-- **Dynamic raycast targets** — `add_obstacle(morph, dynamic=…, raycast=True)`
-  adds a body the wheels must *sense* (ramp, curb, moving platform). In raywheel
+- **Dynamic raycast targets** — `add_dynamic(morph, physics=…, raycast=True)`
+  adds a body the wheels must *sense* (ramp, curb, moving platform). In dual_scene
   mode it gets a rigid mirror in the raycast scene's *rigid* solver — a separate
   BVH context from the kinematic terrain — re-synced each step, so only that
   small body's BVH re-fits while the heavy terrain stays static. Verified: the
-  wheel distance tracks the obstacle (and matches inline) as it is moved via
-  `obstacle.set_pose(...)`.
+  wheel distance tracks the obstacle (and matches single_scene) as it is moved via
+  `handle.set_pose(...)`.
 
 Follow-up:
 

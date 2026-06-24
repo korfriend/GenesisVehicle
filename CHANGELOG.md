@@ -27,18 +27,18 @@ bodies / obstacles, and the per-step loop — no manual `gs.init` / `scene.build
 `scene.step` / `sensor.read`. The existing `VehiclePhysics` / `add_vehicle` / presets are
 unchanged and used internally.
 
-`raycast_mode="raywheel"` (**default**) raycasts the terrain in a **separate
+`raycast_mode="dual_scene"` (**default**) raycasts the terrain in a **separate
 scene** as a *kinematic* body, so its BVH is built once and never re-fit (and is
 shared across batch envs), while collision/rollover keep the terrain as a *rigid*
 body in the main scene. Each step the chassis pose is mirrored onto a rigid,
 fixed, collision-free proxy in the raycast scene; `raycast_scene.step()` re-casts
 against the static BVH; the distances are fed to the main-scene physics.
-`raycast_mode="inline"` reproduces the classic one-scene behavior. The legacy
-names `"split"` / `"single"` are accepted as aliases. See
-`docs/two-scene-raycast.md`.
+`raycast_mode="single_scene"` reproduces the classic one-scene behavior. The
+legacy names `"raywheel"` / `"inline"` and `"split"` / `"single"` are accepted as
+aliases for `"dual_scene"` / `"single_scene"`. See `docs/two-scene-raycast.md`.
 
 - **`VehiclePhysics.step(inputs, distances=None)`** — new optional `distances`
-  arg injects externally-measured wheel-ground distances (the hook the split
+  arg injects externally-measured wheel-ground distances (the hook the dual_scene
   mode uses). `distances=None` reads `self.sensor` exactly as before — fully
   backward compatible. `sensor=None` is now allowed when distances are injected.
 
@@ -55,8 +55,8 @@ Measured single vs split (tank/car, flat terrain, CPU):
 
 The *raycast* cost stops scaling with face count (rebuild → flat re-cast, up to
 ~18x cheaper at 205 k); the *full-step* speedup is smaller because the shared
-vehicle physics (~6 ms) dominates once the rebuild is gone. `raywheel` is
-slightly slower than `inline` on small/flat terrain and costs ~2x terrain memory.
+vehicle physics (~6 ms) dominates once the rebuild is gone. `dual_scene` is
+slightly slower than `single_scene` on small/flat terrain and costs ~2x terrain memory.
 
 On **GPU at `n_envs=1`** the gap is much smaller — the rebuild parallelizes, so
 single barely grows with face count and split's two-scene/launch overhead
@@ -66,8 +66,8 @@ dominates: full-step **0.98x @13 k, 1.10x @51 k, 1.31x @205 k**.
 terrain BVH is built once and shared across envs (split is ~flat in `n_envs`,
 single re-fits per env): full-step **1.03x @1, 1.13x @16, 1.57x @64, 3.40x @256
 envs** (51 k-face terrain; split 42 → 8576 env-steps/s ≈ near-linear vs single
-41 → 2521). So **`raywheel` is the default** (complex terrain is the common case
-and the win grows with `n_envs`); switch to `inline` only for a flat ground at
+41 → 2521). So **`dual_scene` is the default** (complex terrain is the common case
+and the win grows with `n_envs`); switch to `single_scene` only for a flat ground at
 `n_envs=1`. `VehicleScene` supports `n_envs > 1` (L3). The cast is already shared
 across envs (so split is ~flat in `n_envs`), but the BVH *allocation* still
 replicates per env, hitting a memory ceiling at very high `n_envs`
@@ -76,7 +76,7 @@ replicates per env, hitting a memory ceiling at very high `n_envs`
 Split also helps independent of speed via the accuracy benefit on non-convex
 mesh (a rigid mesh is convexified for collision, so a single-scene rigid-mesh
 raycast hits the convex bulge while the split kinematic raycast hits the true
-surface). Pose/distance output is identical to `inline` mode (verified:
+surface). Pose/distance output is identical to `single_scene` mode (verified:
 |Δx| < 1e-3 m on a 2 s drive, CPU and GPU, n_envs=1).
 
 ### Notes
@@ -89,23 +89,23 @@ surface). Pose/distance output is identical to `inline` mode (verified:
 - Scope: one or more vehicles (L2 — each gets its own proxy + sensor, still
   colliding in the main scene), L3 (`n_envs >= 1`), static terrain/mesh targets
   (`add_static` / `add_static_terrain`), and **dynamic raycast obstacles** the
-  wheels must sense (`add_obstacle` — ramp / curb / moving platform). In raywheel
+  wheels must sense (`add_dynamic` — ramp / curb / moving platform). In dual_scene
   mode the obstacle gets a rigid mirror in the raycast scene's *rigid* solver (a
   separate BVH context from the kinematic terrain), re-synced each step via
-  `obstacle.set_pose(...)`, so only its small BVH re-fits while the terrain stays
-  static. Verified: the wheel distance tracks the obstacle and matches `inline`
+  `handle.set_pose(...)`, so only its small BVH re-fits while the terrain stays
+  static. Verified: the wheel distance tracks the obstacle and matches `single_scene`
   as it moves.
-- **`add_vehicle(cfg=, entity=)`** — register a vehicle the caller built itself
+- **`add_vehicle(cfg=, morph=)`** — register a vehicle the caller built itself
   (custom URDF / material / surface) with a pre-built `cfg`, instead of a
   `preset` fn. `urdf_path` is still used for the wheel positions.
 - **Server L3 unification**: `server/l3_runtime.py` now builds via
-  `VehicleScene` (raywheel) — the road is rigid in the main scene (collision /
+  `VehicleScene` (dual_scene) — the road is rigid in the main scene (collision /
   rollover) with a kinematic raycast mirror, superseding the single-scene
   `--road-raycast-only` on the L3 path. (`env_builder.build_obstacles` gained
   `raycast_scene=` for the road mirror.) The **per-entity (non-L3) path** is also
-  ported — `physics_server` builds via `VehicleScene(raycast_mode="inline")`
+  ported — `physics_server` builds via `VehicleScene(raycast_mode="single_scene")`
   (interacting vehicles at n_envs=1 on CPU, where the two-scene raycast has no
-  benefit), `build_vehicle` registers via `add_vehicle(cfg=, entity=)`, and the
+  benefit), `build_vehicle` registers via `add_vehicle(cfg=, morph=)`, and the
   loop uses `veh.set_inputs(...)` + `vs.step()` — so the server no longer
   constructs `VehiclePhysics` / `VehicleInputs` directly. Non-road obstacle
   mirroring remains a follow-up; the OSC round-trip needs UE integration testing.
