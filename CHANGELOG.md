@@ -10,6 +10,29 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.1] — 2026-06-25
+
+### Added / Changed — samples on the `VehicleScene` API
+
+- **New sample `obstacles_and_ramp.py`** — builds a course entirely with
+  `VehicleScene` (`add_ground_plane` + `add_static` with the
+  `collision_morph`/`wheel_raycast_morph` split + `add_dynamic` for a collide-only
+  box and a `wheel_raycast=True` ramp). Prints the body registry (each body's
+  main / raycast entities — `docs/api-reference.md` §0.2 made concrete), then
+  drives through and reports. Sample #12.
+- **`quickstart.py` and `slope_hold.py` migrated to `VehicleScene`** — they no
+  longer call `gs.init` / `gs.Scene` / `scene.build` / `VehiclePhysics` directly;
+  the flat / tilted ground is an `add_static` (slope) / `add_ground_plane` body
+  and the loop is `veh.set_inputs(...) + vs.step()`. Behaviour is identical
+  (quickstart final pose x=+12.49, 5.02 m/s; slope_hold 0.0 mm lateral slip).
+- The other samples intentionally stay on the lower-level
+  `VehiclePhysics` / `MultiVehiclePhysics` API they exist to demonstrate (L2/L3
+  batching, per-env control, solver benchmarks) — that API is unchanged by 0.9.0.
+
+All 12 samples verified running on the new version (GPU); 78 pytest.
+
+---
+
 ## [0.9.0] — 2026-06-25
 
 ### Changed — full server encapsulation behind `VehicleScene`
