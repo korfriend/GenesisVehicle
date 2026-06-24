@@ -30,9 +30,13 @@ class VehicleScene:
                  show_viewer=False, init_genesis=True)
 
     # --- registration (before build) ---
-    def add_vehicle(urdf_path, preset, *, pos=(0,0,1), quat=None,
+    def add_vehicle(urdf_path, preset=None, *, pos=(0,0,1), quat=None,
                     material=None, stability="control", name=None,
-                    raycaster_max_range=20.0) -> Vehicle
+                    raycaster_max_range=20.0,
+                    cfg=None, entity=None) -> Vehicle
+    #   preset (fn→cfg) OR a pre-built cfg=; and a pre-built entity= already
+    #   added to main_scene (custom material/surface, e.g. the L3 server) OR
+    #   built from urdf_path. urdf_path always gives the wheel positions.
     def add_static(*, morph=None, raycast_morph=None, collision_morph=None,
                    collision=True, raycast=True, material=None, name=None) -> StaticBody
     def add_static_terrain(morph, **kwargs) -> StaticBody     # alias of add_static(morph=)
