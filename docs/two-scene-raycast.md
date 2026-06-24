@@ -170,7 +170,7 @@ vs = VehicleScene(backend="gpu", raycast_mode="dual_scene", dt=1/48, substeps=10
 # detailed surface (recommended for high-poly / non-convex meshes — a rigid
 # mesh is auto-convexified for collision, so a rigid-mesh raycast would hit the
 # convex bulge, not the true surface; the kinematic raycast stays exact).
-vs.add_static_terrain(gs.morphs.Terrain(...))
+vs.add_static(morph=gs.morphs.Terrain(...))
 
 car = vs.add_vehicle(URDF, car_4w_rwd_ackermann, pos=(0, 0, 1.0))
 vs.build()
@@ -196,14 +196,19 @@ Supported:
   matches single_scene pose-for-pose with two cars).
 - **L3 (`n_envs >= 1`) batching** — one proxy per env; the static terrain BVH is
   shared across envs.
-- **Static terrain/mesh raycast targets** — `add_static` / `add_static_terrain`.
-- **Dynamic raycast targets** — `add_dynamic(morph, physics=…, raycast=True)`
-  adds a body the wheels must *sense* (ramp, curb, moving platform). In dual_scene
-  mode it gets a rigid mirror in the raycast scene's *rigid* solver — a separate
-  BVH context from the kinematic terrain — re-synced each step, so only that
-  small body's BVH re-fits while the heavy terrain stays static. Verified: the
-  wheel distance tracks the obstacle (and matches single_scene) as it is moved via
-  `handle.set_pose(...)`.
+- **Static terrain/mesh raycast targets** — `add_static` (always a wheel-raycast
+  target; use `wheel_raycast_morph` for a detailed raycast surface vs a coarse
+  `collision_morph`).
+- **Dynamic raycast targets** — `add_dynamic(morph, physics=…, wheel_raycast=True)`
+  adds a moving body the wheels must *sense* (ramp, curb, moving platform). A
+  dynamic body is collide-only by default (`wheel_raycast=False`); set
+  `wheel_raycast=True` only for a surface the wheels drive onto, and prefer a
+  primitive Box/Sphere/Cylinder collider (a non-primitive mesh logs a warning,
+  since its mirror BVH re-fits every step). In dual_scene mode it gets a rigid
+  mirror in the raycast scene's *rigid* solver — a separate BVH context from the
+  kinematic terrain — re-synced each step, so only that small body's BVH re-fits
+  while the heavy terrain stays static. Verified: the wheel distance tracks the
+  body (and matches single_scene) as it is moved via `handle.set_pose(...)`.
 
 Follow-up:
 
