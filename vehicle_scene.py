@@ -352,7 +352,7 @@ class VehicleScene:
     def add_vehicle(
         self,
         urdf_path: str,
-        preset: Callable[..., Any],
+        preset: Optional[Callable[..., Any]] = None,
         *,
         pos: tuple = (0.0, 0.0, 1.0),
         quat: Optional[tuple] = None,
@@ -360,13 +360,23 @@ class VehicleScene:
         stability: str = "control",
         name: Optional[str] = None,
         raycaster_max_range: float = 20.0,
+        cfg: Any = None,
+        entity: Any = None,
     ) -> Vehicle:
-        """Register a vehicle from a URDF + preset. The rigid entity goes in the
-        main scene; in split mode a kinematic proxy + wheel sensor go in the
-        raycast scene."""
+        """Register a vehicle. The rigid entity goes in the main scene; in
+        raywheel mode a kinematic proxy + wheel sensor go in the raycast scene.
+
+        Provide ``preset`` (a preset fn → cfg) OR a pre-built ``cfg``. Provide a
+        pre-built ``entity`` (already added to ``main_scene`` with custom
+        material / surface / vis_mode, e.g. by the L3 server) OR let it be built
+        from ``urdf_path``. ``urdf_path`` is always used for the wheel positions.
+        """
         self._require_not_built()
+        if cfg is None and preset is None:
+            raise ValueError("add_vehicle: pass preset=<fn> or cfg=<VehicleConfig>.")
         name = name or f"vehicle_{len(self._vehicles)}"
-        cfg = preset(urdf_path, stability=stability)
+        if cfg is None:
+            cfg = preset(urdf_path, stability=stability)
         parsed = parse_urdf(urdf_path)
         wheel_positions = [w.position for w in parsed.wheels]
 
@@ -374,13 +384,15 @@ class VehicleScene:
         veh._two_scene = self._two_scene
         veh._n_envs = self.n_envs
 
-        # main scene: rigid URDF entity
-        morph_kw = dict(file=urdf_path, pos=pos)
-        if quat is not None:
-            morph_kw["quat"] = quat
-        morph = gs.morphs.URDF(**morph_kw)
-        veh.entity = (self.main_scene.add_entity(morph) if material is None
-                      else self.main_scene.add_entity(morph, material=material))
+        if entity is not None:
+            veh.entity = entity        # caller already added it to main_scene
+        else:
+            morph_kw = dict(file=urdf_path, pos=pos)
+            if quat is not None:
+                morph_kw["quat"] = quat
+            morph = gs.morphs.URDF(**morph_kw)
+            veh.entity = (self.main_scene.add_entity(morph) if material is None
+                          else self.main_scene.add_entity(morph, material=material))
 
         if self._two_scene:
             # raycast scene: lightweight pose-carrier proxy + wheel sensor.
@@ -435,31 +447,45 @@ class VehicleScene:
                 self.main_scene, veh.entity, sensor, veh.cfg, n_envs=self.n_envs)
         self._built = True
 
+    def measure_distances(self) -> dict:
+        """Return ``{vehicle: wheel-ground distances}`` for the upcoming step.
+
+        Raywheel mode: mirror each chassis pose onto its proxy + sync obstacle
+        mirrors, step the raycast scene ONCE (refreshes ray origins; the static
+        road/terrain BVH is skipped, only the cast runs), and read each sensor →
+        ``(n_envs, n_wheels)``. Inline mode: ``{vehicle: None}`` (each vehicle
+        reads its own sensor inside ``physics.step``).
+
+        Exposed so a caller that drives the main step itself (e.g. the OSC L3
+        server, which interleaves pose overrides / state capture) can do::
+
+            dists = vs.measure_distances()
+            veh.physics.step(inputs, distances=dists[veh])
+            vs.main_scene.step()
+        """
+        self._require_built()
+        if not self._two_scene:
+            return {veh: None for veh in self._vehicles}
+        for veh in self._vehicles:
+            veh._sync_proxy()
+        for obs in self._obstacles:
+            if obs.mirror is not None:
+                self._sync_obstacle(obs)
+        self.raycast_scene.step()
+        return {veh: read_distances(veh.sensor, self.n_envs)
+                for veh in self._vehicles}
+
     def step(self) -> None:
         """One simulation step.
 
-        Split mode: mirror each chassis pose onto its raycast-scene proxy, step
-        the raycast scene ONCE (refreshes ray origins; the static terrain BVH is
-        skipped, only the cast runs), read the wheel distances, feed them into
-        each vehicle's main-scene physics, then advance the main scene.
-        Single mode: each vehicle reads its own sensor, then advance the scene.
+        Raywheel mode: ``measure_distances`` (sync proxies/mirrors + re-cast the
+        static raycast scene), feed each vehicle's main-scene physics, advance
+        the main scene. Inline mode: each vehicle reads its own sensor.
         """
         self._require_built()
-        if self._two_scene:
-            for veh in self._vehicles:
-                veh._sync_proxy()
-            for obs in self._obstacles:        # track dynamic raycast obstacles
-                if obs.mirror is not None:
-                    self._sync_obstacle(obs)
-            # One cheap step: terrain BVH is static (proxy lives in a separate
-            # solver), so this refreshes ray origins + casts without re-fitting.
-            self.raycast_scene.step()
-            for veh in self._vehicles:
-                d = read_distances(veh.sensor, self.n_envs)
-                veh.physics.step(veh._inputs, distances=d)
-        else:
-            for veh in self._vehicles:
-                veh.physics.step(veh._inputs)
+        dists = self.measure_distances()
+        for veh in self._vehicles:
+            veh.physics.step(veh._inputs, distances=dists[veh])
         self.main_scene.step()
 
     def reset(self) -> None:

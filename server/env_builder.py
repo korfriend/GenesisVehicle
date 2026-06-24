@@ -76,7 +76,7 @@ def mesh_to_primitive_box(mesh_path, pos, quat, scale, fixed):
 
 def build_obstacles(scene, init_data, ue_friction, ue_restitution, vis_mode,
                     verbose=False, road_raycast_only=False,
-                    structures_as_primitive=False):
+                    structures_as_primitive=False, raycast_scene=None):
     """
     언리얼 엔진으로부터 수신한 초기 장애물 리스트를 파싱하여
     물질 특성(마찰력, 반발력 등)과 충돌 기하(SDF/Box/Convex 등)를 자동 튜닝하여
@@ -323,6 +323,20 @@ def build_obstacles(scene, init_data, ue_friction, ue_restitution, vis_mode,
             vis_mode=vis_mode
         )
         obstacles.append(obs_entity)
+
+        # [Two-scene road] When a raycast_scene is provided, the road is RIGID in
+        # the main scene (collision / rollover); mirror it as a KINEMATIC
+        # visual-raycast mesh in the raycast scene so the wheel rays hit a static
+        # BVH there (see docs/two-scene-raycast.md). Only for road meshes, and
+        # not when rc_only already put it in the (single-scene) raycast form.
+        if raycast_scene is not None and is_road_mesh and not rc_only_mesh \
+                and mesh_path and os.path.exists(mesh_path):
+            raycast_scene.add_entity(
+                gs.morphs.Mesh(file=mesh_path, scale=size, pos=pos, quat=quat,
+                               fixed=is_fixed, align=False, collision=False,
+                               visualization=True, convexify=False, decimate=False),
+                material=gs.materials.Kinematic(use_visual_raycasting=True),
+                surface=gs.surfaces.Rough(color=current_color, double_sided=True))
         
         if b_dynamic in [1, 2]:
             dynamic_obstacles[obs_id] = obs_entity
