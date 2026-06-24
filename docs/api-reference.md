@@ -14,14 +14,82 @@ otherwise noted. For the mental model behind these names, read
 > [`road_loop.py`](../samples/road_loop.py) (multi-vehicle visual demo
 > with 4 distinct kinds driving a closed loop).
 
+## 0. `VehicleScene` — the unified entry point (recommended)
+
+The high-level API that owns the Genesis scene(s), the registered vehicles and
+static bodies, and the per-step loop — no manual `gs.init` / `scene.build` /
+`scene.step` / `sensor.read`. It wraps `VehiclePhysics` (§1) internally. Full
+notes in [`two-scene-raycast.md`](two-scene-raycast.md).
+
+```python
+class VehicleScene:
+    def __init__(*, n_envs=1, dt=1/200, backend="gpu",
+                 raycast_mode="raywheel",          # "raywheel" (default) | "inline"
+                 gravity=(0,0,-9.81), substeps=4,
+                 sim_options=None, rigid_options=None, vis_options=None,
+                 show_viewer=False, init_genesis=True)
+
+    # --- registration (before build) ---
+    def add_vehicle(urdf_path, preset, *, pos=(0,0,1), quat=None,
+                    material=None, stability="control", name=None,
+                    raycaster_max_range=20.0) -> Vehicle
+    def add_static(*, morph=None, raycast_morph=None, collision_morph=None,
+                   collision=True, raycast=True, material=None, name=None) -> StaticBody
+    def add_static_terrain(morph, **kwargs) -> StaticBody     # alias of add_static(morph=)
+    def add_ground_plane(*, friction=0.85) -> StaticBody
+    def add_obstacle(morph, *, dynamic=False, raycast=True,   # a body wheels must SENSE
+                     material=None, name=None) -> Obstacle
+
+    def build() -> None
+    def step() -> None
+    def reset() -> None
+
+    main_scene: gs.Scene                 # physics/collision
+    raycast_scene: gs.Scene | None       # raywheel mode only (None for inline)
+    vehicles: list[Vehicle]              # property
+    statics: list[StaticBody]            # property
+    obstacles: list[Obstacle]            # property
+
+class Vehicle:                           # handle returned by add_vehicle
+    def set_inputs(throttle=0.0, brake=0.0, steer=0.0) -> Vehicle
+    def get_pos() / get_quat() / get_vel() / get_ang()   # (n_envs, ...) main-scene truth
+    distances                            # property: last (n_envs, n_wheels) wheel-ground d
+    entity, physics, sensor, cfg, proxy  # underlying objects
+
+class StaticBody:                        # handle returned by add_static
+    name; is_static; has_collision; has_raycast
+    entity_main                          # rigid collision entity (main scene)
+    entity_raycast                       # kinematic raycast entity (raycast scene; raywheel)
+
+class Obstacle:                          # handle returned by add_obstacle
+    name; is_dynamic; has_raycast
+    entity                               # rigid body in the main scene (physics)
+    mirror                               # synced raycast target in the raycast scene (raywheel)
+    def set_pose(pos=None, quat=None)    # move a user-controlled obstacle (mirror follows)
+```
+
+`raycast_mode="raywheel"` (default) raycasts static terrain in a separate scene
+(BVH built once, shared across envs); `"inline"` is the classic one scene.
+Legacy `"split"`/`"single"` are accepted aliases. Use `collision_morph` to give a
+coarse/convex collider while raycasting a detailed surface (non-convex meshes are
+convexified for collision, so an inline rigid-mesh raycast hits the convex bulge
+— the raywheel kinematic raycast stays exact). Scope: one or more vehicles (L2),
+L3 (`n_envs >= 1`), static terrain/mesh targets, and dynamic raycast obstacles
+(`add_obstacle`).
+
 ## 1. `VehiclePhysics` — the driver
 
 ```python
 class VehiclePhysics:
     def __init__(scene, entity, sensor, config: VehicleConfig, n_envs: int = 1)
-    def step(inputs: VehicleStepInputs) -> None
+    def step(inputs: VehicleStepInputs, distances: torch.Tensor | None = None) -> None
     def reset(env_ids: torch.Tensor | None = None) -> None
 ```
+
+`step(distances=...)` injects externally-measured wheel-ground distances
+(shape `(n_envs, n_wheels)`) instead of reading `self.sensor` — the hook
+`VehicleScene`'s raywheel mode uses. `distances=None` reads the sensor as before
+(`sensor=None` is then allowed at construction).
 
 ### Multi-vehicle (L2 batching, v0.5.11+)
 
