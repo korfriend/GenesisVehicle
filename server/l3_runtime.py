@@ -27,7 +27,7 @@ import numpy as np
 import torch
 import genesis as gs
 
-from genesis_vehicle import VehiclePhysics, VehicleInputs, make_wheel_raycaster
+from genesis_vehicle import VehicleInputs, VehicleScene
 
 from .osc_manager import OSCManager
 from . import env_builder
@@ -160,40 +160,50 @@ def run_l3(args):
     print(f" [Genesis] [L3] {n_envs} targets → scene.build(n_envs={n_envs}) | URDF: {urdf_path}")
 
     # 3. 씬 구성 — 환경은 1세트만 추가 (env 마다 자동 복제)
-    scene = gs.Scene(
-        show_viewer=not args.headless,
-        sim_options=gs.options.SimOptions(
-            gravity=(0, 0, ue_gravity),
-            dt=ue_dt,
-            substeps=2
-        ),
-        rigid_options=gs.options.RigidOptions(
-            enable_self_collision=False,
-            enable_adjacent_collision=False,
-            enable_neutral_collision=False,
-            enable_collision=True,
-            prefer_parallel_linesearch=False,
-            tolerance=0.001,
-            use_gjk_collision=False,
-            box_box_detection=True,
-            use_hibernation=True,
-            broadphase_traversal=gs.broadphase_traversal.SAP,
-            max_collision_pairs=2048,
-        )
+    _rigid_opts = gs.options.RigidOptions(
+        enable_self_collision=False,
+        enable_adjacent_collision=False,
+        enable_neutral_collision=False,
+        enable_collision=True,
+        prefer_parallel_linesearch=False,
+        tolerance=0.001,
+        use_gjk_collision=False,
+        box_box_detection=True,
+        use_hibernation=True,
+        broadphase_traversal=gs.broadphase_traversal.SAP,
+        max_collision_pairs=2048,
     )
+    # Unified two-scene raycast (VehicleScene raywheel): the road is RIGID in the
+    # main scene (collision / rollover) and a KINEMATIC mirror is raycast in a
+    # SEPARATE scene whose BVH is static and shared across envs — same trick as
+    # the high-level API (see docs/two-scene-raycast.md). Supersedes the old
+    # single-scene --road-raycast-only (kinematic road, no collision). Genesis is
+    # already initialized by the server, so init_genesis=False.
+    vs = VehicleScene(
+        n_envs=n_envs, dt=ue_dt, backend=("cpu" if use_cpu else "gpu"),
+        raycast_mode="raywheel", gravity=(0, 0, ue_gravity), substeps=2,
+        rigid_options=_rigid_opts, show_viewer=not args.headless,
+        init_genesis=False,
+    )
+    scene = vs.main_scene
+    raycast_scene = vs.raycast_scene
 
     plane = None
     if not args.no_floor:
         plane = scene.add_entity(gs.morphs.Plane(),
                                  material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution))
+        # Kinematic floor mirror so the wheels sense flat ground in the raycast scene.
+        raycast_scene.add_entity(gs.morphs.Plane(),
+                                 material=gs.materials.Kinematic(use_visual_raycasting=True))
 
     obstacles, dynamic_obstacles, initial_dynamic_states, ue_driven_obstacle_ids, extra_mass_entities = \
         env_builder.build_obstacles(
             scene=scene, init_data=init_data,
             ue_friction=ue_friction, ue_restitution=ue_restitution,
             vis_mode=args.vis_mode, verbose=args.verbose,
-            road_raycast_only=getattr(args, "road_raycast_only", False),
+            road_raycast_only=False,   # road RIGID in main (collision); mirror handles raycast
             structures_as_primitive=getattr(args, "structures_as_primitive", False),
+            raycast_scene=raycast_scene,
         )
 
     # 차량: 엔티티 1개 + Raycaster 1개 + 공유 cfg
@@ -207,18 +217,21 @@ def run_l3(args):
         surface=gs.surfaces.Rough(color=(1.0, 0.3, 0.3, 0.5)),
         vis_mode=args.vis_mode,
     )
-    sensor = make_wheel_raycaster(scene, car, urdf_path)
     cfg = vehicle_builder.build_cfg(urdf_path, mapping, t_fric, target_id="L3-shared")
     # VisualJointSync only for the Genesis viewer; headless uses the closed-form
     # wheel_visual_transforms capture (skip the per-step engine FK cost).
     cfg.enable_visual_joint_sync = not args.headless
+    # Register with VehicleScene: it adds the raycast-scene proxy + wheel sensor
+    # and (at build) constructs the VehiclePhysics with sensor=None (distances
+    # are injected from the raycast scene each step).
+    veh = vs.add_vehicle(urdf_path, cfg=cfg, entity=car, name="L3-shared")
 
-    # 4. 배치 빌드 + 컨트롤러 1개 (SDK 네이티브 배치 경로 — monkey patch 불필요)
-    scene.build(n_envs=n_envs)
+    # 4. 배치 빌드 — VehicleScene 이 main + raycast 씬을 함께 빌드하고 VehiclePhysics 생성
+    vs.build()
     print(f" [DEBUG] Total rigid geoms after build: {scene.sim.rigid_solver.n_geoms}")
     print(f" [DEBUG] Total rigid links after build: {scene.sim.rigid_solver.n_links}")
 
-    physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=n_envs)
+    physics = veh.physics
     vehicle_builder.print_resolved_table("L3-shared", physics.resolved)
 
     # env 별 초기 포즈
@@ -240,7 +253,7 @@ def run_l3(args):
     warmup_starts = time.perf_counter()
     idle_inputs = VehicleInputs(throttle=0.0, brake=0.0, steer=0.0)
     for _ in range(5):
-        physics.step(idle_inputs)
+        physics.step(idle_inputs, distances=vs.measure_distances()[veh])
         scene.step()
         if not use_cpu:
             torch.cuda.synchronize()
@@ -430,7 +443,7 @@ def run_l3(args):
             prev_state = curr_state
             physics_start = time.perf_counter()
             try:
-                physics.step(inputs)
+                physics.step(inputs, distances=vs.measure_distances()[veh])
                 scene.step()
             except gs.GenesisException as e:
                 if "Viewer closed" in str(e):
