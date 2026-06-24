@@ -1,13 +1,13 @@
 # `genesis_vehicle/samples/`
 
-Three minimal, self-contained sample scripts that exercise the SDK's core
-API surface. All three depend only on the SDK itself and the bundled
+A set of minimal, self-contained sample scripts that exercise the SDK's core
+API surface. They depend only on the SDK itself and the bundled
 `urdf/car_4w.urdf` — no external mesh files, no umbrella-level helpers.
 
 | # | Script | Demonstrates | viewer |
 |---|---|---|---|
-| 1 | [`quickstart.py`](quickstart.py) | The minimum-viable SDK call pattern: preset → `add_vehicle` → `scene.build` → step loop. Open-loop forward drive for 5 s on flat ground. | ✓ `--viewer` |
-| 2 | [`slope_hold.py`](slope_hold.py) | `StaticFrictionLock` side-slope hold regression check. Brake-locked car on a tilted ground should not creep laterally. Used to verify the v0.5.7 stick-slip fix. | ✓ `--viewer` |
+| 1 | [`quickstart.py`](quickstart.py) | The minimum-viable SDK call pattern through the unified **`VehicleScene`** API (no manual `gs.init`/`build`/`step`): `add_ground_plane` → `add_vehicle` → `build` → loop of `veh.set_inputs(...) + vs.step()`. Open-loop forward drive for 5 s on flat ground. | ✓ `--viewer` |
+| 2 | [`slope_hold.py`](slope_hold.py) | `StaticFrictionLock` side-slope hold regression check (on **`VehicleScene`**; the tilted ground is an `add_static` body). Brake-locked car on a tilted ground should not creep laterally. Used to verify the v0.5.7 stick-slip fix. | ✓ `--viewer` |
 | 3 | [`batched_rollout.py`](batched_rollout.py) | The batched `n_envs > 1` API for RL / MPPI. Spawn N cars in parallel, per-env random controls, measure per-step throughput. | ✓ `--viewer` (grid) |
 | 4 | [`road_loop.py`](road_loop.py) | **Multi-vehicle visual demo** — 4 vehicle kinds (FWD red sedan, RWD blue coupe, AWD green SUV, yellow 6-wheel truck), `--n_per_kind` each, all driving a circular track under constant Ackermann steering. Top-down camera frames the whole fleet. `--solver multi_batched` switches from N independent `VehiclePhysics` calls to one `MultiVehiclePhysics` that batches the compute per kind (~10% faster on a 16-vehicle scene). | ✓ `--viewer` |
 | 5 | [`perf_vectorization.py`](perf_vectorization.py) | **n_envs batching speedup benchmark.** Sweeps `n_envs ∈ [1, 4, 16, 64, 256, 1024]` (one fresh subprocess per measurement) and prints a scaling table showing per-env cost dropping from ~26 ms (single env) to < 1 ms (64+ envs). Use to gauge RL / MPPI throughput on your machine. | ✗ headless by design |
@@ -17,6 +17,7 @@ API surface. All three depend only on the SDK itself and the bundled
 | 9 | [`city_traffic_ego.py`](city_traffic_ego.py) | **Autonomous-driving scenario — ego + traffic on a 4-lane highway.** 1 red AWD ego + 7 traffic agents (3 RWD blue coupes, 3 FWD small dark-red sedans, 1 yellow truck) under a simple P lane-keeper. Top-down camera frames the road. `--n_envs N` enables the L2 × L3 combined batching pattern (one MPPI candidate per env, all 8×N vehicles batched). The reference setup for "MPPI ego in surrounding traffic" workflows. | ✓ `--viewer` |
 | 10 | [`l2l3_minimal.py`](l2l3_minimal.py) | **Shortest L2 × L3 program (~90 lines).** K interacting vehicles share one world (collide — L2) × N parallel scenarios (L3), advanced by one `MultiVehiclePhysics(scene, vehicles, n_envs=N)`. Demonstrates per-(scenario, vehicle) control: the lead car brakes in scenario 0 only and diverges from the rolling copies. The clean reference for "how do I use L2 × L3" before reading the full `city_traffic_ego` demo. `--k`, `--n_envs`, `--cpu`. | ✗ headless |
 | 11 | [`two_scene_terrain.py`](two_scene_terrain.py) | **`VehicleScene` unified API + ray-wheel raycast split.** Drives a car over a heightfield terrain with the high-level `VehicleScene` (no manual `gs.init`/`build`/`step`). `--compare` times `dual_scene` (default; terrain raycast in a separate static-BVH scene) vs `single_scene` (classic one scene); `--n-envs N` shows the dual_scene win growing with L3 batch size (the static BVH is shared across envs). `--horizontal-scale`, `--cpu`. | ✗ headless |
+| 12 | [`obstacles_and_ramp.py`](obstacles_and_ramp.py) | **The encapsulated obstacle API + parameter-behavior matrix.** Builds a course entirely with `VehicleScene` — `add_ground_plane`, `add_static` (a wheel-raycast platform/block, with the `collision_morph`/`wheel_raycast_morph` split), and `add_dynamic` (a collide-only box the car pushes; a `wheel_raycast=True` ramp the wheels sense). Prints the body registry (each body's main/raycast entities — `docs/api-reference.md` §0.2 made concrete), then drives through and reports. `--mode single_scene`, `--cpu`. | ✗ headless |
 
 The three perf benchmarks (5, 7, 8) are intentionally headless — camera
 rendering adds per-step overhead that distorts the throughput numbers
@@ -72,9 +73,11 @@ python -m genesis_vehicle.samples.city_traffic_ego --viewer
 python -m genesis_vehicle.samples.city_traffic_ego --n_envs 16 --bench
 python -m genesis_vehicle.samples.two_scene_terrain --compare
 python -m genesis_vehicle.samples.two_scene_terrain --compare --n-envs 64
+python -m genesis_vehicle.samples.obstacles_and_ramp
+python -m genesis_vehicle.samples.obstacles_and_ramp --mode single_scene --cpu
 ```
 
-All three are headless (no viewer, no `cv2`, no `pynput`). The chase-cam
+The perf benchmarks are headless (no viewer, no `cv2`, no `pynput`). The chase-cam
 HUD / keyboard-driven demos live one level up at the umbrella project
 (`GeneVehicle_*/demo_drive.py`) and are not bundled with the SDK on
 purpose — they have opencv-python + pynput dependencies and are more

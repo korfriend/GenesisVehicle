@@ -1,7 +1,8 @@
 """slope_hold.py — StaticFrictionLock side-slope hold regression check.
 
 Drops a 4-wheel car onto a 20° side-tilted ground, holds brake=1.0 for
-10 seconds, and verifies the chassis does NOT creep laterally.
+10 seconds, and verifies the chassis does NOT creep laterally. Built on the
+unified ``VehicleScene`` API (the tilted ground is an ``add_static`` body).
 
 Why this exists
 ---------------
@@ -44,11 +45,11 @@ import torch
 import genesis as gs
 
 from genesis_vehicle import (
-    VehiclePhysics, VehicleInputs,
+    VehicleScene,
     car_4w_rwd_ackermann,
-    add_vehicle,
     __version__ as sdk_version,
 )
+from genesis_vehicle.samples import _hud
 
 URDF_PATH = os.path.join(os.path.dirname(__file__), "urdf", "car_4w.urdf")
 HOLD_OK_M = 0.01     # 1 cm threshold — stick-slip lock should beat this easily
@@ -78,53 +79,46 @@ def main():
           + ("  (viewer ON)" if args.viewer else ""))
 
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
-    gs.init(backend=gs.gpu, logging_level="warning")
 
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=cfg.recommended_dt, substeps=10),
-        rigid_options=gs.options.RigidOptions(dt=cfg.recommended_dt, enable_collision=True),
+    # VehicleScene owns gs.init + the scene + build + step. Single, tilted ground
+    # at n_envs=1 → single_scene (no heavy static terrain to amortize, so the
+    # dual_scene raycast optimization has nothing to gain here).
+    vs = VehicleScene(
+        backend="gpu", raycast_mode="single_scene",
+        dt=cfg.recommended_dt, substeps=10,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10)),
-        show_viewer=False,    # --viewer uses cv2 HUD instead
+        show_viewer=False,    # --viewer uses a cv2 HUD instead
     )
-    from genesis_vehicle.samples import _hud
     if args.viewer and not _hud.have_cv2():
         print("WARN: --viewer needs opencv-python. Continuing headless.")
         args.viewer = False
-    # Tilt the ground around world X-axis. fixed=True is critical — without
-    # it the ground itself falls under gravity, putting the car in a
-    # co-moving frame and removing the apparent lateral gravity.
-    scene.add_entity(
-        gs.morphs.Box(
-            size=(60.0, 60.0, 0.1),
-            pos=(0.0, 0.0, -0.05),
-            euler=(slope_deg, 0.0, 0.0),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(friction=1.0),
-    )
-    car, sensor, _ = add_vehicle(
-        scene, URDF_PATH, preset_fn=None, pos=(0.0, 0.0, 1.0),
-        material=gs.materials.Rigid(friction=1.0),
-    )
+
+    # Tilt the ground around world X-axis. fixed=True is critical — without it the
+    # ground itself falls under gravity, putting the car in a co-moving frame and
+    # removing the apparent lateral gravity. As an add_static body it is both the
+    # collider and the wheel-raycast target.
+    vs.add_static(
+        morph=gs.morphs.Box(size=(60.0, 60.0, 0.1), pos=(0.0, 0.0, -0.05),
+                            euler=(slope_deg, 0.0, 0.0), fixed=True),
+        material=gs.materials.Rigid(friction=1.0), name="slope")
+    veh = vs.add_vehicle(URDF_PATH, car_4w_rwd_ackermann, cfg=cfg,
+                         pos=(0.0, 0.0, 1.0),
+                         material=gs.materials.Rigid(friction=1.0))
 
     cam = None
     if args.viewer:
-        # Side view that shows the slope tilt AND the car. Camera looks at
-        # the world origin (where the car spawns) from the +X side at the
-        # height of typical chassis (~1 m), so the slope is visible as a
-        # tilted plane and lateral drift is visible end-on.
-        cam = scene.add_camera(
+        # Side view that shows the slope tilt AND the car (added before build()).
+        cam = vs.main_scene.add_camera(
             res=(1280, 720),
             pos=(15.0, 0.0, 6.0), lookat=(0.0, 0.0, 1.0),
             up=(0.0, 0.0, 1.0), fov=50, near=0.1, far=200.0, GUI=False,
         )
 
-    scene.build(n_envs=1)
     # VisualJointSync is off by default; enable it only when rendering (--viewer).
     cfg.enable_visual_joint_sync = args.viewer
-    physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
+    vs.build()
 
     DT = cfg.recommended_dt
     n_settle = int(3.0 / DT)
@@ -136,9 +130,9 @@ def main():
         # Headless = pure physics (no cam/render); viewer = render + HUD.
         if not args.viewer:
             return True
-        q = car.get_quat()[0].cpu().numpy()
+        q = veh.get_quat()[0].cpu().numpy()
         roll = _quat_to_roll_deg(q)
-        p = car.get_pos()[0].cpu().numpy()
+        p = veh.get_pos()[0].cpu().numpy()
         frame = _hud.render_hud_frame(
             cam,
             title=f"slope_hold  slope={slope_deg:+.0f}°   v{sdk_version}",
@@ -152,17 +146,16 @@ def main():
         )
         return _hud.cv2_show("genesis_vehicle slope_hold", frame)
 
-    inputs = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
+    veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)   # brake held throughout
 
     for step in range(n_settle):
-        physics.step(inputs)
-        scene.step()
+        vs.step()
         hud_perf.tick()
         if step % render_every == 0:
             if not _hud_render(step * DT, slip_mm=0.0):
                 break
-    p0 = car.get_pos()[0].cpu().numpy()
-    roll0 = _quat_to_roll_deg(car.get_quat()[0].cpu().numpy())
+    p0 = veh.get_pos()[0].cpu().numpy()
+    roll0 = _quat_to_roll_deg(veh.get_quat()[0].cpu().numpy())
     y0 = float(p0[1])
     print(f"  settled: pos=({p0[0]:+.3f}, {p0[1]:+.3f}, {p0[2]:+.3f}) m   "
           f"roll={roll0:+.2f}°  (expect roll ≈ {slope_deg:+.1f}° on slope)")
@@ -172,11 +165,10 @@ def main():
     t_start = time.perf_counter()
     user_quit = False
     for step in range(n_hold):
-        physics.step(inputs)
-        scene.step()
+        vs.step()
         hud_perf.tick()
         if step % render_every == 0:
-            current_slip_mm = (float(car.get_pos()[0, 1].cpu().numpy()) - y0) * 1000.0
+            current_slip_mm = (float(veh.get_pos()[0, 1].cpu().numpy()) - y0) * 1000.0
             if not _hud_render(3.0 + step * DT, slip_mm=current_slip_mm):
                 user_quit = True
                 break
@@ -184,7 +176,7 @@ def main():
     wall = time.perf_counter() - t_start
     _hud.cv2_cleanup()
     n_done = step + 1 if user_quit else n_hold
-    p1 = car.get_pos()[0].cpu().numpy()
+    p1 = veh.get_pos()[0].cpu().numpy()
     slip = float(p1[1]) - y0
     abs_slip_mm = abs(slip) * 1000.0
 
