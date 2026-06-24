@@ -412,12 +412,12 @@ def main():
             t_color = (1.0, 0.8, 0.1, 0.6)
             # Generic (non-vehicle) target — a free rigid body the OSC layer
             # teleports. Routed through VehicleScene like any obstacle.
-            _obs = vs.add_obstacle(
-                target_morph, dynamic=True,
+            _obs = vs.add_dynamic(
+                target_morph, physics=True,
                 material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution, sdf_cell_size=10000.0),
                 surface=gs.surfaces.Rough(color=t_color), vis_mode=args.vis_mode,
                 mass=target_info.get('mass', 1.0), name=f"target_{target_id}")
-            target_entities[target_id] = _obs.entity
+            target_entities[target_id] = _obs.entity_main
             print(f" [Genesis] Created Target {target_id} at {t_pos}")
             
     # 5. 언리얼 엔진 환경 동기화 (헬퍼 모듈에 위임)

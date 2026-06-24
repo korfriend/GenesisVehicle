@@ -302,8 +302,8 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
         # distribution (collision body in main + a static/synced raycast mirror in
         # the raycast scene). The caller never touches a scene.
         #   b_dynamic 0 = static structure/road  -> add_static
-        #   b_dynamic 1 = physics-dynamic         -> add_obstacle(dynamic=True)
-        #   b_dynamic 2 = UE-driven (OSC set_pos) -> add_obstacle(dynamic=False)
+        #   b_dynamic 1 = physics-dynamic         -> add_dynamic(physics=True)
+        #   b_dynamic 2 = UE-driven (OSC set_pos) -> add_dynamic(physics=False)
         if b_dynamic == 0:
             if is_road_mesh and mesh_path and os.path.exists(mesh_path):
                 # Road: convexified collision (morph, from CoACD above) + a DETAILED
@@ -320,11 +320,11 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
                                        vis_mode=vis_mode, name=f"obs_{obs_id}")
             obs_entity = handle.entity_main
         else:
-            handle = vs.add_obstacle(morph, dynamic=(b_dynamic == 1),
-                                     material=mat, surface=surface, vis_mode=vis_mode,
-                                     mass=(obs_mass if b_dynamic == 1 else None),
-                                     name=f"obs_{obs_id}")
-            obs_entity = handle.entity
+            handle = vs.add_dynamic(morph, physics=(b_dynamic == 1),
+                                    material=mat, surface=surface, vis_mode=vis_mode,
+                                    mass=(obs_mass if b_dynamic == 1 else None),
+                                    name=f"obs_{obs_id}")
+            obs_entity = handle.entity_main
 
         obstacles.append(obs_entity)
 
