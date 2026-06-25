@@ -10,6 +10,45 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.2] — 2026-06-25
+
+### Added — non-convex collision-mesh guard
+
+| Abbr. | Meaning |
+|---|---|
+| SDF | Signed Distance Field (rigid mesh collision representation) |
+| BVH | Bounding Volume Hierarchy (raycast acceleration tree) |
+| OOM | Out Of Memory (process/VM killed) |
+
+- **`VehicleScene` now refuses a large non-convex mesh as a rigid collider.**
+  A `gs.morphs.Mesh` with `convexify=False` keeps its full concave geometry for
+  collision, so Genesis builds an SDF over every face. Past **1000 faces**
+  (`_MAX_NONCONVEX_COLLISION_FACES`) that build explodes in memory and can
+  hard-crash the process — under WSL it takes the whole VM down. `add_static` /
+  `add_dynamic` now call `_guard_collision_mesh()` before adding any rigid
+  collision entity (main-scene collider, single_scene raycast target, and the
+  dual_scene dynamic raycast mirror): it `raise`s a `ValueError` with an
+  actionable message and logs a `>>> REVIEW THIS MESH <<<` error asking the mesh
+  to be decimated, `convexify=True`-d, or moved to a **kinematic wheel-raycast
+  target** (`add_static(collision=False)`, which needs no SDF).
+- **Exempt** (correctly not blocked): primitives / heightfields (not a `Mesh`),
+  `convexify=True` (convex decomposition keeps collision cheap), and
+  `collision=False` visual / kinematic raycast surfaces — i.e. the recommended
+  home for a high-poly surface, where a big face count is fine.
+
+### Added — `samples/terrain_drive.py` (bumpy-terrain demo on `VehicleScene`)
+
+- Drive a car forever over an x-periodic **undulating mesh terrain** using the
+  `VehicleScene` API. Default `dual_scene` registers the terrain as a
+  `Kinematic` wheel-raycast target (`add_static(collision=False)`, exact surface,
+  BVH built once) plus a collision-free **visual copy** in the main scene for the
+  camera. Side-following chase cam, seamless period-wrap, speed governor, ESC to
+  quit. `--rigid-terrain` runs the slow `single_scene` rigid-mesh A/B path — at
+  full resolution it now trips the mesh-guard above and exits cleanly instead of
+  crashing.
+
+---
+
 ## [0.9.1] — 2026-06-25
 
 ### Added / Changed — samples on the `VehicleScene` API
