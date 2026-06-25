@@ -10,6 +10,19 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.16] — 2026-06-26
+
+### Docs — state explicitly that the raycast scene is never viewed or rendered
+
+Made the invariant explicit in the code (a comment at the raycast-scene
+construction and the module docstring): the dual_scene raycast scene is
+**sensors-only and never views or renders** — `show_viewer=False` always
+(independent of `VehicleScene`'s `show_viewer` / `viewer_options`, which apply to
+the main scene only), no camera is ever added to it, and its `step()` is always
+called with `update_visualizer=False`. Only the main scene can have a viewer.
+
+---
+
 ## [0.9.15] — 2026-06-26
 
 ### Added — `viewer_options=` on `VehicleScene` (configure the native viewer)

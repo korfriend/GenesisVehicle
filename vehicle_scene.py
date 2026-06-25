@@ -15,6 +15,9 @@ Two raycast modes (``raycast_mode=``):
   raycast scene; ``raycast_scene.step()`` refreshes the ray origins and re-casts
   against the static BVH; the distances are fed into the main-scene physics via
   :meth:`VehiclePhysics.step(distances=...) <genesis_vehicle.core.VehiclePhysics.step>`.
+  The raycast scene is **sensors-only**: it is never shown (``show_viewer=False``
+  always) or rendered (stepped with ``update_visualizer=False``, no camera) —
+  only the main scene takes a viewer / ``viewer_options``.
 
 - ``"single_scene"`` — classic: one scene, each vehicle owns a wheel raycaster that
   casts against everything (terrain + vehicle). The raycast BVH is **re-fit
@@ -338,7 +341,15 @@ class VehicleScene:
         if viewer_options is not None:
             _scene_kw["viewer_options"] = viewer_options
         self.main_scene = gs.Scene(**_scene_kw)
-        # The raycast scene never advances dynamics; reuse the same dt for sanity.
+        # The raycast scene is SENSORS-ONLY and is NEVER viewed or rendered:
+        #   - created with show_viewer=False ALWAYS (independent of this
+        #     VehicleScene's show_viewer / viewer_options, which apply to the main
+        #     scene only) → no native viewer window, _visualizer._viewer is None;
+        #   - no camera is ever added to it;
+        #   - its step() is always called with update_visualizer=False (see build()
+        #     and _measure_distances) → the visualizer is never updated for it.
+        # Only the main scene can be viewed/rendered. It also never advances real
+        # dynamics (kinematic terrain + fixed proxies); reuse the same dt for sanity.
         self.raycast_scene = (
             gs.Scene(sim_options=gs.options.SimOptions(dt=dt, substeps=1, gravity=(0, 0, 0)),
                      show_viewer=False)
