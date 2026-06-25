@@ -207,12 +207,31 @@ def render_hud_frame(
     return frame
 
 
+_cv2_windows_shown: set = set()
+
+
 def cv2_show(window: str, frame: Optional[np.ndarray]) -> bool:
     """Display ``frame`` in the named cv2 window. Returns ``False`` if ESC
     was pressed (caller should ``break`` the main loop). Returns ``True``
     otherwise (continue)."""
     if cv2 is None or frame is None:
         return True
+    if window not in _cv2_windows_shown:
+        # First show: create the window OFF the top-left corner and pin it on
+        # top. By default cv2 spawns the window at (0, 0), where it lands behind
+        # a maximized editor / terminal — on WSLg especially it then looks like
+        # "no window appeared" when it's just hidden. Both calls are best-effort
+        # (highgui-backend dependent).
+        cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
+        try:
+            cv2.moveWindow(window, 120, 80)
+        except Exception:
+            pass
+        try:
+            cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1.0)
+        except Exception:
+            pass
+        _cv2_windows_shown.add(window)
     cv2.imshow(window, frame)
     key = cv2.waitKey(1) & 0xFF
     return key != 27   # 27 = ESC
@@ -220,6 +239,7 @@ def cv2_show(window: str, frame: Optional[np.ndarray]) -> bool:
 
 def cv2_cleanup() -> None:
     """Close all cv2 windows. Safe to call even if cv2 isn't installed."""
+    _cv2_windows_shown.clear()
     if cv2 is not None:
         cv2.destroyAllWindows()
 

@@ -47,6 +47,7 @@ re-fits while the terrain stays static).
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -63,6 +64,59 @@ _logger = logging.getLogger("genesis_vehicle.vehicle_scene")
 # trivially cheap — anything outside this set is a mesh/heightfield whose BVH
 # re-fit cost scales with face count (see add_dynamic's guard).
 _PRIMITIVE_MORPHS = frozenset({"Box", "Sphere", "Cylinder", "Capsule", "Plane"})
+
+# Above this face count, a NON-CONVEX mesh used as a rigid collider is refused
+# (see _guard_collision_mesh): the full-concave SDF/collision build explodes in
+# memory and can crash the process — under WSL it takes the whole VM down.
+_MAX_NONCONVEX_COLLISION_FACES = 1000
+
+
+def _guard_collision_mesh(morph: Any, where: str) -> None:
+    """Refuse to build a large NON-CONVEX mesh as a rigid collision body.
+
+    A ``gs.morphs.Mesh`` with ``convexify=False`` keeps its full concave
+    geometry for collision, so Genesis builds an SDF / collision structure over
+    every face. Past ``_MAX_NONCONVEX_COLLISION_FACES`` that build explodes in
+    memory and can hard-crash the process (and, under WSL, the whole VM).
+    Raising here — before the entity is added/built — turns that silent crash
+    into a clear, actionable error and asks for the mesh to be reviewed.
+
+    Exempt (not a rigid collider, so no SDF):
+    - primitives (Box/Sphere/…), heightfields — not a ``Mesh``;
+    - ``convexify=True`` — convex decomposition keeps collision cheap;
+    - ``collision=False`` — visual-only / kinematic wheel-raycast surfaces
+      (``add_static(collision=False)`` in dual_scene), which are the *recommended*
+      home for a high-poly surface (built once, no SDF)."""
+    if type(morph).__name__ != "Mesh":
+        return
+    if getattr(morph, "convexify", True):
+        return
+    if not getattr(morph, "collision", True):
+        return
+    f = getattr(morph, "file", None)
+    if not f or not os.path.exists(f):
+        return                      # can't introspect → best-effort, let it through
+    try:
+        import trimesh
+        n_faces = int(len(trimesh.load(f, process=False, force="mesh").faces))
+    except Exception:
+        return
+    if n_faces <= _MAX_NONCONVEX_COLLISION_FACES:
+        return
+    _logger.error(
+        "%s: %d-face non-convex mesh requested as a RIGID collision body with "
+        "convexify=False (limit %d). >>> REVIEW THIS MESH <<< before using it as "
+        "a collider: decimate it, enable convexify=True (convex decomposition), "
+        "or register it as a KINEMATIC wheel-raycast target "
+        "(add_static(collision=False) in dual_scene), which needs no SDF. "
+        "File: %s", where, n_faces, _MAX_NONCONVEX_COLLISION_FACES, f)
+    raise ValueError(
+        f"{where}: refusing to build a {n_faces}-face non-convex mesh as a rigid "
+        f"collision body with convexify=False (limit "
+        f"{_MAX_NONCONVEX_COLLISION_FACES}). A large concave collider forces a "
+        f"huge SDF/collision build that can exhaust memory and crash the "
+        f"process/WSL. Decimate the mesh, set convexify=True, or use a kinematic "
+        f"wheel-raycast target (add_static(collision=False)) instead. File: {f}")
 
 # gs.init is process-global and may be called at most once. Track it so several
 # VehicleScenes (or a user who already called gs.init) don't double-initialize.
@@ -325,6 +379,7 @@ class VehicleScene:
         body = StaticBody(name=name, has_collision=bool(collision), has_raycast=True)
 
         if collision and col_morph is not None:
+            _guard_collision_mesh(col_morph, f"add_static({name!r})")
             mat = material if material is not None else gs.materials.Rigid()
             body.entity_main = self.main_scene.add_entity(
                 col_morph, **_add_kwargs(mat, surface, vis_mode))
@@ -339,6 +394,7 @@ class VehicleScene:
             else:
                 # single mode: the rigid collision body IS the raycast target.
                 if body.entity_main is None:
+                    _guard_collision_mesh(rc_morph, f"add_static({name!r})")
                     mat = material if material is not None else gs.materials.Rigid()
                     body.entity_main = self.main_scene.add_entity(
                         rc_morph, **_add_kwargs(mat, surface, vis_mode))
@@ -408,6 +464,7 @@ class VehicleScene:
         obs = DynamicBody(name=name, is_dynamic=bool(physics),
                           has_raycast=bool(wheel_raycast))
         main_morph = _clone_morph(morph, fixed=not physics)
+        _guard_collision_mesh(main_morph, f"add_dynamic({name!r})")
         obs.entity_main = self.main_scene.add_entity(
             main_morph, **_add_kwargs(mat, surface, vis_mode))
         if mass is not None:
@@ -418,6 +475,8 @@ class VehicleScene:
             # solver (a separate BVH context from the kinematic terrain), so
             # re-syncing it each step re-fits only this small body.
             mirror_morph = _clone_morph(morph, fixed=True, collision=True)
+            _guard_collision_mesh(mirror_morph,
+                                  f"add_dynamic({name!r}) wheel_raycast mirror")
             obs.entity_raycast = self.raycast_scene.add_entity(
                 mirror_morph, **_add_kwargs(gs.materials.Rigid(), surface, vis_mode))
 
