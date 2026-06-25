@@ -10,6 +10,25 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.8] — 2026-06-25
+
+### Added — formatted package logging by default
+
+- **`import genesis_vehicle` now attaches a formatted handler to the
+  `genesis_vehicle` logger**, so its warnings/errors print as
+  `HH:MM:SS LEVEL    genesis_vehicle.<mod> | [genesis_vehicle:<slug>] message`
+  out of the box (previously, with no logging config, Python's last-resort
+  handler printed the bare message only). Only the `genesis_vehicle` namespace
+  is configured and `propagate` is turned **off**, so the root logger / app
+  config is untouched and messages are never double-emitted — even if the app
+  later calls `logging.basicConfig()`.
+- New public **`configure_logging(level=…, fmt=…, datefmt=…, stream=…,
+  force=…)`** to change the level/format or redirect the stream; if the logger
+  already has handlers it keeps them and only updates the level. Auto-setup can
+  be disabled with the env var **`GENESIS_VEHICLE_LOG=0`**.
+
+---
+
 ## [0.9.7] — 2026-06-25
 
 ### Added — single_scene `collision=False` warning + greppable log prefixes
