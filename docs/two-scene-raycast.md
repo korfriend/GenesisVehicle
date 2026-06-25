@@ -95,6 +95,18 @@ dominant cost is the unavoidable re-cast). A lower-level `cast-only` path
 (`sim._sensor_manager.step()`) exists and is ~2% cheaper but uses an internal
 API; the public `scene.step()` is used for robustness.
 
+### The raycast scene is never viewed or rendered
+
+It is **sensors-only**. It is created with `show_viewer=False` **always** —
+independent of `VehicleScene`'s `show_viewer` / `viewer_options`, which configure
+the **main** scene's native viewer — no camera is ever added to it, and
+`VehicleScene` steps it with `update_visualizer=False`. So its `step()` does no
+viewer/render work; only the SensorManager re-cast runs. (Genesis already no-ops a
+viewer-less scene's visualizer update during a normal advancing step, so
+`update_visualizer=False` is explicit intent / belt-and-suspenders rather than a
+measurable speedup — see the 0.9.13/0.9.14 CHANGELOG.) Only the **main** scene can
+have a viewer.
+
 ## Performance (honest, CPU)
 
 `raycast_mode` changes only the *raycast* cost. The vehicle physics is shared.

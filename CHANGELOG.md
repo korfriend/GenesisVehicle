@@ -10,6 +10,18 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.17] — 2026-06-26
+
+### Docs — carry the "raycast scene never viewed/rendered" statement into the docs
+
+Extends 0.9.16 (code comment + docstring) to the markdown docs:
+`two-scene-raycast.md` gains a "The raycast scene is never viewed or rendered"
+subsection (sensors-only; `show_viewer=False` always; no camera;
+`update_visualizer=False`; only the main scene takes a viewer / `viewer_options`),
+and the `api-reference.md` §0 `raycast_scene` property is annotated the same way.
+
+---
+
 ## [0.9.16] — 2026-06-26
 
 ### Docs — state explicitly that the raycast scene is never viewed or rendered
