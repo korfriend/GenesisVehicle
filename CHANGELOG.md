@@ -10,6 +10,32 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.7] — 2026-06-25
+
+### Added — single_scene `collision=False` warning + greppable log prefixes
+
+| Abbr. | Meaning |
+|---|---|
+| BVH | Bounding Volume Hierarchy (raycast acceleration tree) |
+| SDF | Signed Distance Field (rigid mesh collision) |
+
+- **`add_static(collision=False)` in `single_scene` now logs a warning.** With one
+  scene the wheel-raycast target *is* a rigid body, so `collision=False` cannot be
+  honored — the body still collides. This was a documented caveat but was applied
+  silently; it now emits a `[genesis_vehicle:single-scene]` warning pointing to
+  `dual_scene` for a true no-collision (kinematic) raycast surface.
+- **All `VehicleScene` warnings/errors now carry a greppable
+  `[genesis_vehicle:<slug>]` prefix** so an issue class is easy to spot and
+  filter. Slugs: `mesh-guard` (non-convex collider refused), `single-scene` (a
+  dual_scene-only option used in single_scene), `refit-cost` (a non-primitive
+  `wheel_raycast` mirror whose BVH re-fits each step). Grep `\[genesis_vehicle:`
+  for all, or a single slug for one class.
+- **Docs:** `docs/api-reference.md` §0.2 now documents the 0.9.2 non-convex mesh
+  guard (every rigid collision path, with the exempt cases) and the log-prefix
+  convention, and notes the single_scene `collision=False` warning.
+
+---
+
 ## [0.9.6] — 2026-06-25
 
 ### Changed — `road_raycast_only` routing drops the redundant collider
