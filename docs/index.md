@@ -7,6 +7,7 @@ Landing page. Pick the document that matches what you're doing.
 | Run something in 1 minute | [`quickstart.md`](quickstart.md) |
 | See all 12 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
 | Build a mental model before reading code | [`concepts.md`](concepts.md) |
+| Choose the high-level (`VehicleScene`) vs low-level (`VehiclePhysics`) API | [`concepts.md`](concepts.md#start-here-the-two-api-layers) |
 | Pick the right batching axis (L1 / L2 / L3) for your workflow | [`batching.md`](batching.md) |
 | Choose a tire model (Pacejka vs Coulomb) and understand the ground-contact mechanism | [`tire-and-contact.md`](tire-and-contact.md) |
 | Drive from one unified `VehicleScene` object, and cut the wheel-raycast cost on heavy static terrain | [`two-scene-raycast.md`](two-scene-raycast.md) |
