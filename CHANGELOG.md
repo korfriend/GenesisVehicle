@@ -10,6 +10,21 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.12] — 2026-06-25
+
+### Changed — mesh-guard message: name the per-step raycaster BVH re-fit cost
+
+- The `[genesis_vehicle:mesh-guard]` error/log and docstring (and
+  `docs/api-reference.md` §0.2) now state that a large non-convex *rigid* mesh is
+  expensive **two** ways — the SDF/collision build **and**, in `single_scene`, a
+  **per-step wheel-raycaster BVH re-fit over every face** — and that the latter
+  fires **independent of `sdf_cell_size`** (which only caps the SDF grid). This is
+  why a terrain that set `sdf_cell_size=10000` (small SDF) could still crash the
+  VM. No behavior change: same trigger (`convexify=False` + > 1000 faces), same
+  exempt cases — message accuracy only.
+
+---
+
 ## [0.9.11] — 2026-06-25
 
 ### Fixed — dual_scene `vs.build()` crash on a non-"visual" mirror vis_mode

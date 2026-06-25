@@ -171,19 +171,24 @@ surface use `dual_scene` (kinematic mirror, no collider). Likewise
 needs the two bodies of dual_scene, so it is **ignored in single_scene and logs a
 warning**.
 
-⚠️ **Non-convex mesh guard (rigid colliders):** any rigid collision body built
-from a `gs.morphs.Mesh` with `convexify=False` and **> 1000 faces**
+⚠️ **Non-convex mesh guard (rigid collider / raycast target):** any rigid body
+built from a `gs.morphs.Mesh` with `convexify=False` and **> 1000 faces**
 (`_MAX_NONCONVEX_COLLISION_FACES`) is *refused* — `_guard_collision_mesh` raises
 a `ValueError` and logs a `[genesis_vehicle:mesh-guard] >>> REVIEW THIS MESH <<<`
-error. A full-concave collider forces a huge SDF/collision build that can exhaust
-memory and crash the process (under WSL, the whole VM). It applies to **every
-rigid collision path**: `add_static` (main collider, and the single_scene raycast
-target) and `add_dynamic` (main body, and the dual_scene `wheel_raycast` mirror).
-**Exempt:** primitives & heightfields (not a `Mesh`), `convexify=True` (convex
-decomposition keeps collision cheap), and `collision=False` kinematic
-wheel-raycast surfaces (no SDF — the recommended home for a high-poly mesh). Fix:
-decimate the mesh, set `convexify=True`, or register it as
-`add_static(collision=False)` (kinematic) in dual_scene.
+error. As a *rigid* body it is expensive **two** ways, either of which can crash
+the process (under WSL, the whole VM): (1) an SDF/collision build over every
+face, and (2) in `single_scene`, a **per-step wheel-raycaster BVH re-fit** over
+every face (the vehicle moves → the BVH is never static). Note (2) fires **even
+with a large `sdf_cell_size`** — that only caps the SDF grid (1), not the raycast
+re-fit, which is why a terrain that set `sdf_cell_size=10000` could still take the
+VM down. Applies to **every rigid path**: `add_static` (main collider, and the
+single_scene raycast target) and `add_dynamic` (main body, and the dual_scene
+`wheel_raycast` mirror). **Exempt:** primitives & heightfields (not a `Mesh`),
+`convexify=True` (convex decomposition keeps both the collider and the raycast
+BVH cheap), and `collision=False` kinematic wheel-raycast surfaces (no SDF, and
+the BVH is built once — the recommended home for a high-poly mesh). Fix: decimate
+the mesh, set `convexify=True`, or register it as `add_static(collision=False)`
+(kinematic) in dual_scene.
 
 **Log prefixes.** All `VehicleScene` warnings/errors carry a greppable
 `[genesis_vehicle:<slug>]` prefix so an issue class is easy to spot/filter:

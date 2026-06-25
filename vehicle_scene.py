@@ -65,28 +65,36 @@ _logger = logging.getLogger("genesis_vehicle.vehicle_scene")
 # re-fit cost scales with face count (see add_dynamic's guard).
 _PRIMITIVE_MORPHS = frozenset({"Box", "Sphere", "Cylinder", "Capsule", "Plane"})
 
-# Above this face count, a NON-CONVEX mesh used as a rigid collider is refused
-# (see _guard_collision_mesh): the full-concave SDF/collision build explodes in
-# memory and can crash the process — under WSL it takes the whole VM down.
+# Above this face count, a NON-CONVEX mesh used as a rigid collider/raycast
+# target is refused (see _guard_collision_mesh): the cost — the SDF/collision
+# build AND, in single_scene, the per-step wheel-raycaster BVH re-fit over every
+# face — spikes memory/compute and can crash the process; under WSL it takes the
+# whole VM down.
 _MAX_NONCONVEX_COLLISION_FACES = 1000
 
 
 def _guard_collision_mesh(morph: Any, where: str) -> None:
-    """Refuse to build a large NON-CONVEX mesh as a rigid collision body.
+    """Refuse to build a large NON-CONVEX mesh as a rigid collision/raycast body.
 
     A ``gs.morphs.Mesh`` with ``convexify=False`` keeps its full concave
-    geometry for collision, so Genesis builds an SDF / collision structure over
-    every face. Past ``_MAX_NONCONVEX_COLLISION_FACES`` that build explodes in
-    memory and can hard-crash the process (and, under WSL, the whole VM).
-    Raising here — before the entity is added/built — turns that silent crash
-    into a clear, actionable error and asks for the mesh to be reviewed.
+    geometry. As a *rigid* body that is expensive two ways: Genesis builds an
+    SDF / collision structure over every face, AND — in ``single_scene`` — the
+    wheel raycaster re-fits a BVH over every face *each step* (the vehicle moves,
+    so the BVH is never static). Past ``_MAX_NONCONVEX_COLLISION_FACES`` either
+    cost can spike memory/compute and hard-crash the process (under WSL, the
+    whole VM). It fires even with a large ``sdf_cell_size`` (which only caps the
+    SDF grid) because the per-step raycaster re-fit is unaffected by it. Raising
+    here — before the entity is added/built — turns that silent crash into a
+    clear, actionable error and asks for the mesh to be reviewed.
 
-    Exempt (not a rigid collider, so no SDF):
+    Exempt:
     - primitives (Box/Sphere/…), heightfields — not a ``Mesh``;
-    - ``convexify=True`` — convex decomposition keeps collision cheap;
+    - ``convexify=True`` — convex decomposition keeps both the collider and the
+      raycast BVH cheap;
     - ``collision=False`` — visual-only / kinematic wheel-raycast surfaces
-      (``add_static(collision=False)`` in dual_scene), which are the *recommended*
-      home for a high-poly surface (built once, no SDF)."""
+      (``add_static(collision=False)`` in dual_scene): no SDF, and the kinematic
+      raycast BVH is built once (static) — the recommended home for a high-poly
+      surface."""
     if type(morph).__name__ != "Mesh":
         return
     if getattr(morph, "convexify", True):
@@ -105,20 +113,25 @@ def _guard_collision_mesh(morph: Any, where: str) -> None:
         return
     _logger.error(
         "[genesis_vehicle:mesh-guard] %s: %d-face non-convex mesh requested as a "
-        "RIGID collision body with "
-        "convexify=False (limit %d). >>> REVIEW THIS MESH <<< before using it as "
-        "a collider: decimate it, enable convexify=True (convex decomposition), "
-        "or register it as a KINEMATIC wheel-raycast target "
-        "(add_static(collision=False) in dual_scene), which needs no SDF. "
-        "File: %s", where, n_faces, _MAX_NONCONVEX_COLLISION_FACES, f)
+        "RIGID collision/raycast body with convexify=False (limit %d). >>> REVIEW "
+        "THIS MESH <<< — as a rigid body it pays both an SDF/collision build and "
+        "(single_scene) a per-step wheel-raycaster BVH re-fit over every face, "
+        "either of which can crash the process (independent of sdf_cell_size, "
+        "which only caps the SDF grid). Fix: decimate it, enable convexify=True "
+        "(convex decomposition), or register it as a KINEMATIC wheel-raycast "
+        "target (add_static(collision=False) in dual_scene), which needs no SDF "
+        "and whose BVH is built once. File: %s",
+        where, n_faces, _MAX_NONCONVEX_COLLISION_FACES, f)
     raise ValueError(
         f"[genesis_vehicle:mesh-guard] {where}: refusing to build a {n_faces}-face "
-        f"non-convex mesh as a rigid "
-        f"collision body with convexify=False (limit "
-        f"{_MAX_NONCONVEX_COLLISION_FACES}). A large concave collider forces a "
-        f"huge SDF/collision build that can exhaust memory and crash the "
-        f"process/WSL. Decimate the mesh, set convexify=True, or use a kinematic "
-        f"wheel-raycast target (add_static(collision=False)) instead. File: {f}")
+        f"non-convex mesh as a rigid collision/raycast body with convexify=False "
+        f"(limit {_MAX_NONCONVEX_COLLISION_FACES}). As a rigid body it forces a "
+        f"large SDF/collision build AND, in single_scene, a per-step "
+        f"wheel-raycaster BVH re-fit over every face — either can exhaust "
+        f"memory/compute and crash the process/WSL (independent of sdf_cell_size, "
+        f"which only caps the SDF grid). Decimate the mesh, set convexify=True, or "
+        f"use a kinematic wheel-raycast target (add_static(collision=False)) "
+        f"instead. File: {f}")
 
 # gs.init is process-global and may be called at most once. Track it so several
 # VehicleScenes (or a user who already called gs.init) don't double-initialize.
