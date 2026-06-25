@@ -366,14 +366,17 @@ class VehicleScene:
         col_morph = collision_morph or morph
         name = name or f"static_{len(self._statics)}"
 
-        if not self._two_scene and wheel_raycast_morph is not None:
-            # The split (detailed raycast surface vs coarse collider) needs the two
-            # bodies of dual_scene. In single_scene one rigid body serves both roles,
-            # so the collision geometry is the raycast target and this is dropped.
+        if (not self._two_scene and wheel_raycast_morph is not None
+                and collision and col_morph is not None):
+            # A distinct raycast surface vs collider split needs the two bodies of
+            # dual_scene. In single_scene the one rigid collision body is the
+            # raycast target, so a *separate* wheel_raycast_morph is dropped. (When
+            # wheel_raycast_morph is the only geometry — collision=False — it IS the
+            # body, so no warning.)
             _logger.warning(
                 "add_static(%r): wheel_raycast_morph only applies in dual_scene (a "
                 "separate kinematic raycast surface). In single_scene the one rigid "
-                "body is both collider and raycast target, so a distinct "
+                "collision body is also the raycast target, so a distinct "
                 "wheel_raycast_morph is ignored.", name)
 
         body = StaticBody(name=name, has_collision=bool(collision), has_raycast=True)

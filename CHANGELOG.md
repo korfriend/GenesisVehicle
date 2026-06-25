@@ -10,6 +10,28 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.6] — 2026-06-25
+
+### Changed — `road_raycast_only` routing drops the redundant collider
+
+When `road_raycast_only=True` a road mesh is a wheel-raycast surface only (no
+chassis collision). The 0.9.3 fix restored the flag but still routed it through
+`add_static(collision_morph=<a collision=False mesh>, wheel_raycast_morph=…)`,
+which added a useless no-collision rigid to the main scene — doubling road-mesh
+memory, exactly what rco exists to avoid on big maps. It now routes as
+`add_static(collision=False, wheel_raycast_morph=…)`: the kinematic raycast
+mirror only, no main-scene collider. (This completes the team's rco fix in the
+direction they intended — a leaner raycast-only road — rather than reverting it.)
+
+`add_static`'s single_scene `wheel_raycast_morph` warning is refined to fire only
+when a collision body also exists; the rco case (where `wheel_raycast_morph` is
+the sole geometry and so IS the raycast body) no longer warns spuriously.
+
+Tests: a dual_scene rco road has no main rigid (just the mirror); a single_scene
+rco road logs no warning. 95 pytest.
+
+---
+
 ## [0.9.5] — 2026-06-25
 
 ### Added — regression tests for the server mesh-obstacle paths
