@@ -314,19 +314,27 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
         #   b_dynamic 2 = UE-driven (OSC set_pos) -> add_dynamic(physics=False)
         if b_dynamic == 0:
             if is_road_mesh and mesh_path and os.path.exists(mesh_path):
-                # Road: convexified collision (morph, from CoACD above) + a DETAILED
-                # kinematic raycast surface, so the wheels hit the true surface, not
-                # the convex bulge. add_static splits collision vs raycast.
+                # Detailed kinematic raycast surface (collision=False) the wheels
+                # cast against — the true surface, not a convex bulge.
                 rc_morph = gs.morphs.Mesh(file=mesh_path, scale=size, pos=pos, quat=quat,
                                           fixed=is_fixed, align=False, collision=False,
                                           visualization=True, convexify=False, decimate=False)
-                handle = vs.add_static(collision_morph=morph, wheel_raycast_morph=rc_morph,
-                                       material=mat, surface=surface, vis_mode=vis_mode,
-                                       name=f"obs_{obs_id}")
+                if road_raycast_only:
+                    # rco road: raycast surface ONLY — no chassis collision, no CoACD.
+                    # Skip the main-scene collider entirely so there is no redundant
+                    # no-collision rigid (halves road-mesh memory on big maps).
+                    handle = vs.add_static(collision=False, wheel_raycast_morph=rc_morph,
+                                           material=mat, surface=surface, vis_mode=vis_mode,
+                                           name=f"obs_{obs_id}")
+                else:
+                    # full road: convex CoACD collider (morph) + detailed raycast surface.
+                    handle = vs.add_static(collision_morph=morph, wheel_raycast_morph=rc_morph,
+                                           material=mat, surface=surface, vis_mode=vis_mode,
+                                           name=f"obs_{obs_id}")
             else:
                 handle = vs.add_static(morph=morph, material=mat, surface=surface,
                                        vis_mode=vis_mode, name=f"obs_{obs_id}")
-            obs_entity = handle.entity_main
+            obs_entity = handle.entity_main if handle.entity_main is not None else handle.entity_raycast
         else:
             handle = vs.add_dynamic(morph, physics=(b_dynamic == 1),
                                     material=mat, surface=surface, vis_mode=vis_mode,

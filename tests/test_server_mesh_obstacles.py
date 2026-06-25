@@ -120,3 +120,31 @@ def test_build_obstacles_mesh_path_registers(cpu_genesis, cube_obj, name, b_dyna
     if b_dynamic in (1, 2):
         assert sorted(dyn) == [0]
     assert sorted(ue_ids) == ([0] if is_ue else [])
+
+
+def test_rco_road_dual_scene_has_no_redundant_main_rigid(cpu_genesis, cube_obj):
+    """0.9.6 cleanup: a road_raycast_only road in dual_scene is the kinematic
+    raycast mirror ONLY — no redundant no-collision rigid in the main scene."""
+    vs = VehicleScene(n_envs=1, backend="cpu", raycast_mode="dual_scene",
+                      init_genesis=False)
+    env_builder.build_obstacles(
+        vs=vs, init_data=_mesh_init(0, "[Complex]", cube_obj),
+        ue_friction=1.0, ue_restitution=0.0, vis_mode=None, road_raycast_only=True)
+    body = vs.statics[0]
+    assert body.entity_main is None          # no main-scene collider built
+    assert body.entity_raycast is not None   # just the raycast mirror
+
+
+def test_rco_road_single_scene_no_spurious_warning(cpu_genesis, cube_obj, caplog):
+    """0.9.6 guard refinement: in single_scene the rco road's wheel_raycast_morph
+    is the sole geometry (the raycast body), so the 'ignored in single_scene'
+    warning must NOT fire."""
+    import logging
+    vs = VehicleScene(n_envs=1, backend="cpu", raycast_mode="single_scene",
+                      init_genesis=False)
+    with caplog.at_level(logging.WARNING, logger="genesis_vehicle.vehicle_scene"):
+        env_builder.build_obstacles(
+            vs=vs, init_data=_mesh_init(0, "[Complex]", cube_obj),
+            ue_friction=1.0, ue_restitution=0.0, vis_mode=None, road_raycast_only=True)
+    assert not any("wheel_raycast_morph" in r.getMessage() for r in caplog.records)
+    assert vs.statics[0].entity_main is not None   # single_scene: the body exists
