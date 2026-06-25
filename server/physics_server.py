@@ -336,7 +336,6 @@ def main():
             enable_adjacent_collision=False,
             enable_neutral_collision=False,
             enable_collision=True,
-            prefer_parallel_linesearch=False,
             tolerance=0.001,
             use_gjk_collision=False, # [최적화] MPR 전환
             box_box_detection=True,
@@ -428,6 +427,7 @@ def main():
         ue_restitution=ue_restitution,
         vis_mode=args.vis_mode,
         verbose=args.verbose,
+        road_raycast_only=args.road_raycast_only,
         structures_as_primitive=args.structures_as_primitive,
     )
     entities_to_set_mass.extend(extra_mass_entities)

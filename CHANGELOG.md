@@ -10,6 +10,31 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.3] — 2026-06-25
+
+### Fixed — server road-mesh path (regression from 0.9.0)
+
+- `env_builder.build_obstacles` still referenced `road_raycast_only` in the mesh
+  morph-building branch, but the 0.9.0 encapsulation refactor had dropped it from
+  the signature — so a **road mesh** (`obs_type == 5` / `[Complex]`) hit a
+  `NameError` at runtime. The 0.9.0 routing test only used primitive boxes, which
+  never reach that branch, so it slipped through; UE integration surfaced it.
+  Restored `road_raycast_only=False` to the signature and `physics_server` passes
+  `--road-raycast-only` again (`l3_runtime` uses the default). So
+  **`--road-raycast-only` is NOT superseded** (correcting the 0.9.0 note): a road
+  can still load as a no-collision kinematic wheel-raycast surface, while the
+  default (`False`) routes it through `add_static` (convex `collision_morph` +
+  detailed `wheel_raycast_morph`).
+- `physics_server` dropped `RigidOptions(prefer_parallel_linesearch=False)` — the
+  installed Genesis (1.2.0) rejects that attribute ("Unrecognized attribute"),
+  which crashed `VehicleScene` construction in the per-entity server. Latent
+  since the pre-SDK server hard-coded it but was never run headless on 1.2.0.
+
+Verified: a road mesh registers under both `road_raycast_only` values with no
+NameError; 85 pytest.
+
+---
+
 ## [0.9.2] — 2026-06-25
 
 ### Added — non-convex collision-mesh guard
