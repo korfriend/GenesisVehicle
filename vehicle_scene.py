@@ -405,10 +405,16 @@ class VehicleScene:
         if rc_morph is not None:
             if self._two_scene:
                 # Kinematic visual-raycast body in the raycast scene → static BVH.
+                # Force vis_mode="visual": a KinematicEntity is visual-only (it has
+                # vgeoms, not collision geoms), so the renderer's on_rigid must take
+                # the vgeoms path. A non-"visual" vis_mode (e.g. the server's
+                # --vis-mode=collision leaking through, or a changed Genesis default)
+                # makes on_rigid touch entity.geoms → AttributeError at build. This
+                # scene is sensors-only and never user-rendered, so "visual" is right.
                 body.entity_raycast = self.raycast_scene.add_entity(
                     rc_morph, **_add_kwargs(
                         gs.materials.Kinematic(use_visual_raycasting=True),
-                        surface, vis_mode))
+                        surface, "visual"))
             else:
                 # single mode: the rigid collision body IS the raycast target.
                 if body.entity_main is None:

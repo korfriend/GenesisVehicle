@@ -10,6 +10,34 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.11] — 2026-06-25
+
+### Fixed — dual_scene `vs.build()` crash on a non-"visual" mirror vis_mode
+
+Building a dual_scene `VehicleScene` could crash in Genesis's renderer:
+
+```
+AttributeError: 'KinematicEntity' object has no attribute 'geoms'. Did you mean: 'vgeoms'?
+  genesis/vis/rasterizer_context.py … on_rigid() → geoms = entity.geoms
+```
+
+The kinematic raycast-scene mirrors (`use_visual_raycasting=True`) are visual-only
+(they have `vgeoms`, not collision `geoms`). Genesis's `on_rigid` only takes the
+`vgeoms` path when `surface.vis_mode == "visual"`; for any other vis_mode it
+touches `entity.geoms`, which a `KinematicEntity` lacks. The caller's vis_mode
+(e.g. the OSC server's `--vis-mode=collision`) was leaking onto the sensors-only
+mirror. On Genesis 1.2.0 the kinematic default is `"visual"`, so it was latent;
+the L3 server with `--vis-mode=collision` (or a Genesis build whose kinematic
+default differs) hit it at `vs.build()` — the failure the UE team reported.
+
+Fix: the kinematic raycast-scene mirror is now always added with
+`vis_mode="visual"` (it is never user-rendered — the external engine renders); the
+caller's vis_mode still applies to the main-scene entity. Reproduced on 1.2.0
+(`vis_mode="collision"` → same crash, `"visual"` → OK) and regression-tested. 96
+pytest.
+
+---
+
 ## [0.9.10] — 2026-06-25
 
 ### Docs — the two API layers (high-level `VehicleScene` vs low-level `VehiclePhysics`)
