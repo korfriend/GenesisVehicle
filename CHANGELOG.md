@@ -10,6 +10,25 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.15] — 2026-06-26
+
+### Added — `viewer_options=` on `VehicleScene` (configure the native viewer)
+
+`VehicleScene` exposed `show_viewer` (open/close) and `vis_options` (rendering)
+but not the native viewer's own config. Added a `viewer_options=` parameter
+(`gs.options.ViewerOptions`: `camera_pos` / `camera_lookat` / `camera_fov` / `res`
+/ `max_FPS` / `refresh_rate` / …), passed through to the main scene. `None` keeps
+Genesis defaults; pair with `show_viewer=True` to open the window. Only the main
+scene takes it (the raycast scene is sensors-only, never shown).
+
+```python
+vs = VehicleScene(show_viewer=True,
+                  viewer_options=gs.options.ViewerOptions(
+                      camera_pos=(8, -6, 4), camera_lookat=(0, 0, 1), max_FPS=60))
+```
+
+---
+
 ## [0.9.14] — 2026-06-26
 
 ### Fixed (docs) — correct the 0.9.13 perf claim; Genesis already no-ops headless render

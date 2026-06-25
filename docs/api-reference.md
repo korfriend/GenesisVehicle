@@ -30,7 +30,7 @@ class VehicleScene:
                  raycast_mode="dual_scene",        # "dual_scene" (default) | "single_scene"
                  gravity=(0,0,-9.81), substeps=4,
                  sim_options=None, rigid_options=None, vis_options=None,
-                 show_viewer=False, init_genesis=True)
+                 viewer_options=None, show_viewer=False, init_genesis=True)
 
     # --- registration (before build) ---
     def add_vehicle(urdf_path, preset=None, *, pos=(0,0,1), quat=None,
@@ -107,7 +107,8 @@ targets (`add_dynamic`).
 | `gravity` | `(0,0,-9.81)` | world gravity |
 | `substeps` | `4` | engine solver substeps per `step()` |
 | `sim_options` / `rigid_options` / `vis_options` | `None` | inject Genesis option objects (else built from the args above) |
-| `show_viewer` | `False` | open the Genesis viewer |
+| `viewer_options` | `None` | native-viewer config — `gs.options.ViewerOptions(camera_pos, camera_lookat, camera_fov, res, max_FPS, refresh_rate, …)`. Main scene only (the raycast scene is never shown). Needs `show_viewer=True` to actually open a window |
+| `show_viewer` | `False` | open the native Genesis viewer window (main scene) |
 | `init_genesis` | `True` | call `gs.init` (set `False` if the process already did) |
 
 **`add_vehicle(urdf_path, preset=None, *, …)`** — registers a driven vehicle (always collides + always wheel-raycast).
