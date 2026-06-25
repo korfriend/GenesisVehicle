@@ -46,6 +46,49 @@ def version_info() -> tuple[int, int, int]:
     return VERSION_INFO
 
 
+# --- Logging -----------------------------------------------------------------
+# Attach a formatted handler to the ``genesis_vehicle`` package logger so its
+# warnings/errors print with a timestamp / level / logger-name by default —
+# WITHOUT hijacking the root logger. Only the ``genesis_vehicle`` namespace is
+# configured and propagation is turned off, so an application's own logging
+# config (root handlers, basicConfig, etc.) is left untouched and our messages
+# are never double-emitted. Customize via ``configure_logging(...)`` or silence
+# the auto-setup with the env var ``GENESIS_VEHICLE_LOG=0``.
+
+import logging as _logging
+import os as _os
+
+_LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s | %(message)s"
+_LOG_DATEFMT = "%H:%M:%S"
+
+
+def configure_logging(level=_logging.WARNING, *, fmt=_LOG_FORMAT,
+                      datefmt=_LOG_DATEFMT, stream=None, force=False):
+    """Attach a formatted stream handler to the ``genesis_vehicle`` logger.
+
+    Called once on import with sensible defaults (``WARNING`` and up, formatted
+    as ``HH:MM:SS LEVEL    genesis_vehicle.<mod> | message`` to stderr). Re-call
+    to change the ``level`` / ``fmt`` / ``datefmt`` / ``stream``; pass
+    ``force=True`` to replace handlers a previous call added. If the logger
+    already has handlers (the app configured it), the level is updated but the
+    existing handlers are kept. Only the package logger is touched (propagation
+    off) — the root logger / app config is left alone. Returns the logger."""
+    log = _logging.getLogger("genesis_vehicle")
+    if log.handlers and not force:
+        log.setLevel(level)
+        return log
+    for h in list(log.handlers):
+        log.removeHandler(h)
+    handler = _logging.StreamHandler(stream)        # stream=None → stderr
+    handler.setFormatter(_logging.Formatter(fmt, datefmt=datefmt))
+    log.addHandler(handler)
+    log.setLevel(level)
+    log.propagate = False        # our handler emits it; don't double-log via root
+    return log
+
+
+if _os.environ.get("GENESIS_VEHICLE_LOG", "1") != "0":
+    configure_logging()
 
 
 # --- Eager (no Genesis runtime needed) ---------------------------------------
@@ -140,6 +183,8 @@ def __getattr__(name: str):
 __all__ = [
     # Version
     "__version__", "VERSION_INFO", "version", "version_info",
+    # Logging
+    "configure_logging",
     # Driver (lazy)
     "VehiclePhysics", "WheelMeta", "PipelineContext",
     "MultiVehiclePhysics", "MultiVehicleKindPhysics",
