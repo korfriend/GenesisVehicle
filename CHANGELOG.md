@@ -10,6 +10,25 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.5] — 2026-06-25
+
+### Added — regression tests for the server mesh-obstacle paths
+
+`tests/test_server_mesh_obstacles.py` (Genesis-gated via `importorskip`; CPU).
+The root cause of the 0.9.3 / 0.9.4 bugs was that the 0.9.0 obstacle test only
+used primitive boxes, which skip the mesh morph-building branch where both bugs
+lived. New tests close that gap:
+
+- `build_obstacles` must keep the `road_raycast_only` parameter (signature guard
+  for the 0.9.3 NameError);
+- `make_double_sided_mesh` doubles a closed mesh without the removed trimesh API
+  (guard for 0.9.4);
+- `build_obstacles` registers cleanly across all six mesh paths (road
+  raycast-only / full-collision, structures-as-primitive, convex, dynamic,
+  UE-driven). 93 pytest (8 new).
+
+---
+
 ## [0.9.4] — 2026-06-25
 
 ### Fixed — double-sided road-mesh preprocessing on trimesh 4.x
