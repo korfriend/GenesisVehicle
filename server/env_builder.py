@@ -29,8 +29,15 @@ def make_double_sided_mesh(mesh, thickness=0.02):
     all_faces = np.vstack([f_orig, f_back])
     
     new_mesh = trimesh.Trimesh(vertices=new_vertices, faces=all_faces)
-    new_mesh.remove_degenerate_faces()
-    new_mesh.remove_duplicate_faces()
+    # trimesh >= 4 removed remove_degenerate_faces() / remove_duplicate_faces();
+    # the replacement is update_faces() with a boolean face mask. Fall back to the
+    # legacy methods on trimesh 3.x.
+    if hasattr(new_mesh, "nondegenerate_faces"):
+        new_mesh.update_faces(new_mesh.nondegenerate_faces())
+        new_mesh.update_faces(new_mesh.unique_faces())
+    else:
+        new_mesh.remove_degenerate_faces()
+        new_mesh.remove_duplicate_faces()
 
     return new_mesh
 

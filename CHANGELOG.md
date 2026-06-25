@@ -10,6 +10,25 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.4] — 2026-06-25
+
+### Fixed — double-sided road-mesh preprocessing on trimesh 4.x
+
+`env_builder.make_double_sided_mesh` called `remove_degenerate_faces()` /
+`remove_duplicate_faces()`, which **trimesh ≥ 4 removed** (the installed venv has
+4.12.2). The `[Complex]` road path caught the resulting `AttributeError` and fell
+back to the *original* (single-sided) mesh — so the double-siding silently never
+happened. Switched to the `update_faces(mesh.nondegenerate_faces())` /
+`update_faces(mesh.unique_faces())` face-mask API, with a `hasattr` fallback to
+the legacy methods on trimesh 3.x.
+
+Verified: a `[Complex]` road mesh is now doubled before CoACD (e.g. a 12-face
+cube → 24 faces) instead of falling back; the other mesh-obstacle paths
+(`structures_as_primitive`, convex, dynamic, UE-driven) all register cleanly;
+85 pytest.
+
+---
+
 ## [0.9.3] — 2026-06-25
 
 ### Fixed — server road-mesh path (regression from 0.9.0)
