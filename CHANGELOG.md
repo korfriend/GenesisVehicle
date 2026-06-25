@@ -10,21 +10,42 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.14] — 2026-06-26
+
+### Fixed (docs) — correct the 0.9.13 perf claim; Genesis already no-ops headless render
+
+The 0.9.13 note claimed a ~16.5% raycast-step saving from `update_visualizer=False`.
+That was a **benchmarking artifact** (a single non-interleaved GPU run);
+interleaved re-measurement shows no real difference. Reading Genesis confirms why:
+`Scene.step()` calls `visualizer.update(force=not advance)`, whose body is
+
+```python
+if force:                         # only when the sim did NOT advance (paused)
+    self.reset()
+elif self._viewer is not None:    # only when a native viewer is attached
+    self._viewer.update(...)
+# else: nothing
+```
+
+So a **headless scene (no viewer) during a normal advancing step renders nothing**
+— Genesis already skips it; cameras render only on an explicit `cam.render()`,
+never inside `step()`. The criterion is "is a viewer attached / is the sim
+paused", and Genesis applies it itself. The 0.9.13 `update_visualizer=False` on the
+raycast scene is therefore **not a speedup**; it is kept only as explicit intent
+(the sensors-only raycast scene must never render) and is a no-op in practice.
+`main_scene` needs no such change — when headless it already renders nothing.
+
 ## [0.9.13] — 2026-06-26
 
-### Changed — skip the per-step visualizer update on the sensors-only raycast scene
+### Changed — be explicit that the sensors-only raycast scene is never rendered
 
-`Scene.step()` calls `visualizer.update()` every frame (a viewer/render refresh).
-The dual_scene **raycast scene** is sensors-only and never user-rendered (the
-external engine renders), so that refresh is pure overhead. `VehicleScene` now
-steps it with `update_visualizer=False` — both the per-step re-cast in
-`_measure_distances` and the one-time populate step in `build`. The wheel-ray
-re-cast still runs inside `sim.step()`, so distances are unchanged.
-
-Isolated measurement on a ~6k-face heightfield raycast scene (GPU): the raycast
-step drops **2.90 → 2.42 ms (−0.48 ms, ≈16.5% of the raycast step)**. Correctness
-unchanged — `two_scene_terrain --compare` still matches single_scene pose-for-pose
-(|Δx| = 0.000 m). 96 pytest.
+`VehicleScene` steps the dual_scene raycast scene with `update_visualizer=False`
+(both the per-step re-cast in `_measure_distances` and the one-time populate step
+in `build`) — it is sensors-only and never user-rendered. The wheel-ray re-cast
+still runs inside `sim.step()`, so distances/poses are unchanged
+(`two_scene_terrain --compare` matches single_scene, |Δx| = 0.000 m). **Not a
+measurable speedup** — see the 0.9.14 correction (Genesis already no-ops a headless
+scene's visualizer update). Kept as explicit intent. 96 pytest.
 
 ---
 
