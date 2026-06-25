@@ -6,10 +6,9 @@ and the `collision` / `wheel_raycast` / `physics` parameter combinations from
 `docs/api-reference.md` §0.2:
 
 - `add_ground_plane()`                          — flat ground (always raycast).
-- `add_static(collision_morph=, wheel_raycast_morph=)` — a raised platform: the
-  wheels SENSE it (always a raycast target) so the suspension lifts the chassis
-  onto it; the coarse collider / detailed raycast surface split is a dual_scene
-  feature.
+- `add_static(collision_morph=, wheel_raycast_morph=)` — a static block: the
+  wheels SENSE it (always a raycast target); the coarse-collider / detailed-
+  raycast split is a dual_scene feature.
 - `add_dynamic(physics=True, wheel_raycast=False)` — a free box the car COLLIDES
   with and knocks away; the wheels do NOT drive onto it (collide-only default).
 - `add_dynamic(physics=True, wheel_raycast=True)`  — a low ramp the wheels SENSE
@@ -18,10 +17,19 @@ and the `collision` / `wheel_raycast` / `physics` parameter combinations from
 It prints the body registry (each body's main / raycast entities) — the §0.2
 matrix made concrete — then drives forward and reports what happened.
 
+`--bench` instead times single_scene vs dual_scene over the drive loop (optionally
+swept across L3 `--n-envs`), to show how dual_scene pays off here. Spoiler: these
+obstacles are PRIMITIVES (cheap BVH), so single_scene's per-step BVH re-fit is
+nearly free and dual_scene's extra scene + synced ramp-mirror make it ~even-to-
+slower at small n_envs — dual_scene's win needs a heavy *static mesh* terrain
+and/or large `n_envs` (see `two_scene_terrain.py`).
+
 Run
 ---
     python -m genesis_vehicle.samples.obstacles_and_ramp
     python -m genesis_vehicle.samples.obstacles_and_ramp --mode single_scene
+    python -m genesis_vehicle.samples.obstacles_and_ramp --bench
+    python -m genesis_vehicle.samples.obstacles_and_ramp --bench --n-envs 64
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ if _SDK_PARENT not in sys.path:
 
 import argparse
 import os
+import time
 
 import genesis as gs
 from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann, __version__ as sdk_version
@@ -40,46 +49,82 @@ from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann, __version__ as s
 URDF_PATH = os.path.join(os.path.dirname(__file__), "urdf", "car_4w.urdf")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["dual_scene", "single_scene"], default="dual_scene",
-                    help="raycast_mode (default dual_scene).")
-    ap.add_argument("--cpu", action="store_true", help="run on CPU instead of GPU.")
-    args = ap.parse_args()
-    print(f"genesis_vehicle v{sdk_version}  |  obstacles_and_ramp  (mode={args.mode})")
-
-    cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
-    vs = VehicleScene(backend="cpu" if args.cpu else "gpu", raycast_mode=args.mode,
-                      dt=cfg.recommended_dt, substeps=10, n_envs=1)
-
-    # --- build the course through VehicleScene (it owns the scene routing) ---
-    # Obstacles are kept low so the car interacts gently instead of launching off
-    # a vertical step. Positions are spaced along +x in the order the car meets them.
+def _build_course(mode, n_envs, backend, cfg):
+    """Build the obstacle course on a fresh VehicleScene. Returns (vs, veh, box)."""
+    vs = VehicleScene(backend=backend, raycast_mode=mode, dt=cfg.recommended_dt,
+                      substeps=10, n_envs=n_envs)
     vs.add_ground_plane(friction=1.0)
-
-    # (1) Collide-only free box at x=4 — the car drives into it and pushes it; the
-    # wheels do NOT drive onto it (wheel_raycast=False, the default).
+    # (1) collide-only free box at x=4 — pushed by the chassis, wheels don't climb it.
     knock_box = vs.add_dynamic(
         gs.morphs.Box(size=(0.5, 0.5, 0.5), pos=(4.0, 0.0, 0.25)),
         physics=True, wheel_raycast=False, mass=1.0, name="knock_box")
-
-    # (2) Low ramp at x=8 the wheels SENSE and roll over (wheel_raycast=True opt-in;
-    # a primitive collider, so no re-fit warning). physics=False = a fixed surface.
-    ramp = vs.add_dynamic(
+    # (2) low ramp at x=8 the wheels SENSE and roll over (wheel_raycast=True opt-in).
+    vs.add_dynamic(
         gs.morphs.Box(size=(2.0, 2.0, 0.12), pos=(8.0, 0.0, 0.06)),
         physics=False, wheel_raycast=True, name="ramp")
-
-    # (3) Static block at x=11 — a static body is ALWAYS a raycast target; the
-    # collision/raycast morph split only takes effect in dual_scene.
-    block = vs.add_static(
+    # (3) static block at x=11 — always a raycast target; collision/raycast split
+    #     only takes effect in dual_scene.
+    vs.add_static(
         collision_morph=gs.morphs.Box(size=(2.0, 2.0, 0.12), pos=(11.0, 0.0, 0.06)),
         wheel_raycast_morph=gs.morphs.Box(size=(2.0, 2.0, 0.12), pos=(11.0, 0.0, 0.06)),
         material=gs.materials.Rigid(friction=1.0), name="block")
-
     veh = vs.add_vehicle(URDF_PATH, car_4w_rwd_ackermann, cfg=cfg,
-                         pos=(0.0, 0.0, 0.6),
-                         material=gs.materials.Rigid(friction=1.0))
+                         pos=(0.0, 0.0, 0.6), material=gs.materials.Rigid(friction=1.0))
     vs.build()
+    return vs, veh, knock_box
+
+
+def _bench(backend, n_envs, cfg, drive_s=3.0, settle_s=1.0):
+    """Time the drive loop in each mode; return {mode: ms_per_step}."""
+    import torch
+    DT = cfg.recommended_dt
+    out = {}
+    for mode in ("single_scene", "dual_scene"):
+        vs, veh, _ = _build_course(mode, n_envs, backend, cfg)
+        veh.set_inputs(throttle=0.0, brake=1.0)
+        for _ in range(int(settle_s / DT)):      # settle + warm up kernels
+            vs.step()
+        n = int(drive_s / DT)
+        veh.set_inputs(throttle=0.45)
+        if backend == "gpu":
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(n):
+            vs.step()
+        if backend == "gpu":
+            torch.cuda.synchronize()
+        out[mode] = (time.perf_counter() - t0) / n * 1000.0
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=["dual_scene", "single_scene"], default="dual_scene",
+                    help="raycast_mode for the educational run (default dual_scene).")
+    ap.add_argument("--cpu", action="store_true", help="run on CPU instead of GPU.")
+    ap.add_argument("--bench", action="store_true",
+                    help="time single_scene vs dual_scene over the drive loop.")
+    ap.add_argument("--n-envs", type=int, default=1,
+                    help="L3 batch size for --bench (default 1).")
+    args = ap.parse_args()
+    backend = "cpu" if args.cpu else "gpu"
+    cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
+
+    if args.bench:
+        print(f"genesis_vehicle v{sdk_version}  |  obstacles_and_ramp  --bench  "
+              f"(backend={backend}, n_envs={args.n_envs})")
+        ms = _bench(backend, args.n_envs, cfg)
+        s, d = ms["single_scene"], ms["dual_scene"]
+        print(f"\n  {'mode':12s} {'ms/step':>9s} {'ms/env-step':>12s}")
+        for mode, t in (("single_scene", s), ("dual_scene", d)):
+            print(f"  {mode:12s} {t:9.3f} {t / args.n_envs:12.4f}")
+        verdict = ("dual faster" if d < s else
+                   "dual slower — primitive obstacles, no heavy static mesh to amortize")
+        print(f"\n  dual_scene speedup vs single_scene: {s / d:.2f}x  ({verdict})")
+        return
+
+    print(f"genesis_vehicle v{sdk_version}  |  obstacles_and_ramp  (mode={args.mode})")
+    vs, veh, knock_box = _build_course(args.mode, 1, backend, cfg)
 
     # --- registry: the §0.2 matrix made concrete ---
     print(f"\n  raycast_mode = {vs.raycast_mode}  (raycast_scene = "

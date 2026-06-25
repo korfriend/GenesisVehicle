@@ -10,6 +10,28 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.9] — 2026-06-25
+
+### Added — `obstacles_and_ramp --bench` (dual_scene vs single_scene)
+
+The obstacle sample gained `--bench` (and `--n-envs`) to time the two raycast
+modes over the drive loop. Finding on this PRIMITIVE-obstacle course (GPU):
+
+| n_envs | single_scene | dual_scene | dual speedup |
+|---|---|---|---|
+| 1   | 24.5 ms/step | 26.3 ms/step | 0.93x (≈7% slower) |
+| 64  | 46.8 ms/step (0.73 ms/env) | 50.8 ms/step (0.79 ms/env) | 0.92x (≈8% slower) |
+
+dual_scene is **slower** here, and L3 does not rescue it: the obstacles are boxes
+(trivial BVH), so single_scene's per-step BVH re-fit is nearly free while
+dual_scene pays for a second `scene.step()`, the ramp's synced mirror, and the
+proxy sync — and the static-BVH-shared-across-envs benefit is negligible for
+primitives. dual_scene's win needs a heavy static **mesh** terrain (see
+`two_scene_terrain.py`: 3.40x @256 envs); prefer **single_scene** for
+primitive-obstacle scenes.
+
+---
+
 ## [0.9.8] — 2026-06-25
 
 ### Added — formatted package logging by default
