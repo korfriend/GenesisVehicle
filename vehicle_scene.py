@@ -298,6 +298,7 @@ class VehicleScene:
         sim_options: Any = None,
         rigid_options: Any = None,
         vis_options: Any = None,
+        viewer_options: Any = None,
         show_viewer: bool = False,
         init_genesis: bool = True,
     ) -> None:
@@ -328,8 +329,15 @@ class VehicleScene:
         _rigid = rigid_options or gs.options.RigidOptions(dt=dt, enable_collision=True)
         _vis = vis_options or gs.options.VisOptions()
 
-        self.main_scene = gs.Scene(sim_options=_sim, rigid_options=_rigid,
-                                   vis_options=_vis, show_viewer=show_viewer)
+        # viewer_options (gs.options.ViewerOptions: camera_pos / camera_lookat /
+        # res / max_FPS / refresh_rate …) configures the NATIVE viewer; only the
+        # main scene can have one (the raycast scene is sensors-only). None lets
+        # Genesis use its defaults. Pass show_viewer=True to actually open it.
+        _scene_kw = dict(sim_options=_sim, rigid_options=_rigid, vis_options=_vis,
+                         show_viewer=show_viewer)
+        if viewer_options is not None:
+            _scene_kw["viewer_options"] = viewer_options
+        self.main_scene = gs.Scene(**_scene_kw)
         # The raycast scene never advances dynamics; reuse the same dt for sanity.
         self.raycast_scene = (
             gs.Scene(sim_options=gs.options.SimOptions(dt=dt, substeps=1, gravity=(0, 0, 0)),
