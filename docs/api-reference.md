@@ -55,7 +55,7 @@ class VehicleScene:
     def reset() -> None
 
     main_scene: gs.Scene                 # physics/collision
-    raycast_scene: gs.Scene | None       # dual_scene mode only (None for single_scene)
+    raycast_scene: gs.Scene | None       # dual_scene only (None for single_scene); sensors-only, never viewed/rendered
     vehicles: list[Vehicle]              # property
     statics: list[StaticBody]            # property
     dynamics: list[DynamicBody]          # property
