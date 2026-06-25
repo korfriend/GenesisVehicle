@@ -128,7 +128,7 @@ targets (`add_dynamic`).
 | `morph` | `None` | one morph for both collision + raycast |
 | `collision_morph` | `None` | coarse/convex collider (overrides `morph` for collision) |
 | `wheel_raycast_morph` | `None` | detailed surface the wheel rays hit (overrides `morph` for raycast) |
-| `collision` | `True` | build a main-scene rigid collider (see matrix for the `False` + single_scene caveat) |
+| `collision` | `True` | build a main-scene rigid collider (a `convexify=False` mesh > 1000 faces is **refused** — see the mesh guard below; see matrix for the `False` + single_scene caveat) |
 | `material` / `surface` / `vis_mode` | `None` | passed to `add_entity` |
 | `name` | `None` | handle label |
 
@@ -161,11 +161,32 @@ with it in the main scene; **Wheels sense** = the wheel rays detect it as ground
 | `False` | `single_scene` | rigid (raycast target) ⚠️ | — | ⚠️ **yes** | ✅ |
 
 ⚠️ **single_scene caveat:** with one scene the raycast target *is* a rigid body,
-so `collision=False` cannot be honored — it still collides. For a true
-no-collision raycast surface use `dual_scene` (kinematic mirror, no collider).
-Likewise `wheel_raycast_morph` (a detailed raycast surface separate from the
-collider) needs the two bodies of dual_scene, so it is **ignored in single_scene
-and logs a warning**.
+so `collision=False` cannot be honored — it still collides (and now **logs a
+`[genesis_vehicle:single-scene]` warning**). For a true no-collision raycast
+surface use `dual_scene` (kinematic mirror, no collider). Likewise
+`wheel_raycast_morph` (a detailed raycast surface separate from the collider)
+needs the two bodies of dual_scene, so it is **ignored in single_scene and logs a
+warning**.
+
+⚠️ **Non-convex mesh guard (rigid colliders):** any rigid collision body built
+from a `gs.morphs.Mesh` with `convexify=False` and **> 1000 faces**
+(`_MAX_NONCONVEX_COLLISION_FACES`) is *refused* — `_guard_collision_mesh` raises
+a `ValueError` and logs a `[genesis_vehicle:mesh-guard] >>> REVIEW THIS MESH <<<`
+error. A full-concave collider forces a huge SDF/collision build that can exhaust
+memory and crash the process (under WSL, the whole VM). It applies to **every
+rigid collision path**: `add_static` (main collider, and the single_scene raycast
+target) and `add_dynamic` (main body, and the dual_scene `wheel_raycast` mirror).
+**Exempt:** primitives & heightfields (not a `Mesh`), `convexify=True` (convex
+decomposition keeps collision cheap), and `collision=False` kinematic
+wheel-raycast surfaces (no SDF — the recommended home for a high-poly mesh). Fix:
+decimate the mesh, set `convexify=True`, or register it as
+`add_static(collision=False)` (kinematic) in dual_scene.
+
+**Log prefixes.** All `VehicleScene` warnings/errors carry a greppable
+`[genesis_vehicle:<slug>]` prefix so an issue class is easy to spot/filter:
+`mesh-guard` (mesh refused), `single-scene` (a dual_scene-only option used in
+single_scene), `refit-cost` (a non-primitive `wheel_raycast` mirror that re-fits
+each step). Grep `\[genesis_vehicle:` for all, or a slug for one class.
 
 **`add_dynamic`** — `physics` sets motion; `wheel_raycast` only controls the
 **dual_scene** raycast mirror (see the caveat below):

@@ -104,14 +104,16 @@ def _guard_collision_mesh(morph: Any, where: str) -> None:
     if n_faces <= _MAX_NONCONVEX_COLLISION_FACES:
         return
     _logger.error(
-        "%s: %d-face non-convex mesh requested as a RIGID collision body with "
+        "[genesis_vehicle:mesh-guard] %s: %d-face non-convex mesh requested as a "
+        "RIGID collision body with "
         "convexify=False (limit %d). >>> REVIEW THIS MESH <<< before using it as "
         "a collider: decimate it, enable convexify=True (convex decomposition), "
         "or register it as a KINEMATIC wheel-raycast target "
         "(add_static(collision=False) in dual_scene), which needs no SDF. "
         "File: %s", where, n_faces, _MAX_NONCONVEX_COLLISION_FACES, f)
     raise ValueError(
-        f"{where}: refusing to build a {n_faces}-face non-convex mesh as a rigid "
+        f"[genesis_vehicle:mesh-guard] {where}: refusing to build a {n_faces}-face "
+        f"non-convex mesh as a rigid "
         f"collision body with convexify=False (limit "
         f"{_MAX_NONCONVEX_COLLISION_FACES}). A large concave collider forces a "
         f"huge SDF/collision build that can exhaust memory and crash the "
@@ -374,10 +376,23 @@ class VehicleScene:
             # wheel_raycast_morph is the only geometry — collision=False — it IS the
             # body, so no warning.)
             _logger.warning(
-                "add_static(%r): wheel_raycast_morph only applies in dual_scene (a "
+                "[genesis_vehicle:single-scene] add_static(%r): wheel_raycast_morph "
+                "only applies in dual_scene (a "
                 "separate kinematic raycast surface). In single_scene the one rigid "
                 "collision body is also the raycast target, so a distinct "
                 "wheel_raycast_morph is ignored.", name)
+
+        if not self._two_scene and not collision and rc_morph is not None:
+            # single_scene has ONE body, and the wheel-raycast target must be a
+            # rigid body the rays can hit — so collision=False cannot be honored:
+            # the body still collides (it is created as a rigid below). Use
+            # dual_scene for a true no-collision (kinematic) raycast surface.
+            _logger.warning(
+                "[genesis_vehicle:single-scene] add_static(%r): collision=False "
+                "cannot be honored in single_scene "
+                "— the lone rigid body is also the wheel-raycast target, so it "
+                "still collides. Use raycast_mode='dual_scene' for a true "
+                "no-collision (kinematic) raycast surface.", name)
 
         body = StaticBody(name=name, has_collision=bool(collision), has_raycast=True)
 
@@ -453,13 +468,15 @@ class VehicleScene:
             # a rigid body is already a wheel-raycast target via the main scene, so
             # the flag changes nothing.
             _logger.warning(
-                "add_dynamic(%r): wheel_raycast=True has no effect in single_scene "
+                "[genesis_vehicle:single-scene] add_dynamic(%r): wheel_raycast=True "
+                "has no effect in single_scene "
                 "mode — there is no raycast scene to mirror into, and the rigid body "
                 "is already a wheel-raycast target via the main scene. The flag only "
                 "adds a dedicated mirror in dual_scene.", name)
         elif wheel_raycast and type(morph).__name__ not in _PRIMITIVE_MORPHS:
             _logger.warning(
-                "add_dynamic(%r): wheel_raycast=True on a non-primitive (%s) morph — "
+                "[genesis_vehicle:refit-cost] add_dynamic(%r): wheel_raycast=True on "
+                "a non-primitive (%s) morph — "
                 "the dual_scene mirror's BVH re-fits every step (cost grows with face "
                 "count). Prefer a primitive collider (Box/Sphere/Cylinder) for a "
                 "wheel_raycast dynamic body.", name, type(morph).__name__)
