@@ -614,7 +614,9 @@ class VehicleScene:
             # the first read() returns valid data (Genesis sensors are empty
             # before the first step). The kinematic terrain/proxy don't move, so
             # this single step is cheap and never repeated.
-            self.raycast_scene.step()
+            # update_visualizer=False: this scene is sensors-only and never
+            # user-rendered, so skip the per-step visualizer/render update.
+            self.raycast_scene.step(update_visualizer=False)
 
         for veh in self._vehicles:
             sensor = None if self._two_scene else veh.sensor
@@ -644,7 +646,11 @@ class VehicleScene:
         for obs in self._dynamics:
             if obs.entity_raycast is not None:
                 self._sync_dynamic(obs)
-        self.raycast_scene.step()
+        # update_visualizer=False: the raycast scene is sensors-only and never
+        # user-rendered, so skip the per-step visualizer/render update — the
+        # sensor re-cast still runs inside sim.step(). Saves the render call the
+        # raycast scene was making every frame.
+        self.raycast_scene.step(update_visualizer=False)
         return {veh: read_distances(veh.sensor, self.n_envs)
                 for veh in self._vehicles}
 
