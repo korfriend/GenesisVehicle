@@ -10,6 +10,24 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.13] — 2026-06-26
+
+### Changed — skip the per-step visualizer update on the sensors-only raycast scene
+
+`Scene.step()` calls `visualizer.update()` every frame (a viewer/render refresh).
+The dual_scene **raycast scene** is sensors-only and never user-rendered (the
+external engine renders), so that refresh is pure overhead. `VehicleScene` now
+steps it with `update_visualizer=False` — both the per-step re-cast in
+`_measure_distances` and the one-time populate step in `build`. The wheel-ray
+re-cast still runs inside `sim.step()`, so distances are unchanged.
+
+Isolated measurement on a ~6k-face heightfield raycast scene (GPU): the raycast
+step drops **2.90 → 2.42 ms (−0.48 ms, ≈16.5% of the raycast step)**. Correctness
+unchanged — `two_scene_terrain --compare` still matches single_scene pose-for-pose
+(|Δx| = 0.000 m). 96 pytest.
+
+---
+
 ## [0.9.12] — 2026-06-25
 
 ### Changed — mesh-guard message: name the per-step raycaster BVH re-fit cost
