@@ -75,7 +75,8 @@ def mesh_to_primitive_box(mesh_path, pos, quat, scale, fixed):
     return gs.morphs.Box(size=box_size, pos=box_pos, quat=quat, fixed=fixed)
 
 def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
-                    verbose=False, structures_as_primitive=False):
+                    verbose=False, road_raycast_only=False,
+                    structures_as_primitive=False):
     """
     언리얼 엔진으로부터 수신한 초기 장애물 리스트를 파싱하여
     물질 특성(마찰력, 반발력 등)과 충돌 기하(SDF/Box/Convex 등)를 자동 튜닝하여
