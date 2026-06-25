@@ -1,6 +1,39 @@
 # Concepts
 
-The mental model. Five things to know before reading the API reference.
+The mental model. First the two API layers, then five things to know before
+reading the API reference.
+
+## Start here: the two API layers
+
+The SDK has two layers. **Reach for the high-level one first.**
+
+- **High-level — `VehicleScene`** (the recommended entry point). It owns the
+  Genesis scene(s), `gs.init` / `build` / `step` / the wheel raycast (including
+  the two-scene optimization), and the registered vehicles / static / dynamic
+  bodies. You write `add_vehicle` / `add_static` / `add_dynamic` → `build` → a
+  loop of `veh.set_inputs(...) + vs.step()`, with no manual Genesis boilerplate.
+
+- **Low-level — `VehiclePhysics`** (one vehicle, batched over `n_envs`) **/
+  `MultiVehiclePhysics`** (K vehicles in one scene). This is the actual driver
+  `VehicleScene` wraps internally. You own the `gs.Scene`, `scene.build`, the
+  per-step loop, and the wheel raycaster; you call
+  `physics.step(VehicleInputs(...))` then `scene.step()` yourself.
+
+| | **`VehicleScene`** (high-level) | **`VehiclePhysics` / `MultiVehiclePhysics`** (low-level) |
+|---|---|---|
+| Owns | `gs.init` · scene(s) · `build` · `step` · raycast · two-scene | you own the scene + step loop |
+| Use it for | the default — drop a car and drive, terrain / obstacles, L3 (`n_envs`) | fine control: the L2 batched solver (`MultiVehiclePhysics`), a custom step loop, solver / throughput benchmarks |
+| Relationship | **wraps** `VehiclePhysics` | the **engine inside** `VehicleScene` |
+
+Rule of thumb: **start with `VehicleScene`; drop to `VehiclePhysics` /
+`MultiVehiclePhysics` only when you need control it doesn't expose** — e.g. the
+L2 cross-vehicle batched solver, or a hand-written step loop. The
+[`samples/`](../samples/README.md) show both: `quickstart` / `slope_hold` /
+`obstacles_and_ramp` / `two_scene_terrain` use `VehicleScene`; the L2 / L3
+batching and perf samples (`road_loop`, `l2l3_minimal`, `perf_*`,
+`city_traffic_ego`) use the low-level API directly. See
+[`api-reference.md`](api-reference.md) §0 (`VehicleScene`) and §1
+(`VehiclePhysics`), and [`batching.md`](batching.md) for L1 / L2 / L3.
 
 ## 1. The 5-step pipeline
 

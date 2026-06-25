@@ -10,6 +10,23 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.10] — 2026-06-25
+
+### Docs — the two API layers (high-level `VehicleScene` vs low-level `VehiclePhysics`)
+
+The recommendation to use `VehicleScene` was scattered and `concepts.md` (the
+mental-model doc) never mentioned it. Added a cohesive explanation:
+
+- `concepts.md` opens with a **"Start here: the two API layers"** section — what
+  each layer owns, a decision table, and the rule of thumb (start high-level,
+  drop to `VehiclePhysics` / `MultiVehiclePhysics` only for control it doesn't
+  expose, e.g. the L2 batched solver or a hand-written step loop).
+- `docs/index.md` gains a row pointing to it.
+- `api-reference.md` §0 (`VehicleScene`) and §1 (`VehiclePhysics`) cross-link to
+  the guide.
+
+---
+
 ## [0.9.9] — 2026-06-25
 
 ### Added — `obstacles_and_ramp --bench` (dual_scene vs single_scene)
