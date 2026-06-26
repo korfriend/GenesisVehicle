@@ -36,7 +36,6 @@ import argparse
 import math
 import os
 import tempfile
-from types import SimpleNamespace
 
 import numpy as np
 import genesis as gs
@@ -44,12 +43,11 @@ import genesis as gs
 import time
 
 from genesis_vehicle import (
-    VehiclePhysics, MultiVehiclePhysics, VehicleInputs,
+    VehicleScene,
     car_4w_fwd_ackermann, car_4w_rwd_ackermann, car_4w_awd_ackermann,
     truck_6w_partial_ackermann,
     __version__ as sdk_version,
 )
-from genesis_vehicle.scene_helpers import make_wheel_raycaster
 
 
 # ---------------------------------------------------------------------------
@@ -256,16 +254,19 @@ KINDS = [
 # Scene + run
 # ---------------------------------------------------------------------------
 
-def _add_loop_markers(scene, radius: float, n: int = 24, z: float = 0.05):
-    """Tall cones around the loop at target radius — visual cue for the
-    'road' the cars are following (no physical track geometry)."""
+def _add_loop_markers(vs, radius: float, n: int = 24, z: float = 0.05):
+    """Tall posts around the loop at target radius — visual cue for the
+    'road' the cars are following (no physical track geometry). Registered as
+    visual-only dynamics (physics=False, wheel_raycast=False) so the wheel
+    raycaster never treats them as ground."""
     for i in range(n):
         theta = 2 * math.pi * i / n
         x, y = radius * math.cos(theta), radius * math.sin(theta)
         color = (1.0, 0.55, 0.15, 1.0) if i % 2 == 0 else (1.0, 1.0, 1.0, 1.0)
-        scene.add_entity(
+        vs.add_dynamic(
             gs.morphs.Box(size=(0.3, 0.3, 0.5), pos=(x, y, z),
                           fixed=True, collision=False),
+            physics=False, wheel_raycast=False,
             surface=gs.surfaces.Plastic(color=color),
         )
 
@@ -322,16 +323,19 @@ def main():
     if args.viewer and not _hud.have_cv2():
         print("WARN: --viewer needs opencv-python. Continuing headless.")
         args.viewer = False
-    scene = gs.Scene(
+    # VehicleScene owns the scene / build / step. view: None headless, "native"
+    # the Genesis viewer, "cv2" renders the loop camera for the cv2 HUD. The
+    # benchmark's solver maps to VE's: multi_batched → "batched", per_vehicle →
+    # one VehiclePhysics per vehicle.
+    view = "native" if args.native else ("cv2" if args.viewer else None)
+    vs = VehicleScene(
+        n_envs=1, backend="gpu", raycast_mode="single_scene", view=view,
+        solver=("batched" if args.solver == "multi_batched" else "per_vehicle"),
         # substeps=30: the cars are stable at 10, but the 5000 kg Truck's stiff
-        # suspension + heavy-chassis/light-wheel mass ratio blows the constraint
-        # forces up to NaN at coarse internal dt (dt/substeps) the moment the
-        # brake releases and it drives. Measured floor with the truck in the
-        # fleet: substeps=20 still NaNs, 30 is stable (the standalone
-        # GeneVehicle_Truck6w demo uses 50 with a single truck). The extra cost
-        # vs the cars-only 10 is offset by the multi_batched solver (--solver),
-        # which batches each kind's pipeline; per_vehicle at substeps=30 is slow.
-        sim_options=gs.options.SimOptions(dt=DT, substeps=30),
+        # suspension blows the constraint forces up to NaN at coarse dt/substeps
+        # the moment it drives (20 still NaNs, 30 is stable). multi_batched offsets
+        # the cost by batching each kind's pipeline; per_vehicle at 30 is slow.
+        dt=DT, substeps=30,
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
@@ -341,27 +345,19 @@ def main():
             background_color=(0.05, 0.07, 0.10)),
         viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_height), (0.0, 0.0, 0.0))
                         if args.native else None),
-        show_viewer=args.native,    # --viewer uses cv2 HUD instead
+        init_genesis=False,    # gs.init already called above
     )
-    scene.add_entity(
-        gs.morphs.Plane(pos=(0, 0, 0), plane_size=(120.0, 120.0)),
-        material=gs.materials.Rigid(friction=1.0),
-    )
-    _add_loop_markers(scene, radius=args.radius, n=24)
+    vs.add_ground_plane(friction=1.0)
+    _add_loop_markers(vs, radius=args.radius, n=24)
 
-    # Build ONE cfg per kind and share across vehicles of that kind. This is
-    # important for MultiVehiclePhysics, which groups by cfg identity to know
-    # which vehicles can share a batched compute pipeline.
+    # One cfg per kind, shared across that kind's K vehicles → the batched solver
+    # groups them into one kind each. VJS is auto-managed by VehicleScene.
     cfg_per_kind = [preset_fn(urdf_paths[k_i], stability="control")
                     for k_i, (_n, _c, _u, preset_fn, _wb, _nw) in enumerate(KINDS)]
-    # VisualJointSync is off by default; enable it only when rendering (--viewer)
-    # so the per-kind cfgs animate wheels in the cv2 frames.
-    for _cfg in cfg_per_kind:
-        _cfg.enable_visual_joint_sync = args.viewer or args.native
 
     # Spawn vehicles, interleaved around the loop so kinds are mixed visually.
-    physics_list = []
-    entities = []
+    vehs = []
+    entities = []   # (kind_name, Vehicle, wheelbase)
     for global_idx in range(N_TOTAL):
         kind_idx  = global_idx % len(KINDS)
         kind_name, _color, _urdf_fn, _preset_fn, wheelbase, _nw = KINDS[kind_idx]
@@ -369,67 +365,43 @@ def main():
         pos   = (args.radius * math.cos(theta),
                  args.radius * math.sin(theta), 1.0)
         yaw_deg = math.degrees(theta + math.pi / 2)   # tangent CCW
-        morph = gs.morphs.URDF(file=urdf_paths[kind_idx],
-                                pos=pos, euler=(0.0, 0.0, yaw_deg))
-        ent  = scene.add_entity(morph, material=gs.materials.Rigid(friction=1.0))
-        sens = make_wheel_raycaster(scene, ent, urdf_paths[kind_idx])
-        entities.append((kind_name, ent, wheelbase))
-        # Same cfg INSTANCE shared across all K vehicles of this kind.
-        physics_list.append((ent, sens, cfg_per_kind[kind_idx]))
+        veh = vs.add_vehicle(
+            urdf_paths[kind_idx], cfg=cfg_per_kind[kind_idx],
+            morph=gs.morphs.URDF(file=urdf_paths[kind_idx], pos=pos,
+                                 euler=(0.0, 0.0, yaw_deg)),
+            material=gs.materials.Rigid(friction=1.0))
+        vehs.append(veh)
+        entities.append((kind_name, veh, wheelbase))
 
-    # Offscreen camera framing the whole loop, only created when --viewer.
-    # Having a camera in the scene adds a per-step renderer-state-sync cost
-    # inside scene.step(); skipping it in headless gives a clean
-    # physics-only ms/step number.
+    # Offscreen camera framing the whole loop, only created when --viewer
+    # (a camera adds a per-step renderer-sync cost; headless skips it).
     cam = None
     if args.viewer:
-        cam = scene.add_camera(
+        cam = vs.add_camera(
             res=(1280, 720),
             pos=(0.0, 0.0, cam_height), lookat=(0.0, 0.0, 0.0),
             up=(1.0, 0.0, 0.0),       # +X is up on screen
             fov=60, near=0.1, far=cam_height * 4, GUI=False,
         )
 
-    scene.build(n_envs=1)
+    vs.build()
 
-    # Shim so _hud.native_alive(...) (expects ``.main_scene.viewer``) works with
-    # this raw gs.Scene sample (no VehicleScene wrapper here).
-    _vs = SimpleNamespace(main_scene=scene)
-
-    # Two solver setups:
-    #   'per_vehicle'   — N independent VehiclePhysics. Python loop over them.
-    #   'multi_batched' — MultiVehiclePhysics: kinds grouped, each kind's K
-    #                     vehicles share one batched compute pipeline.
-    if args.solver == "per_vehicle":
-        physics_objs = [VehiclePhysics(scene, e, s, c, n_envs=1)
-                        for (e, s, c) in physics_list]
-        def step_all(inputs_list):
-            for ph, inp in zip(physics_objs, inputs_list):
-                ph.step(inp)
-    else:
-        mphys = MultiVehiclePhysics(scene, physics_list)
-        def step_all(inputs_list):
-            mphys.step(inputs_list)
-        print(f"  solver : multi_batched — {mphys.n_kinds} kinds, "
-              f"K per kind = {[k.K for k in mphys.kinds]}")
+    if args.solver == "multi_batched":
+        print(f"  solver : multi_batched — {vs.physics.n_kinds} kinds, "
+              f"K per kind = {[k.K for k in vs.physics.kinds]}")
 
     # Constant Ackermann steering — for ISO 8855 (+steer = right turn, CW),
-    # a CCW loop needs negative steer.
-    drive_inputs = []
-    for global_idx in range(N_TOTAL):
-        _kn, ent, wb = entities[global_idx]
-        steer = -math.atan(wb / args.radius)
-        drive_inputs.append(VehicleInputs(throttle=args.throttle, brake=0.0, steer=steer))
+    # a CCW loop needs negative steer. Per-vehicle (wheelbase differs by kind).
+    drive_steer = [-math.atan(wb / args.radius) for (_kn, _veh, wb) in entities]
 
     # ------------------------------------------------------------------
-    # Phase 1 — settle on brake.
+    # Phase 1 — settle on brake. set_inputs persists across steps.
     # ------------------------------------------------------------------
     print(f"\n[settle 1.5 s]")
-    settle = [VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
-              for _ in range(N_TOTAL)]
+    for veh in vehs:
+        veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
     for _ in range(int(1.5 / DT)):
-        step_all(settle)
-        scene.step()
+        vs.step()
         if args.viewer:
             cam.render()
 
@@ -449,14 +421,14 @@ def main():
     def _hud_render(step: int):
         # Headless = pure physics (cam is None); viewer = render + HUD.
         if args.native:                 # native viewer renders itself; just watch for close
-            return _hud.native_alive(_vs)
+            return _hud.native_alive(vs)
         if not args.viewer:
             return True
         # Pick the first vehicle of each kind for HUD speed display.
         speeds = []
         for kind_i in range(len(KINDS)):
-            ent = entities[kind_i][1]
-            v = ent.get_vel()[0].cpu().numpy()
+            veh = entities[kind_i][1]
+            v = veh.get_vel()[0].cpu().numpy()
             speeds.append(float(np.linalg.norm(v[:2])))
         frame = _hud.render_hud_frame(
             cam,
@@ -472,12 +444,14 @@ def main():
         )
         return _hud.cv2_show("genesis_vehicle road_loop", frame)
 
+    # Apply per-vehicle constant Ackermann steer for the loop (persists).
+    for veh, steer in zip(vehs, drive_steer):
+        veh.set_inputs(throttle=args.throttle, brake=0.0, steer=steer)
     torch.cuda.synchronize()
     t_start = time.perf_counter()
     user_quit = False
     for step in range(n_steps):
-        step_all(drive_inputs)
-        scene.step()
+        vs.step()
         hud_perf.tick()
         if step % 2 == 0:    # ~25 fps render
             if not _hud_render(step):
@@ -508,9 +482,9 @@ def main():
     print(f"  {'kind':<5}  {'pos':<20}  {'radius':>7}  {'speed':>7}")
     print(f"  {'-'*5}  {'-'*20}  {'-'*7}  {'-'*7}")
     for kind_idx, (kind_name, _c, _u, _p, _wb, _nw) in enumerate(KINDS):
-        ent = entities[kind_idx][1]    # first vehicle of this kind
-        p = ent.get_pos()[0].cpu().numpy()
-        v = ent.get_vel()[0].cpu().numpy()
+        veh = entities[kind_idx][1]    # first vehicle of this kind
+        p = veh.get_pos()[0].cpu().numpy()
+        v = veh.get_vel()[0].cpu().numpy()
         r = float(np.linalg.norm(p[:2]))
         s = float(np.linalg.norm(v[:2]))
         print(f"  {kind_name:<5}  ({p[0]:+6.2f}, {p[1]:+6.2f})    "
@@ -519,12 +493,11 @@ def main():
 
     if args.native:    # keep the interactive viewer open until closed/ESC
         print("\nviewer 유지 중 — 창 닫기(또는 ESC)로 종료.")
-        hold_inputs = [VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
-                       for _ in range(N_TOTAL)]
+        for veh in vehs:
+            veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
         try:
-            while _hud.native_alive(_vs):
-                step_all(hold_inputs)
-                scene.step()
+            while _hud.native_alive(vs):
+                vs.step()
         except gs.GenesisException:
             pass
 
