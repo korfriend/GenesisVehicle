@@ -10,6 +10,24 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.34] — 2026-06-26
+
+### Changed — `road_loop` sample on VehicleScene (1.0.0 phase 3.3, 7/8)
+
+Migrated `road_loop.py` (the 16-vehicle / 4-kind loop demo with cv2 / native HUD +
+solver comparison) onto `VehicleScene`: `view=` maps the display mode; `--solver`
+maps to `VehicleScene(solver=…)`; the 4 kinds (FWD/RWD/AWD/Truck, one shared cfg
+each) auto-group into 4 batched kinds; the loop markers register as **visual-only
+dynamics** (`add_dynamic(physics=False, wheel_raycast=False)`) so the wheel
+raycaster never treats them as ground; the loop camera is `vs.add_camera()`;
+per-vehicle Ackermann steer via `veh.set_inputs`; the `_vs` shim is gone. The URDF
+generators (`_car_urdf` / `_truck_urdf` / `_save_urdf`, imported by `l2l3_minimal`
++ `perf_multi_vehicle`) are unchanged. Headless-verified both solvers:
+multi_batched → 4 kinds [4, 4, 4, 4], all 16 vehicles track radius ~25 m;
+per_vehicle runs clean.
+
+---
+
 ## [0.9.33] — 2026-06-26
 
 ### Changed — `multi_env_render` sample on VehicleScene; `build(center_envs_at_origin=)` (1.0.0 phase 3.3, 6/8)
