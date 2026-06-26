@@ -50,7 +50,10 @@ class VehicleScene:
                     material=None, surface=None, vis_mode=None,    # set wheel_raycast=True only
                     mass=None, name=None) -> DynamicBody           # for a surface wheels must sense
 
-    def build() -> None
+    def build(*, env_spacing=None, n_envs_per_row=None) -> None
+    #   env_spacing / n_envs_per_row → grid the L3 batch (forwarded to BOTH scenes,
+    #   identical layout). dual_scene builds the raycast scene first + the main
+    #   scene (viewer, if any) last so the native viewer's GL context stays current.
     def step() -> None
     def reset() -> None
 

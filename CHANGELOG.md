@@ -10,6 +10,31 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.18] — 2026-06-26
+
+### Added — `VehicleScene.build()` grid layout + dual_scene native-viewer build order
+
+| Abbr. | Meaning |
+|---|---|
+| GL | OpenGL render context |
+| BVH | Bounding Volume Hierarchy (raycast acceleration tree) |
+
+- **`VehicleScene.build(env_spacing=None, n_envs_per_row=None)`** — forwards the
+  L3 grid layout to *both* scenes' `Scene.build` (identical layout, so the
+  dual_scene raycast proxy stays aligned with the main-scene vehicle per env).
+  Lay a batch out on a grid (e.g. one cell per checkpoint) instead of stacked at
+  the origin. No args → unchanged (stacked at origin).
+- **dual_scene + native viewer now works.** `build()` builds the sensors-only
+  raycast scene **first** and the main scene (which may own the viewer) **last**.
+  Genesis creates a GL context per scene; building the raycast scene *after* the
+  main one left the raycast context current and crashed the viewer thread
+  (`OpenGL ... no valid context` in the pyrender draw). With the main scene built
+  last its context stays current, and the per-step
+  `raycast_scene.step(update_visualizer=False)` is CUDA-only so it never steals
+  the context back. No effect in single_scene / headless (identical output).
+
+---
+
 ## [0.9.17] — 2026-06-26
 
 ### Docs — carry the "raycast scene never viewed/rendered" statement into the docs
