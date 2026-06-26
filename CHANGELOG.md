@@ -10,6 +10,23 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.31] — 2026-06-26
+
+### Changed — `perf_multi_vehicle` sample on VehicleScene; Truck NaN fixed (1.0.0 phase 3.3, 4/8)
+
+Migrated `perf_multi_vehicle.py` (the `per_vehicle` vs batched solver benchmark)
+onto `VehicleScene`: the `--solver` flag now maps to
+`VehicleScene(solver="per_vehicle" | "batched")`, so the benchmark compares the
+two solvers **through the public API**. 4 vehicle kinds (FWD/RWD/AWD/Truck), one
+shared cfg per kind → auto-grouped into 4 batched kinds. Also bumped `substeps`
+10→30: the 6-wheel Truck NaN'd the rigid solver at `substeps=10` in the
+`per_vehicle` path (**pre-existing** — the original `gs.Scene` benchmark crashed
+identically; same fix road_loop took at 0.9.21), so **both** solvers now run.
+Verified n_per_kind=4 (16 vehicles): per_vehicle 223 ms/step vs batched 125
+ms/step (**1.78×** — the L2 batching win).
+
+---
+
 ## [0.9.30] — 2026-06-26
 
 ### Changed — `perf_l2_l3_combined` sample on VehicleScene (1.0.0 phase 3.3, 3/8)
