@@ -10,6 +10,19 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.33] — 2026-06-26
+
+### Changed — `multi_env_render` sample on VehicleScene; `build(center_envs_at_origin=)` (1.0.0 phase 3.3, 6/8)
+
+Migrated `multi_env_render.py` (the n_envs grid-render demo) onto `VehicleScene`
+(same pattern as batched_rollout: `view=`, `vs.add_camera()`, grid `vs.build()`,
+`veh.set_inputs`, `native_alive(vs)`). Also added `center_envs_at_origin=` to
+`VehicleScene.build` (forwarded to `Scene.build`) so grid-render samples can
+center the L3 grid under the overhead camera. Headless-verified: n_envs=16 → envs
+spread (pos x range 1.49 m), 605 env-steps/s.
+
+---
+
 ## [0.9.32] — 2026-06-26
 
 ### Changed — `batched_rollout` sample on VehicleScene (1.0.0 phase 3.3, 5/8)
