@@ -370,6 +370,11 @@ class VehicleScene:
             raise ValueError(f"solver must be 'per_vehicle' or 'batched', got {solver!r}")
         self.solver = solver
         self._mvp = None        # MultiVehiclePhysics, in batched mode
+        # Kind grouping is lazy + dirty-tracked: add_vehicle / mark_config_dirty
+        # bump _config_version; _ensure_grouped re-groups only when it differs from
+        # _grouped_version (so step() pays an O(1) int compare when nothing changed).
+        self._config_version = 0
+        self._grouped_version = -1
         self._built = False
 
         if init_genesis:
@@ -635,6 +640,7 @@ class VehicleScene:
         if cfg is None and preset is None:
             raise ValueError("add_vehicle: pass preset=<fn> or cfg=<VehicleConfig>.")
         name = name or f"vehicle_{len(self._vehicles)}"
+        user_cfg = cfg
         if cfg is None:
             cfg = preset(urdf_path, stability=stability)
         parsed = parse_urdf(urdf_path)
@@ -643,6 +649,15 @@ class VehicleScene:
         veh = Vehicle(name, urdf_path, cfg, wheel_positions, pos, quat, material)
         veh._two_scene = self._two_scene
         veh._n_envs = self.n_envs
+        # Kind key for the batched solver: vehicles registered the same way are one
+        # kind and get batched. preset → grouped by (urdf, preset fn, stability);
+        # a pre-built cfg → grouped by that cfg OBJECT (pass the same cfg to batch).
+        # VehicleConfig has object fields (hooks/strategies) so value-equality is
+        # unreliable; the registration-based key is robust and cheap.
+        veh._kind_key = (("cfg", id(user_cfg)) if user_cfg is not None
+                         else ("preset", urdf_path, preset, stability))
+        veh._group_cfg = cfg
+        self._config_version += 1   # mark grouping dirty
 
         if morph is None:
             morph_kw = dict(file=urdf_path, pos=pos)
@@ -729,21 +744,18 @@ class VehicleScene:
         # not a user-facing option): on a headless / external-renderer run it stays
         # off, and wheel poses are read closed-form via wheel_visual_transforms().
         renders = self.show_viewer or bool(getattr(self.main_scene.visualizer, "cameras", None))
-        for veh in self._vehicles:
-            veh.cfg.enable_visual_joint_sync = renders   # auto-managed (see above)
-
         if self.solver == "batched":
-            # One batched MultiVehiclePhysics over all vehicles (grouped by cfg
-            # identity → same kind). In dual_scene step() injects the raycast-scene
-            # distances; in single_scene the MVP reads each vehicle's own sensor.
-            from .multi_vehicle import MultiVehiclePhysics
-            self._mvp = MultiVehiclePhysics(
-                self.main_scene,
-                [(veh.entity_main, veh.sensor, veh.cfg) for veh in self._vehicles],
-                n_envs=self.n_envs)
+            # Group same-kind vehicles (lazy/dirty) and give each kind one shared
+            # cfg so MultiVehiclePhysics batches them. dual_scene → step() injects
+            # the raycast-scene distances; single_scene → the MVP reads each sensor.
+            self._ensure_grouped()
+            for veh in self._vehicles:
+                veh._group_cfg.enable_visual_joint_sync = renders
+            self._build_mvp()
             # veh.physics stays None in batched mode; the shared solver is vs.physics.
         else:
             for veh in self._vehicles:
+                veh.cfg.enable_visual_joint_sync = renders   # auto-managed (see above)
                 sensor = None if self._two_scene else veh.sensor
                 veh.physics = VehiclePhysics(
                     self.main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
@@ -787,6 +799,8 @@ class VehicleScene:
         Inline mode: each vehicle reads its own sensor.
         """
         self._require_built()
+        if self.solver == "batched" and self._ensure_grouped():
+            self._build_mvp()   # config changed since last group → regroup + rebuild
         dists = self._measure_distances()   # dual: {veh:(N,n)} ; single: {veh:None}
         if self.solver == "batched":
             inputs_list = [veh._inputs for veh in self._vehicles]
@@ -808,6 +822,38 @@ class VehicleScene:
                 veh.physics.reset()
             if self._two_scene:
                 veh._sync_proxy()
+
+    # ---- kind grouping for the batched solver (lazy + dirty-tracked) ----
+    def mark_config_dirty(self) -> None:
+        """Mark the vehicle/cfg configuration changed so the batched solver
+        re-groups before the next ``step`` (e.g. after you mutate a vehicle's cfg
+        post-build). Cheap — re-grouping only happens on the next dirty step."""
+        self._config_version += 1
+
+    def _ensure_grouped(self) -> bool:
+        """If the config changed since the last grouping, re-group vehicles into
+        kinds (same ``_kind_key`` → one kind) and give each kind ONE shared cfg
+        object so the batched solver batches them. Returns True iff it re-grouped;
+        O(1) (an int compare) when nothing changed."""
+        if self._config_version == self._grouped_version:
+            return False
+        groups: dict = {}
+        for veh in self._vehicles:
+            groups.setdefault(veh._kind_key, []).append(veh)
+        for kind_vehicles in groups.values():
+            shared = kind_vehicles[0].cfg          # one cfg object per kind
+            for veh in kind_vehicles:
+                veh._group_cfg = shared
+        self._grouped_version = self._config_version
+        return True
+
+    def _build_mvp(self) -> None:
+        """(Re)construct the batched MultiVehiclePhysics from the current groups."""
+        from .multi_vehicle import MultiVehiclePhysics
+        self._mvp = MultiVehiclePhysics(
+            self.main_scene,
+            [(veh.entity_main, veh.sensor, veh._group_cfg) for veh in self._vehicles],
+            n_envs=self.n_envs)
 
     # ---- accessors ----
     @property
