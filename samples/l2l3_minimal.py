@@ -55,7 +55,7 @@ def main():
     # VehicleScene owns gs.init / the scene / build / step. solver="batched" (the
     # default) groups the K same-kind vehicles into ONE batched compute (this IS
     # MultiVehiclePhysics under the hood); n_envs=N replicates the world N× (L3).
-    VehicleScene.InitBackend("cpu" if args.cpu else "gpu")
+    VehicleScene.init_backend("cpu" if args.cpu else "gpu")
     vs = VehicleScene(
         n_envs=N, raycast_mode="single_scene",
         dt=DT, substeps=10,

@@ -198,7 +198,7 @@ def main():
     # ------------------------------------------------------------------
     # Scene + Genesis init.
     # ------------------------------------------------------------------
-    VehicleScene.InitBackend("gpu")
+    VehicleScene.init_backend("gpu")
     DT = 0.02
     cam_h = 55.0
     from genesis_vehicle.samples import _hud

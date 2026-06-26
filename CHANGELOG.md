@@ -10,6 +10,30 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.1] — 2026-06-27
+
+### Changed — `VehicleScene.InitBackend` → `init_backend` (PEP 8); fix spurious backend warning
+
+- Renamed the physics-backend classmethod from PascalCase `InitBackend` to
+  snake_case **`init_backend`** — to match the rest of the SDK (`set_inputs`,
+  `add_vehicle`, `add_camera`, `mark_config_dirty`) and PEP 8. The PascalCase name
+  is **removed (no alias)**; it shipped only in 0.9.37 / v1.0.0 (hours earlier), so
+  nothing depends on it. New call: `VehicleScene.init_backend("gpu")`. All 13
+  samples + the server + tests + docs updated.
+- Fixed a spurious warning: `init_backend("gpu")` followed by `VehicleScene(...)`
+  warned "backend already initialized as 'gpu'; ignoring 'cpu'" on **every** GPU
+  scene, because the constructor's silent auto-ensure passed its cpu default into
+  the mismatch check. The auto-ensure (in `__init__`) now reuses whatever backend
+  is up **without warning**; only an *explicit* `init_backend(...)` requesting a
+  different backend warns. (Bug was present in v1.0.0.)
+
+Verified: quickstart drives on GPU with **no** spurious warning; an explicit
+cpu→gpu `init_backend` mismatch still warns; 96 pytest.
+
+> The `v1.0.0` tag is left in place; this is the follow-up `v1.0.1`.
+
+---
+
 ## [1.0.0] — 2026-06-27
 
 **VehicleScene is the SDK.** 1.0.0 makes `VehicleScene` the single high-level entry
@@ -33,7 +57,7 @@ This release is the sum of phases 1–5 (0.9.22 → 0.9.39); the headlines:
 - **Full scene encapsulation** (0.9.36): `main_scene` / `raycast_scene` are private;
   the thin accessors `vs.viewer` / `vs.rigid_solver` / `vs.sim_options` /
   `vs.is_dual_scene` cover the legitimate reads.
-- **Physics backend via `VehicleScene.InitBackend("cpu" | "gpu")`** (0.9.37),
+- **Physics backend via `VehicleScene.init_backend("cpu" | "gpu")`** (0.9.37),
   process-global + set once, **default CPU**; double-init warns + is ignored. The
   renderer is separate (always GPU; physics-CPU + GPU-render is valid).
 - **All 12 samples + the OSC server migrated** onto `VehicleScene` (0.9.28–0.9.35,
@@ -47,7 +71,7 @@ Genesis-1.2.0 numeric-drift quirk, not a regression).
 
 | was | now |
 |---|---|
-| `VehicleScene(backend="gpu", …)` | `VehicleScene.InitBackend("gpu")` then `VehicleScene(…)` (default cpu) |
+| `VehicleScene(backend="gpu", …)` | `VehicleScene.init_backend("gpu")` then `VehicleScene(…)` (default cpu) |
 | `vs.main_scene` / `vs.raycast_scene` | `vs.viewer` / `vs.rigid_solver` / `vs.sim_options` / `vs.is_dual_scene` |
 | `vs.main_scene.add_camera(...)` | `vs.add_camera(...)` |
 | `show_viewer=True` | `view="native"` (alias still accepted) |
@@ -64,7 +88,7 @@ Brought the prose docs in line with phases 1–5 after a full drift scan:
 - **quickstart.md** + **README.md** "Getting Started" + **two-scene-raycast.md**
   example: rewrote the old low-level `gs.init` + `VehiclePhysics` +
   `add_vehicle(scene,…)` snippets to the `VehicleScene` pattern
-  (`VehicleScene.InitBackend("gpu")` → `add_ground_plane` → `add_vehicle(preset=)`
+  (`VehicleScene.init_backend("gpu")` → `add_ground_plane` → `add_vehicle(preset=)`
   → `build` → `veh.set_inputs / vs.step`). Removed the now-false "the SDK does NOT
   fully encapsulate Genesis" claim from the README.
 - **api-reference.md** §0 + **samples/README.md**: the VJS auto-manage note now
@@ -93,13 +117,13 @@ pass.**
 
 ## [0.9.37] — 2026-06-26
 
-### Changed — physics backend via `VehicleScene.InitBackend()`, default CPU; renderer separate (1.0.0 phase 5)
+### Changed — physics backend via `VehicleScene.init_backend()`, default CPU; renderer separate (1.0.0 phase 5)
 
 The physics backend is no longer a `VehicleScene(...)` argument. Set it (process-
-global, once) with the classmethod **`VehicleScene.InitBackend("cpu" | "gpu")`**
+global, once) with the classmethod **`VehicleScene.init_backend("cpu" | "gpu")`**
 BEFORE constructing any scene; the **default is now CPU**. Constructing a
 `VehicleScene` without it auto-initializes CPU. Any double-init — a second
-`InitBackend`, or a stray `gs.init` — **warns and is ignored** (the backend can't
+`init_backend`, or a stray `gs.init` — **warns and is ignored** (the backend can't
 change within a process).
 
 The **renderer is separate from the physics backend**: the viewer / cameras
@@ -109,9 +133,9 @@ thing. With no GPU present, `build()` warns that rendering falls back to slow
 software.
 
 Consolidated the 7 scattered `gs.init` sites (server ×2, visual samples ×4, tests)
-onto `InitBackend`; removed `backend=` from all 13 sample `VehicleScene` calls +
+onto `init_backend`; removed `backend=` from all 13 sample `VehicleScene` calls +
 both server entry points + the tests. Documented in the module docstring +
-api-reference §0 ("Backends — physics vs renderer"). Verified: `InitBackend`
+api-reference §0 ("Backends — physics vs renderer"). Verified: `init_backend`
 default cpu + mismatch warning; `two_scene_terrain --cpu` drives on CPU;
 `quickstart` drives on GPU; 96 pytest.
 

@@ -65,7 +65,7 @@ def test_make_double_sided_mesh_doubles_without_legacy_api():
 def cpu_genesis():
     if not getattr(gs, "_initialized", False):
         try:
-            VehicleScene.InitBackend("cpu")
+            VehicleScene.init_backend("cpu")
         except Exception as e:                     # pragma: no cover
             pytest.skip(f"genesis CPU backend unavailable: {e}")
     return gs

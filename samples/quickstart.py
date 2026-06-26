@@ -74,7 +74,7 @@ def main():
     # VehicleScene owns gs.init + the scene(s) + build + step. Flat ground at
     # n_envs=1 → single_scene (the classic one-scene raycast; the dual_scene
     # optimization only pays off on heavy static terrain — see two_scene_terrain).
-    VehicleScene.InitBackend("gpu")
+    VehicleScene.init_backend("gpu")
     vs = VehicleScene(
         raycast_mode="single_scene",
         dt=cfg.recommended_dt, substeps=10,

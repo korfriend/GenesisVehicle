@@ -78,7 +78,7 @@ def main():
           + ("  (viewer ON — grid)" if args.viewer else ""))
 
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
-    VehicleScene.InitBackend("gpu")
+    VehicleScene.init_backend("gpu")
 
     from genesis_vehicle.samples import _hud
     if args.viewer and not _hud.have_cv2():

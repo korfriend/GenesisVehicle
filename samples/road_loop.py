@@ -316,7 +316,7 @@ def main():
     urdf_paths = [_save_urdf(urdf_fn(), tmpdir, name.lower())
                   for name, _c, urdf_fn, _p, _wb, _nw in KINDS]
 
-    VehicleScene.InitBackend("gpu")
+    VehicleScene.init_backend("gpu")
     DT = 0.02
     cam_height = args.radius * 2.5
     from genesis_vehicle.samples import _hud
