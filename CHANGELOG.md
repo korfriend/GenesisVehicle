@@ -10,6 +10,23 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.27] — 2026-06-26
+
+### Changed — `solver="batched"` is the default; server on solver-agnostic accessors (1.0.0 phase 3.1–3.2)
+
+- VehicleScene's default solver is now **`"batched"`** (was `per_vehicle`). With
+  the dirty-tracked kind grouping (0.9.25), a single vehicle is a batched
+  kind-of-1 and K same-preset vehicles batch automatically; correctness is
+  identical (quickstart x=+12.49 / 5.02 m/s; `two_scene_terrain --compare`
+  |Δx| = 0.000 m). A vehicle-less scene builds no MVP and steps fine (guarded).
+- The OSC server (`l3_runtime`, `physics_server`) now reads per-vehicle capture
+  through the **solver-agnostic `Vehicle` accessors** (`veh.wheel_visual_transforms()`
+  / `veh.resolved`) instead of `veh.physics.*`, so it works under either solver
+  (and under the new batched default). `controllers[tid]` and `L3State` hold the
+  `Vehicle` handle. 96 pytest.
+
+---
+
 ## [0.9.26] — 2026-06-26
 
 ### Added — per-vehicle accessors that work in both solver modes (1.0.0 phase 3.0)

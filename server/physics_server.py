@@ -445,11 +445,12 @@ def main():
     print(f" [DEBUG] Total rigid geoms after build: {scene.sim.rigid_solver.n_geoms}")
     print(f" [DEBUG] Total rigid links after build: {scene.sim.rigid_solver.n_links}")
 
-    # VehiclePhysics is created inside vs.build(); populate the controllers dict
-    # the OSC / state-capture code reads, and print the resolved table now.
+    # Populate the controllers dict the OSC / state-capture code reads with the
+    # Vehicle HANDLES (solver-agnostic — veh.wheel_visual_transforms / veh.resolved
+    # work in both per_vehicle and batched modes), and print the resolved table.
     for tid, veh in vehicles.items():
-        controllers[tid] = veh.physics
-        genesis_vehicle_builder.print_resolved_table(tid, veh.physics.resolved)
+        controllers[tid] = veh
+        genesis_vehicle_builder.print_resolved_table(tid, veh.resolved)
 
     # 텐서 관련 Monkey Patch 적용
     genesis_vehicle_builder.apply_monkey_patches(scene)

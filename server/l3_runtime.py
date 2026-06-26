@@ -65,13 +65,13 @@ def _q_rot(v, q):
 class L3State:
     """배치 텐서 ↔ tid 별 상태 dict 변환 + 스핀각 누적을 담당."""
 
-    def __init__(self, car, physics, tids, n_envs, sim_dt):
+    def __init__(self, car, veh, tids, n_envs, sim_dt):
         self.car = car
-        self.physics = physics
+        self.veh = veh                          # Vehicle handle (solver-agnostic)
         self.tids = list(tids)                  # env index 순서의 target id
         self.n_envs = n_envs
         self.sim_dt = sim_dt
-        self.n_wheels = len(physics.resolved.wheels)
+        self.n_wheels = len(veh.resolved.wheels)
 
     def reset_angles(self):
         pass   # spin is owned by the SDK (wheel_visual_transforms); nothing to reset here
@@ -88,7 +88,7 @@ class L3State:
             bp = bp.cpu().numpy(); bq = bq.cpu().numpy()
         bp = np.atleast_2d(bp); bq = np.atleast_2d(bq)
 
-        wp, wq = self.physics.wheel_visual_transforms("world")   # (N, n, 3/4)
+        wp, wq = self.veh.wheel_visual_transforms("world")   # (N, n, 3/4)
         if hasattr(wp, 'cpu'):
             wp = wp.cpu().numpy(); wq = wq.cpu().numpy()
 
@@ -227,8 +227,7 @@ def run_l3(args):
     print(f" [DEBUG] Total rigid geoms after build: {scene.sim.rigid_solver.n_geoms}")
     print(f" [DEBUG] Total rigid links after build: {scene.sim.rigid_solver.n_links}")
 
-    physics = veh.physics
-    vehicle_builder.print_resolved_table("L3-shared", physics.resolved)
+    vehicle_builder.print_resolved_table("L3-shared", veh.resolved)
 
     # env 별 초기 포즈
     init_pos = np.array([target_dict[tid].get('pos', [0, 0, 2]) for tid in tids], dtype=np.float32)
@@ -240,7 +239,7 @@ def run_l3(args):
     except Exception:
         pass
 
-    st = L3State(car, physics, tids, n_envs, ue_dt)
+    st = L3State(car, veh, tids, n_envs, ue_dt)
 
     # 5. 하드웨어 프로파일링 + Pacing (legacy 와 동일 절차)
     print("\n" + "="*50)
