@@ -10,6 +10,19 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.2] — 2026-06-27
+
+### Changed — `road_loop --solver` choices match `VehicleScene(solver=)`
+
+- `samples/road_loop.py`: `--solver` choices `multi_batched` / `per_vehicle` →
+  **`batched` / `per_vehicle`** (default `batched`), matching the 1.0.0 SDK's
+  `VehicleScene(solver=...)` naming; the value is now passed straight through.
+  The road_loop Truck stability fix (`substeps=30`, so the 5000 kg 6-wheel truck
+  doesn't blow constraint forces to NaN the moment it drives) carries over to
+  1.0.x unchanged — re-verified on 1.0.1: 16 vehicles, no NaN, ~130 ms/step.
+
+---
+
 ## [1.0.1] — 2026-06-27
 
 ### Changed — `VehicleScene.InitBackend` → `init_backend` (PEP 8); fix spurious backend warning
