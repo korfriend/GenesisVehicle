@@ -10,6 +10,27 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.35] — 2026-06-26
+
+### Changed — `city_traffic_ego` sample on VehicleScene — phase 3.3 COMPLETE (8/8)
+
+Migrated `city_traffic_ego.py` (ego + 7 traffic, lane-keeping P-control, L2 kinds
+× L3 envs) onto `VehicleScene`: `view=` display mode; lane markers as visual-only
+dynamics; per-step lane-keeper steer via `veh.set_inputs` (recomputed from each
+vehicle's pose); the 4 kinds (ego AWD + RWD×3 + FWD×3 + Truck) auto-group;
+`vs.physics.n_kinds` for the L2 report; the `_vs` shim is gone. Headless-verified
+n_envs=4: 4 kinds [1, 3, 3, 1], all vehicles hold their lanes (Δy < 0.03 m).
+
+**Phase 3.3 complete** — all 8 low-level samples (`l2l3_minimal`,
+`perf_vectorization`, `perf_l2_l3_combined`, `perf_multi_vehicle`,
+`batched_rollout`, `multi_env_render`, `road_loop`, `city_traffic_ego`) now run on
+`VehicleScene`. Every sample + the server uses the high-level API; none touch
+`gs.Scene` / `VehiclePhysics` / `MultiVehiclePhysics` directly. Remaining for
+1.0.0: phase 4 (remove the `main_scene` / `raycast_scene` properties) + phase 5
+(release).
+
+---
+
 ## [0.9.34] — 2026-06-26
 
 ### Changed — `road_loop` sample on VehicleScene (1.0.0 phase 3.3, 7/8)

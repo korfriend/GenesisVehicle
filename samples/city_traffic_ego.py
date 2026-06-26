@@ -51,19 +51,16 @@ import math
 import os
 import tempfile
 import time
-from types import SimpleNamespace
-
 import numpy as np
 import torch
 import genesis as gs
 
 from genesis_vehicle import (
-    MultiVehiclePhysics, VehicleInputs,
+    VehicleScene,
     car_4w_fwd_ackermann, car_4w_rwd_ackermann, car_4w_awd_ackermann,
     truck_6w_partial_ackermann,
     __version__ as sdk_version,
 )
-from genesis_vehicle.scene_helpers import make_wheel_raycaster
 
 # Reuse the parametric URDF generators from road_loop.
 from genesis_vehicle.samples.road_loop import (
@@ -106,25 +103,28 @@ TRAFFIC_KINDS = [
 # Scene setup
 # ---------------------------------------------------------------------------
 
-def _add_lane_markers(scene, n_dashes: int = 60):
+def _add_lane_markers(vs, n_dashes: int = 60):
     """White dashed lane separators between adjacent lanes.
 
-    3 separators (between 4 lanes), each a row of small white boxes
-    spaced ~3.5 m apart along the road's +X direction."""
+    3 separators (between 4 lanes), each a row of small white boxes spaced ~3.5 m
+    apart along the road's +X direction. Visual-only dynamics (physics=False,
+    wheel_raycast=False) so the wheel raycaster never treats them as ground."""
     for i in range(len(LANE_Y) - 1):
         y = (LANE_Y[i] + LANE_Y[i + 1]) / 2.0
         for d in range(n_dashes):
             x = -ROAD_LENGTH / 2 + (d + 0.5) * (ROAD_LENGTH / n_dashes)
-            scene.add_entity(
+            vs.add_dynamic(
                 gs.morphs.Box(size=(1.5, 0.20, 0.05), pos=(x, y, 0.03),
                               fixed=True, collision=False),
+                physics=False, wheel_raycast=False,
                 surface=gs.surfaces.Plastic(color=(1.0, 1.0, 1.0, 1.0)),
             )
     # Road edges (solid white lines, brighter).
     for y in (LANE_Y[0] + LANE_W / 2, LANE_Y[-1] - LANE_W / 2):
-        scene.add_entity(
+        vs.add_dynamic(
             gs.morphs.Box(size=(ROAD_LENGTH, 0.30, 0.05), pos=(0, y, 0.03),
                           fixed=True, collision=False),
+            physics=False, wheel_raycast=False,
             surface=gs.surfaces.Plastic(color=(1.0, 1.0, 1.0, 1.0)),
         )
 
@@ -206,11 +206,14 @@ def main():
         print("WARN: --viewer needs opencv-python. Continuing headless.")
         args.viewer = False
 
-    scene = gs.Scene(
-        # substeps=10 is the floor for this vehicle stack (verified in
-        # road_loop — see CHANGELOG v0.5.28). With 8 vehicles in one scene
-        # this nearly halves ms/step at no fidelity cost.
-        sim_options=gs.options.SimOptions(dt=DT, substeps=10),
+    # VehicleScene owns the scene / build / step. view: None headless, "native"
+    # the Genesis viewer, "cv2" renders the camera for the cv2 HUD. Default
+    # solver="batched" groups the traffic kinds (L2); n_envs is the L3 axis.
+    view = "native" if args.native else ("cv2" if args.viewer else None)
+    vs = VehicleScene(
+        n_envs=args.n_envs, backend="gpu", raycast_mode="single_scene", view=view,
+        # substeps=10 is the floor for this vehicle stack (verified in road_loop).
+        dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
@@ -218,20 +221,15 @@ def main():
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10),
-            # If n_envs > 1, lay parallel scenarios out on a grid so the
-            # camera can show all of them. n_envs=1 → no offset.
+            # If n_envs > 1, lay parallel scenarios on a grid (see vs.build).
             env_separate_rigid=(args.n_envs > 1),
         ),
         viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_h), (0.0, 0.0, 0.0))
                         if args.native else None),
-        show_viewer=args.native,    # --viewer uses cv2 HUD instead
+        init_genesis=False,    # gs.init already called above
     )
-    scene.add_entity(
-        gs.morphs.Plane(pos=(0, 0, 0),
-                         plane_size=(ROAD_LENGTH, 2 * ROAD_HALF_WIDTH + 4.0)),
-        material=gs.materials.Rigid(friction=1.0),
-    )
-    _add_lane_markers(scene, n_dashes=60)
+    vs.add_ground_plane(friction=1.0)
+    _add_lane_markers(vs, n_dashes=60)
 
     # ------------------------------------------------------------------
     # Spawn ego + traffic.
@@ -240,20 +238,17 @@ def main():
     cfg_ego     = EGO_KIND[2](ego_urdf, stability="control")
     cfg_traffic = [tk[2](traffic_urdfs[i], stability="control")
                    for i, tk in enumerate(TRAFFIC_KINDS)]
-    # VisualJointSync is off by default; enable it only when rendering (--viewer).
-    cfg_ego.enable_visual_joint_sync = args.viewer or args.native
-    for _cfg in cfg_traffic:
-        _cfg.enable_visual_joint_sync = args.viewer or args.native
+    # VisualJointSync is auto-managed by VehicleScene (on when a viewer/camera exists).
 
-    vehicles = []                # list[(entity, sensor, cfg)]
+    vehicles = []                # list[Vehicle]
     target_lanes = []            # parallel list: target Y per vehicle for lane-keeping
     labels = []                  # parallel list: label per vehicle
 
     def spawn(urdf_path: str, cfg, pos_xyz, target_y, label):
-        morph = gs.morphs.URDF(file=urdf_path, pos=pos_xyz)
-        ent = scene.add_entity(morph, material=gs.materials.Rigid(friction=1.0))
-        sens = make_wheel_raycaster(scene, ent, urdf_path)
-        vehicles.append((ent, sens, cfg))
+        veh = vs.add_vehicle(urdf_path, cfg=cfg,
+                             morph=gs.morphs.URDF(file=urdf_path, pos=pos_xyz),
+                             material=gs.materials.Rigid(friction=1.0))
+        vehicles.append(veh)
         target_lanes.append(target_y)
         labels.append(label)
 
@@ -299,7 +294,7 @@ def main():
     cam = None
     if args.viewer:
         cam_res = (640, 360) if args.n_envs > 1 else (1920, 1080)
-        cam = scene.add_camera(
+        cam = vs.add_camera(
             res=cam_res,
             pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
             up=(1.0, 0.0, 0.0),       # +X is "up" on screen (driving away from viewer)
@@ -309,19 +304,14 @@ def main():
     # ------------------------------------------------------------------
     # Build + MultiVehiclePhysics (n_envs = L3 axis; K = L2 axis = K_total here).
     # ------------------------------------------------------------------
-    scene.build(
-        n_envs=args.n_envs,
+    vs.build(
         env_spacing=(ROAD_LENGTH + 20.0, 2 * ROAD_HALF_WIDTH + 20.0) if args.n_envs > 1 else (0.0, 0.0),
         n_envs_per_row=max(1, int(round(math.sqrt(args.n_envs)))),
     )
-    mphys = MultiVehiclePhysics(scene, vehicles, n_envs=args.n_envs)
-    device = vehicles[0][0].get_pos().device
+    device = vehicles[0].get_pos().device
 
-    # Shim so _hud.native_alive(...) (expects ``.main_scene.viewer``) works with
-    # this raw gs.Scene sample (no VehicleScene wrapper here).
-    _vs = SimpleNamespace(main_scene=scene)
-    print(f"  L2 groups : {mphys.n_kinds} kinds  "
-          f"(K per kind = {[k.K for k in mphys.kinds]})")
+    print(f"  L2 groups : {vs.physics.n_kinds} kinds  "
+          f"(K per kind = {[k.K for k in vs.physics.kinds]})")
 
     target_y_t = [torch.full((args.n_envs,), float(t), device=device,
                               dtype=gs.tc_float) for t in target_lanes]
@@ -344,11 +334,10 @@ def main():
     # Settle (brake held).
     # ------------------------------------------------------------------
     print(f"\n[settle 1.5 s]")
-    settle_in = [VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
-                 for _ in vehicles]
+    for veh in vehicles:
+        veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
     for _ in range(int(1.5 / DT)):
-        mphys.step(settle_in)
-        scene.step()
+        vs.step()
         if args.viewer:
             cam.render()
 
@@ -367,13 +356,13 @@ def main():
     def _hud_render(step: int):
         # Headless = pure physics (cam is None); viewer = render + HUD.
         if args.native:                 # native viewer renders itself; just watch for close
-            return _hud.native_alive(_vs)
+            return _hud.native_alive(vs)
         if not args.viewer:
             return True
         # env 0 ego state.
-        ego_ent = vehicles[0][0]
-        ep = ego_ent.get_pos()[0].cpu().numpy()
-        ev = ego_ent.get_vel()[0].cpu().numpy()
+        ego_veh = vehicles[0]
+        ep = ego_veh.get_pos()[0].cpu().numpy()
+        ev = ego_veh.get_vel()[0].cpu().numpy()
         ego_speed = float(np.linalg.norm(ev[:2]))
         frame = _hud.render_hud_frame(
             cam,
@@ -384,8 +373,8 @@ def main():
                 f"{K_total * args.n_envs} total batched",
                 f"ego (env 0): pos=({ep[0]:+6.2f}, {ep[1]:+5.2f})  "
                 f"lane Δy={ep[1] - target_lanes[0]:+5.3f}  speed={ego_speed:4.1f} m/s",
-                f"L2 kinds: {mphys.n_kinds}    "
-                f"K per kind = {[k.K for k in mphys.kinds]}",
+                f"L2 kinds: {vs.physics.n_kinds}    "
+                f"K per kind = {[k.K for k in vs.physics.kinds]}",
                 "[ESC] quit",
             ],
             perf_ms=hud_perf.ms_per_step(),
@@ -395,21 +384,20 @@ def main():
 
     user_quit = False
     for step in range(n_steps):
-        # Read state once per step. Multi-entity reads aren't auto-batched
-        # at the entity-API level — loop is short (K_total = 8).
-        inputs = []
-        for v_i, (ent, _sens, _cfg) in enumerate(vehicles):
-            pos  = ent.get_pos()         # (n_envs, 3)
-            quat = ent.get_quat()        # (n_envs, 4)
+        # Recompute lane-keeper steer from each vehicle's current pose, then set
+        # its controls. Multi-entity reads aren't auto-batched at the entity-API
+        # level — loop is short (K_total = 8).
+        for v_i, veh in enumerate(vehicles):
+            pos  = veh.get_pos()         # (n_envs, 3)
+            quat = veh.get_quat()        # (n_envs, 4)
             yaw  = _yaw_from_quat(quat)
             steer = _make_lane_keeper_steer(pos[:, 1], target_lanes[v_i], yaw)
-            inputs.append(VehicleInputs(
+            veh.set_inputs(
                 throttle=throttle_t[v_i],
                 brake=torch.zeros(args.n_envs, device=device, dtype=gs.tc_float),
                 steer=steer,
-            ))
-        mphys.step(inputs)
-        scene.step()
+            )
+        vs.step()
         hud_perf.tick()
         if step % render_every == 0:
             if not _hud_render(step):
@@ -427,9 +415,9 @@ def main():
     print(f"=== AFTER {args.duration:.1f}s  (env 0) ===")
     print(f"  {'label':<8}  {'pos':<22}  {'lane Δy':>8}  {'speed':>7}")
     print(f"  {'-'*8}  {'-'*22}  {'-'*8}  {'-'*7}")
-    for v_i, (ent, _s, _c) in enumerate(vehicles):
-        p = ent.get_pos()[0].cpu().numpy()
-        v = ent.get_vel()[0].cpu().numpy()
+    for v_i, veh in enumerate(vehicles):
+        p = veh.get_pos()[0].cpu().numpy()
+        v = veh.get_vel()[0].cpu().numpy()
         speed = float(np.linalg.norm(v[:2]))
         dy = float(p[1]) - target_lanes[v_i]
         print(f"  {labels[v_i]:<8}  ({p[0]:+7.2f}, {p[1]:+6.2f}, {p[2]:.2f})  "
@@ -443,7 +431,7 @@ def main():
         batch=args.n_envs * K_total, batch_label="vehicle",
         render_ms=r_ms, render_n=r_n,
         extra=[
-            f"L2 kinds   : {mphys.n_kinds}   K per kind = {[k.K for k in mphys.kinds]}",
+            f"L2 kinds   : {vs.physics.n_kinds}   K per kind = {[k.K for k in vs.physics.kinds]}",
             f"L3 envs    : {args.n_envs}    (batch = n_envs x K = "
             f"{args.n_envs} x {K_total} = {args.n_envs*K_total})",
         ],
@@ -451,12 +439,11 @@ def main():
 
     if args.native:    # keep the interactive viewer open until closed/ESC
         print("\nviewer 유지 중 — 창 닫기(또는 ESC)로 종료.")
-        hold_inputs = [VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
-                       for _ in vehicles]
+        for veh in vehicles:
+            veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
         try:
-            while _hud.native_alive(_vs):
-                mphys.step(hold_inputs)
-                scene.step()
+            while _hud.native_alive(vs):
+                vs.step()
         except gs.GenesisException:
             pass
 
