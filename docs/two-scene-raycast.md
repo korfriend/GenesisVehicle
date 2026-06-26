@@ -175,7 +175,8 @@ Split also helps independent of speed via (a) very-high-poly terrain on GPU and
 from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 import genesis as gs
 
-vs = VehicleScene(backend="gpu", raycast_mode="dual_scene", dt=1/48, substeps=10)  # default
+VehicleScene.InitBackend("gpu")   # physics backend (default cpu); set before the scene
+vs = VehicleScene(raycast_mode="dual_scene", dt=1/48, substeps=10)  # dual_scene is the default
 
 # Static body: rigid in main (collision) + kinematic in raycast (static BVH).
 # Provide collision_morph for a coarse/convex collider while raycasting a

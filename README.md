@@ -100,34 +100,34 @@ Dev dependency for running the test suite: `pip install pytest`.
 ## Getting Started
 
 ```python
-import genesis as gs
-from genesis_vehicle import (
-    VehiclePhysics, VehicleInputs, add_vehicle, car_4w_rwd_ackermann,
-)
+from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 
-URDF = "<path to your car_raywheel.urdf>"
+URDF = "<path to your 4-wheel-car URDF>"
 
-gs.init(backend=gs.gpu)
-scene = gs.Scene(sim_options=gs.options.SimOptions(dt=1/48, substeps=50))
-scene.add_entity(gs.morphs.Plane())
+# Physics backend — process-global, set ONCE, before any scene (default cpu).
+# The renderer is separate (always GPU). Omit this line to run on cpu.
+VehicleScene.InitBackend("gpu")
 
-car, sensor, cfg = add_vehicle(scene, URDF, car_4w_rwd_ackermann)
-scene.build(n_envs=1)
-physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=1)
+# VehicleScene is the single entry point: it owns gs.init / the scene(s) / build / step.
+vs = VehicleScene(raycast_mode="single_scene", dt=1/48, substeps=10)
+vs.add_ground_plane(friction=1.0)
+veh = vs.add_vehicle(URDF, preset=car_4w_rwd_ackermann, pos=(0, 0, 1.0))
+vs.build()
 
-for step in range(480):                                       # 10 s @ 48 Hz
-    physics.step(VehicleInputs(throttle=0.5, brake=0.0, steer=0.0))
-    scene.step()
+for step in range(480):                       # 10 s @ 48 Hz
+    veh.set_inputs(throttle=0.5, brake=0.0, steer=0.0)   # scalars or (n_envs,) tensors
+    vs.step()
 
-print(car.get_pos()[0].cpu().numpy())
+print(veh.get_pos()[0].cpu().numpy())
 ```
 
-`add_vehicle` is a thin convenience helper that bundles the canonical
-URDF-entity + wheel-raycaster + preset config boilerplate. The full
-hand-wired form (using `WheelRayPattern` + `parse_urdf` directly) is also
-available — see [`docs/api-reference.md`](docs/api-reference.md). The SDK
-deliberately does NOT fully encapsulate Genesis; you keep direct access to
-`gs.Scene`, viewer, terrain, materials, and any other Genesis feature you need.
+`VehicleScene` is the recommended entry point — it registers vehicles / static /
+dynamic bodies (`add_vehicle` / `add_static` / `add_dynamic`), cameras
+(`add_camera`), L2/L3 batching (`solver="batched"` default, `n_envs=`), and the
+per-step loop, and owns the physics backend (`VehicleScene.InitBackend`). To drop
+*below* it to the raw `gs.Scene` + `VehiclePhysics` / `MultiVehiclePhysics` layer
+(for control it doesn't expose), see [`docs/api-reference.md`](docs/api-reference.md)
+§1 and the two-API-layers note in [`docs/concepts.md`](docs/concepts.md).
 
 On first `VehiclePhysics` construction, the SDK prints a one-line banner:
 

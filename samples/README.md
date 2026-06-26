@@ -31,7 +31,7 @@ Driving the URDF wheel visual joints through the engine each step (so the
 **Genesis viewer / a Genesis camera** shows wheels spinning/steering) costs
 ~ms/step and is only worth paying when Genesis actually renders. `VehicleScene`
 turns it on **automatically at `build()`** when the main scene is rendered —
-i.e. `show_viewer=True` **or** a Genesis camera was added (`vs.main_scene.add_camera(...)`).
+i.e. `view="native"` **or** a camera was added (`vs.add_camera(...)`).
 It is **not** a user-facing knob; the samples no longer set it:
 
 - `--viewer` (cv2 HUD) adds a Genesis camera → animation on for the HUD frames.

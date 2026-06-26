@@ -144,11 +144,14 @@ There are three orthogonal batching axes:
 
 - **L1** — wheels of ONE vehicle, batched inside `VehiclePhysics` (always on).
 - **L2** — K vehicles of the SAME URDF/cfg in one Genesis env, batched via
-  `MultiVehiclePhysics` (since v0.5.11).
-- **L3** — N parallel envs, batched via `scene.build(n_envs=N)` (since v0.1).
+  `MultiVehiclePhysics` (since v0.5.11) — or just `VehicleScene(solver="batched")`,
+  the default, which groups same-kind vehicles for you.
+- **L3** — N parallel envs, batched via `scene.build(n_envs=N)` (since v0.1), or
+  `VehicleScene(n_envs=N)`.
 
 L2 and L3 compose into `MultiVehiclePhysics(scene, vehicles, n_envs=N)`
-for `N·K` total vehicles in one batched compute call (since v0.5.14).
+for `N·K` total vehicles in one batched compute call (since v0.5.14) — which is
+exactly what `VehicleScene(solver="batched", n_envs=N)` drives under the hood.
 
 See [`batching.md`](batching.md) for the decision matrix, measured
 speedups, and the L2 × L3 combined pattern (the headline workflow for
