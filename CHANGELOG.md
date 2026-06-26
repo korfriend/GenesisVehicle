@@ -10,6 +10,18 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.30] — 2026-06-26
+
+### Changed — `perf_l2_l3_combined` sample on VehicleScene (1.0.0 phase 3.3, 3/8)
+
+Migrated `perf_l2_l3_combined.py` (the combined L2 × L3 benchmark) from
+`gs.Scene` + `make_wheel_raycaster` + `MultiVehiclePhysics` to `VehicleScene`
+(default `solver="batched"`): K `add_vehicle(preset=…)` (one batched kind) +
+`n_envs=N` + per-(vehicle, env) `veh.set_inputs((N,) tensor)` + `vs.step()`.
+Verified `--internal --K 4 --N 16` → 64 vehicles, 2,078 vehicle-steps/s.
+
+---
+
 ## [0.9.29] — 2026-06-26
 
 ### Changed — `perf_vectorization` sample on VehicleScene (1.0.0 phase 3.3, 2/8)
