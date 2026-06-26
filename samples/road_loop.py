@@ -291,11 +291,12 @@ def main():
                     help="Render the top-down camera each step.")
     ap.add_argument("--native", action="store_true",
                     help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
-    ap.add_argument("--solver", default="per_vehicle",
+    ap.add_argument("--solver", default="multi_batched",
                     choices=["per_vehicle", "multi_batched"],
-                    help="Solver: 'per_vehicle' (N VehiclePhysics, Python loop) or "
-                         "'multi_batched' (MultiVehiclePhysics — kinds grouped, "
-                         "compute pipeline batched within each kind).")
+                    help="Solver: 'multi_batched' (default; MultiVehiclePhysics — "
+                         "kinds grouped, compute pipeline batched within each kind, "
+                         "much faster for the fleet) or 'per_vehicle' (N separate "
+                         "VehiclePhysics in a Python loop — simpler but slow).")
     args = ap.parse_args()
     if args.native:
         args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
@@ -322,15 +323,15 @@ def main():
         print("WARN: --viewer needs opencv-python. Continuing headless.")
         args.viewer = False
     scene = gs.Scene(
-        # Genesis's default substeps=20 is 2× the floor needed for the
-        # spring-damper suspension stack (suspension natural freq ≈ 2 Hz at
-        # K~50 kN/m and quarter-car mass ~375 kg; even substeps=10 →
-        # internal dt 1 ms gives massive headroom). With 16 vehicles in one
-        # scene the per-step cost is the constraint solver, which scales
-        # linearly with substeps — going 20 → 10 nearly halves wall time
-        # without changing the observed dynamics (verified: speeds within
-        # ±5 % of substeps=20). substeps=8 already breaks (no acceleration).
-        sim_options=gs.options.SimOptions(dt=DT, substeps=10),
+        # substeps=30: the cars are stable at 10, but the 5000 kg Truck's stiff
+        # suspension + heavy-chassis/light-wheel mass ratio blows the constraint
+        # forces up to NaN at coarse internal dt (dt/substeps) the moment the
+        # brake releases and it drives. Measured floor with the truck in the
+        # fleet: substeps=20 still NaNs, 30 is stable (the standalone
+        # GeneVehicle_Truck6w demo uses 50 with a single truck). The extra cost
+        # vs the cars-only 10 is offset by the multi_batched solver (--solver),
+        # which batches each kind's pipeline; per_vehicle at substeps=30 is slow.
+        sim_options=gs.options.SimOptions(dt=DT, substeps=30),
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,

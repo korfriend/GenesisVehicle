@@ -10,6 +10,26 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.21] — 2026-06-26
+
+### Fixed — `road_loop` NaN with the Truck kind (+ faster default solver)
+
+- `samples/road_loop.py`: the 5000 kg 6-wheel **Truck** blew the constraint
+  forces up to NaN the instant the brake released into the drive phase (the 3
+  car kinds were fine) — a pre-existing genesis-1.2.0 instability that the new
+  `--native` viewer made visible (cars launching / wheels sinking, then crash).
+  Root cause: the truck's stiff suspension + heavy-chassis/light-wheel mass
+  ratio is unstable at the coarse internal dt of `substeps=10`. **Raised
+  substeps 10 → 30** (measured floor with the truck in the fleet: 20 still NaNs,
+  30 is stable; the standalone `GeneVehicle_Truck6w` demo uses 50 for a single
+  truck).
+- **Default `--solver` `per_vehicle` → `multi_batched`**: batches each kind's
+  compute pipeline, much faster for the 16-vehicle fleet — offsets the higher
+  substeps (~125 ms/step). `per_vehicle` is still available for the simple
+  N-independent-`VehiclePhysics` path.
+
+---
+
 ## [0.9.20] — 2026-06-26
 
 ### Changed — `enable_visual_joint_sync` is auto-managed (no longer a user knob)
