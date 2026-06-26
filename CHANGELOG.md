@@ -10,6 +10,51 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.0] — 2026-06-27
+
+**VehicleScene is the SDK.** 1.0.0 makes `VehicleScene` the single high-level entry
+point that owns everything — `gs.init`, the Genesis scene(s), `build` / `step`,
+rendering, and L1/L2/L3 batching — so application code (and every sample + the OSC
+server) never touches `gs.Scene` / `VehiclePhysics` / `MultiVehiclePhysics`
+directly. The low-level layer is still public for control `VehicleScene` doesn't
+expose (see api-reference §1).
+
+This release is the sum of phases 1–5 (0.9.22 → 0.9.39); the headlines:
+
+- **Rendering API** (0.9.22): `view=None | "native" | "cv2"`, an SDK `Camera` +
+  `vs.add_camera()` (any view mode), `vs.cameras`. VisualJointSync auto-managed.
+- **Per-env inputs** (0.9.23): `veh.set_inputs(...)` takes per-env `(n_envs,)`
+  tensors.
+- **Batched solver, default** (0.9.24–0.9.27): `solver="batched"` (default) wraps
+  `MultiVehiclePhysics`; works in BOTH raycast modes (dual_scene injects the
+  raycast-scene distances); same-kind vehicles auto-group (lazy, dirty-tracked);
+  per-vehicle accessors (`veh.wheel_visual_transforms()` / `.resolved` /
+  `.distances`) work in either solver mode.
+- **Full scene encapsulation** (0.9.36): `main_scene` / `raycast_scene` are private;
+  the thin accessors `vs.viewer` / `vs.rigid_solver` / `vs.sim_options` /
+  `vs.is_dual_scene` cover the legitimate reads.
+- **Physics backend via `VehicleScene.InitBackend("cpu" | "gpu")`** (0.9.37),
+  process-global + set once, **default CPU**; double-init warns + is ignored. The
+  renderer is separate (always GPU; physics-CPU + GPU-render is valid).
+- **All 12 samples + the OSC server migrated** onto `VehicleScene` (0.9.28–0.9.35,
+  0.9.27); docs/README swept to the new API (0.9.39).
+
+Regression for the release: **96 pytest**, **all 13 SDK samples** drive headless,
+**all 4 GeneVehicle_\* demos** run (HJW's `z anchored` sub-check is a pre-existing
+Genesis-1.2.0 numeric-drift quirk, not a regression).
+
+### Migration from 0.9.x
+
+| was | now |
+|---|---|
+| `VehicleScene(backend="gpu", …)` | `VehicleScene.InitBackend("gpu")` then `VehicleScene(…)` (default cpu) |
+| `vs.main_scene` / `vs.raycast_scene` | `vs.viewer` / `vs.rigid_solver` / `vs.sim_options` / `vs.is_dual_scene` |
+| `vs.main_scene.add_camera(...)` | `vs.add_camera(...)` |
+| `show_viewer=True` | `view="native"` (alias still accepted) |
+| low-level `MultiVehiclePhysics(scene, …)` for L2/L3 | `VehicleScene(solver="batched", n_envs=N)` |
+
+---
+
 ## [0.9.39] — 2026-06-27
 
 ### Docs — sweep all docs/README for the 1.0.0 API (1.0.0 phase 5)
