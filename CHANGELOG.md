@@ -10,6 +10,23 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.4] — 2026-06-27
+
+### Added — live FPS; Fixed — `--truck` launching the cars
+
+- `samples/road_loop.py` prints a **live `fps` / `ms-per-step` line** to the
+  console every ~0.5 s of the drive loop — works in every view (`--native`,
+  `--viewer` cv2, headless).
+- **`enable_collision=False`** (road_loop scene): ray-wheel vehicles float on
+  raycast suspension (wheels sense the ground regardless), so chassis↔chassis
+  rigid collision isn't needed for a spaced loop — and **with** it the heavy
+  truck (`--truck`), which drifts wide, **rammed neighbouring cars and launched
+  them** ("cars bouncing out"). Off → cars stay put; also a bit faster. (The
+  truck itself still understeers wide off-frame under `--truck` — an opt-in,
+  documented quirk; tame it later with a lower truck throttle.)
+
+---
+
 ## [1.0.3] — 2026-06-27
 
 ### Changed — `road_loop` default = 3 car kinds (fast + all-visible); Truck is `--truck`
