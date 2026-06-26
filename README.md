@@ -106,7 +106,7 @@ URDF = "<path to your 4-wheel-car URDF>"
 
 # Physics backend — process-global, set ONCE, before any scene (default cpu).
 # The renderer is separate (always GPU). Omit this line to run on cpu.
-VehicleScene.InitBackend("gpu")
+VehicleScene.init_backend("gpu")
 
 # VehicleScene is the single entry point: it owns gs.init / the scene(s) / build / step.
 vs = VehicleScene(raycast_mode="single_scene", dt=1/48, substeps=10)
@@ -124,7 +124,7 @@ print(veh.get_pos()[0].cpu().numpy())
 `VehicleScene` is the recommended entry point — it registers vehicles / static /
 dynamic bodies (`add_vehicle` / `add_static` / `add_dynamic`), cameras
 (`add_camera`), L2/L3 batching (`solver="batched"` default, `n_envs=`), and the
-per-step loop, and owns the physics backend (`VehicleScene.InitBackend`). To drop
+per-step loop, and owns the physics backend (`VehicleScene.init_backend`). To drop
 *below* it to the raw `gs.Scene` + `VehiclePhysics` / `MultiVehiclePhysics` layer
 (for control it doesn't expose), see [`docs/api-reference.md`](docs/api-reference.md)
 §1 and the two-API-layers note in [`docs/concepts.md`](docs/concepts.md).

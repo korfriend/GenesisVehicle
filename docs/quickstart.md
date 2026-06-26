@@ -23,7 +23,7 @@ URDF = "<path to your 4-wheel-car URDF>"
 
 # 0. Physics backend — process-global, set ONCE, before any scene (default cpu).
 #    The renderer is separate (always GPU). Omit this line to run on cpu.
-VehicleScene.InitBackend("gpu")
+VehicleScene.init_backend("gpu")
 
 # 1. VehicleScene owns gs.init / the scene(s) / build / step — the single entry point.
 vs = VehicleScene(raycast_mode="single_scene", dt=1/48, substeps=10)

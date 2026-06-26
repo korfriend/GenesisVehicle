@@ -284,7 +284,7 @@ def main():
             backend = gs.cpu
             # print(" [Genesis] [Warning] GPU 백엔드가 요청되었으나 CUDA를 사용할 수 없습니다. CPU 백엔드로 안전하게 폴백합니다.")
 
-    VehicleScene.InitBackend("cpu" if backend is gs.cpu else "gpu")
+    VehicleScene.init_backend("cpu" if backend is gs.cpu else "gpu")
 
     # [Engine Hack] RigidGeom.n_cells Monkey-patch
     import genesis.engine.entities.rigid_entity.rigid_geom as rigid_geom

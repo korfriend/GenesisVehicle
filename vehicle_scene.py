@@ -8,7 +8,7 @@ Backends — physics vs renderer
 ------------------------------
 The Genesis **physics** backend (CPU / GPU) is the COMPUTE target. It is
 process-global and set ONCE, and is deliberately NOT a ``VehicleScene``
-constructor argument: call ``VehicleScene.InitBackend("cpu" | "gpu")`` BEFORE
+constructor argument: call ``VehicleScene.init_backend("cpu" | "gpu")`` BEFORE
 constructing any scene (default **cpu**). A second call — or any double-init,
 internal or external — warns and is ignored (the backend can't change within a
 process). Constructing a ``VehicleScene`` without calling it first auto-initializes
@@ -158,25 +158,30 @@ def _guard_collision_mesh(morph: Any, where: str) -> None:
 _GENESIS_BACKEND: Optional[str] = None
 
 
-def _ensure_genesis(backend: str = "cpu") -> None:
-    """Initialize the Genesis **physics** backend (``"cpu"`` default | ``"gpu"``).
-    Process-global, set once. If Genesis is already initialized, a request for a
-    DIFFERENT backend warns and is ignored (the backend can't change within a
-    process). Use ``gs._initialized`` (not a swallowed exception) so a REAL init
-    failure — e.g. missing libcuda on the GPU backend — still propagates."""
+def _ensure_genesis(backend: Optional[str] = None) -> None:
+    """Ensure the Genesis **physics** backend is up (process-global, set once).
+
+    ``backend`` is an EXPLICIT request from ``VehicleScene.init_backend`` (``"cpu"``
+    / ``"gpu"``); ``None`` is ``VehicleScene.__init__``'s silent auto-ensure (default
+    cpu). If Genesis is already initialized, an EXPLICIT request for a *different*
+    backend warns and is ignored — but the silent auto-ensure (``backend=None``)
+    never warns, it just reuses whatever is up. Uses ``gs._initialized`` (not a
+    swallowed exception) so a REAL init failure (e.g. missing libcuda on GPU) still
+    propagates."""
     global _GENESIS_BACKEND
     if getattr(gs, "_initialized", False) or _GENESIS_BACKEND is not None:
-        if _GENESIS_BACKEND is not None and backend != _GENESIS_BACKEND:
+        if (backend is not None and _GENESIS_BACKEND is not None
+                and backend != _GENESIS_BACKEND):
             _logger.warning(
                 "Genesis physics backend already initialized as %r; ignoring the "
                 "requested %r (the backend is process-global and set once — call "
-                "VehicleScene.InitBackend(...) before any VehicleScene to choose it).",
+                "VehicleScene.init_backend(...) before any VehicleScene to choose it).",
                 _GENESIS_BACKEND, backend)
-        _GENESIS_BACKEND = _GENESIS_BACKEND or backend
+        _GENESIS_BACKEND = _GENESIS_BACKEND or backend or "cpu"
         return
-    be = gs.gpu if backend == "gpu" else gs.cpu
-    gs.init(backend=be, logging_level="warning")
-    _GENESIS_BACKEND = backend
+    be_str = backend or "cpu"     # auto-ensure (backend=None) defaults to cpu
+    gs.init(backend=(gs.gpu if be_str == "gpu" else gs.cpu), logging_level="warning")
+    _GENESIS_BACKEND = be_str
 
 
 def _render_gpu_available() -> bool:
@@ -382,7 +387,7 @@ class VehicleScene:
     """Unified vehicle simulation scene — the center of the SDK API."""
 
     @staticmethod
-    def InitBackend(backend: str = "cpu") -> None:
+    def init_backend(backend: str = "cpu") -> None:
         """Initialize the Genesis **physics** backend, explicitly, before constructing
         any ``VehicleScene``. ``backend`` is ``"cpu"`` (the default) or ``"gpu"`` and
         is the COMPUTE backend only — the renderer is separate (always GPU; see
@@ -392,7 +397,7 @@ class VehicleScene:
         Constructing a ``VehicleScene`` without calling this first auto-initializes
         the **cpu** backend. So: opt into GPU physics by calling this up front.
 
-        >>> VehicleScene.InitBackend("gpu")   # GPU physics (e.g. large-n_envs L3)
+        >>> VehicleScene.init_backend("gpu")   # GPU physics (e.g. large-n_envs L3)
         >>> vs = VehicleScene(n_envs=4096)
         """
         if backend not in ("cpu", "gpu"):
@@ -463,7 +468,7 @@ class VehicleScene:
         self._built = False
 
         # Ensure the Genesis physics backend is up (default cpu). To run on GPU,
-        # call VehicleScene.InitBackend("gpu") BEFORE constructing any VehicleScene;
+        # call VehicleScene.init_backend("gpu") BEFORE constructing any VehicleScene;
         # this is a no-op if it (or gs.init) already ran. init_genesis=False lets a
         # caller manage gs.init entirely on its own.
         if init_genesis:

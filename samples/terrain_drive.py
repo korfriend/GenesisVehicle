@@ -158,7 +158,7 @@ def main():
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
     DT = cfg.recommended_dt
 
-    VehicleScene.InitBackend("cpu" if args.cpu else "gpu")
+    VehicleScene.init_backend("cpu" if args.cpu else "gpu")
     vs = VehicleScene(
         raycast_mode=mode,
         dt=DT, substeps=10, n_envs=1,

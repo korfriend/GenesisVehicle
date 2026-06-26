@@ -26,7 +26,7 @@ doesn't expose** — see the two-API-layers guide in
 
 **Backends — physics vs renderer.** The **physics** backend (CPU/GPU compute) is
 process-global and set ONCE — it is NOT a constructor arg. Call
-`VehicleScene.InitBackend("cpu" | "gpu")` *before* constructing any scene (default
+`VehicleScene.init_backend("cpu" | "gpu")` *before* constructing any scene (default
 **cpu**); a second call (or any double-init) warns and is ignored. The
 **renderer** is separate — viewer/cameras rasterize on the **GPU** regardless of
 the physics backend, so physics-CPU + GPU-render is valid; there is no CPU-render
@@ -35,7 +35,7 @@ mode. No GPU present → software render + a `build()` warning.
 ```python
 class VehicleScene:
     @staticmethod
-    def InitBackend(backend="cpu") -> None    # PHYSICS backend, once; "cpu"|"gpu"
+    def init_backend(backend="cpu") -> None    # PHYSICS backend, once; "cpu"|"gpu"
 
     def __init__(*, n_envs=1, dt=1/200,
                  raycast_mode="dual_scene",        # "dual_scene" (default) | "single_scene"
@@ -137,9 +137,9 @@ targets (`add_dynamic`).
 | `viewer_options` | `None` | native-viewer config — `gs.options.ViewerOptions(camera_pos, camera_lookat, camera_fov, res, max_FPS, refresh_rate, …)`. Main scene only (the raycast scene is never shown). Needs `view="native"` to actually open a window |
 | `view` | `None` | `None` headless / `"native"` (Genesis viewer) / `"cv2"` (render cameras for a cv2 HUD) |
 | `show_viewer` | `False` | back-compat alias for `view="native"` |
-| `init_genesis` | `True` | auto-init the (cpu-default) physics backend if not already up; set `False` to manage `gs.init` yourself. **The backend itself is chosen by `VehicleScene.InitBackend()`, not here** |
+| `init_genesis` | `True` | auto-init the (cpu-default) physics backend if not already up; set `False` to manage `gs.init` yourself. **The backend itself is chosen by `VehicleScene.init_backend()`, not here** |
 
-> **Physics backend** is set by the classmethod `VehicleScene.InitBackend("cpu" \| "gpu")` (process-global, once, default **cpu**) BEFORE any scene — not a constructor arg. The renderer is separate (always GPU). See "Backends" above.
+> **Physics backend** is set by the classmethod `VehicleScene.init_backend("cpu" \| "gpu")` (process-global, once, default **cpu**) BEFORE any scene — not a constructor arg. The renderer is separate (always GPU). See "Backends" above.
 
 **`add_vehicle(urdf_path, preset=None, *, …)`** — registers a driven vehicle (always collides + always wheel-raycast).
 

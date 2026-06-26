@@ -65,7 +65,7 @@ def _internal_run(K: int, N: int, warmup: int, steps: int) -> None:
     # VehicleScene owns gs.init / scene / build / step. Default solver="batched"
     # groups the K same-kind vehicles into ONE batched compute (L2); n_envs=N
     # replicates the world N× (L3) — so this measures the combined L2 × L3 path.
-    VehicleScene.InitBackend("gpu")
+    VehicleScene.init_backend("gpu")
     vs = VehicleScene(
         n_envs=N, raycast_mode="single_scene", dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(

@@ -79,7 +79,7 @@ def main():
     print(f"  drive    : throttle {args.throttle:.2f} × per-env scale, "
           f"{args.duration:.1f} s")
 
-    VehicleScene.InitBackend("gpu")
+    VehicleScene.init_backend("gpu")
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
 
     from genesis_vehicle.samples import _hud
