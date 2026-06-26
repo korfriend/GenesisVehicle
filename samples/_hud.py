@@ -111,6 +111,35 @@ def have_cv2() -> bool:
     return cv2 is not None
 
 
+# ----------------------------------------------------------------------
+# Native Genesis viewer helpers (the ``--native`` option of the visual samples)
+# ----------------------------------------------------------------------
+# A ``VehicleScene(show_viewer=True, viewer_options=...)`` renders the main scene
+# live in an interactive window (orbit/zoom), and ``vs.step()`` updates it — so a
+# sample needs no per-step render call in --native mode, just the viewer config
+# and an is-alive check for ESC/close. dual_scene works too since SDK 0.9.18
+# (raycast scene built first / main+viewer last → no GL-context clash).
+
+def native_viewer_options(camera_pos, camera_lookat, *, camera_fov: float = 55.0,
+                          res: tuple = (1280, 720)):
+    """Build a ``gs.options.ViewerOptions`` for ``VehicleScene(viewer_options=)``."""
+    import genesis as gs
+    return gs.options.ViewerOptions(
+        camera_pos=tuple(camera_pos), camera_lookat=tuple(camera_lookat),
+        camera_fov=camera_fov, res=res)
+
+
+def native_alive(vs) -> bool:
+    """``True`` while the native viewer window (main scene) is open. Best-effort:
+    returns ``True`` when there is no viewer to query, so loops never break
+    spuriously in headless / cv2 modes."""
+    try:
+        v = vs.main_scene.viewer
+        return True if v is None else v.is_alive()
+    except Exception:
+        return True
+
+
 def _tile_grid(arr: np.ndarray, per_row: Optional[int], max_cell_size: Optional[int]) -> np.ndarray:
     """Tile an (N, H, W, 3) stack into a (R*h, C*w, 3) mosaic.
 

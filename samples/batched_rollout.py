@@ -40,6 +40,7 @@ import argparse
 import math
 import os
 import time
+from types import SimpleNamespace
 
 import torch
 import genesis as gs
@@ -68,7 +69,11 @@ def main():
                          "use perf_vectorization.py instead.")
     ap.add_argument("--grid_spacing", type=float, default=12.0,
                     help="Grid cell spacing (m) when --viewer is on (default 12).")
+    ap.add_argument("--native", action="store_true",
+                    help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
     args = ap.parse_args()
+    if args.native:
+        args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
 
     print(f"genesis_vehicle v{sdk_version}  |  batched_rollout  "
           f"n_envs={args.n_envs}  steps={args.steps}"
@@ -94,9 +99,11 @@ def main():
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10),
-            env_separate_rigid=args.viewer,
+            env_separate_rigid=args.viewer or args.native,
         ),
-        show_viewer=False,    # --viewer uses cv2 HUD instead
+        viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_h), (0.0, 0.0, 0.0))
+                        if args.native else None),
+        show_viewer=args.native,    # --viewer uses cv2 HUD instead
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0)),
@@ -116,6 +123,8 @@ def main():
             pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
             up=(1.0, 0.0, 0.0), fov=70, near=0.1, far=cam_h * 4, GUI=False,
         )
+    if args.viewer or args.native:
+        # Grid layout (env_separate_rigid) so the N envs are visually separated.
         scene.build(
             n_envs=args.n_envs,
             env_spacing=(args.grid_spacing, args.grid_spacing),
@@ -125,9 +134,13 @@ def main():
     else:
         scene.build(n_envs=args.n_envs)
     # VisualJointSync is off by default; enable it only when rendering (--viewer).
-    cfg.enable_visual_joint_sync = args.viewer
+    cfg.enable_visual_joint_sync = args.viewer or args.native
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=args.n_envs)
     device = car.get_pos().device
+
+    # Shim so _hud.native_alive(...) (expects ``.main_scene.viewer``) works with
+    # this raw gs.Scene sample (no VehicleScene wrapper here).
+    _vs = SimpleNamespace(main_scene=scene)
 
     print(f"\n[shapes after build (n_envs={args.n_envs})]")
     print(f"  car.get_pos()        : {tuple(car.get_pos().shape)}")
@@ -142,6 +155,8 @@ def main():
     hud_perf = _hud.PerfMeter(window=60)
 
     def _hud_render(phase: str, step: int, total: int):
+        if args.native:                 # native viewer renders itself; just watch for close
+            return _hud.native_alive(_vs)
         if cam is None:
             return True
         if not args.viewer:
@@ -233,6 +248,16 @@ def main():
             f"speed range: {speed.min():.2f} .. {speed.max():.2f} m/s",
         ],
     )
+
+    if args.native:    # keep the interactive viewer open until closed/ESC
+        print("\nviewer 유지 중 — 창 닫기(또는 ESC)로 종료.")
+        hold = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
+        try:
+            while _hud.native_alive(_vs):
+                physics.step(hold)
+                scene.step()
+        except gs.GenesisException:
+            pass
 
 
 if __name__ == "__main__":

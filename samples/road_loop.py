@@ -36,6 +36,7 @@ import argparse
 import math
 import os
 import tempfile
+from types import SimpleNamespace
 
 import numpy as np
 import genesis as gs
@@ -288,12 +289,16 @@ def main():
                     help="Constant throttle for all vehicles (default 0.4).")
     ap.add_argument("--viewer", action="store_true",
                     help="Render the top-down camera each step.")
+    ap.add_argument("--native", action="store_true",
+                    help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
     ap.add_argument("--solver", default="per_vehicle",
                     choices=["per_vehicle", "multi_batched"],
                     help="Solver: 'per_vehicle' (N VehiclePhysics, Python loop) or "
                          "'multi_batched' (MultiVehiclePhysics — kinds grouped, "
                          "compute pipeline batched within each kind).")
     args = ap.parse_args()
+    if args.native:
+        args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
 
     K = args.n_per_kind
     N_TOTAL = K * len(KINDS)
@@ -333,7 +338,9 @@ def main():
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10)),
-        show_viewer=False,    # --viewer uses cv2 HUD instead
+        viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_height), (0.0, 0.0, 0.0))
+                        if args.native else None),
+        show_viewer=args.native,    # --viewer uses cv2 HUD instead
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0), plane_size=(120.0, 120.0)),
@@ -349,7 +356,7 @@ def main():
     # VisualJointSync is off by default; enable it only when rendering (--viewer)
     # so the per-kind cfgs animate wheels in the cv2 frames.
     for _cfg in cfg_per_kind:
-        _cfg.enable_visual_joint_sync = args.viewer
+        _cfg.enable_visual_joint_sync = args.viewer or args.native
 
     # Spawn vehicles, interleaved around the loop so kinds are mixed visually.
     physics_list = []
@@ -383,6 +390,10 @@ def main():
         )
 
     scene.build(n_envs=1)
+
+    # Shim so _hud.native_alive(...) (expects ``.main_scene.viewer``) works with
+    # this raw gs.Scene sample (no VehicleScene wrapper here).
+    _vs = SimpleNamespace(main_scene=scene)
 
     # Two solver setups:
     #   'per_vehicle'   — N independent VehiclePhysics. Python loop over them.
@@ -436,6 +447,8 @@ def main():
 
     def _hud_render(step: int):
         # Headless = pure physics (cam is None); viewer = render + HUD.
+        if args.native:                 # native viewer renders itself; just watch for close
+            return _hud.native_alive(_vs)
         if not args.viewer:
             return True
         # Pick the first vehicle of each kind for HUD speed display.
@@ -502,6 +515,17 @@ def main():
         print(f"  {kind_name:<5}  ({p[0]:+6.2f}, {p[1]:+6.2f})    "
               f"{r:6.2f}   {s:5.2f} m/s")
     print(f"  (target radius {args.radius:.1f} m)")
+
+    if args.native:    # keep the interactive viewer open until closed/ESC
+        print("\nviewer 유지 중 — 창 닫기(또는 ESC)로 종료.")
+        hold_inputs = [VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
+                       for _ in range(N_TOTAL)]
+        try:
+            while _hud.native_alive(_vs):
+                step_all(hold_inputs)
+                scene.step()
+        except gs.GenesisException:
+            pass
 
 
 if __name__ == "__main__":

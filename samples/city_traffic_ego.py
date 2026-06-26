@@ -51,6 +51,7 @@ import math
 import os
 import tempfile
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -170,7 +171,11 @@ def main():
                     help="Ego constant throttle (default 0.4).")
     ap.add_argument("--viewer", action="store_true",
                     help="Render top-down camera per step.")
+    ap.add_argument("--native", action="store_true",
+                    help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
     args = ap.parse_args()
+    if args.native:
+        args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
 
     print(f"genesis_vehicle v{sdk_version}  |  city_traffic_ego")
     print(f"  scene  : 4-lane highway, flat plane ({ROAD_LENGTH:.0f} × "
@@ -217,7 +222,9 @@ def main():
             # camera can show all of them. n_envs=1 → no offset.
             env_separate_rigid=(args.n_envs > 1),
         ),
-        show_viewer=False,    # --viewer uses cv2 HUD instead
+        viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_h), (0.0, 0.0, 0.0))
+                        if args.native else None),
+        show_viewer=args.native,    # --viewer uses cv2 HUD instead
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0),
@@ -234,9 +241,9 @@ def main():
     cfg_traffic = [tk[2](traffic_urdfs[i], stability="control")
                    for i, tk in enumerate(TRAFFIC_KINDS)]
     # VisualJointSync is off by default; enable it only when rendering (--viewer).
-    cfg_ego.enable_visual_joint_sync = args.viewer
+    cfg_ego.enable_visual_joint_sync = args.viewer or args.native
     for _cfg in cfg_traffic:
-        _cfg.enable_visual_joint_sync = args.viewer
+        _cfg.enable_visual_joint_sync = args.viewer or args.native
 
     vehicles = []                # list[(entity, sensor, cfg)]
     target_lanes = []            # parallel list: target Y per vehicle for lane-keeping
@@ -309,6 +316,10 @@ def main():
     )
     mphys = MultiVehiclePhysics(scene, vehicles, n_envs=args.n_envs)
     device = vehicles[0][0].get_pos().device
+
+    # Shim so _hud.native_alive(...) (expects ``.main_scene.viewer``) works with
+    # this raw gs.Scene sample (no VehicleScene wrapper here).
+    _vs = SimpleNamespace(main_scene=scene)
     print(f"  L2 groups : {mphys.n_kinds} kinds  "
           f"(K per kind = {[k.K for k in mphys.kinds]})")
 
@@ -355,6 +366,8 @@ def main():
 
     def _hud_render(step: int):
         # Headless = pure physics (cam is None); viewer = render + HUD.
+        if args.native:                 # native viewer renders itself; just watch for close
+            return _hud.native_alive(_vs)
         if not args.viewer:
             return True
         # env 0 ego state.
@@ -435,6 +448,17 @@ def main():
             f"{args.n_envs} x {K_total} = {args.n_envs*K_total})",
         ],
     )
+
+    if args.native:    # keep the interactive viewer open until closed/ESC
+        print("\nviewer 유지 중 — 창 닫기(또는 ESC)로 종료.")
+        hold_inputs = [VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
+                       for _ in vehicles]
+        try:
+            while _hud.native_alive(_vs):
+                mphys.step(hold_inputs)
+                scene.step()
+        except gs.GenesisException:
+            pass
 
 
 if __name__ == "__main__":
