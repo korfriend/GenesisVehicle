@@ -10,6 +10,19 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.23] — 2026-06-26
+
+### Docs — per-env `set_inputs` (1.0.0 phase 2a)
+
+`Vehicle.set_inputs(throttle, brake, steer)` already accepted **per-env tensors of
+shape `(n_envs,)`** (it forwards to `VehicleInputs`, whose fields are
+`ScalarOrTensor`) — only the signature/docstring implied scalars. Documented it:
+each control is a scalar (broadcast to all envs) or a per-env `(n_envs,)` tensor
+for L3 RL/MPPI rollouts. Verified through `VehicleScene` (n_envs=4, per-env
+throttle → the four envs diverge as expected). No behavior change.
+
+---
+
 ## [0.9.22] — 2026-06-26
 
 ### Added — VehicleScene rendering API: `view=`, `Camera`, `add_camera()` (1.0.0 phase 1)
