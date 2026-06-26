@@ -10,6 +10,27 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.25] — 2026-06-26
+
+### Added — lazy, dirty-tracked kind grouping for the batched solver (1.0.0 phase 2c)
+
+`solver="batched"` now groups vehicles by KIND, so the common pattern —
+`add_vehicle(preset=…)` called K times — actually batches. (Previously each fresh
+preset cfg was its own kind → `MultiVehiclePhysics` made K kinds-of-1 → no
+batching.) The kind key is **registration-based**: `preset` → `(urdf, preset fn,
+stability)`; a pre-built `cfg` → that cfg object (pass the same cfg to batch).
+VehicleConfig has object fields (hooks/strategies) and is not value-comparable, so
+the registration key is the robust choice. Same-kind vehicles share one cfg object
+so the MVP batches them.
+
+Grouping is **lazy + dirty-tracked**: `add_vehicle` / `mark_config_dirty()` bump a
+config version; the grouping re-runs (and the MVP is rebuilt) only before a `step`
+where the version changed — otherwise `step()` pays an O(1) int compare. Verified:
+`add_vehicle(preset)` ×3 → **1 kind** (batched); rwd+awd → 2 kinds;
+`mark_config_dirty()` re-groups on the next step. 96 pytest.
+
+---
+
 ## [0.9.24] — 2026-06-26
 
 ### Added — VehicleScene `solver="batched"`, working in dual_scene too (1.0.0 phase 2b)
