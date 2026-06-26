@@ -10,6 +10,22 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.3] — 2026-06-27
+
+### Changed — `road_loop` default = 3 car kinds (fast + all-visible); Truck is `--truck`
+
+- The 6-wheel **Truck is now opt-in via `--truck`**. It was the source of both
+  reported problems: (1) it needs `substeps=30` (3x slower) to avoid a
+  constraint-force NaN, and (2) being heavy + partial-Ackermann + overpowered it
+  understeers **wide off the loop** (spirals out to r≈33 m → "not all vehicles
+  visible"). The **default is now the 3 car kinds** (FWD/RWD/AWD): they hold the
+  loop (r≈25) and are stable at `substeps=10` → **~60 ms/step vs ~130**, and all
+  vehicles stay in frame. `--truck` restores the 4th kind (at `substeps=30`).
+- HUD speed line + final-pose summary are now **kind-count agnostic** (no
+  hardcoded 4-kind assumption, which would `IndexError` on the 3-kind default).
+
+---
+
 ## [1.0.2] — 2026-06-27
 
 ### Changed — `road_loop --solver` choices match `VehicleScene(solver=)`

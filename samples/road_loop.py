@@ -1,23 +1,29 @@
 """road_loop.py — multi-vehicle loop drive visual demo.
 
-Drops 4 KINDS of vehicles (FWD sedan / RWD coupe / AWD SUV / 6-wheel truck),
-``--n_per_kind`` of each, evenly spaced around a circular track. Each
-vehicle gets a constant Ackermann steering angle sized to the track radius
-so the whole fleet orbits indefinitely under constant throttle. A
+Drops ``--n_per_kind`` of each vehicle kind, evenly spaced around a circular
+track. Each vehicle gets a constant Ackermann steering angle sized to the track
+radius so the whole fleet orbits indefinitely under constant throttle. A
 top-down chase camera shows the whole scene.
+
+Default kinds = the 3 cars (FWD / RWD / AWD), which hold the loop and are stable
+at ``substeps=10`` (fast). The 6-wheel **Truck** is **opt-in via ``--truck``**:
+the 5000 kg chassis needs ``substeps=30`` (3x slower) to avoid a constraint-force
+NaN, and being heavy + partial-Ackermann + overpowered it understeers wide off
+the loop (drifts out of frame).
 
 Vehicle identification (shape + color)
 --------------------------------------
   FWD     red    compact sedan        ~3.8 × 1.6 × 1.0 m
   RWD     blue   low sports coupe     ~4.5 × 1.8 × 0.7 m
   AWD     green  tall SUV             ~4.3 × 2.0 × 1.4 m
-  Truck   yellow 6-wheel cargo truck  ~6.0 × 2.2 × 2.5 m
+  Truck   yellow 6-wheel cargo truck  ~6.0 × 2.2 × 2.5 m   (--truck)
 
 Run
 ---
-    python -m genesis_vehicle.samples.road_loop
+    python -m genesis_vehicle.samples.road_loop                 # 3 cars (fast), native: --native
+    python -m genesis_vehicle.samples.road_loop --truck         # + the 6-wheel truck (slower)
     python -m genesis_vehicle.samples.road_loop --n_per_kind 8
-    python -m genesis_vehicle.samples.road_loop --duration 30 --viewer
+    python -m genesis_vehicle.samples.road_loop --duration 30 --native
 
 For a benchmark of `n_envs` batching speedup see
 ``samples/perf_vectorization.py`` (a separate concern from this visual demo
@@ -298,23 +304,34 @@ def main():
                          "vehicles into one batched compute — much faster for the "
                          "fleet) or 'per_vehicle' (one VehiclePhysics per vehicle — "
                          "simpler but slower). Maps to VehicleScene(solver=...).")
+    ap.add_argument("--truck", action="store_true",
+                    help="Include the 6-wheel Truck kind. Off by default: the 5000 kg "
+                         "truck needs substeps=30 (3x slower) for stability and, being "
+                         "heavy + partial-Ackermann + overpowered, understeers wide off "
+                         "the loop (out of frame). Default = the 3 car kinds (substeps=10, "
+                         "all hold the loop).")
     args = ap.parse_args()
     if args.native:
         args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
 
+    # Vehicle kinds in this run: the 3 cars by default; add the Truck with --truck.
+    kinds = list(KINDS) if args.truck else [k for k in KINDS if k[0] != "Truck"]
+    # substeps floor: cars are stable at 10; the heavy truck needs 30 (20 still NaNs).
+    SUBSTEPS = 30 if args.truck else 10
+
     K = args.n_per_kind
-    N_TOTAL = K * len(KINDS)
+    N_TOTAL = K * len(kinds)
 
     print(f"genesis_vehicle v{sdk_version}  |  road_loop")
-    print(f"  fleet  : {N_TOTAL} vehicles ({K} × FWD red, {K} × RWD blue, "
-          f"{K} × AWD green, {K} × Truck yellow)")
-    print(f"  track  : circle radius {args.radius:.1f} m")
+    print(f"  fleet  : {N_TOTAL} vehicles  ({K} each × {', '.join(k[0] for k in kinds)})"
+          + ("" if args.truck else "   [--truck to add the 6-wheel truck]"))
+    print(f"  track  : circle radius {args.radius:.1f} m   |   substeps={SUBSTEPS}")
     print(f"  drive  : throttle {args.throttle:.2f} for {args.duration:.1f} s")
 
     # Stamp URDFs to tempdir.
     tmpdir = tempfile.mkdtemp(prefix="gv_road_loop_")
     urdf_paths = [_save_urdf(urdf_fn(), tmpdir, name.lower())
-                  for name, _c, urdf_fn, _p, _wb, _nw in KINDS]
+                  for name, _c, urdf_fn, _p, _wb, _nw in kinds]
 
     VehicleScene.init_backend("gpu")
     DT = 0.02
@@ -330,11 +347,11 @@ def main():
     vs = VehicleScene(
         n_envs=1, raycast_mode="single_scene", view=view,
         solver=args.solver,
-        # substeps=30: the cars are stable at 10, but the 5000 kg Truck's stiff
+        # SUBSTEPS = 10 (cars) / 30 (with --truck): the 5000 kg truck's stiff
         # suspension blows the constraint forces up to NaN at coarse dt/substeps
-        # the moment it drives (20 still NaNs, 30 is stable). The batched solver
-        # offsets the cost by batching each kind's pipeline; per_vehicle at 30 is slow.
-        dt=DT, substeps=30,
+        # the moment it drives (20 still NaNs, 30 stable), so it forces the coarser
+        # step — which is why it's opt-in and the car-only default runs 3x faster.
+        dt=DT, substeps=SUBSTEPS,
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
@@ -351,14 +368,14 @@ def main():
     # One cfg per kind, shared across that kind's K vehicles → the batched solver
     # groups them into one kind each. VJS is auto-managed by VehicleScene.
     cfg_per_kind = [preset_fn(urdf_paths[k_i], stability="control")
-                    for k_i, (_n, _c, _u, preset_fn, _wb, _nw) in enumerate(KINDS)]
+                    for k_i, (_n, _c, _u, preset_fn, _wb, _nw) in enumerate(kinds)]
 
     # Spawn vehicles, interleaved around the loop so kinds are mixed visually.
     vehs = []
     entities = []   # (kind_name, Vehicle, wheelbase)
     for global_idx in range(N_TOTAL):
-        kind_idx  = global_idx % len(KINDS)
-        kind_name, _color, _urdf_fn, _preset_fn, wheelbase, _nw = KINDS[kind_idx]
+        kind_idx  = global_idx % len(kinds)
+        kind_name, _color, _urdf_fn, _preset_fn, wheelbase, _nw = kinds[kind_idx]
         theta = 2 * math.pi * global_idx / N_TOTAL
         pos   = (args.radius * math.cos(theta),
                  args.radius * math.sin(theta), 1.0)
@@ -424,18 +441,18 @@ def main():
             return True
         # Pick the first vehicle of each kind for HUD speed display.
         speeds = []
-        for kind_i in range(len(KINDS)):
+        for kind_i in range(len(kinds)):
             veh = entities[kind_i][1]
             v = veh.get_vel()[0].cpu().numpy()
             speeds.append(float(np.linalg.norm(v[:2])))
+        speed_str = "  ".join(f"{kinds[i][0]} {speeds[i]:4.1f}" for i in range(len(kinds)))
         frame = _hud.render_hud_frame(
             cam,
             title=f"road_loop  v{sdk_version}   solver={args.solver}",
             lines=[
                 f"step {step:>4}/{n_steps}    "
-                f"{N_TOTAL} vehicles, {len(KINDS)} kinds (×{K} each)",
-                f"speeds: FWD {speeds[0]:4.1f}  RWD {speeds[1]:4.1f}  "
-                f"AWD {speeds[2]:4.1f}  Truck {speeds[3]:4.1f} m/s",
+                f"{N_TOTAL} vehicles, {len(kinds)} kinds (×{K} each)",
+                f"speeds: {speed_str} m/s",
                 "[ESC] quit",
             ],
             perf_ms=hud_perf.ms_per_step(),
@@ -469,7 +486,7 @@ def main():
         extra=[
             f"solver     : {args.solver}",
             f"fleet      : {N_TOTAL} vehicles "
-            f"({', '.join(f'{nm}={k}' for nm, k, *_ in KINDS)})",
+            f"({', '.join(f'{nm}={k}' for nm, k, *_ in kinds)})",
         ],
     )
 
@@ -479,7 +496,7 @@ def main():
     print(f"\n=== FINAL  (after {args.duration:.1f} s of driving) ===")
     print(f"  {'kind':<5}  {'pos':<20}  {'radius':>7}  {'speed':>7}")
     print(f"  {'-'*5}  {'-'*20}  {'-'*7}  {'-'*7}")
-    for kind_idx, (kind_name, _c, _u, _p, _wb, _nw) in enumerate(KINDS):
+    for kind_idx, (kind_name, _c, _u, _p, _wb, _nw) in enumerate(kinds):
         veh = entities[kind_idx][1]    # first vehicle of this kind
         p = veh.get_pos()[0].cpu().numpy()
         v = veh.get_vel()[0].cpu().numpy()
