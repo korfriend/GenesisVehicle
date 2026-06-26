@@ -10,6 +10,21 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.32] — 2026-06-26
+
+### Changed — `batched_rollout` sample on VehicleScene (1.0.0 phase 3.3, 5/8)
+
+Migrated `batched_rollout.py` (the L3 per-env random-control rollout with cv2 /
+native HUD) onto `VehicleScene`: `view=` maps `--native`→`"native"` /
+`--viewer`→`"cv2"`; the cv2 HUD camera is now `vs.add_camera()` (SDK `Camera`
+handle — `_hud` uses `cam.render()`); the grid build uses `vs.build(env_spacing=,
+n_envs_per_row=)`; per-env controls via `veh.set_inputs((N,) tensor)`; the
+`SimpleNamespace` `_vs` shim is gone (`native_alive(vs)` reads `vs.main_scene`).
+VJS auto-managed. Headless-verified: n_envs=16 → (16, 3) state, 662 env-steps/s,
+envs spread as expected. First of the 4 HUD-heavy visual samples.
+
+---
+
 ## [0.9.31] — 2026-06-26
 
 ### Changed — `perf_multi_vehicle` sample on VehicleScene; Truck NaN fixed (1.0.0 phase 3.3, 4/8)

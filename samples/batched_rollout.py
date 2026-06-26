@@ -40,15 +40,13 @@ import argparse
 import math
 import os
 import time
-from types import SimpleNamespace
 
 import torch
 import genesis as gs
 
 from genesis_vehicle import (
-    VehiclePhysics, VehicleInputs,
+    VehicleScene,
     car_4w_rwd_ackermann,
-    add_vehicle,
     __version__ as sdk_version,
 )
 
@@ -93,8 +91,12 @@ def main():
     grid_h  = args.grid_spacing * n_rows
     cam_h   = max(grid_w, grid_h) * 1.2
 
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=cfg.recommended_dt, substeps=10),
+    # VehicleScene owns the scene / build / step. view: None headless, "native"
+    # opens the Genesis viewer, "cv2" renders cameras for the cv2 HUD.
+    view = "native" if args.native else ("cv2" if args.viewer else None)
+    vs = VehicleScene(
+        n_envs=args.n_envs, backend="gpu", raycast_mode="single_scene", view=view,
+        dt=cfg.recommended_dt, substeps=10,
         rigid_options=gs.options.RigidOptions(dt=cfg.recommended_dt, enable_collision=True),
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
@@ -103,67 +105,52 @@ def main():
         ),
         viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_h), (0.0, 0.0, 0.0))
                         if args.native else None),
-        show_viewer=args.native,    # --viewer uses cv2 HUD instead
+        init_genesis=False,    # gs.init already called above
     )
-    scene.add_entity(
-        gs.morphs.Plane(pos=(0, 0, 0)),
-        material=gs.materials.Rigid(friction=1.0),
-    )
-    car, sensor, _ = add_vehicle(
-        scene, URDF_PATH, preset_fn=None, pos=(0.0, 0.0, 1.0),
-        material=gs.materials.Rigid(friction=1.0),
-    )
+    vs.add_ground_plane(friction=1.0)
+    veh = vs.add_vehicle(URDF_PATH, cfg=cfg, pos=(0.0, 0.0, 1.0),
+                         material=gs.materials.Rigid(friction=1.0))
 
     cam = None
     if args.viewer:
         # env_separate_rigid → N per-env frames. HUD downsizes each cell to
-        # ≤480 px, so a modest per-cell render res is plenty.
-        cam = scene.add_camera(
+        # ≤480 px, so a modest per-cell render res is plenty. (SDK Camera handle —
+        # _hud uses cam.render(), which the handle wraps.)
+        cam = vs.add_camera(
             res=(640, 360),
             pos=(0.0, 0.0, cam_h), lookat=(0.0, 0.0, 0.0),
             up=(1.0, 0.0, 0.0), fov=70, near=0.1, far=cam_h * 4, GUI=False,
         )
     if args.viewer or args.native:
         # Grid layout (env_separate_rigid) so the N envs are visually separated.
-        scene.build(
-            n_envs=args.n_envs,
-            env_spacing=(args.grid_spacing, args.grid_spacing),
-            n_envs_per_row=per_row,
-        )
+        vs.build(env_spacing=(args.grid_spacing, args.grid_spacing),
+                 n_envs_per_row=per_row)
         print(f"  viewer grid: {per_row} × {n_rows} cells, spacing {args.grid_spacing} m")
     else:
-        scene.build(n_envs=args.n_envs)
-    # VisualJointSync is off by default; enable it only when rendering (--viewer).
-    cfg.enable_visual_joint_sync = args.viewer or args.native
-    physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=args.n_envs)
-    device = car.get_pos().device
-
-    # Shim so _hud.native_alive(...) (expects ``.main_scene.viewer``) works with
-    # this raw gs.Scene sample (no VehicleScene wrapper here).
-    _vs = SimpleNamespace(main_scene=scene)
+        vs.build()
+    # VisualJointSync is auto-managed by VehicleScene (on when a viewer/camera exists).
+    device = veh.get_pos().device
 
     print(f"\n[shapes after build (n_envs={args.n_envs})]")
-    print(f"  car.get_pos()        : {tuple(car.get_pos().shape)}")
-    print(f"  car.get_vel()        : {tuple(car.get_vel().shape)}")
-    print(f"  car.get_quat()       : {tuple(car.get_quat().shape)}")
-    print(f"  sensor.read().distances: {tuple(sensor.read().distances.shape)}")
-    print(f"  physics.omega        : {tuple(physics.omega.shape)}")
+    print(f"  veh.get_pos()        : {tuple(veh.get_pos().shape)}")
+    print(f"  veh.get_vel()        : {tuple(veh.get_vel().shape)}")
+    print(f"  veh.get_quat()       : {tuple(veh.get_quat().shape)}")
 
-    # 1.5 s settle, brake held, identical across envs.
-    settle_in = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
+    # 1.5 s settle, brake held, identical across envs. set_inputs persists.
+    veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
     render_every = max(1, int(0.04 / cfg.recommended_dt))
     hud_perf = _hud.PerfMeter(window=60)
 
     def _hud_render(phase: str, step: int, total: int):
         if args.native:                 # native viewer renders itself; just watch for close
-            return _hud.native_alive(_vs)
+            return _hud.native_alive(vs)
         if cam is None:
             return True
         if not args.viewer:
             cam.render()
             return True
         # Quick spread stats for HUD.
-        v = car.get_vel().cpu().numpy()
+        v = veh.get_vel().cpu().numpy()
         speed = (v[:, :2] ** 2).sum(axis=1) ** 0.5
         frame = _hud.render_hud_frame(
             cam,
@@ -182,8 +169,7 @@ def main():
 
     user_quit = False
     for step in range(int(1.5 / cfg.recommended_dt)):
-        physics.step(settle_in)
-        scene.step()
+        vs.step()
         hud_perf.tick()
         if step % render_every == 0:
             if not _hud_render("settle", step, int(1.5 / cfg.recommended_dt)):
@@ -204,23 +190,21 @@ def main():
           f"({args.warmup} warmup + {args.steps} measured)]")
 
     # Per-env random controls. Throttle ∈ [0, 0.6], steer ∈ [-0.4, +0.4],
-    # brake = 0. These are (n_envs,) tensors — broadcast by VehicleInputs.
+    # brake = 0. These are (n_envs,) tensors — per-env control via set_inputs.
     g = torch.Generator(device=device).manual_seed(0)
     throttle = 0.6 * torch.rand(args.n_envs, generator=g, device=device)
     steer    = 0.8 * (torch.rand(args.n_envs, generator=g, device=device) - 0.5)
     brake    = torch.zeros(args.n_envs, device=device)
-    inputs   = VehicleInputs(throttle=throttle, brake=brake, steer=steer)
+    veh.set_inputs(throttle=throttle, brake=brake, steer=steer)
 
     for _ in range(args.warmup):
-        physics.step(inputs)
-        scene.step()
+        vs.step()
         hud_perf.tick()
 
     user_quit = False
     t0 = time.perf_counter()
     for step in range(args.steps):
-        physics.step(inputs)
-        scene.step()
+        vs.step()
         hud_perf.tick()
         if step % render_every == 0:
             if not _hud_render("measure", step, args.steps):
@@ -230,8 +214,8 @@ def main():
     _hud.cv2_cleanup()
     n_done = step + 1 if user_quit else args.steps
 
-    p = car.get_pos().cpu().numpy()    # (n_envs, 3)
-    v = car.get_vel().cpu().numpy()
+    p = veh.get_pos().cpu().numpy()    # (n_envs, 3)
+    v = veh.get_vel().cpu().numpy()
     speed = (v[:, :2] ** 2).sum(axis=1) ** 0.5
 
     r_ms, r_n = _hud.bench_render(cam, n=20) if cam is not None else (None, None)
@@ -251,11 +235,10 @@ def main():
 
     if args.native:    # keep the interactive viewer open until closed/ESC
         print("\nviewer 유지 중 — 창 닫기(또는 ESC)로 종료.")
-        hold = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
+        veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
         try:
-            while _hud.native_alive(_vs):
-                physics.step(hold)
-                scene.step()
+            while _hud.native_alive(vs):
+                vs.step()
         except gs.GenesisException:
             pass
 
