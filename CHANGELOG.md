@@ -10,6 +10,20 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.26] — 2026-06-26
+
+### Added — per-vehicle accessors that work in both solver modes (1.0.0 phase 3.0)
+
+`Vehicle` gained `wheel_visual_transforms()`, `visual_parts_transforms()`, a
+`resolved` property, and a solver-agnostic `distances` — each reads this vehicle's
+own `VehiclePhysics` in `per_vehicle` mode, or delegates to the shared
+`MultiVehiclePhysics` + the vehicle's flat slot in `batched` mode. So callers (the
+server, samples) never branch on `solver`. `MultiVehiclePhysics` gained
+`resolved_list` / `distances_list()` to back the batched delegation. This unblocks
+making `batched` the default without breaking per-vehicle capture. 96 pytest.
+
+---
+
 ## [0.9.25] — 2026-06-26
 
 ### Added — lazy, dirty-tracked kind grouping for the batched solver (1.0.0 phase 2c)
