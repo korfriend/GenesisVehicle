@@ -737,7 +737,8 @@ class VehicleScene:
     # Build / step
     # -----------------------------------------------------------------
 
-    def build(self, *, env_spacing=None, n_envs_per_row=None) -> None:
+    def build(self, *, env_spacing=None, n_envs_per_row=None,
+              center_envs_at_origin=None) -> None:
         """Build both scenes and wire up per-vehicle physics.
 
         ``env_spacing`` / ``n_envs_per_row`` are forwarded to the underlying
@@ -762,6 +763,8 @@ class VehicleScene:
             _kw["env_spacing"] = env_spacing
         if n_envs_per_row is not None:
             _kw["n_envs_per_row"] = n_envs_per_row
+        if center_envs_at_origin is not None:
+            _kw["center_envs_at_origin"] = center_envs_at_origin
         if self._two_scene:
             self.raycast_scene.build(n_envs=self.n_envs, **_kw)
             # Populate the raycast sensors once so the static BVH is built and
