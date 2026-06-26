@@ -185,7 +185,6 @@ def run_l3(args):
         rigid_options=_rigid_opts, show_viewer=not args.headless,
         init_genesis=False,
     )
-    scene = vs.main_scene   # alias for sim reads / sim_options tweaks (not entity adds)
 
     plane = None
     if not args.no_floor:
@@ -224,8 +223,8 @@ def run_l3(args):
 
     # 4. 배치 빌드 — VehicleScene 이 main + raycast 씬을 함께 빌드하고 VehiclePhysics 생성
     vs.build()
-    print(f" [DEBUG] Total rigid geoms after build: {scene.sim.rigid_solver.n_geoms}")
-    print(f" [DEBUG] Total rigid links after build: {scene.sim.rigid_solver.n_links}")
+    print(f" [DEBUG] Total rigid geoms after build: {vs.rigid_solver.n_geoms}")
+    print(f" [DEBUG] Total rigid links after build: {vs.rigid_solver.n_links}")
 
     vehicle_builder.print_resolved_table("L3-shared", veh.resolved)
 

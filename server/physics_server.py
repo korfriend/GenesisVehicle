@@ -324,9 +324,9 @@ def main():
     # 4. Genesis Scene Setup — VehicleScene(inline) for unified vehicle handling.
     # Per-entity mode is interacting vehicles at n_envs=1 on CPU, where the
     # two-scene raycast has no benefit, so inline == one scene == prior behavior.
-    # ``scene`` is aliased to vs.main_scene so all existing scene.add_entity(...)
-    # calls are untouched; only build()/step() route through vs. Genesis is
-    # already initialized above, so init_genesis=False.
+    # All geometry is registered via vs.add_* (no raw scene access); build() /
+    # step() and sim reads/tweaks route through vs accessors. Genesis is already
+    # initialized above, so init_genesis=False.
     vs = VehicleScene(
         n_envs=1, dt=ue_dt, backend="cpu", raycast_mode="inline",
         gravity=(0, 0, ue_gravity), substeps=2, show_viewer=not args.headless,
@@ -344,8 +344,6 @@ def main():
             max_collision_pairs=2048, # [최적화] 충돌 쌍 사전할당
         ),
     )
-    scene = vs.main_scene   # alias — keep all existing scene.add_entity(...) calls
-    
     target_entities = {}
     controllers = {}        # {tid: VehiclePhysics} — populated after vs.build()
     vehicles = {}           # {tid: Vehicle handle} — for set_inputs in the loop
@@ -442,8 +440,8 @@ def main():
                     geom._conaffinity = 1
 
     vs.build()      # builds vs.main_scene + constructs each vehicle's VehiclePhysics
-    print(f" [DEBUG] Total rigid geoms after build: {scene.sim.rigid_solver.n_geoms}")
-    print(f" [DEBUG] Total rigid links after build: {scene.sim.rigid_solver.n_links}")
+    print(f" [DEBUG] Total rigid geoms after build: {vs.rigid_solver.n_geoms}")
+    print(f" [DEBUG] Total rigid links after build: {vs.rigid_solver.n_links}")
 
     # Populate the controllers dict the OSC / state-capture code reads with the
     # Vehicle HANDLES (solver-agnostic — veh.wheel_visual_transforms / veh.resolved
@@ -453,7 +451,7 @@ def main():
         genesis_vehicle_builder.print_resolved_table(tid, veh.resolved)
 
     # 텐서 관련 Monkey Patch 적용
-    genesis_vehicle_builder.apply_monkey_patches(scene)
+    genesis_vehicle_builder.apply_monkey_patches(vs.rigid_solver)
 
     # 질량 덮어쓰기 적용
     for entity, mass in entities_to_set_mass:
@@ -467,7 +465,7 @@ def main():
     # 5회 시험 step 구동하여 스텝당 평균 물리 연산 시간 실측 (GPU일 때는 명시적 동기화 적용)
     warmup_starts = time.perf_counter()
     for _ in range(5):
-        scene.step()
+        vs.step()
         if not args.cpu and torch.cuda.is_available():
             torch.cuda.synchronize()
     warmup_ends = time.perf_counter()
@@ -477,7 +475,7 @@ def main():
     
     # [CRITICAL FIX] 물리적 시간 흐름 및 동역학 일관성(Determinism)을 위해 sim_dt는 항상 고정 고수합니다.
     sim_dt = ue_dt
-    scene.sim_options.dt = sim_dt
+    vs.sim_options.dt = sim_dt
     print(f"  [OK] [Determinism] 물리 해상도(sim_dt)가 표준 {sim_dt * 1000.0:.1f}ms ({1.0/sim_dt:.1f}Hz)로 설정되었습니다.")
     print("="*50 + "\n")
     
@@ -575,8 +573,8 @@ def main():
                 last_frame_id = 0
                 
                 print(f" [Genesis] Physics Resetting to Initial Values...")
-                scene.sim_options.gravity = (0, 0, initial_physics_state['gravity'])
-                scene.sim_options.dt = initial_physics_state['dt']
+                vs.sim_options.gravity = (0, 0, initial_physics_state['gravity'])
+                vs.sim_options.dt = initial_physics_state['dt']
                 
                 accumulated_wheel_angles.clear()
 

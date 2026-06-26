@@ -10,6 +10,34 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.36] — 2026-06-26
+
+### Changed — remove the public `main_scene` / `raycast_scene` properties (1.0.0 phase 4)
+
+`VehicleScene` now fully encapsulates the underlying Genesis Scene(s): `main_scene`
+/ `raycast_scene` are private (`_main_scene` / `_raycast_scene`). External code goes
+through the high-level API + four narrow accessors added for the legitimate
+reads/tweaks that remained:
+
+- `vs.viewer` — the native viewer (or `None`) — replaces `vs.main_scene.viewer`
+  (cv2 / native HUD + terrain_drive camera follow).
+- `vs.rigid_solver` — read-only sim introspection (`n_geoms` / `n_links` /
+  `faces_info`) — replaces `vs.main_scene.(sim.)rigid_solver`.
+- `vs.sim_options` — the runtime physics tweaks (`dt` / `gravity`) the server makes.
+- `vs.is_dual_scene` — replaces `vs.raycast_scene is not None` mode checks.
+
+Migrated all callers: samples (quickstart / slope_hold / terrain_drive cameras →
+`vs.add_camera`; terrain_drive's visual terrain copy → `vs.add_dynamic`;
+two_scene_terrain faces → `vs.rigid_solver`; obstacles_and_ramp →
+`vs.is_dual_scene`), `_hud.native_alive` → `vs.viewer`, and the OSC server
+(l3_runtime / physics_server scene-alias reads → `vs.rigid_solver` / `vs.step()` /
+`vs.sim_options`; `apply_monkey_patches(scene)` → `apply_monkey_patches(rigid_solver)`).
+**No raw scene access remains outside `vehicle_scene.py`.** 96 pytest; server
+imports clean; `two_scene_terrain --compare` |Δx| = 0.000 m; obstacles_and_ramp
+prints `is_dual_scene`.
+
+---
+
 ## [0.9.35] — 2026-06-26
 
 ### Changed — `city_traffic_ego` sample on VehicleScene — phase 3.3 COMPLETE (8/8)

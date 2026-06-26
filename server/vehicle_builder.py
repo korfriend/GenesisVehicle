@@ -34,12 +34,12 @@ def _mapping_steer_rad(mapping, default=None):
     return default
 
 
-def apply_monkey_patches(scene):
+def apply_monkey_patches(rigid_solver):
     """
     GenesisVehicle의 3D Tensor(Batched) Force 입력을
     현재 Genesis 엔진의 2D Tensor 요구사항에 맞게 변환해주는 Monkey Patch (SDK 원본 수정 방지)
     """
-    orig_apply_force = scene.sim.rigid_solver.apply_links_external_force
+    orig_apply_force = rigid_solver.apply_links_external_force
     def patched_apply_force(force, links_idx=None, envs_idx=None, **kwargs):
         if isinstance(force, torch.Tensor) and force.dim() == 3:
             if force.shape[1] == 1:
@@ -47,9 +47,9 @@ def apply_monkey_patches(scene):
             else:
                 force = force.reshape(-1, force.shape[-1])
         return orig_apply_force(force, links_idx, envs_idx, **kwargs)
-    scene.sim.rigid_solver.apply_links_external_force = patched_apply_force
+    rigid_solver.apply_links_external_force = patched_apply_force
 
-    orig_apply_torque = scene.sim.rigid_solver.apply_links_external_torque
+    orig_apply_torque = rigid_solver.apply_links_external_torque
     def patched_apply_torque(torque, links_idx=None, envs_idx=None, **kwargs):
         if isinstance(torque, torch.Tensor) and torque.dim() == 3:
             if torque.shape[1] == 1:
@@ -57,9 +57,9 @@ def apply_monkey_patches(scene):
             else:
                 torque = torque.reshape(-1, torque.shape[-1])
         return orig_apply_torque(torque, links_idx, envs_idx, **kwargs)
-    scene.sim.rigid_solver.apply_links_external_torque = patched_apply_torque
+    rigid_solver.apply_links_external_torque = patched_apply_torque
 
-    orig_set_dofs_pos = scene.sim.rigid_solver.set_dofs_position
+    orig_set_dofs_pos = rigid_solver.set_dofs_position
     def patched_set_dofs_pos(position, dofs_idx=None, envs_idx=None, **kwargs):
         if isinstance(position, torch.Tensor) and position.dim() == 2:
             if position.shape[0] == 1:
@@ -67,9 +67,9 @@ def apply_monkey_patches(scene):
             else:
                 position = position.reshape(-1)
         return orig_set_dofs_pos(position, dofs_idx, envs_idx, **kwargs)
-    scene.sim.rigid_solver.set_dofs_position = patched_set_dofs_pos
+    rigid_solver.set_dofs_position = patched_set_dofs_pos
 
-    orig_control_dofs_pos = scene.sim.rigid_solver.control_dofs_position
+    orig_control_dofs_pos = rigid_solver.control_dofs_position
     def patched_control_dofs_pos(position, dofs_idx=None, envs_idx=None, **kwargs):
         if isinstance(position, torch.Tensor) and position.dim() == 2:
             if position.shape[0] == 1:
@@ -77,7 +77,7 @@ def apply_monkey_patches(scene):
             else:
                 position = position.reshape(-1)
         return orig_control_dofs_pos(position, dofs_idx, envs_idx, **kwargs)
-    scene.sim.rigid_solver.control_dofs_position = patched_control_dofs_pos
+    rigid_solver.control_dofs_position = patched_control_dofs_pos
 
 
 def is_wheel_match_fuzzy(override_wheel_name, wheel_config):
@@ -460,7 +460,7 @@ def print_resolved_table(target_id, resolved_cfg):
 def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
                   urdf_path, mapping, ue_friction, ue_restitution, vis_mode):
     """
-    지정된 URDF 경로 및 매핑 설정을 기반으로 차량 엔티티를 vs.main_scene 에 로딩하고
+    지정된 URDF 경로 및 매핑 설정을 기반으로 차량을 vs.add_vehicle 로 등록하고
     cfg 를 동적 자동 튜닝하여 VehicleScene 에 등록합니다.
     (per-entity 경로 — 차량마다 엔티티 1개. proxy/sensor/VehiclePhysics 는 vs.build()
     에서 생성되므로, controllers 는 호출측이 build 후 채운다.)

@@ -134,7 +134,7 @@ def native_alive(vs) -> bool:
     returns ``True`` when there is no viewer to query, so loops never break
     spuriously in headless / cv2 modes."""
     try:
-        v = vs.main_scene.viewer
+        v = vs.viewer
         return True if v is None else v.is_alive()
     except Exception:
         return True

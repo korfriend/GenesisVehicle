@@ -426,7 +426,7 @@ class VehicleScene:
                          show_viewer=self.show_viewer)
         if viewer_options is not None:
             _scene_kw["viewer_options"] = viewer_options
-        self.main_scene = gs.Scene(**_scene_kw)
+        self._main_scene = gs.Scene(**_scene_kw)
         # The raycast scene is SENSORS-ONLY and is NEVER viewed or rendered:
         #   - created with show_viewer=False ALWAYS (independent of this
         #     VehicleScene's show_viewer / viewer_options, which apply to the main
@@ -436,7 +436,7 @@ class VehicleScene:
         #     and _measure_distances) → the visualizer is never updated for it.
         # Only the main scene can be viewed/rendered. It also never advances real
         # dynamics (kinematic terrain + fixed proxies); reuse the same dt for sanity.
-        self.raycast_scene = (
+        self._raycast_scene = (
             gs.Scene(sim_options=gs.options.SimOptions(dt=dt, substeps=1, gravity=(0, 0, 0)),
                      show_viewer=False)
             if self._two_scene else None
@@ -517,7 +517,7 @@ class VehicleScene:
         if collision and col_morph is not None:
             _guard_collision_mesh(col_morph, f"add_static({name!r})")
             mat = material if material is not None else gs.materials.Rigid()
-            body.entity_main = self.main_scene.add_entity(
+            body.entity_main = self._main_scene.add_entity(
                 col_morph, **_add_kwargs(mat, surface, vis_mode))
 
         if rc_morph is not None:
@@ -529,7 +529,7 @@ class VehicleScene:
                 # --vis-mode=collision leaking through, or a changed Genesis default)
                 # makes on_rigid touch entity.geoms → AttributeError at build. This
                 # scene is sensors-only and never user-rendered, so "visual" is right.
-                body.entity_raycast = self.raycast_scene.add_entity(
+                body.entity_raycast = self._raycast_scene.add_entity(
                     rc_morph, **_add_kwargs(
                         gs.materials.Kinematic(use_visual_raycasting=True),
                         surface, "visual"))
@@ -538,7 +538,7 @@ class VehicleScene:
                 if body.entity_main is None:
                     _guard_collision_mesh(rc_morph, f"add_static({name!r})")
                     mat = material if material is not None else gs.materials.Rigid()
-                    body.entity_main = self.main_scene.add_entity(
+                    body.entity_main = self._main_scene.add_entity(
                         rc_morph, **_add_kwargs(mat, surface, vis_mode))
                 body.entity_raycast = body.entity_main
 
@@ -562,7 +562,7 @@ class VehicleScene:
         auto-enables the wheels' VisualJointSync at build, so rendered wheels
         animate."""
         self._require_not_built()
-        cam = self.main_scene.add_camera(res=res, pos=pos, lookat=lookat, up=up,
+        cam = self._main_scene.add_camera(res=res, pos=pos, lookat=lookat, up=up,
                                          fov=fov, GUI=GUI, **kwargs)
         handle = Camera(name=name or f"camera_{len(self._cameras)}", entity=cam)
         self._cameras.append(handle)
@@ -626,7 +626,7 @@ class VehicleScene:
                           has_raycast=bool(wheel_raycast))
         main_morph = _clone_morph(morph, fixed=not physics)
         _guard_collision_mesh(main_morph, f"add_dynamic({name!r})")
-        obs.entity_main = self.main_scene.add_entity(
+        obs.entity_main = self._main_scene.add_entity(
             main_morph, **_add_kwargs(mat, surface, vis_mode))
         if mass is not None:
             self._pending_mass.append((obs.entity_main, float(mass)))
@@ -638,7 +638,7 @@ class VehicleScene:
             mirror_morph = _clone_morph(morph, fixed=True, collision=True)
             _guard_collision_mesh(mirror_morph,
                                   f"add_dynamic({name!r}) wheel_raycast mirror")
-            obs.entity_raycast = self.raycast_scene.add_entity(
+            obs.entity_raycast = self._raycast_scene.add_entity(
                 mirror_morph, **_add_kwargs(gs.materials.Rigid(), surface, vis_mode))
 
         self._dynamics.append(obs)
@@ -700,7 +700,7 @@ class VehicleScene:
             if quat is not None:
                 morph_kw["quat"] = quat
             morph = gs.morphs.URDF(**morph_kw)
-        veh.entity_main = self.main_scene.add_entity(
+        veh.entity_main = self._main_scene.add_entity(
             morph, **_add_kwargs(material, surface, vis_mode))
 
         if self._two_scene:
@@ -716,16 +716,16 @@ class VehicleScene:
             # (measured ~6x slower). The ray origins still track the vehicle
             # because raycast_scene.step() refreshes them each frame from the
             # proxy's link pose. See docs/two-scene-raycast.md.
-            veh.proxy = self.raycast_scene.add_entity(
+            veh.proxy = self._raycast_scene.add_entity(
                 gs.morphs.Box(size=(0.02, 0.02, 0.02), pos=pos,
                               fixed=True, collision=False),
                 material=gs.materials.Rigid())
-            veh.sensor = self.raycast_scene.add_sensor(gs.sensors.Raycaster(
+            veh.sensor = self._raycast_scene.add_sensor(gs.sensors.Raycaster(
                 pattern=WheelRayPattern(wheel_positions),
                 entity_idx=veh.proxy.idx,
                 max_range=raycaster_max_range, min_range=0.0, return_world_frame=True))
         else:
-            veh.sensor = self.main_scene.add_sensor(gs.sensors.Raycaster(
+            veh.sensor = self._main_scene.add_sensor(gs.sensors.Raycaster(
                 pattern=WheelRayPattern(wheel_positions),
                 entity_idx=veh.entity_main.idx,
                 max_range=raycaster_max_range, min_range=0.0, return_world_frame=True))
@@ -766,15 +766,15 @@ class VehicleScene:
         if center_envs_at_origin is not None:
             _kw["center_envs_at_origin"] = center_envs_at_origin
         if self._two_scene:
-            self.raycast_scene.build(n_envs=self.n_envs, **_kw)
+            self._raycast_scene.build(n_envs=self.n_envs, **_kw)
             # Populate the raycast sensors once so the static BVH is built and
             # the first read() returns valid data (Genesis sensors are empty
             # before the first step). The kinematic terrain/proxy don't move, so
             # this single step is cheap and never repeated.
             # update_visualizer=False: this scene is sensors-only and never
             # user-rendered, so skip the per-step visualizer/render update.
-            self.raycast_scene.step(update_visualizer=False)
-        self.main_scene.build(n_envs=self.n_envs, **_kw)   # viewer (if any) starts LAST
+            self._raycast_scene.step(update_visualizer=False)
+        self._main_scene.build(n_envs=self.n_envs, **_kw)   # viewer (if any) starts LAST
 
         # VisualJointSync drives the URDF wheel VISUAL joints through the engine
         # each step so GENESIS's own renderer shows wheels spinning/steering. It is
@@ -782,7 +782,7 @@ class VehicleScene:
         # viewer or a Genesis camera — so VehicleScene auto-manages it here (it is
         # not a user-facing option): on a headless / external-renderer run it stays
         # off, and wheel poses are read closed-form via wheel_visual_transforms().
-        renders = self.show_viewer or bool(getattr(self.main_scene.visualizer, "cameras", None))
+        renders = self.show_viewer or bool(getattr(self._main_scene.visualizer, "cameras", None))
         if self.solver == "batched":
             # Group same-kind vehicles (lazy/dirty) and give each kind one shared
             # cfg so MultiVehiclePhysics batches them. dual_scene → step() injects
@@ -799,7 +799,7 @@ class VehicleScene:
                 veh.cfg.enable_visual_joint_sync = renders   # auto-managed (see above)
                 sensor = None if self._two_scene else veh.sensor
                 veh.physics = VehiclePhysics(
-                    self.main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
+                    self._main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
 
         # Apply any per-obstacle mass overrides now that entities are built.
         for entity, mass in self._pending_mass:
@@ -828,7 +828,7 @@ class VehicleScene:
         # user-rendered, so skip the per-step visualizer/render update — the
         # sensor re-cast still runs inside sim.step(). Saves the render call the
         # raycast scene was making every frame.
-        self.raycast_scene.step(update_visualizer=False)
+        self._raycast_scene.step(update_visualizer=False)
         return {veh: read_distances(veh.sensor, self.n_envs)
                 for veh in self._vehicles}
 
@@ -853,7 +853,7 @@ class VehicleScene:
         else:
             for veh in self._vehicles:
                 veh.physics.step(veh._inputs, distances=dists[veh])
-        self.main_scene.step()
+        self._main_scene.step()
 
     def reset(self) -> None:
         """Reset per-vehicle physics state and re-sync proxies. (Full scene
@@ -893,7 +893,7 @@ class VehicleScene:
         """(Re)construct the batched MultiVehiclePhysics from the current groups."""
         from .multi_vehicle import MultiVehiclePhysics
         self._mvp = MultiVehiclePhysics(
-            self.main_scene,
+            self._main_scene,
             [(veh.entity_main, veh.sensor, veh._group_cfg) for veh in self._vehicles],
             n_envs=self.n_envs)
 
@@ -921,6 +921,33 @@ class VehicleScene:
         ``VehiclePhysics``). Use it for batched closed-form visuals, e.g.
         ``vs.physics.wheel_visual_transforms()``."""
         return self._mvp
+
+    # ---- thin scene accessors ----
+    # VehicleScene owns the underlying Scene(s); the raw scenes are NOT public
+    # (use add_* / step / add_camera). These narrow accessors cover the few
+    # legitimate reads/tweaks external code still needs.
+    @property
+    def is_dual_scene(self) -> bool:
+        """True in ``raycast_mode="dual_scene"`` (a separate raycast scene exists)."""
+        return self._two_scene
+
+    @property
+    def viewer(self):
+        """The Genesis native viewer (``view="native"``), or ``None`` when headless
+        / cv2. Use it to poll liveness or move the viewer camera."""
+        return getattr(self._main_scene, "viewer", None)
+
+    @property
+    def rigid_solver(self):
+        """The main scene's rigid solver — for read-only sim introspection
+        (``n_geoms`` / ``n_links`` / ``faces_info`` …). Valid after ``build()``."""
+        return self._main_scene.sim.rigid_solver
+
+    @property
+    def sim_options(self):
+        """The main scene's ``sim_options`` — for the runtime physics tweaks the
+        server makes (``dt`` / ``gravity``)."""
+        return self._main_scene.sim_options
 
     # ---- internals ----
     def _sync_dynamic(self, obs: "DynamicBody") -> None:
