@@ -361,7 +361,7 @@ class VehicleScene:
         viewer_options: Any = None,
         view: Optional[str] = None,
         show_viewer: bool = False,
-        solver: str = "per_vehicle",
+        solver: str = "batched",
         init_genesis: bool = True,
     ) -> None:
         # Back-compat aliases for the pre-rename names.
@@ -784,10 +784,12 @@ class VehicleScene:
             # Group same-kind vehicles (lazy/dirty) and give each kind one shared
             # cfg so MultiVehiclePhysics batches them. dual_scene → step() injects
             # the raycast-scene distances; single_scene → the MVP reads each sensor.
-            self._ensure_grouped()
-            for veh in self._vehicles:
-                veh._group_cfg.enable_visual_joint_sync = renders
-            self._build_mvp()
+            # (No vehicles → no MVP; the scene can still hold static/dynamic bodies.)
+            if self._vehicles:
+                self._ensure_grouped()
+                for veh in self._vehicles:
+                    veh._group_cfg.enable_visual_joint_sync = renders
+                self._build_mvp()
             # veh.physics stays None in batched mode; the shared solver is vs.physics.
         else:
             for veh in self._vehicles:
@@ -835,15 +837,16 @@ class VehicleScene:
         Inline mode: each vehicle reads its own sensor.
         """
         self._require_built()
-        if self.solver == "batched" and self._ensure_grouped():
+        if self.solver == "batched" and self._vehicles and self._ensure_grouped():
             self._build_mvp()   # config changed since last group → regroup + rebuild
         dists = self._measure_distances()   # dual: {veh:(N,n)} ; single: {veh:None}
         if self.solver == "batched":
-            inputs_list = [veh._inputs for veh in self._vehicles]
-            # dual_scene: inject the per-vehicle raycast-scene distances into the
-            # batched compute; single_scene: None → the MVP reads each sensor.
-            inj = [dists[veh] for veh in self._vehicles] if self._two_scene else None
-            self._mvp.step(inputs_list, distances=inj)
+            if self._mvp is not None:       # None → no vehicles; just advance the scene
+                inputs_list = [veh._inputs for veh in self._vehicles]
+                # dual_scene: inject the per-vehicle raycast-scene distances into the
+                # batched compute; single_scene: None → the MVP reads each sensor.
+                inj = [dists[veh] for veh in self._vehicles] if self._two_scene else None
+                self._mvp.step(inputs_list, distances=inj)
         else:
             for veh in self._vehicles:
                 veh.physics.step(veh._inputs, distances=dists[veh])
