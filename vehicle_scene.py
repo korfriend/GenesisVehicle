@@ -267,8 +267,12 @@ class Vehicle:
         self._n_envs = 1
 
     # ---- per-step input ----
-    def set_inputs(self, throttle: float = 0.0, brake: float = 0.0,
-                   steer: float = 0.0) -> "Vehicle":
+    def set_inputs(self, throttle=0.0, brake=0.0, steer=0.0) -> "Vehicle":
+        """Set this vehicle's controls for the next ``step``(s). Each of
+        ``throttle`` [-1,1] (+ = accel) / ``brake`` [0,1] / ``steer`` [-1,1]
+        (+ = right) is a scalar (broadcast to all envs) **or a per-env tensor of
+        shape ``(n_envs,)``** for L3 — e.g. per-env random controls in an RL / MPPI
+        rollout. Persists until the next ``set_inputs``."""
         self._inputs = VehicleInputs(throttle=throttle, brake=brake, steer=steer)
         return self
 
