@@ -353,7 +353,12 @@ def main():
         # step — which is why it's opt-in and the car-only default runs 3x faster.
         dt=DT, substeps=SUBSTEPS,
         rigid_options=gs.options.RigidOptions(
-            dt=DT, enable_collision=True,
+            # Ray-wheel vehicles float on raycast suspension (wheels sense the
+            # ground plane regardless of enable_collision), so chassis↔chassis
+            # rigid collision isn't needed for a spaced loop — and WITH it the
+            # heavy truck (which drifts wide, --truck) rams neighbouring cars and
+            # launches them. Off → cars stay put, and it's a bit faster too.
+            dt=DT, enable_collision=False,
             enable_self_collision=False, enable_joint_limit=True,
         ),
         vis_options=gs.options.VisOptions(
@@ -465,9 +470,15 @@ def main():
     torch.cuda.synchronize()
     t_start = time.perf_counter()
     user_quit = False
+    fps_every = max(1, int(0.5 / DT))    # live FPS line ~ every 0.5 s of sim time
     for step in range(n_steps):
         vs.step()
         hud_perf.tick()
+        if step % fps_every == 0:         # live FPS to console (works in every view)
+            ms = hud_perf.ms_per_step()
+            fps = (1000.0 / ms) if ms else 0.0
+            print(f"  [{step:>4}/{n_steps}]  {fps:5.1f} fps  ({ms:5.1f} ms/step)",
+                  flush=True)
         if step % 2 == 0:    # ~25 fps render
             if not _hud_render(step):
                 user_quit = True
