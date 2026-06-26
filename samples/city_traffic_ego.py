@@ -198,7 +198,7 @@ def main():
     # ------------------------------------------------------------------
     # Scene + Genesis init.
     # ------------------------------------------------------------------
-    gs.init(backend=gs.gpu, logging_level="warning")
+    VehicleScene.InitBackend("gpu")
     DT = 0.02
     cam_h = 55.0
     from genesis_vehicle.samples import _hud
@@ -211,7 +211,7 @@ def main():
     # solver="batched" groups the traffic kinds (L2); n_envs is the L3 axis.
     view = "native" if args.native else ("cv2" if args.viewer else None)
     vs = VehicleScene(
-        n_envs=args.n_envs, backend="gpu", raycast_mode="single_scene", view=view,
+        n_envs=args.n_envs, raycast_mode="single_scene", view=view,
         # substeps=10 is the floor for this vehicle stack (verified in road_loop).
         dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
@@ -226,7 +226,6 @@ def main():
         ),
         viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_h), (0.0, 0.0, 0.0))
                         if args.native else None),
-        init_genesis=False,    # gs.init already called above
     )
     vs.add_ground_plane(friction=1.0)
     _add_lane_markers(vs, n_dashes=60)

@@ -10,6 +10,32 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.37] — 2026-06-26
+
+### Changed — physics backend via `VehicleScene.InitBackend()`, default CPU; renderer separate (1.0.0 phase 5)
+
+The physics backend is no longer a `VehicleScene(...)` argument. Set it (process-
+global, once) with the classmethod **`VehicleScene.InitBackend("cpu" | "gpu")`**
+BEFORE constructing any scene; the **default is now CPU**. Constructing a
+`VehicleScene` without it auto-initializes CPU. Any double-init — a second
+`InitBackend`, or a stray `gs.init` — **warns and is ignored** (the backend can't
+change within a process).
+
+The **renderer is separate from the physics backend**: the viewer / cameras
+rasterize on the GPU regardless, so **physics-CPU + GPU-render is valid** (and
+tested — a real frame renders under `gs.cpu`); "GPU physics + CPU render" is not a
+thing. With no GPU present, `build()` warns that rendering falls back to slow
+software.
+
+Consolidated the 7 scattered `gs.init` sites (server ×2, visual samples ×4, tests)
+onto `InitBackend`; removed `backend=` from all 13 sample `VehicleScene` calls +
+both server entry points + the tests. Documented in the module docstring +
+api-reference §0 ("Backends — physics vs renderer"). Verified: `InitBackend`
+default cpu + mismatch warning; `two_scene_terrain --cpu` drives on CPU;
+`quickstart` drives on GPU; 96 pytest.
+
+---
+
 ## [0.9.36] — 2026-06-26
 
 ### Changed — remove the public `main_scene` / `raycast_scene` properties (1.0.0 phase 4)

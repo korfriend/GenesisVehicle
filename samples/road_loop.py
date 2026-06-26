@@ -316,7 +316,7 @@ def main():
     urdf_paths = [_save_urdf(urdf_fn(), tmpdir, name.lower())
                   for name, _c, urdf_fn, _p, _wb, _nw in KINDS]
 
-    gs.init(backend=gs.gpu, logging_level="warning")
+    VehicleScene.InitBackend("gpu")
     DT = 0.02
     cam_height = args.radius * 2.5
     from genesis_vehicle.samples import _hud
@@ -329,7 +329,7 @@ def main():
     # one VehiclePhysics per vehicle.
     view = "native" if args.native else ("cv2" if args.viewer else None)
     vs = VehicleScene(
-        n_envs=1, backend="gpu", raycast_mode="single_scene", view=view,
+        n_envs=1, raycast_mode="single_scene", view=view,
         solver=("batched" if args.solver == "multi_batched" else "per_vehicle"),
         # substeps=30: the cars are stable at 10, but the 5000 kg Truck's stiff
         # suspension blows the constraint forces up to NaN at coarse dt/substeps
@@ -345,7 +345,6 @@ def main():
             background_color=(0.05, 0.07, 0.10)),
         viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_height), (0.0, 0.0, 0.0))
                         if args.native else None),
-        init_genesis=False,    # gs.init already called above
     )
     vs.add_ground_plane(friction=1.0)
     _add_loop_markers(vs, radius=args.radius, n=24)

@@ -115,8 +115,7 @@ class L3State:
 def run_l3(args):
     # 1. 백엔드: 배칭 모드에선 GPU 가 기본 (커널 런치 고정비를 n_envs 로 분산)
     use_cpu = bool(getattr(args, 'force_cpu', False)) or not torch.cuda.is_available()
-    backend = gs.cpu if use_cpu else gs.gpu
-    gs.init(backend=backend, logging_level="warning")
+    VehicleScene.InitBackend("cpu" if use_cpu else "gpu")
     print(f" [Genesis] [L3] Multi-env batched mode | backend = {'CPU' if use_cpu else 'GPU'}")
 
     # [Engine Hack] RigidGeom.n_cells Monkey-patch (legacy 와 동일)
@@ -178,9 +177,9 @@ def run_l3(args):
     # SEPARATE scene whose BVH is static and shared across envs — same trick as
     # the high-level API (see docs/two-scene-raycast.md). Supersedes the old
     # single-scene --road-raycast-only (kinematic road, no collision). Genesis is
-    # already initialized by the server, so init_genesis=False.
+    # already initialized above via VehicleScene.InitBackend, so init_genesis=False.
     vs = VehicleScene(
-        n_envs=n_envs, dt=ue_dt, backend=("cpu" if use_cpu else "gpu"),
+        n_envs=n_envs, dt=ue_dt,
         raycast_mode="raywheel", gravity=(0, 0, ue_gravity), substeps=2,
         rigid_options=_rigid_opts, show_viewer=not args.headless,
         init_genesis=False,
