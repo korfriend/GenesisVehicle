@@ -293,9 +293,9 @@ def main():
             vs.step(); hud_perf.tick()
             zc = float(veh.get_pos()[0][2]); z_lo = min(z_lo, zc); z_hi = max(z_hi, zc)
             if float(veh.get_pos()[0][0]) - x0 >= WRAP_PERIOD:
-                pos = veh.entity.get_pos().clone()
+                pos = veh.entity_main.get_pos().clone()
                 pos[..., 0] -= WRAP_PERIOD          # absolute pose, keep velocity
-                veh.entity.set_pos(pos, zero_velocity=False, relative=False)
+                veh.entity_main.set_pos(pos, zero_velocity=False, relative=False)
                 wraps += 1
             if step % render_every == 0:
                 _follow_native()

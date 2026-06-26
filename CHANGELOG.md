@@ -10,6 +10,19 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.38] — 2026-06-26
+
+### Fixed — `terrain_drive` wrap used the old `veh.entity` name (regression sweep)
+
+A full headless sweep of all 13 SDK samples at 0.9.37 caught `terrain_drive`
+crashing with `AttributeError('Vehicle' object has no attribute 'entity')` in its
+wrap-around teleport — only reached after `WRAP_PERIOD` of driving, so missed by
+earlier spot checks. A leftover from the `entity` → `entity_main` rename; fixed to
+`veh.entity_main`. Re-verified: drove +116 m over 1 wrap (OK). **All 13 SDK samples
+pass.**
+
+---
+
 ## [0.9.37] — 2026-06-26
 
 ### Changed — physics backend via `VehicleScene.InitBackend()`, default CPU; renderer separate (1.0.0 phase 5)
