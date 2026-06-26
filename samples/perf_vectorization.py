@@ -58,60 +58,49 @@ def _internal_run(n_envs: int, warmup: int, steps: int) -> None:
     import torch
     import genesis as gs
 
-    from genesis_vehicle import (
-        VehiclePhysics, VehicleInputs,
-        car_4w_rwd_ackermann, add_vehicle,
-    )
+    from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 
     URDF = os.path.join(os.path.dirname(__file__), "urdf", "car_4w.urdf")
 
-    gs.init(backend=gs.gpu, logging_level="warning")
     DT = 0.02
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=DT, substeps=10),
+    # VehicleScene owns gs.init / scene / build / step. Default solver="batched"
+    # → this measures L3 scaling of the default single-vehicle path (a batched
+    # kind-of-1); n_envs is the L3 batch axis.
+    vs = VehicleScene(
+        n_envs=n_envs, backend="gpu", raycast_mode="single_scene", dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
-        show_viewer=False,
     )
-    scene.add_entity(
-        gs.morphs.Plane(pos=(0, 0, 0)),
-        material=gs.materials.Rigid(friction=1.0),
-    )
-    car, sensor, _ = add_vehicle(
-        scene, URDF, preset_fn=None, pos=(0.0, 0.0, 1.0),
-        material=gs.materials.Rigid(friction=1.0),
-    )
-    cfg = car_4w_rwd_ackermann(URDF, stability="control")
-    scene.build(n_envs=n_envs)
-    physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=n_envs)
-    device = car.get_pos().device
+    vs.add_ground_plane(friction=1.0)
+    veh = vs.add_vehicle(URDF, preset=car_4w_rwd_ackermann, stability="control",
+                         pos=(0.0, 0.0, 1.0),
+                         material=gs.materials.Rigid(friction=1.0))
+    vs.build()
+    device = veh.get_pos().device
 
     # Per-env random throttle / steer (modest values, no extreme behavior).
     g = torch.Generator(device=device).manual_seed(0)
     throttle = 0.4 * torch.rand(n_envs, generator=g, device=device)
     steer    = 0.4 * (torch.rand(n_envs, generator=g, device=device) - 0.5)
     brake    = torch.zeros(n_envs, device=device)
-    inputs   = VehicleInputs(throttle=throttle, brake=brake, steer=steer)
 
-    # Settle on brake (uniform across envs).
-    settle = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
+    # Settle on brake (uniform across envs). set_inputs persists across steps.
+    veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
     for _ in range(int(1.0 / DT)):
-        physics.step(settle)
-        scene.step()
+        vs.step()
 
     # Warmup at the random per-env inputs (compiles kernels for current n_envs).
+    veh.set_inputs(throttle=throttle, brake=brake, steer=steer)
     for _ in range(warmup):
-        physics.step(inputs)
-        scene.step()
+        vs.step()
 
     # Measurement.
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(steps):
-        physics.step(inputs)
-        scene.step()
+        vs.step()
     torch.cuda.synchronize()
     wall = time.perf_counter() - t0
 

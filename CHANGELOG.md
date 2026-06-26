@@ -10,6 +10,18 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.29] — 2026-06-26
+
+### Changed — `perf_vectorization` sample on VehicleScene (1.0.0 phase 3.3, 2/8)
+
+Migrated `perf_vectorization.py` (the n_envs L3-scaling benchmark) from
+`gs.Scene` + `VehiclePhysics` to `VehicleScene` (default `solver="batched"`,
+single vehicle = batched kind-of-1). Per-env random `veh.set_inputs((n_envs,)
+tensor)` + `vs.step()`; now measures the default VE path's L3 scaling. Verified
+n_envs 1→256: 43 → 8,903 env-steps/s (~207× batching throughput).
+
+---
+
 ## [0.9.28] — 2026-06-26
 
 ### Changed — `l2l3_minimal` sample on VehicleScene (1.0.0 phase 3.3, 1/8)
