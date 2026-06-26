@@ -10,6 +10,29 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.22] — 2026-06-26
+
+### Added — VehicleScene rendering API: `view=`, `Camera`, `add_camera()` (1.0.0 phase 1)
+
+First step of the 1.0.0 "VehicleScene owns everything" refactor — so callers never
+touch the underlying scene to render:
+
+- `view=None | "native" | "cv2"` (default `None`): `None` headless (no Genesis
+  render), `"native"` opens the Genesis viewer, `"cv2"` renders via cameras you add
+  (offscreen → e.g. a cv2 window). `show_viewer=True` is kept as a back-compat
+  alias for `view="native"`.
+- A `Camera` handle (SDK wrapper around a Genesis camera) + `vs.add_camera(...)`
+  (works in **every** view mode) + the `vs.cameras` property. Render frames with
+  `cam.render()`, aim with `cam.set_pose(...)`.
+- A camera (or `view="native"`) auto-enables the wheels' VisualJointSync at build
+  (0.9.20), so rendered wheels animate with no extra code.
+
+Additive / non-breaking. **Next phases** (toward 1.0.0): per-env `set_inputs` + a
+batched `solver=`, migrate all samples + the server onto `VehicleScene`, then
+remove the `main_scene` / `raycast_scene` properties and tag 1.0.0.
+
+---
+
 ## [0.9.21] — 2026-06-26
 
 ### Fixed — `road_loop` NaN with the Truck kind (+ faster default solver)

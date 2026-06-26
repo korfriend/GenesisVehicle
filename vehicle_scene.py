@@ -223,6 +223,25 @@ class DynamicBody:
             self.entity_main.set_quat(quat, zero_velocity=zero_velocity)
 
 
+@dataclass
+class Camera:
+    """Handle for a camera registered on a :class:`VehicleScene` (the SDK wrapper
+    around a Genesis camera). Lives on the main scene and works in every view mode
+    (``"native"`` and ``"cv2"``). Returned by :meth:`VehicleScene.add_camera`."""
+    name: str
+    entity: Any = None        # underlying gs camera
+
+    def render(self, *, rgb=True, depth=False, segmentation=False, normal=False):
+        """Render a frame from this camera (offscreen). Returns whatever Genesis
+        returns for the requested buffers — e.g. the RGB array for a cv2 window."""
+        return self.entity.render(rgb=rgb, depth=depth,
+                                  segmentation=segmentation, normal=normal)
+
+    def set_pose(self, *, pos=None, lookat=None, up=None):
+        """Move / aim the camera (e.g. a chase cam following the vehicle)."""
+        self.entity.set_pose(pos=pos, lookat=lookat, up=up)
+
+
 class Vehicle:
     """Handle for a registered vehicle. Set inputs each step; read pose anytime.
 
@@ -302,6 +321,7 @@ class VehicleScene:
         rigid_options: Any = None,
         vis_options: Any = None,
         viewer_options: Any = None,
+        view: Optional[str] = None,
         show_viewer: bool = False,
         init_genesis: bool = True,
     ) -> None:
@@ -323,7 +343,18 @@ class VehicleScene:
         self.backend = backend
         self.raycast_mode = raycast_mode
         self._two_scene = raycast_mode == "dual_scene"
-        self.show_viewer = bool(show_viewer)   # native viewer on the main scene
+        # Render mode (all on the MAIN scene; the raycast scene never renders):
+        #   None    — headless (no Genesis rendering)
+        #   "native"— open the native Genesis viewer window
+        #   "cv2"   — no native window; add cameras with add_camera() and render
+        #             them yourself (e.g. to a cv2 window or a frame buffer)
+        # add_camera() works in EVERY mode (native + cv2). show_viewer is a
+        # back-compat alias for view="native".
+        if view not in (None, "native", "cv2"):
+            raise ValueError(f"view must be None, 'native', or 'cv2', got {view!r}")
+        self.view = view
+        self.show_viewer = (view == "native") or bool(show_viewer)
+        self._cameras: list["Camera"] = []
         self._built = False
 
         if init_genesis:
@@ -338,7 +369,7 @@ class VehicleScene:
         # main scene can have one (the raycast scene is sensors-only). None lets
         # Genesis use its defaults. Pass show_viewer=True to actually open it.
         _scene_kw = dict(sim_options=_sim, rigid_options=_rigid, vis_options=_vis,
-                         show_viewer=show_viewer)
+                         show_viewer=self.show_viewer)
         if viewer_options is not None:
             _scene_kw["viewer_options"] = viewer_options
         self.main_scene = gs.Scene(**_scene_kw)
@@ -465,6 +496,23 @@ class VehicleScene:
         return self.add_static(morph=gs.morphs.Plane(),
                                material=gs.materials.Rigid(friction=friction),
                                name="ground")
+
+    def add_camera(self, *, res=(1280, 720), pos=(3.0, -3.0, 2.0),
+                   lookat=(0.0, 0.0, 0.0), up=(0.0, 0.0, 1.0), fov=50.0,
+                   GUI=False, name=None, **kwargs) -> Camera:
+        """Add a camera to the (main) scene — call before :meth:`build`. Render
+        frames in your loop with ``cam.render()`` (e.g. into a cv2 window), or aim
+        it with ``cam.set_pose(...)``. Works in every ``view`` mode (it is how the
+        ``"cv2"`` mode renders, and you can also add cameras alongside ``"native"``).
+        The caller never touches the underlying scene. Adding any camera also
+        auto-enables the wheels' VisualJointSync at build, so rendered wheels
+        animate."""
+        self._require_not_built()
+        cam = self.main_scene.add_camera(res=res, pos=pos, lookat=lookat, up=up,
+                                         fov=fov, GUI=GUI, **kwargs)
+        handle = Camera(name=name or f"camera_{len(self._cameras)}", entity=cam)
+        self._cameras.append(handle)
+        return handle
 
     def add_dynamic(
         self,
@@ -738,6 +786,10 @@ class VehicleScene:
     @property
     def dynamics(self) -> list:
         return list(self._dynamics)
+
+    @property
+    def cameras(self) -> list:
+        return list(self._cameras)
 
     # ---- internals ----
     def _sync_dynamic(self, obs: "DynamicBody") -> None:
