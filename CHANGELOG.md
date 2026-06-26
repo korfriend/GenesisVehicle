@@ -10,6 +10,27 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.24] — 2026-06-26
+
+### Added — VehicleScene `solver="batched"`, working in dual_scene too (1.0.0 phase 2b)
+
+`VehicleScene` gained `solver="per_vehicle"` (default) | `"batched"`. `"batched"`
+runs one `MultiVehiclePhysics` that groups same-kind vehicles (**same cfg object**
+→ pass `cfg=shared` to each `add_vehicle`) into one batched compute — faster for
+many same-kind vehicles (L2).
+
+It now works in **both** raycast modes. The batched solver
+(`MultiVehicleKindPhysics.step` / `MultiVehiclePhysics.step`) gained a
+`distances=` injection: in dual_scene `VehicleScene` feeds the raycast-scene
+distances into the batched compute (the kinds skip their own sensor read); in
+single_scene the solver reads each vehicle's sensor as before. Previously the
+batched solver only read its own sensors → single-scene only; injecting the
+pre-computed distances lifts that. Verified: `batched` == `per_vehicle` in both
+single_scene and dual_scene (`[2.4, 2.4]` either way). `vs.physics` exposes the
+MVP in batched mode (per-vehicle `Vehicle.physics` handles otherwise). 96 pytest.
+
+---
+
 ## [0.9.23] — 2026-06-26
 
 ### Docs — per-env `set_inputs` (1.0.0 phase 2a)

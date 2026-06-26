@@ -221,7 +221,8 @@ class MultiVehicleKindPhysics:
     # ------------------------------------------------------------------
     # The step pipeline. Mirrors VehiclePhysics.step but with batched I/O.
     # ------------------------------------------------------------------
-    def step(self, inputs_list: Sequence[VehicleStepInputs]) -> None:
+    def step(self, inputs_list: Sequence[VehicleStepInputs],
+             distances: "torch.Tensor | None" = None) -> None:
         """Step K vehicles in one batched compute pipeline.
 
         Args
@@ -229,6 +230,11 @@ class MultiVehicleKindPhysics:
         inputs_list : sequence of K ``VehicleInputs`` (or steering-specific
                       inputs). Each vehicle's throttle / brake / steer
                       become element-k of the batched (K,) tensor.
+        distances   : optional pre-computed wheel-ground distances of shape
+                      ``(NK, n_wheels)`` (env-major / vehicle-minor, the
+                      ``_read_distances_batched`` layout). When given, the kind's
+                      own raycasters are NOT read — used to inject VehicleScene's
+                      dual_scene raycast-scene distances into the batched compute.
         """
         assert len(inputs_list) == self.K, (
             f"expected K={self.K} inputs, got {len(inputs_list)}")
@@ -281,8 +287,10 @@ class MultiVehicleKindPhysics:
             throttle=throttle_t, brake=brake_t, wheel_meta=wm,
         )
 
-        # [RAYCAST]
-        distances = self._read_distances_batched()       # (K, n)
+        # [RAYCAST] — read this kind's own sensors, OR use injected distances
+        # (shape (NK, n) — e.g. VehicleScene's dual_scene raycast-scene distances).
+        if distances is None:
+            distances = self._read_distances_batched()   # (NK, n)
         p.last_distances = distances.detach().clone()
         if not p._prev_init and torch.all(distances < 1e-6):
             p._prev_init = True
@@ -511,13 +519,19 @@ class MultiVehiclePhysics:
     def n_kinds(self) -> int:
         return len(self.kinds)
 
-    def step(self, inputs_list: Sequence[VehicleStepInputs]) -> None:
+    def step(self, inputs_list: Sequence[VehicleStepInputs],
+             distances=None) -> None:
         """Step all vehicles in batched per-kind pipelines.
 
         Args
         ----
         inputs_list : flat list of length ``n_vehicles``, in the SAME order
                       as the ``vehicles`` argument to ``__init__``.
+        distances   : optional flat list (length ``n_vehicles``, same order) of
+                      per-vehicle ``(n_envs, n_wheels)`` distance tensors. When
+                      given, the per-kind raycasters are NOT read — VehicleScene
+                      injects its dual_scene raycast-scene distances here. ``None``
+                      → each kind reads its own raycasters (single-scene).
         """
         assert len(inputs_list) == self.n_vehicles, (
             f"MultiVehiclePhysics expected {self.n_vehicles} inputs, "
@@ -525,9 +539,29 @@ class MultiVehiclePhysics:
         # Re-bucket inputs into per-kind slot order (pure helper — unit-tested).
         per_kind = rebucket_inputs(
             inputs_list, self._flat_to_kind, [k.K for k in self.kinds])
+        per_kind_dist = (self._assemble_kind_distances(distances)
+                         if distances is not None else [None] * len(self.kinds))
         # Dispatch.
-        for kind, ins in zip(self.kinds, per_kind):
-            kind.step(ins)
+        for kind, ins, dist in zip(self.kinds, per_kind, per_kind_dist):
+            kind.step(ins, distances=dist)
+
+    def _assemble_kind_distances(self, distances):
+        """Re-bucket a flat per-vehicle distances list (length ``n_vehicles``, each
+        ``(n_envs, n_wheels)``) into per-kind ``(NK, n_wheels)`` tensors matching
+        ``MultiVehicleKindPhysics._read_distances_batched`` (env-major / vehicle-
+        minor: stack the kind's vehicles on dim 1 → ``(N, K, n)`` → ``(NK, n)``)."""
+        assert len(distances) == self.n_vehicles, (
+            f"distances list must have {self.n_vehicles} entries, got {len(distances)}")
+        per_kind_slots = [[] for _ in self.kinds]
+        for flat_i, kind_idx, slot_idx in self._flat_to_kind:
+            per_kind_slots[kind_idx].append((slot_idx, distances[flat_i]))
+        out = []
+        for slots in per_kind_slots:
+            slots.sort(key=lambda x: x[0])              # restore slot order
+            ds = [d for _, d in slots]                  # each (N, n_wheels)
+            stacked = torch.stack(ds, dim=1)            # (N, K_kind, n_wheels)
+            out.append(stacked.reshape(-1, stacked.shape[-1]))   # (NK, n_wheels)
+        return out
 
     def wheel_visual_transforms(self, frame: str = "world"):
         """Closed-form wheel visual poses for every vehicle, in the caller's flat

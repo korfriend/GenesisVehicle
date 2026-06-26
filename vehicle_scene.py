@@ -327,6 +327,7 @@ class VehicleScene:
         viewer_options: Any = None,
         view: Optional[str] = None,
         show_viewer: bool = False,
+        solver: str = "per_vehicle",
         init_genesis: bool = True,
     ) -> None:
         # Back-compat aliases for the pre-rename names.
@@ -359,6 +360,16 @@ class VehicleScene:
         self.view = view
         self.show_viewer = (view == "native") or bool(show_viewer)
         self._cameras: list["Camera"] = []
+        # solver: "per_vehicle" — one VehiclePhysics per vehicle (works in any
+        # raycast_mode). "batched" — one MultiVehiclePhysics that groups vehicles
+        # of the same kind (= same cfg object) into one batched compute; faster for
+        # many same-kind vehicles (L2). In dual_scene the raycast-scene distances
+        # are injected into the batched compute; in single_scene the batched solver
+        # reads each vehicle's own sensor.
+        if solver not in ("per_vehicle", "batched"):
+            raise ValueError(f"solver must be 'per_vehicle' or 'batched', got {solver!r}")
+        self.solver = solver
+        self._mvp = None        # MultiVehiclePhysics, in batched mode
         self._built = False
 
         if init_genesis:
@@ -719,10 +730,23 @@ class VehicleScene:
         # off, and wheel poses are read closed-form via wheel_visual_transforms().
         renders = self.show_viewer or bool(getattr(self.main_scene.visualizer, "cameras", None))
         for veh in self._vehicles:
-            veh.cfg.enable_visual_joint_sync = renders
-            sensor = None if self._two_scene else veh.sensor
-            veh.physics = VehiclePhysics(
-                self.main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
+            veh.cfg.enable_visual_joint_sync = renders   # auto-managed (see above)
+
+        if self.solver == "batched":
+            # One batched MultiVehiclePhysics over all vehicles (grouped by cfg
+            # identity → same kind). In dual_scene step() injects the raycast-scene
+            # distances; in single_scene the MVP reads each vehicle's own sensor.
+            from .multi_vehicle import MultiVehiclePhysics
+            self._mvp = MultiVehiclePhysics(
+                self.main_scene,
+                [(veh.entity_main, veh.sensor, veh.cfg) for veh in self._vehicles],
+                n_envs=self.n_envs)
+            # veh.physics stays None in batched mode; the shared solver is vs.physics.
+        else:
+            for veh in self._vehicles:
+                sensor = None if self._two_scene else veh.sensor
+                veh.physics = VehiclePhysics(
+                    self.main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
 
         # Apply any per-obstacle mass overrides now that entities are built.
         for entity, mass in self._pending_mass:
@@ -763,9 +787,16 @@ class VehicleScene:
         Inline mode: each vehicle reads its own sensor.
         """
         self._require_built()
-        dists = self._measure_distances()
-        for veh in self._vehicles:
-            veh.physics.step(veh._inputs, distances=dists[veh])
+        dists = self._measure_distances()   # dual: {veh:(N,n)} ; single: {veh:None}
+        if self.solver == "batched":
+            inputs_list = [veh._inputs for veh in self._vehicles]
+            # dual_scene: inject the per-vehicle raycast-scene distances into the
+            # batched compute; single_scene: None → the MVP reads each sensor.
+            inj = [dists[veh] for veh in self._vehicles] if self._two_scene else None
+            self._mvp.step(inputs_list, distances=inj)
+        else:
+            for veh in self._vehicles:
+                veh.physics.step(veh._inputs, distances=dists[veh])
         self.main_scene.step()
 
     def reset(self) -> None:
@@ -794,6 +825,14 @@ class VehicleScene:
     @property
     def cameras(self) -> list:
         return list(self._cameras)
+
+    @property
+    def physics(self):
+        """The batched ``MultiVehiclePhysics`` when ``solver="batched"`` (else
+        ``None``; in ``per_vehicle`` mode each ``Vehicle.physics`` is its own
+        ``VehiclePhysics``). Use it for batched closed-form visuals, e.g.
+        ``vs.physics.wheel_visual_transforms()``."""
+        return self._mvp
 
     # ---- internals ----
     def _sync_dynamic(self, obs: "DynamicBody") -> None:
