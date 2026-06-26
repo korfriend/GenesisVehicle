@@ -292,12 +292,12 @@ def main():
                     help="Render the top-down camera each step.")
     ap.add_argument("--native", action="store_true",
                     help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
-    ap.add_argument("--solver", default="multi_batched",
-                    choices=["per_vehicle", "multi_batched"],
-                    help="Solver: 'multi_batched' (default; MultiVehiclePhysics — "
-                         "kinds grouped, compute pipeline batched within each kind, "
-                         "much faster for the fleet) or 'per_vehicle' (N separate "
-                         "VehiclePhysics in a Python loop — simpler but slow).")
+    ap.add_argument("--solver", default="batched",
+                    choices=["per_vehicle", "batched"],
+                    help="VehicleScene solver: 'batched' (default; groups same-kind "
+                         "vehicles into one batched compute — much faster for the "
+                         "fleet) or 'per_vehicle' (one VehiclePhysics per vehicle — "
+                         "simpler but slower). Maps to VehicleScene(solver=...).")
     args = ap.parse_args()
     if args.native:
         args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
@@ -323,18 +323,17 @@ def main():
     if args.viewer and not _hud.have_cv2():
         print("WARN: --viewer needs opencv-python. Continuing headless.")
         args.viewer = False
-    # VehicleScene owns the scene / build / step. view: None headless, "native"
-    # the Genesis viewer, "cv2" renders the loop camera for the cv2 HUD. The
-    # benchmark's solver maps to VE's: multi_batched → "batched", per_vehicle →
-    # one VehiclePhysics per vehicle.
+    # VehicleScene owns the scene / build / step / render. view: None headless,
+    # "native" the Genesis viewer, "cv2" renders the loop camera for the cv2 HUD.
+    # --solver maps straight to VehicleScene(solver=...): 'batched' / 'per_vehicle'.
     view = "native" if args.native else ("cv2" if args.viewer else None)
     vs = VehicleScene(
         n_envs=1, raycast_mode="single_scene", view=view,
-        solver=("batched" if args.solver == "multi_batched" else "per_vehicle"),
+        solver=args.solver,
         # substeps=30: the cars are stable at 10, but the 5000 kg Truck's stiff
         # suspension blows the constraint forces up to NaN at coarse dt/substeps
-        # the moment it drives (20 still NaNs, 30 is stable). multi_batched offsets
-        # the cost by batching each kind's pipeline; per_vehicle at 30 is slow.
+        # the moment it drives (20 still NaNs, 30 is stable). The batched solver
+        # offsets the cost by batching each kind's pipeline; per_vehicle at 30 is slow.
         dt=DT, substeps=30,
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
@@ -385,8 +384,8 @@ def main():
 
     vs.build()
 
-    if args.solver == "multi_batched":
-        print(f"  solver : multi_batched — {vs.physics.n_kinds} kinds, "
+    if args.solver == "batched":
+        print(f"  solver : batched — {vs.physics.n_kinds} kinds, "
               f"K per kind = {[k.K for k in vs.physics.kinds]}")
 
     # Constant Ackermann steering — for ISO 8855 (+steer = right turn, CW),
