@@ -210,9 +210,9 @@ def run_l3(args):
     t_fric = first_info.get('friction', ue_friction)
     temp_urdf = vehicle_builder.strip_wheel_collisions(urdf_path)
     cfg = vehicle_builder.build_cfg(urdf_path, mapping, t_fric, target_id="L3-shared")
-    # VisualJointSync only for the Genesis viewer; headless uses the closed-form
-    # wheel_visual_transforms capture (skip the per-step engine FK cost).
-    cfg.enable_visual_joint_sync = not args.headless
+    # VisualJointSync is auto-managed by VehicleScene.build() (on iff the main
+    # scene is rendered — show_viewer); headless reads wheel poses closed-form via
+    # wheel_visual_transforms, so no per-step engine FK is paid.
     veh = vs.add_vehicle(
         urdf_path, cfg=cfg,
         morph=gs.morphs.URDF(file=temp_urdf, pos=first_info.get('pos', [0, 0, 2]),
