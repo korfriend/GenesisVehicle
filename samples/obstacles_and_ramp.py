@@ -127,8 +127,7 @@ def main():
     vs, veh, knock_box = _build_course(args.mode, 1, backend, cfg)
 
     # --- registry: the §0.2 matrix made concrete ---
-    print(f"\n  raycast_mode = {vs.raycast_mode}  (raycast_scene = "
-          f"{'present' if vs.raycast_scene is not None else 'None'})")
+    print(f"\n  raycast_mode = {vs.raycast_mode}  (is_dual_scene = {vs.is_dual_scene})")
     print("  registered bodies:")
 
     def _has(e):

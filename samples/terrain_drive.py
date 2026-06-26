@@ -205,9 +205,10 @@ def main():
         # main-scene camera/viewer would not see it. Add a collision-free VISUAL
         # copy to the main scene purely for rendering (no physics, no raycast).
         if need_render:
-            vs.main_scene.add_entity(
+            vs.add_dynamic(
                 gs.morphs.Mesh(file=terrain_obj, fixed=True, align=False,
                                collision=False, visualization=True, convexify=False),
+                physics=False, wheel_raycast=False,
                 material=gs.materials.Rigid(), surface=terrain_surface)
 
     veh = vs.add_vehicle(URDF_PATH, cfg=cfg, pos=(0.0, 0.0, 1.0),
@@ -215,9 +216,9 @@ def main():
 
     cam = None
     if args.viewer:
-        cam = vs.main_scene.add_camera(res=(1280, 720), pos=(-8.0, -6.0, 4.0),
-                                       lookat=(0.0, 0.0, 1.0), up=(0.0, 0.0, 1.0),
-                                       fov=55, near=0.1, far=200.0, GUI=False)
+        cam = vs.add_camera(res=(1280, 720), pos=(-8.0, -6.0, 4.0),
+                            lookat=(0.0, 0.0, 1.0), up=(0.0, 0.0, 1.0),
+                            fov=55, near=0.1, far=200.0, GUI=False)
 
     vs.build()
 
@@ -228,7 +229,7 @@ def main():
             return
         p = veh.get_pos()[0].cpu().numpy()
         try:
-            vs.main_scene.viewer.set_camera_pose(
+            vs.viewer.set_camera_pose(
                 pos=p + np.array([0.0, -13.0, 2.8]),
                 lookat=p + np.array([0.0, 0.0, 0.7]))
         except Exception:

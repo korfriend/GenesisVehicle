@@ -94,12 +94,11 @@ def main():
                          material=gs.materials.Rigid(friction=1.0))
 
     # Camera only when --viewer. Adding a camera triggers per-step renderer-state
-    # sync inside scene.step() (slows pure-physics timing), so headless skips it
-    # and reports physics-only numbers. The camera lives on vs.main_scene and
-    # must be added before build().
+    # sync inside the step (slows pure-physics timing), so headless skips it and
+    # reports physics-only numbers. vs.add_camera must be called before build().
     cam = None
     if args.viewer:
-        cam = vs.main_scene.add_camera(
+        cam = vs.add_camera(
             res=(1280, 720),
             pos=(-8.0, -6.0, 4.0), lookat=(0.0, 0.0, 1.0),
             up=(0.0, 0.0, 1.0), fov=55, near=0.1, far=200.0, GUI=False,

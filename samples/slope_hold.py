@@ -116,7 +116,7 @@ def main():
     cam = None
     if args.viewer:
         # Side view that shows the slope tilt AND the car (added before build()).
-        cam = vs.main_scene.add_camera(
+        cam = vs.add_camera(
             res=(1280, 720),
             pos=(15.0, 0.0, 6.0), lookat=(0.0, 0.0, 1.0),
             up=(0.0, 0.0, 1.0), fov=50, near=0.1, far=200.0, GUI=False,

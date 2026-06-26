@@ -69,7 +69,7 @@ def run(mode: str, backend: str, horizontal_scale: float, n_envs: int = 1,
     vs.add_static(morph=_terrain(horizontal_scale))
     veh = vs.add_vehicle(URDF_PATH, car_4w_rwd_ackermann, pos=(0.0, 0.0, 3.0))
     vs.build()
-    n_faces = int(vs.main_scene.rigid_solver.faces_info.geom_idx.shape[0])
+    n_faces = int(vs.rigid_solver.faces_info.geom_idx.shape[0])
 
     for _ in range(int(settle_s / vs.dt)):
         veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
