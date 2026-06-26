@@ -10,6 +10,28 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.20] — 2026-06-26
+
+### Changed — `enable_visual_joint_sync` is auto-managed (no longer a user knob)
+
+`VisualJointSync` drives the URDF wheel *visual* joints through the engine each
+step so **Genesis's own renderer** shows wheels spinning/steering — useful only
+when Genesis actually renders (the wheels are decorative; physics is unaffected).
+`VehicleScene.build()` now sets `enable_visual_joint_sync` **automatically**: ON iff
+the main scene is rendered by Genesis — `show_viewer=True` **or** a Genesis camera
+was added (`vs.main_scene.add_camera(...)`) — OFF otherwise.
+
+So it is no longer exposed as something callers set: the samples (`quickstart`,
+`slope_hold`) and the server (`l3_runtime`, `physics_server`, `vehicle_builder`)
+dropped their manual `cfg.enable_visual_joint_sync = …` lines. A headless /
+external-renderer run leaves it off and reads wheel poses closed-form via
+`wheel_visual_transforms()` / `visual_parts_transforms()` (forward kinematics, ~µs,
+no per-step engine FK); a `--viewer` (cv2 camera) or `--native` (Genesis viewer)
+sample turns it on with no extra code. (Driving the low-level `VehiclePhysics`
+directly, you may still set it on the config yourself.) 96 pytest.
+
+---
+
 ## [0.9.19] — 2026-06-26
 
 ### Added — `--native` (Genesis interactive viewer) option across the visual samples

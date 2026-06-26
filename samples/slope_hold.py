@@ -122,8 +122,9 @@ def main():
             up=(0.0, 0.0, 1.0), fov=50, near=0.1, far=200.0, GUI=False,
         )
 
-    # VisualJointSync is off by default; enable it only when rendering (--viewer).
-    cfg.enable_visual_joint_sync = args.viewer or args.native
+    # VisualJointSync (Genesis wheel animation) is auto-managed by VehicleScene at
+    # build() — on iff the main scene is rendered (show_viewer / a Genesis camera,
+    # e.g. the --viewer cv2 HUD's camera or the --native viewer).
     vs.build()
 
     DT = cfg.recommended_dt

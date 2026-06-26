@@ -458,17 +458,16 @@ def print_resolved_table(target_id, resolved_cfg):
 
 
 def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
-                  urdf_path, mapping, ue_friction, ue_restitution, vis_mode,
-                  *, enable_visual_joint_sync=False):
+                  urdf_path, mapping, ue_friction, ue_restitution, vis_mode):
     """
     지정된 URDF 경로 및 매핑 설정을 기반으로 차량 엔티티를 vs.main_scene 에 로딩하고
     cfg 를 동적 자동 튜닝하여 VehicleScene 에 등록합니다.
     (per-entity 경로 — 차량마다 엔티티 1개. proxy/sensor/VehiclePhysics 는 vs.build()
     에서 생성되므로, controllers 는 호출측이 build 후 채운다.)
 
-    enable_visual_joint_sync: Genesis 뷰어용 VisualJointSync 구동 여부. 서버는 외부
-    렌더(UE)가 그리고 wheel_visual_transforms(닫힌형)로 capture하므로 기본 False
-    (VisualJointSync의 매-스텝 FK ~ms 오버헤드 제거). Genesis 뷰어를 띄울 때만 True.
+    VisualJointSync(휠 시각 관절 구동)는 VehicleScene.build()가 자동 관리한다 — main
+    씬이 Genesis로 렌더될 때(show_viewer)만 ON. 서버는 외부 렌더(UE)가 그리고
+    wheel_visual_transforms(닫힌형)로 capture하므로 헤드리스에선 OFF로 유지된다.
     """
     t_pos = target_info.get('pos', [0, 0, 2])
     t_quat = target_info.get('quat', [1, 0, 0, 0])
@@ -479,9 +478,9 @@ def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
     target_morph = gs.morphs.URDF(file=temp_path, pos=t_pos, quat=t_quat, fixed=False, align=False)
     t_color = (1.0, 0.3, 0.3, 0.5)   # 디버그 색상 (semi-transparent red)
 
-    # 차량 설정 구성 (L3 경로와 공유되는 단일 소스)
+    # 차량 설정 구성 (L3 경로와 공유되는 단일 소스). enable_visual_joint_sync 는
+    # vs.build() 가 렌더 여부로 자동 설정하므로 여기서 건드리지 않는다.
     cfg = build_cfg(urdf_path, mapping, t_fric, target_id=target_id)
-    cfg.enable_visual_joint_sync = enable_visual_joint_sync   # 헤드리스/외부렌더면 False (성능)
 
     # VehicleScene 이 엔티티를 main 씬에 빌드 + raycaster/proxy/VehiclePhysics 를
     # vs.build() 에서 생성. 호출측은 씬을 직접 만지지 않는다.

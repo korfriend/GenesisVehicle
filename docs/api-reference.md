@@ -367,7 +367,7 @@ class VehicleConfig:
     chassis: ChassisConfig = field(default_factory=ChassisConfig)
     stability_hooks: list[StabilityHook] = field(default_factory=list)
     recommended_dt: float = 1.0/48.0   # `dt` is a deprecated alias (v0.5.31)
-    enable_visual_joint_sync: bool = False   # v0.7.14: default flipped (was True)
+    enable_visual_joint_sync: bool = False   # auto-managed by VehicleScene.build() (not a user knob)
     susp_visual_clamp: float | None = None   # v0.7.14: None=per-wheel rest_stroke
 
     @classmethod
@@ -661,11 +661,13 @@ single `VehiclePhysics` at K=1 (Δ = 0).
 > chassis and does not affect physics. External renderers don't need it at
 > all — use `visual_parts_transforms` / `wheel_visual_transforms`.
 
-> **Default (v0.7.14):** `enable_visual_joint_sync` defaults to **`False`** (was
-> `True` through v0.7.13). The dominant path — headless / external UE·Unity
-> renderer — does not need it, so it is now opt-in: set `enable_visual_joint_sync=True`
-> only when you actually open the Genesis viewer (or pass `--viewer` in a sample).
-> The server sets it automatically (`= not args.headless`).
+> **Auto-managed by `VehicleScene` (v0.9.18):** `enable_visual_joint_sync` is
+> **not a user-facing knob**. `VehicleScene.build()` sets it automatically — ON iff
+> the main scene is rendered by Genesis (`show_viewer=True` **or** a Genesis camera
+> was added with `vs.main_scene.add_camera(...)`), OFF otherwise (headless /
+> external UE·Unity renderer, the dominant path). It defaults to `False` (was `True`
+> through v0.7.13). When driving the low-level `VehiclePhysics` directly you may
+> still set it on the config yourself.
 
 > **Perf advisory (v0.7.10):** when `VisualJointSync` is active
 > (`enable_visual_joint_sync=True`) it logs a one-time-per-process

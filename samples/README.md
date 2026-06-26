@@ -25,22 +25,23 @@ they're trying to measure. The visual equivalents are in their
 respective docstring pointers (multi_env_render for L3, road_loop for
 L2 with `--solver multi_batched`, city_traffic_ego for L2 × L3).
 
-### `--viewer` drives `enable_visual_joint_sync` (v0.7.14+)
+### Wheel animation (`VisualJointSync`) is auto-managed by `VehicleScene`
 
-`VehicleConfig.enable_visual_joint_sync` defaults to **`False`** (v0.7.14; it was
-`True` through v0.7.13). It drives the URDF wheel visual joints through the
-engine each step so the **Genesis viewer** shows wheels spinning/steering —
-~ms/step, only worth paying when something actually renders. So every
-`--viewer`-capable sample here sets `cfg.enable_visual_joint_sync = args.viewer`:
+Driving the URDF wheel visual joints through the engine each step (so the
+**Genesis viewer / a Genesis camera** shows wheels spinning/steering) costs
+~ms/step and is only worth paying when Genesis actually renders. `VehicleScene`
+turns it on **automatically at `build()`** when the main scene is rendered —
+i.e. `show_viewer=True` **or** a Genesis camera was added (`vs.main_scene.add_camera(...)`).
+It is **not** a user-facing knob; the samples no longer set it:
 
-- **with `--viewer`** → on, so the cv2 HUD frames show animated wheels.
-- **headless (default)** → off, so the `[timing]` ms/step number reflects
-  pure physics (faster, undistorted).
+- `--viewer` (cv2 HUD) adds a Genesis camera → animation on for the HUD frames.
+- `--native` opens the Genesis viewer (`show_viewer=True`) → animation on.
+- **headless (default)** → no viewer, no camera → off, so the `[timing]` ms/step
+  reflects pure physics (faster, undistorted).
 
-If you copy a sample as a starting point and render through your own path
-(or the Genesis viewer), set `cfg.enable_visual_joint_sync = True` yourself — the
-SDK no longer turns it on for you. For an **external** renderer (UE / Unity)
-keep it off and read poses from `wheel_visual_transforms()` (closed-form).
+For an **external** renderer (UE / Unity), keep the run headless and read wheel
+poses from `wheel_visual_transforms()` / `visual_parts_transforms()` (closed-form,
+~µs) — no engine FK needed.
 
 ## Bundled asset
 

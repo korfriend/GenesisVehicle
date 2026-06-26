@@ -323,6 +323,7 @@ class VehicleScene:
         self.backend = backend
         self.raycast_mode = raycast_mode
         self._two_scene = raycast_mode == "dual_scene"
+        self.show_viewer = bool(show_viewer)   # native viewer on the main scene
         self._built = False
 
         if init_genesis:
@@ -658,7 +659,15 @@ class VehicleScene:
             self.raycast_scene.step(update_visualizer=False)
         self.main_scene.build(n_envs=self.n_envs, **_kw)   # viewer (if any) starts LAST
 
+        # VisualJointSync drives the URDF wheel VISUAL joints through the engine
+        # each step so GENESIS's own renderer shows wheels spinning/steering. It is
+        # useful ONLY when the main scene is actually rendered by Genesis — a native
+        # viewer or a Genesis camera — so VehicleScene auto-manages it here (it is
+        # not a user-facing option): on a headless / external-renderer run it stays
+        # off, and wheel poses are read closed-form via wheel_visual_transforms().
+        renders = self.show_viewer or bool(getattr(self.main_scene.visualizer, "cameras", None))
         for veh in self._vehicles:
+            veh.cfg.enable_visual_joint_sync = renders
             sensor = None if self._two_scene else veh.sensor
             veh.physics = VehiclePhysics(
                 self.main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
