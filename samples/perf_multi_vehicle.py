@@ -66,11 +66,10 @@ def _internal_run(solver: str, n_per_kind: int,
     import genesis as gs
     import torch
     from genesis_vehicle import (
-        VehiclePhysics, MultiVehiclePhysics, VehicleInputs,
+        VehicleScene,
         car_4w_fwd_ackermann, car_4w_rwd_ackermann, car_4w_awd_ackermann,
         truck_6w_partial_ackermann,
     )
-    from genesis_vehicle.scene_helpers import make_wheel_raycaster
 
     # Pull the same parametric URDF generators that road_loop uses, so the
     # benchmark exercises an identical fleet shape.
@@ -101,70 +100,56 @@ def _internal_run(solver: str, n_per_kind: int,
     urdf_paths = [_save_urdf(uf(), tmpdir, name.lower())
                   for (name, uf, _p, _wb, _nw) in KINDS]
 
-    gs.init(backend=gs.gpu, logging_level="warning")
     DT = 0.02
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=DT, substeps=10),
+    # VehicleScene owns gs.init / scene / build / step. Map the benchmark's solver
+    # name onto VE's: multi_batched → "batched" (one MultiVehiclePhysics, grouped
+    # into 4 kinds); per_vehicle → one VehiclePhysics per vehicle.
+    # substeps=30 (not 10): the 6-wheel Truck kind NaNs the rigid solver at
+    # substeps=10 in the per_vehicle path (same fix road_loop used at 0.9.21), so
+    # both solvers run. It scales both equally — the solver comparison is unchanged.
+    vs = VehicleScene(
+        n_envs=1, backend="gpu", raycast_mode="single_scene",
+        solver=("batched" if solver == "multi_batched" else "per_vehicle"),
+        dt=DT, substeps=30,
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
-        show_viewer=False,
     )
-    scene.add_entity(
-        gs.morphs.Plane(pos=(0, 0, 0)),
-        material=gs.materials.Rigid(friction=1.0),
-    )
+    vs.add_ground_plane(friction=1.0)
 
-    # Vehicles spread on a wide grid so they don't collide.
+    # One cfg object per kind, shared across that kind's K vehicles → the batched
+    # solver groups them into 4 kinds (same fleet shape as the old benchmark).
     cfg_per_kind = [pf(urdf_paths[k], stability="control")
                     for k, (_n, _u, pf, _wb, _nw) in enumerate(KINDS)]
-    vehicles = []
+    vehicles = []   # Vehicle handles, spread on a wide grid so they don't collide.
     for global_idx in range(N_TOTAL):
         kind_idx = global_idx % len(KINDS)
         row = global_idx // len(KINDS)
         col = kind_idx
         pos = (col * 8.0 - 12.0, row * 8.0 - K_per_kind * 4.0, 1.0)
-        morph = gs.morphs.URDF(file=urdf_paths[kind_idx], pos=pos)
-        ent = scene.add_entity(morph, material=gs.materials.Rigid(friction=1.0))
-        sens = make_wheel_raycaster(scene, ent, urdf_paths[kind_idx])
-        vehicles.append((ent, sens, cfg_per_kind[kind_idx]))
+        vehicles.append(vs.add_vehicle(
+            urdf_paths[kind_idx], cfg=cfg_per_kind[kind_idx], pos=pos,
+            material=gs.materials.Rigid(friction=1.0)))
 
-    scene.build(n_envs=1)
+    vs.build()
 
-    if solver == "per_vehicle":
-        physics_objs = [VehiclePhysics(scene, e, s, c, n_envs=1)
-                        for (e, s, c) in vehicles]
-        def step_all(inputs_list):
-            for ph, inp in zip(physics_objs, inputs_list):
-                ph.step(inp)
-    else:  # multi_batched
-        mphys = MultiVehiclePhysics(scene, vehicles)
-        def step_all(inputs_list):
-            mphys.step(inputs_list)
-
-    # Inputs: gentle constant throttle, mild constant steer (just to exercise
-    # the steering strategy code path).
-    drive_in = [VehicleInputs(throttle=0.3, brake=0.0, steer=0.0)
-                for _ in range(N_TOTAL)]
-
-    # Settle on brake.
-    settle_in = [VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
-                 for _ in range(N_TOTAL)]
+    # Settle on brake (uniform), then gentle constant throttle. set_inputs persists.
+    for veh in vehicles:
+        veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
     for _ in range(int(1.0 / DT)):
-        step_all(settle_in)
-        scene.step()
+        vs.step()
 
     # Warmup with drive inputs (kernel compile + visual sync init).
+    for veh in vehicles:
+        veh.set_inputs(throttle=0.3, brake=0.0, steer=0.0)
     for _ in range(warmup):
-        step_all(drive_in)
-        scene.step()
+        vs.step()
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(steps):
-        step_all(drive_in)
-        scene.step()
+        vs.step()
     torch.cuda.synchronize()
     wall = time.perf_counter() - t0
 
