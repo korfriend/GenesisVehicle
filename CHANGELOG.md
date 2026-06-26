@@ -10,6 +10,19 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.28] — 2026-06-26
+
+### Changed — `l2l3_minimal` sample on VehicleScene (1.0.0 phase 3.3, 1/8)
+
+Migrated `l2l3_minimal.py` from the low-level `MultiVehiclePhysics` to
+`VehicleScene` (default `solver="batched"`): `add_ground_plane` + K
+`add_vehicle(preset=…)` (auto-grouped into 1 batched kind) + `n_envs=N` (L3) +
+per-(scenario, vehicle) `veh.set_inputs((N,) tensor)` + `vs.step()`. Same
+behavior — K=4 × N=8 = 32 vehicles, 1 kind, scenario-0 lead brake diverges from
+the rolling copies. First of the 8 low-level samples to move onto VehicleScene.
+
+---
+
 ## [0.9.27] — 2026-06-26
 
 ### Changed — `solver="batched"` is the default; server on solver-agnostic accessors (1.0.0 phase 3.1–3.2)
