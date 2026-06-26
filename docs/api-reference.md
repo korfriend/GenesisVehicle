@@ -690,8 +690,8 @@ single `VehiclePhysics` at K=1 (Δ = 0).
 
 > **Auto-managed by `VehicleScene` (v0.9.18):** `enable_visual_joint_sync` is
 > **not a user-facing knob**. `VehicleScene.build()` sets it automatically — ON iff
-> the main scene is rendered by Genesis (`show_viewer=True` **or** a Genesis camera
-> was added with `vs.main_scene.add_camera(...)`), OFF otherwise (headless /
+> the main scene is rendered by Genesis (`view="native"` **or** a camera was added
+> with `vs.add_camera(...)`), OFF otherwise (headless /
 > external UE·Unity renderer, the dominant path). It defaults to `False` (was `True`
 > through v0.7.13). When driving the low-level `VehiclePhysics` directly you may
 > still set it on the config yourself.

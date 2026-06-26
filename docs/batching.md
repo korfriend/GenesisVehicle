@@ -15,6 +15,14 @@ They COMPOSE multiplicatively: L1 is always on; L2 and L3 can be stacked
 via `MultiVehiclePhysics(scene, vehicles, n_envs=N)` for `N·K` total
 vehicles in a single batched compute pipeline.
 
+> **High-level shortcut.** You rarely construct these classes directly.
+> `VehicleScene` (the recommended entry point) drives all three axes for you:
+> `solver="batched"` (the **default**) groups same-kind vehicles into one
+> `MultiVehiclePhysics` (L2), `n_envs=N` gives L3, and `veh.set_inputs(...)` accepts
+> per-env `(n_envs,)` tensors — `add_vehicle(preset=…)` ×K then `vs.step()`. This
+> page explains the underlying layer `VehicleScene` wraps; see the two API layers
+> in [`concepts.md`](concepts.md).
+
 ---
 
 ## L1 — wheel batching (transparent)

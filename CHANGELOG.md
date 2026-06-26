@@ -10,6 +10,29 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.39] — 2026-06-27
+
+### Docs — sweep all docs/README for the 1.0.0 API (1.0.0 phase 5)
+
+Brought the prose docs in line with phases 1–5 after a full drift scan:
+
+- **quickstart.md** + **README.md** "Getting Started" + **two-scene-raycast.md**
+  example: rewrote the old low-level `gs.init` + `VehiclePhysics` +
+  `add_vehicle(scene,…)` snippets to the `VehicleScene` pattern
+  (`VehicleScene.InitBackend("gpu")` → `add_ground_plane` → `add_vehicle(preset=)`
+  → `build` → `veh.set_inputs / vs.step`). Removed the now-false "the SDK does NOT
+  fully encapsulate Genesis" claim from the README.
+- **api-reference.md** §0 + **samples/README.md**: the VJS auto-manage note now
+  says `view="native"` / `vs.add_camera(...)` (was `show_viewer=True` /
+  `vs.main_scene.add_camera`).
+- **batching.md** + **concepts.md**: added the high-level shortcut note —
+  `VehicleScene(solver="batched", n_envs=N)` drives L2/L3 (the page documents the
+  underlying layer it wraps).
+
+No stale `backend=` / `vs.main_scene` / `vs.raycast_scene` left in the SDK docs.
+
+---
+
 ## [0.9.38] — 2026-06-26
 
 ### Fixed — `terrain_drive` wrap used the old `veh.entity` name (regression sweep)
