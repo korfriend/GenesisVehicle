@@ -265,6 +265,10 @@ class Vehicle:
         self._inputs = VehicleInputs(throttle=0.0, brake=0.0, steer=0.0)
         self._two_scene = False
         self._n_envs = 1
+        self._scene = None         # back-ref to VehicleScene (for batched accessors)
+        self._slot = -1            # this vehicle's flat index in the scene
+        self._kind_key = None      # batched grouping key (set in add_vehicle)
+        self._group_cfg = cfg      # shared cfg of its batched kind
 
     # ---- per-step input ----
     def set_inputs(self, throttle=0.0, brake=0.0, steer=0.0) -> "Vehicle":
@@ -289,10 +293,40 @@ class Vehicle:
     def get_ang(self):
         return self.entity_main.get_ang()
 
+    # ---- per-vehicle accessors (work in BOTH solver modes) ----
+    # In solver="per_vehicle" they read this vehicle's own VehiclePhysics; in
+    # solver="batched" they delegate to the shared MultiVehiclePhysics + this
+    # vehicle's flat slot, so callers (the server, samples) never branch on solver.
     @property
     def distances(self):
-        """Last wheel-ground distances used by the physics step."""
-        return None if self.physics is None else self.physics.last_distances
+        """Last wheel-ground distances of the physics step — ``(n_envs, n_wheels)``."""
+        if self.physics is not None:
+            return self.physics.last_distances
+        if self._scene is not None and self._scene._mvp is not None:
+            return self._scene._mvp.distances_list()[self._slot]
+        return None
+
+    @property
+    def resolved(self):
+        """The resolved ``VehicleConfig`` actually driving this vehicle."""
+        if self.physics is not None:
+            return self.physics.resolved
+        if self._scene is not None and self._scene._mvp is not None:
+            return self._scene._mvp.resolved_list[self._slot]
+        return None
+
+    def wheel_visual_transforms(self, frame: str = "world"):
+        """Closed-form per-wheel visual poses ``(pos, quat)`` — ``(n_envs, n_wheels,
+        3)`` / ``(…, 4)``. VisualJointSync-independent (works headless)."""
+        if self.physics is not None:
+            return self.physics.wheel_visual_transforms(frame)
+        return self._scene._mvp.wheel_visual_transforms(frame)[self._slot]
+
+    def visual_parts_transforms(self, frame: str = "world"):
+        """One-call render feed (chassis + wheels) for this vehicle."""
+        if self.physics is not None:
+            return self.physics.visual_parts_transforms(frame)
+        return self._scene._mvp.visual_parts_transforms(frame)[self._slot]
 
     # ---- internals (called by VehicleScene) ----
     def _sync_proxy(self) -> None:
@@ -657,7 +691,9 @@ class VehicleScene:
         veh._kind_key = (("cfg", id(user_cfg)) if user_cfg is not None
                          else ("preset", urdf_path, preset, stability))
         veh._group_cfg = cfg
-        self._config_version += 1   # mark grouping dirty
+        veh._scene = self
+        veh._slot = len(self._vehicles)   # flat index (== MVP order); set before append
+        self._config_version += 1         # mark grouping dirty
 
         if morph is None:
             morph_kw = dict(file=urdf_path, pos=pos)

@@ -592,3 +592,24 @@ class MultiVehiclePhysics:
                 frame=frame, chassis_pos=cpos, chassis_quat=cquat,
                 wheel_names=names, wheel_pos=wp, wheel_quat=wq))
         return out
+
+    @property
+    def resolved_list(self) -> list:
+        """Per-vehicle resolved config, caller flat order (same-kind vehicles share
+        one ``resolved``). Lets a ``Vehicle`` handle expose ``.resolved`` in
+        batched mode."""
+        out = [None] * self.n_vehicles
+        for flat_i, kind_idx, _slot in self._flat_to_kind:
+            out[flat_i] = self.kinds[kind_idx].resolved
+        return out
+
+    def distances_list(self) -> list:
+        """Per-vehicle last wheel-ground distances ``(n_envs, n_wheels)``, caller
+        flat order — slices each kind's batched ``last_distances`` (NK, n)."""
+        out = [None] * self.n_vehicles
+        for flat_i, kind_idx, slot_idx in self._flat_to_kind:
+            kp = self.kinds[kind_idx]
+            d = kp._proto.last_distances              # (NK, n) or None
+            if d is not None:
+                out[flat_i] = d.reshape(kp.n_envs, kp.K, -1)[:, slot_idx, :]   # (N, n)
+        return out
