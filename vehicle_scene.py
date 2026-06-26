@@ -622,13 +622,33 @@ class VehicleScene:
     # Build / step
     # -----------------------------------------------------------------
 
-    def build(self) -> None:
-        """Build both scenes and wire up per-vehicle physics."""
+    def build(self, *, env_spacing=None, n_envs_per_row=None) -> None:
+        """Build both scenes and wire up per-vehicle physics.
+
+        ``env_spacing`` / ``n_envs_per_row`` are forwarded to the underlying
+        ``Scene.build`` (both scenes get the SAME layout so the raycast proxy
+        stays aligned with the main-scene vehicle per env) — use them to lay the
+        L3 batch out on a grid (e.g. one cell per checkpoint) instead of stacked
+        at the origin.
+
+        Build ORDER matters in ``dual_scene`` with a native viewer: Genesis
+        creates a GL ``RasterizerContext`` per scene, and building the
+        sensors-only raycast scene *after* the main one makes the raycast context
+        current — the viewer thread (on the main scene) then dies with
+        "no valid context". So the raycast scene is built FIRST and the main
+        scene (which may own the viewer) LAST, leaving the main context current;
+        the per-step ``raycast_scene.step(update_visualizer=False)`` is CUDA-only
+        and never touches GL, so it can't steal the context back.
+        """
         if self._built:
             return
-        self.main_scene.build(n_envs=self.n_envs)
+        _kw = {}
+        if env_spacing is not None:
+            _kw["env_spacing"] = env_spacing
+        if n_envs_per_row is not None:
+            _kw["n_envs_per_row"] = n_envs_per_row
         if self._two_scene:
-            self.raycast_scene.build(n_envs=self.n_envs)
+            self.raycast_scene.build(n_envs=self.n_envs, **_kw)
             # Populate the raycast sensors once so the static BVH is built and
             # the first read() returns valid data (Genesis sensors are empty
             # before the first step). The kinematic terrain/proxy don't move, so
@@ -636,6 +656,7 @@ class VehicleScene:
             # update_visualizer=False: this scene is sensors-only and never
             # user-rendered, so skip the per-step visualizer/render update.
             self.raycast_scene.step(update_visualizer=False)
+        self.main_scene.build(n_envs=self.n_envs, **_kw)   # viewer (if any) starts LAST
 
         for veh in self._vehicles:
             sensor = None if self._two_scene else veh.sensor
