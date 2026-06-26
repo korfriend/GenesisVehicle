@@ -65,7 +65,7 @@ def test_make_double_sided_mesh_doubles_without_legacy_api():
 def cpu_genesis():
     if not getattr(gs, "_initialized", False):
         try:
-            gs.init(backend=gs.cpu, logging_level="warning")
+            VehicleScene.InitBackend("cpu")
         except Exception as e:                     # pragma: no cover
             pytest.skip(f"genesis CPU backend unavailable: {e}")
     return gs
@@ -108,7 +108,7 @@ def test_build_obstacles_mesh_path_registers(cpu_genesis, cube_obj, name, b_dyna
     """Each mesh-obstacle path runs the morph-building + vs.add_* routing and
     registers the body (no NameError, no crash). Registration-only — the bugs all
     live before scene build, so we skip the (multi-scene) build for speed."""
-    vs = VehicleScene(n_envs=1, backend="cpu", raycast_mode="dual_scene",
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene",
                       init_genesis=False)
     obstacles, dyn, init_states, ue_ids, extra_mass = env_builder.build_obstacles(
         vs=vs, init_data=_mesh_init(b_dynamic, col_src, cube_obj),
@@ -125,7 +125,7 @@ def test_build_obstacles_mesh_path_registers(cpu_genesis, cube_obj, name, b_dyna
 def test_rco_road_dual_scene_has_no_redundant_main_rigid(cpu_genesis, cube_obj):
     """0.9.6 cleanup: a road_raycast_only road in dual_scene is the kinematic
     raycast mirror ONLY — no redundant no-collision rigid in the main scene."""
-    vs = VehicleScene(n_envs=1, backend="cpu", raycast_mode="dual_scene",
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene",
                       init_genesis=False)
     env_builder.build_obstacles(
         vs=vs, init_data=_mesh_init(0, "[Complex]", cube_obj),
@@ -143,7 +143,7 @@ def test_kinematic_mirror_builds_with_collision_vis_mode(cpu_genesis):
     missing KinematicEntity.geoms and AttributeError at build. The mirror's
     vis_mode is forced to 'visual'; the caller's vis_mode is kept for the main
     (rendered) entity only."""
-    vs = VehicleScene(n_envs=1, backend="cpu", raycast_mode="dual_scene",
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene",
                       init_genesis=False)
     sb = vs.add_static(morph=gs.morphs.Plane(),
                        material=gs.materials.Rigid(friction=1.0), vis_mode="collision")
@@ -157,7 +157,7 @@ def test_rco_road_single_scene_no_spurious_warning(cpu_genesis, cube_obj, caplog
     is the sole geometry (the raycast body), so the 'ignored in single_scene'
     warning must NOT fire."""
     import logging
-    vs = VehicleScene(n_envs=1, backend="cpu", raycast_mode="single_scene",
+    vs = VehicleScene(n_envs=1, raycast_mode="single_scene",
                       init_genesis=False)
     with caplog.at_level(logging.WARNING, logger="genesis_vehicle.vehicle_scene"):
         env_builder.build_obstacles(

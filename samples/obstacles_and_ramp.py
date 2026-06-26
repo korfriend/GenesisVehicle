@@ -51,7 +51,8 @@ URDF_PATH = os.path.join(os.path.dirname(__file__), "urdf", "car_4w.urdf")
 
 def _build_course(mode, n_envs, backend, cfg):
     """Build the obstacle course on a fresh VehicleScene. Returns (vs, veh, box)."""
-    vs = VehicleScene(backend=backend, raycast_mode=mode, dt=cfg.recommended_dt,
+    VehicleScene.InitBackend(backend)
+    vs = VehicleScene(raycast_mode=mode, dt=cfg.recommended_dt,
                       substeps=10, n_envs=n_envs)
     vs.add_ground_plane(friction=1.0)
     # (1) collide-only free box at x=4 — pushed by the chassis, wheels don't climb it.

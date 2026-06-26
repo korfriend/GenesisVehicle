@@ -24,13 +24,27 @@ the low-level `VehiclePhysics` / `MultiVehiclePhysics` (§1) only for control it
 doesn't expose** — see the two-API-layers guide in
 [`concepts.md`](concepts.md#start-here-the-two-api-layers).
 
+**Backends — physics vs renderer.** The **physics** backend (CPU/GPU compute) is
+process-global and set ONCE — it is NOT a constructor arg. Call
+`VehicleScene.InitBackend("cpu" | "gpu")` *before* constructing any scene (default
+**cpu**); a second call (or any double-init) warns and is ignored. The
+**renderer** is separate — viewer/cameras rasterize on the **GPU** regardless of
+the physics backend, so physics-CPU + GPU-render is valid; there is no CPU-render
+mode. No GPU present → software render + a `build()` warning.
+
 ```python
 class VehicleScene:
-    def __init__(*, n_envs=1, dt=1/200, backend="gpu",
+    @staticmethod
+    def InitBackend(backend="cpu") -> None    # PHYSICS backend, once; "cpu"|"gpu"
+
+    def __init__(*, n_envs=1, dt=1/200,
                  raycast_mode="dual_scene",        # "dual_scene" (default) | "single_scene"
+                 solver="batched",                 # "batched" (default) | "per_vehicle"
                  gravity=(0,0,-9.81), substeps=4,
                  sim_options=None, rigid_options=None, vis_options=None,
-                 viewer_options=None, show_viewer=False, init_genesis=True)
+                 viewer_options=None,
+                 view=None,                         # None headless | "native" | "cv2"
+                 show_viewer=False, init_genesis=True)
 
     # --- registration (before build) ---
     def add_vehicle(urdf_path, preset=None, *, pos=(0,0,1), quat=None,
@@ -49,16 +63,26 @@ class VehicleScene:
     def add_dynamic(morph, *, physics=True, wheel_raycast=False,   # collide-only by default;
                     material=None, surface=None, vis_mode=None,    # set wheel_raycast=True only
                     mass=None, name=None) -> DynamicBody           # for a surface wheels must sense
+    def add_camera(*, res=(1280,720), pos=(3,-3,2), lookat=(0,0,0), up=(0,0,1),
+                   fov=50.0, GUI=False, name=None, **kw) -> Camera   # any view mode
 
-    def build(*, env_spacing=None, n_envs_per_row=None) -> None
-    #   env_spacing / n_envs_per_row → grid the L3 batch (forwarded to BOTH scenes,
-    #   identical layout). dual_scene builds the raycast scene first + the main
-    #   scene (viewer, if any) last so the native viewer's GL context stays current.
+    def build(*, env_spacing=None, n_envs_per_row=None,
+              center_envs_at_origin=None) -> None
+    #   env_spacing / n_envs_per_row / center_envs_at_origin → grid the L3 batch
+    #   (forwarded to BOTH scenes, identical layout). dual_scene builds the raycast
+    #   scene first + the main scene (viewer, if any) last so the native viewer's
+    #   GL context stays current.
     def step() -> None
     def reset() -> None
+    def mark_config_dirty() -> None      # force the batched solver to re-group next step
 
-    main_scene: gs.Scene                 # physics/collision
-    raycast_scene: gs.Scene | None       # dual_scene only (None for single_scene); sensors-only, never viewed/rendered
+    # --- accessors (the raw Genesis scenes are PRIVATE — not exposed) ---
+    viewer                               # native viewer | None  (property)
+    rigid_solver                         # n_geoms / n_links / faces_info (read-only)
+    sim_options                          # runtime dt / gravity tweaks
+    is_dual_scene: bool                  # raycast_mode == "dual_scene"
+    physics                              # batched MultiVehiclePhysics (solver="batched"), else None
+    cameras: list[Camera]                # property
     vehicles: list[Vehicle]              # property
     statics: list[StaticBody]            # property
     dynamics: list[DynamicBody]          # property
@@ -105,14 +129,17 @@ targets (`add_dynamic`).
 |---|---|---|
 | `n_envs` | `1` | L3 batch size (parallel envs) |
 | `dt` | `1/200` | sim step time (s) |
-| `backend` | `"gpu"` | `"gpu"`/`"cpu"`; ignored if `init_genesis=False` |
 | `raycast_mode` | `"dual_scene"` | `"dual_scene"` (separate static-BVH raycast scene) / `"single_scene"` (one scene). Aliases: `raywheel`/`split`, `inline`/`single` |
+| `solver` | `"batched"` | `"batched"` (one `MultiVehiclePhysics`, same-kind vehicles grouped) / `"per_vehicle"` (one `VehiclePhysics` each) |
 | `gravity` | `(0,0,-9.81)` | world gravity |
 | `substeps` | `4` | engine solver substeps per `step()` |
 | `sim_options` / `rigid_options` / `vis_options` | `None` | inject Genesis option objects (else built from the args above) |
-| `viewer_options` | `None` | native-viewer config — `gs.options.ViewerOptions(camera_pos, camera_lookat, camera_fov, res, max_FPS, refresh_rate, …)`. Main scene only (the raycast scene is never shown). Needs `show_viewer=True` to actually open a window |
-| `show_viewer` | `False` | open the native Genesis viewer window (main scene) |
-| `init_genesis` | `True` | call `gs.init` (set `False` if the process already did) |
+| `viewer_options` | `None` | native-viewer config — `gs.options.ViewerOptions(camera_pos, camera_lookat, camera_fov, res, max_FPS, refresh_rate, …)`. Main scene only (the raycast scene is never shown). Needs `view="native"` to actually open a window |
+| `view` | `None` | `None` headless / `"native"` (Genesis viewer) / `"cv2"` (render cameras for a cv2 HUD) |
+| `show_viewer` | `False` | back-compat alias for `view="native"` |
+| `init_genesis` | `True` | auto-init the (cpu-default) physics backend if not already up; set `False` to manage `gs.init` yourself. **The backend itself is chosen by `VehicleScene.InitBackend()`, not here** |
+
+> **Physics backend** is set by the classmethod `VehicleScene.InitBackend("cpu" \| "gpu")` (process-global, once, default **cpu**) BEFORE any scene — not a constructor arg. The renderer is separate (always GPU). See "Backends" above.
 
 **`add_vehicle(urdf_path, preset=None, *, …)`** — registers a driven vehicle (always collides + always wheel-raycast).
 

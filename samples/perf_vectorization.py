@@ -66,8 +66,9 @@ def _internal_run(n_envs: int, warmup: int, steps: int) -> None:
     # VehicleScene owns gs.init / scene / build / step. Default solver="batched"
     # → this measures L3 scaling of the default single-vehicle path (a batched
     # kind-of-1); n_envs is the L3 batch axis.
+    VehicleScene.InitBackend("gpu")
     vs = VehicleScene(
-        n_envs=n_envs, backend="gpu", raycast_mode="single_scene", dt=DT, substeps=10,
+        n_envs=n_envs, raycast_mode="single_scene", dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,

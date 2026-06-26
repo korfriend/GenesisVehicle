@@ -284,7 +284,7 @@ def main():
             backend = gs.cpu
             # print(" [Genesis] [Warning] GPU 백엔드가 요청되었으나 CUDA를 사용할 수 없습니다. CPU 백엔드로 안전하게 폴백합니다.")
 
-    gs.init(backend=backend, logging_level="warning")
+    VehicleScene.InitBackend("cpu" if backend is gs.cpu else "gpu")
 
     # [Engine Hack] RigidGeom.n_cells Monkey-patch
     import genesis.engine.entities.rigid_entity.rigid_geom as rigid_geom
@@ -328,7 +328,7 @@ def main():
     # step() and sim reads/tweaks route through vs accessors. Genesis is already
     # initialized above, so init_genesis=False.
     vs = VehicleScene(
-        n_envs=1, dt=ue_dt, backend="cpu", raycast_mode="inline",
+        n_envs=1, dt=ue_dt, raycast_mode="inline",
         gravity=(0, 0, ue_gravity), substeps=2, show_viewer=not args.headless,
         init_genesis=False,
         rigid_options=gs.options.RigidOptions(

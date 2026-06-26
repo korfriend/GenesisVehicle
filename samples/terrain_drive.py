@@ -156,11 +156,11 @@ def main():
 
     # car_4w_rwd_ackermann recommends dt≈1/48 with substeps=10 (internal ~2 ms).
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
-    cfg.enable_visual_joint_sync = need_render
     DT = cfg.recommended_dt
 
+    VehicleScene.InitBackend("cpu" if args.cpu else "gpu")
     vs = VehicleScene(
-        backend="cpu" if args.cpu else "gpu", raycast_mode=mode,
+        raycast_mode=mode,
         dt=DT, substeps=10, n_envs=1,
         vis_options=_vis_options(), show_viewer=args.native)
     if args.viewer and not _hud.have_cv2():

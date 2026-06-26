@@ -79,7 +79,7 @@ def main():
     print(f"  drive    : throttle {args.throttle:.2f} × per-env scale, "
           f"{args.duration:.1f} s")
 
-    gs.init(backend=gs.gpu, logging_level="warning")
+    VehicleScene.InitBackend("gpu")
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
 
     from genesis_vehicle.samples import _hud
@@ -95,7 +95,7 @@ def main():
     # opens the Genesis viewer, "cv2" renders the overhead camera for the cv2 HUD.
     view = "native" if args.native else ("cv2" if args.viewer else None)
     vs = VehicleScene(
-        n_envs=n_envs, backend="gpu", raycast_mode="single_scene", view=view,
+        n_envs=n_envs, raycast_mode="single_scene", view=view,
         dt=cfg.recommended_dt, substeps=10,
         rigid_options=gs.options.RigidOptions(
             dt=cfg.recommended_dt, enable_collision=True,
@@ -108,7 +108,6 @@ def main():
         ),
         viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_h), (0.0, 0.0, 0.0))
                         if args.native else None),
-        init_genesis=False,    # gs.init already called above
     )
     vs.add_ground_plane(friction=1.0)
     veh = vs.add_vehicle(URDF_PATH, cfg=cfg, pos=(0.0, 0.0, 1.0),

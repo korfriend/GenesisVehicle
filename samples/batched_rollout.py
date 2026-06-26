@@ -78,7 +78,7 @@ def main():
           + ("  (viewer ON — grid)" if args.viewer else ""))
 
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
-    gs.init(backend=gs.gpu, logging_level="warning")
+    VehicleScene.InitBackend("gpu")
 
     from genesis_vehicle.samples import _hud
     if args.viewer and not _hud.have_cv2():
@@ -95,7 +95,7 @@ def main():
     # opens the Genesis viewer, "cv2" renders cameras for the cv2 HUD.
     view = "native" if args.native else ("cv2" if args.viewer else None)
     vs = VehicleScene(
-        n_envs=args.n_envs, backend="gpu", raycast_mode="single_scene", view=view,
+        n_envs=args.n_envs, raycast_mode="single_scene", view=view,
         dt=cfg.recommended_dt, substeps=10,
         rigid_options=gs.options.RigidOptions(dt=cfg.recommended_dt, enable_collision=True),
         vis_options=gs.options.VisOptions(
@@ -105,7 +105,6 @@ def main():
         ),
         viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_h), (0.0, 0.0, 0.0))
                         if args.native else None),
-        init_genesis=False,    # gs.init already called above
     )
     vs.add_ground_plane(friction=1.0)
     veh = vs.add_vehicle(URDF_PATH, cfg=cfg, pos=(0.0, 0.0, 1.0),

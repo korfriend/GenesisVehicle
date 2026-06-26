@@ -87,8 +87,9 @@ def main():
     # VehicleScene owns gs.init + the scene + build + step. Single, tilted ground
     # at n_envs=1 → single_scene (no heavy static terrain to amortize, so the
     # dual_scene raycast optimization has nothing to gain here).
+    VehicleScene.InitBackend("gpu")
     vs = VehicleScene(
-        backend="gpu", raycast_mode="single_scene",
+        raycast_mode="single_scene",
         dt=cfg.recommended_dt, substeps=10,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),

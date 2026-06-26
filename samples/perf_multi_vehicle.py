@@ -107,8 +107,9 @@ def _internal_run(solver: str, n_per_kind: int,
     # substeps=30 (not 10): the 6-wheel Truck kind NaNs the rigid solver at
     # substeps=10 in the per_vehicle path (same fix road_loop used at 0.9.21), so
     # both solvers run. It scales both equally — the solver comparison is unchanged.
+    VehicleScene.InitBackend("gpu")
     vs = VehicleScene(
-        n_envs=1, backend="gpu", raycast_mode="single_scene",
+        n_envs=1, raycast_mode="single_scene",
         solver=("batched" if solver == "multi_batched" else "per_vehicle"),
         dt=DT, substeps=30,
         rigid_options=gs.options.RigidOptions(

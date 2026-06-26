@@ -64,7 +64,8 @@ def _terrain(horizontal_scale: float):
 def run(mode: str, backend: str, horizontal_scale: float, n_envs: int = 1,
         settle_s: float = 1.0, drive_s: float = 4.0, measure: bool = False):
     # car_4w_rwd_ackermann recommends dt=1/48 with substeps=10 (internal ~2 ms).
-    vs = VehicleScene(backend=backend, raycast_mode=mode, dt=1.0 / 48.0,
+    VehicleScene.InitBackend(backend)
+    vs = VehicleScene(raycast_mode=mode, dt=1.0 / 48.0,
                       substeps=10, n_envs=n_envs)
     vs.add_static(morph=_terrain(horizontal_scale))
     veh = vs.add_vehicle(URDF_PATH, car_4w_rwd_ackermann, pos=(0.0, 0.0, 3.0))
