@@ -57,70 +57,57 @@ import time
 
 def _internal_run(K: int, N: int, warmup: int, steps: int) -> None:
     import torch, genesis as gs
-    from genesis_vehicle import (
-        MultiVehiclePhysics, VehicleInputs,
-        car_4w_rwd_ackermann,
-    )
-    from genesis_vehicle.scene_helpers import make_wheel_raycaster
+    from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 
     URDF = os.path.join(os.path.dirname(__file__), "urdf", "car_4w.urdf")
 
-    gs.init(backend=gs.gpu, logging_level="warning")
     DT = 0.02
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=DT, substeps=10),
+    # VehicleScene owns gs.init / scene / build / step. Default solver="batched"
+    # groups the K same-kind vehicles into ONE batched compute (L2); n_envs=N
+    # replicates the world N× (L3) — so this measures the combined L2 × L3 path.
+    vs = VehicleScene(
+        n_envs=N, backend="gpu", raycast_mode="single_scene", dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
-        show_viewer=False,
     )
-    scene.add_entity(
-        gs.morphs.Plane(pos=(0, 0, 0)),
-        material=gs.materials.Rigid(friction=1.0),
-    )
+    vs.add_ground_plane(friction=1.0)
 
-    cfg = car_4w_rwd_ackermann(URDF, stability="control")
-    vehicles = []
-    # K vehicles spread along X so they don't collide within one env.
-    for k in range(K):
-        ent = scene.add_entity(
-            gs.morphs.URDF(file=URDF, pos=(k * 6.0 - (K - 1) * 3.0, 0.0, 1.0)),
-            material=gs.materials.Rigid(friction=1.0),
-        )
-        sens = make_wheel_raycaster(scene, ent, URDF)
-        vehicles.append((ent, sens, cfg))
-
-    # N parallel envs (spatially separated only if you want viewer; here
-    # we're measuring perf so visual layout doesn't matter).
-    scene.build(n_envs=N)
-    mphys = MultiVehiclePhysics(scene, vehicles, n_envs=N)
+    # K vehicles spread along X (same preset → one batched kind); n_envs=N replicates.
+    vehs = [vs.add_vehicle(URDF, preset=car_4w_rwd_ackermann, stability="control",
+                           pos=(k * 6.0 - (K - 1) * 3.0, 0.0, 1.0),
+                           material=gs.materials.Rigid(friction=1.0))
+            for k in range(K)]
+    vs.build()
     device = torch.device("cuda")
 
-    # Per-vehicle, per-env random inputs (each env_i different to keep the
-    # compute honest — no broadcasting freebies).
+    # Per-vehicle, per-env random inputs (each env_i different to keep the compute
+    # honest — no broadcasting freebies). Generated once, applied after settle.
     g = torch.Generator(device=device).manual_seed(0)
-    inputs = []
+    drive = []
     for _ in range(K):
         throttle = 0.4 * torch.rand(N, generator=g, device=device)
         steer    = 0.3 * (torch.rand(N, generator=g, device=device) - 0.5)
         brake    = torch.zeros(N, device=device)
-        inputs.append(VehicleInputs(throttle=throttle, brake=brake, steer=steer))
+        drive.append((throttle, brake, steer))
 
-    settle = [VehicleInputs(throttle=0.0, brake=1.0, steer=0.0) for _ in range(K)]
+    # Settle on brake (uniform).
+    for veh in vehs:
+        veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
     for _ in range(int(1.0 / DT)):
-        mphys.step(settle)
-        scene.step()
+        vs.step()
 
+    # Apply the per-(vehicle, env) drive inputs (persist across steps).
+    for veh, (thr, brk, st) in zip(vehs, drive):
+        veh.set_inputs(throttle=thr, brake=brk, steer=st)
     for _ in range(warmup):
-        mphys.step(inputs)
-        scene.step()
+        vs.step()
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(steps):
-        mphys.step(inputs)
-        scene.step()
+        vs.step()
     torch.cuda.synchronize()
     wall = time.perf_counter() - t0
 
