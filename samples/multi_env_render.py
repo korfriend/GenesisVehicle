@@ -34,6 +34,7 @@ import argparse
 import math
 import os
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -64,7 +65,11 @@ def main():
     ap.add_argument("--viewer", action="store_true",
                     help="Open Genesis's interactive viewer window in addition to the "
                          "offscreen camera render (otherwise the demo is headless).")
+    ap.add_argument("--native", action="store_true",
+                    help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
     args = ap.parse_args()
+    if args.native:
+        args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
 
     n_envs = int(args.n_envs)
     per_row = args.per_row if args.per_row else max(1, int(round(math.sqrt(n_envs))))
@@ -99,7 +104,9 @@ def main():
             background_color=(0.05, 0.07, 0.10),
             env_separate_rigid=True,        # ← visualization grid layout
         ),
-        show_viewer=False,    # --viewer uses cv2 HUD instead
+        viewer_options=(_hud.native_viewer_options((0.0, 0.0, cam_h), (0.0, 0.0, 0.0))
+                        if args.native else None),
+        show_viewer=args.native,    # --viewer uses cv2 HUD instead
     )
     scene.add_entity(
         gs.morphs.Plane(pos=(0, 0, 0), plane_size=(args.spacing * per_row * 2,
@@ -134,9 +141,13 @@ def main():
         center_envs_at_origin=True,
     )
     # VisualJointSync is off by default; enable it only when rendering (--viewer).
-    cfg.enable_visual_joint_sync = args.viewer
+    cfg.enable_visual_joint_sync = args.viewer or args.native
     physics = VehiclePhysics(scene, car, sensor, cfg, n_envs=n_envs)
     device = car.get_pos().device
+
+    # Shim so _hud.native_alive(...) (expects ``.main_scene.viewer``) works with
+    # this raw gs.Scene sample (no VehicleScene wrapper here).
+    _vs = SimpleNamespace(main_scene=scene)
 
     DT = cfg.recommended_dt
 
@@ -163,6 +174,8 @@ def main():
 
     def _hud_render(step: int):
         # Headless = pure physics (cam is None); viewer = render + tiled HUD.
+        if args.native:                 # native viewer renders itself; just watch for close
+            return _hud.native_alive(_vs)
         if not args.viewer:
             return True
         v = car.get_vel().cpu().numpy()
@@ -225,6 +238,16 @@ def main():
     print(f"\nNote: get_pos() returns the chassis-local world position WITHOUT the")
     print(f"      env_spacing offset (which is a visualization-only transform).")
     print(f"      The renderer adds the offset so all envs appear in their grid cell.")
+
+    if args.native:    # keep the interactive viewer open until closed/ESC
+        print("\nviewer 유지 중 — 창 닫기(또는 ESC)로 종료.")
+        hold = VehicleInputs(throttle=0.0, brake=1.0, steer=0.0)
+        try:
+            while _hud.native_alive(_vs):
+                physics.step(hold)
+                scene.step()
+        except gs.GenesisException:
+            pass
 
 
 if __name__ == "__main__":

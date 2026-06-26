@@ -10,6 +10,22 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [0.9.19] — 2026-06-26
+
+### Added — `--native` (Genesis interactive viewer) option across the visual samples
+
+- The visual samples now take **`--native`** to open the Genesis native
+  interactive viewer (orbit / zoom / ESC) instead of the cv2 HUD (`--viewer`):
+  `quickstart`, `slope_hold`, `road_loop`, `city_traffic_ego`,
+  `multi_env_render`, `batched_rollout` (`terrain_drive` already had it). With
+  the 0.9.18 build-order fix the native viewer works for `VehicleScene`
+  dual_scene too. `--native` implies no cv2; headless / `--viewer` unchanged.
+- `samples/_hud.py`: added `native_viewer_options(camera_pos, camera_lookat, …)`
+  (builds `gs.options.ViewerOptions`) and `native_alive(vs)` (viewer-open check),
+  the two bits each sample reuses for the native path.
+
+---
+
 ## [0.9.18] — 2026-06-26
 
 ### Added — `VehicleScene.build()` grid layout + dual_scene native-viewer build order

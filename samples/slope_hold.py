@@ -71,7 +71,11 @@ def main():
                     help="Brake-hold duration in seconds (default 10).")
     ap.add_argument("--viewer", action="store_true",
                     help="Render a side view of the slope + car each step.")
+    ap.add_argument("--native", action="store_true",
+                    help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
     args = ap.parse_args()
+    if args.native:
+        args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
     slope_deg = 0.0 if args.flat else float(args.slope)
 
     print(f"genesis_vehicle v{sdk_version}  |  slope_hold  "
@@ -89,7 +93,9 @@ def main():
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10)),
-        show_viewer=False,    # --viewer uses a cv2 HUD instead
+        viewer_options=(_hud.native_viewer_options((15.0, 0.0, 6.0), (0.0, 0.0, 1.0))
+                        if args.native else None),
+        show_viewer=args.native,    # --viewer uses a cv2 HUD instead
     )
     if args.viewer and not _hud.have_cv2():
         print("WARN: --viewer needs opencv-python. Continuing headless.")
@@ -117,7 +123,7 @@ def main():
         )
 
     # VisualJointSync is off by default; enable it only when rendering (--viewer).
-    cfg.enable_visual_joint_sync = args.viewer
+    cfg.enable_visual_joint_sync = args.viewer or args.native
     vs.build()
 
     DT = cfg.recommended_dt
@@ -128,6 +134,8 @@ def main():
 
     def _hud_render(t_sim: float, slip_mm: float):
         # Headless = pure physics (no cam/render); viewer = render + HUD.
+        if args.native:                 # native viewer renders itself; just watch for close
+            return _hud.native_alive(vs)
         if not args.viewer:
             return True
         q = veh.get_quat()[0].cpu().numpy()
@@ -202,6 +210,15 @@ def main():
             f"lat. slip  : {slip*1000:+.1f} mm  ({verdict})",
         ],
     )
+
+    if args.native:    # keep the interactive viewer open until closed/ESC
+        print("\nviewer 유지 중 — 창 닫기(또는 ESC)로 종료.")
+        try:
+            while _hud.native_alive(vs):
+                veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
+                vs.step()
+        except gs.GenesisException:
+            pass
 
 
 if __name__ == "__main__":
