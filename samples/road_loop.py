@@ -5,23 +5,23 @@ track. Each vehicle gets a constant Ackermann steering angle sized to the track
 radius so the whole fleet orbits indefinitely under constant throttle. A
 top-down chase camera shows the whole scene.
 
-Default kinds = the 3 cars (FWD / RWD / AWD), which hold the loop and are stable
-at ``substeps=10`` (fast). The 6-wheel **Truck** is **opt-in via ``--truck``**:
-the 5000 kg chassis needs ``substeps=30`` (3x slower) to avoid a constraint-force
-NaN, and being heavy + partial-Ackermann + overpowered it understeers wide off
-the loop (drifts out of frame).
+Kinds = the 3 cars (FWD / RWD / AWD): they hold the loop and are stable at
+``substeps=10``. The 6-wheel Truck is **deliberately not in this scene** — with
+it in the 16-vehicle tight loop the step destabilizes and ~9/16 vehicles explode
+to z=thousands, independent of solver (batched/per_vehicle) and substeps (30/50),
+so it isn't a tuning knob. The truck drives fine on its own in
+``GeneVehicle_Truck6w/demo_drive.py`` (single vehicle, substeps=50).
 
 Vehicle identification (shape + color)
 --------------------------------------
   FWD     red    compact sedan        ~3.8 × 1.6 × 1.0 m
   RWD     blue   low sports coupe     ~4.5 × 1.8 × 0.7 m
   AWD     green  tall SUV             ~4.3 × 2.0 × 1.4 m
-  Truck   yellow 6-wheel cargo truck  ~6.0 × 2.2 × 2.5 m   (--truck)
 
 Run
 ---
-    python -m genesis_vehicle.samples.road_loop                 # 3 cars (fast), native: --native
-    python -m genesis_vehicle.samples.road_loop --truck         # + the 6-wheel truck (slower)
+    python -m genesis_vehicle.samples.road_loop                 # cv2 HUD
+    python -m genesis_vehicle.samples.road_loop --native        # Genesis viewer
     python -m genesis_vehicle.samples.road_loop --n_per_kind 8
     python -m genesis_vehicle.samples.road_loop --duration 30 --native
 
@@ -304,27 +304,25 @@ def main():
                          "vehicles into one batched compute — much faster for the "
                          "fleet) or 'per_vehicle' (one VehiclePhysics per vehicle — "
                          "simpler but slower). Maps to VehicleScene(solver=...).")
-    ap.add_argument("--truck", action="store_true",
-                    help="Include the 6-wheel Truck kind. Off by default: the 5000 kg "
-                         "truck needs substeps=30 (3x slower) for stability and, being "
-                         "heavy + partial-Ackermann + overpowered, understeers wide off "
-                         "the loop (out of frame). Default = the 3 car kinds (substeps=10, "
-                         "all hold the loop).")
     args = ap.parse_args()
     if args.native:
         args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
 
-    # Vehicle kinds in this run: the 3 cars by default; add the Truck with --truck.
-    kinds = list(KINDS) if args.truck else [k for k in KINDS if k[0] != "Truck"]
-    # substeps floor: cars are stable at 10; the heavy truck needs 30 (20 still NaNs).
-    SUBSTEPS = 30 if args.truck else 10
+    # This demo runs the 3 CAR kinds (FWD/RWD/AWD). The 6-wheel Truck is NOT
+    # included: in this 16-vehicle tight-loop scene it destabilizes the step and
+    # ~9/16 vehicles explode to z=thousands — and that is independent of solver
+    # (batched/per_vehicle) and substeps (30/50), so it is not a tuning knob, it's
+    # the heavy truck breaking the shared scene. The truck drives fine on its own
+    # in GeneVehicle_Truck6w/demo_drive.py (single vehicle, substeps=50). Cars are
+    # stable at substeps=10 and all hold the loop.
+    kinds = [k for k in KINDS if k[0] != "Truck"]
+    SUBSTEPS = 10
 
     K = args.n_per_kind
     N_TOTAL = K * len(kinds)
 
     print(f"genesis_vehicle v{sdk_version}  |  road_loop")
-    print(f"  fleet  : {N_TOTAL} vehicles  ({K} each × {', '.join(k[0] for k in kinds)})"
-          + ("" if args.truck else "   [--truck to add the 6-wheel truck]"))
+    print(f"  fleet  : {N_TOTAL} vehicles  ({K} each × {', '.join(k[0] for k in kinds)})")
     print(f"  track  : circle radius {args.radius:.1f} m   |   substeps={SUBSTEPS}")
     print(f"  drive  : throttle {args.throttle:.2f} for {args.duration:.1f} s")
 
@@ -347,18 +345,11 @@ def main():
     vs = VehicleScene(
         n_envs=1, raycast_mode="single_scene", view=view,
         solver=args.solver,
-        # SUBSTEPS = 10 (cars) / 30 (with --truck): the 5000 kg truck's stiff
-        # suspension blows the constraint forces up to NaN at coarse dt/substeps
-        # the moment it drives (20 still NaNs, 30 stable), so it forces the coarser
-        # step — which is why it's opt-in and the car-only default runs 3x faster.
+        # substeps=10: stable for the 3 car kinds (the heavy truck that needed a
+        # coarser step is intentionally not in this scene — see the kinds note).
         dt=DT, substeps=SUBSTEPS,
         rigid_options=gs.options.RigidOptions(
-            # Ray-wheel vehicles float on raycast suspension (wheels sense the
-            # ground plane regardless of enable_collision), so chassis↔chassis
-            # rigid collision isn't needed for a spaced loop — and WITH it the
-            # heavy truck (which drifts wide, --truck) rams neighbouring cars and
-            # launches them. Off → cars stay put, and it's a bit faster too.
-            dt=DT, enable_collision=False,
+            dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
         vis_options=gs.options.VisOptions(
@@ -502,20 +493,22 @@ def main():
     )
 
     # ------------------------------------------------------------------
-    # Final pose summary (one sample per kind — should be near radius).
+    # Final pose summary — EVERY vehicle (z + a FLOWN flag), so a batched-solver
+    # mis-drive that only the first-of-each-kind escapes is caught.
     # ------------------------------------------------------------------
     print(f"\n=== FINAL  (after {args.duration:.1f} s of driving) ===")
-    print(f"  {'kind':<5}  {'pos':<20}  {'radius':>7}  {'speed':>7}")
-    print(f"  {'-'*5}  {'-'*20}  {'-'*7}  {'-'*7}")
-    for kind_idx, (kind_name, _c, _u, _p, _wb, _nw) in enumerate(kinds):
-        veh = entities[kind_idx][1]    # first vehicle of this kind
+    print(f"  {'#':>3} {'kind':<5}  {'radius':>7}  {'z':>6}  {'speed':>7}")
+    print(f"  {'-'*3} {'-'*5}  {'-'*7}  {'-'*6}  {'-'*7}")
+    n_flown = 0
+    for gi, (kind_name, veh, _wb) in enumerate(entities):
         p = veh.get_pos()[0].cpu().numpy()
         v = veh.get_vel()[0].cpu().numpy()
-        r = float(np.linalg.norm(p[:2]))
-        s = float(np.linalg.norm(v[:2]))
-        print(f"  {kind_name:<5}  ({p[0]:+6.2f}, {p[1]:+6.2f})    "
-              f"{r:6.2f}   {s:5.2f} m/s")
-    print(f"  (target radius {args.radius:.1f} m)")
+        r = float(np.linalg.norm(p[:2])); z = float(p[2]); s = float(np.linalg.norm(v[:2]))
+        flown = (z > 3.0) or (r > args.radius * 1.6)
+        n_flown += int(flown)
+        print(f"  {gi:>3} {kind_name:<5}  {r:6.2f}   {z:+5.2f}   {s:5.2f} m/s"
+              f"{'   <-- FLOWN' if flown else ''}")
+    print(f"  (target radius {args.radius:.1f} m;  {n_flown}/{len(entities)} flown away)")
 
     if args.native:    # keep the interactive viewer open until closed/ESC
         print("\nviewer 유지 중 — 창 닫기(또는 ESC)로 종료.")
