@@ -10,6 +10,26 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.5] — 2026-06-27
+
+### Fixed — road_loop vehicles flying off (revert 1.0.4 collision; drop the Truck)
+
+- **1.0.4's `enable_collision=False` made vehicles launch UPWARD** (no rigid
+  ground backstop → raycast-suspension overshoot, z→thousands). Reverted to
+  `enable_collision=True`: all cars stay grounded (z≈0.09), 0/12 flown.
+- **The 6-wheel Truck is removed from road_loop.** In the 16-vehicle tight loop
+  it destabilizes the step and ~9/16 vehicles explode to z=thousands — and that
+  is **independent of solver** (batched/per_vehicle) **and substeps** (30/50),
+  with deterministic per-index blow-ups, so it is not a tuning knob. road_loop is
+  now the 3 car kinds (FWD/RWD/AWD): stable at `substeps=10`, ~56 ms/step, all 12
+  grounded. The truck drives fine standalone in `GeneVehicle_Truck6w` (single
+  vehicle, substeps=50). (`--truck` removed.)
+- The final-pose summary now lists **every** vehicle with `z` + a `FLOWN` flag —
+  the old one-per-kind summary hid the fly-aways (only the first-of-each-kind,
+  which happened to survive, was printed).
+
+---
+
 ## [1.0.4] — 2026-06-27
 
 ### Added — live FPS; Fixed — `--truck` launching the cars
