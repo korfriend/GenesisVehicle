@@ -10,6 +10,32 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.6] — 2026-06-28
+
+### Fixed — `car_4w.urdf` wheels floating above the ground
+
+- **The visual wheel radius (`0.32 m`) did not match the physics radius
+  (`0.358 m`)** that `car_4w_rwd_ackermann`'s wheel overrides impose
+  (`_hjw_wheel_overrides`, matching the HJW/golden_JMK reference URDF). The
+  raycast suspension rests the chassis for a `0.358 m` wheel, so the smaller
+  `0.32 m` visual cylinder was drawn ~38 mm above the contact point — the
+  wheels visibly **floated** over the terrain (most obvious in
+  `samples/terrain_drive.py --viewer`, where the bumpy surface made the gap and
+  the chassis pitch stand out).
+- Fixed by setting the four wheel `<cylinder>` visuals in `car_4w.urdf` to
+  `radius="0.358"` so the rendered wheel matches the physics radius. **Pure
+  visual fix — physics is unchanged** (the pipeline already used `0.358`), so no
+  numeric drift: 96 pytest pass, `terrain_drive` / `quickstart` drive
+  identically.
+- NB: this does **not** change how much the chassis pitches/heaves over
+  `terrain_drive`'s default `--amp 0.7` relief — that is the rigid car
+  geometrically tracking a deliberately *severe*, short-wavelength surface
+  (terrain forcing 0.3–0.8 Hz ≪ 2.4 Hz suspension natural freq, so no spring/
+  damper tuning isolates it). Drive a gentler surface (`--amp 0.3`) or lower the
+  cruise speed for a calm ride.
+
+---
+
 ## [1.0.5] — 2026-06-27
 
 ### Fixed — road_loop vehicles flying off (revert 1.0.4 collision; drop the Truck)

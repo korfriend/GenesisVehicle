@@ -22,7 +22,9 @@
     Mass        1200 kg
     Wheelbase   2.7 m   (front axle x=+1.35, rear x=-1.35)
     Track       1.5 m   (left wheels y=+0.75, right y=-0.75)
-    Wheel       radius 0.32 m, width 0.20 m
+    Wheel       radius 0.358 m, width 0.20 m
+                (matches the physics radius in `car_4w_rwd_ackermann`'s wheel
+                overrides; a smaller visual wheel would float above the ground)
 -->
 <robot name="car_4w">
 
@@ -89,7 +91,7 @@
       <inertia ixx="1.0" iyy="2.0" izz="1.0" ixy="0" ixz="0" iyz="0"/></inertial>
     <visual>
       <origin xyz="0 0 0" rpy="1.5708 0 0"/>
-      <geometry><cylinder radius="0.32" length="0.20"/></geometry>
+      <geometry><cylinder radius="0.358" length="0.20"/></geometry>
       <material name="wheel_dark"><color rgba="0.10 0.10 0.10 1.0"/></material>
     </visual>
   </link>
@@ -129,7 +131,7 @@
       <inertia ixx="1.0" iyy="2.0" izz="1.0" ixy="0" ixz="0" iyz="0"/></inertial>
     <visual>
       <origin xyz="0 0 0" rpy="1.5708 0 0"/>
-      <geometry><cylinder radius="0.32" length="0.20"/></geometry>
+      <geometry><cylinder radius="0.358" length="0.20"/></geometry>
       <material name="wheel_dark"><color rgba="0.10 0.10 0.10 1.0"/></material>
     </visual>
   </link>
@@ -160,7 +162,7 @@
       <inertia ixx="1.0" iyy="2.0" izz="1.0" ixy="0" ixz="0" iyz="0"/></inertial>
     <visual>
       <origin xyz="0 0 0" rpy="1.5708 0 0"/>
-      <geometry><cylinder radius="0.32" length="0.20"/></geometry>
+      <geometry><cylinder radius="0.358" length="0.20"/></geometry>
       <material name="wheel_dark"><color rgba="0.10 0.10 0.10 1.0"/></material>
     </visual>
   </link>
@@ -189,7 +191,7 @@
       <inertia ixx="1.0" iyy="2.0" izz="1.0" ixy="0" ixz="0" iyz="0"/></inertial>
     <visual>
       <origin xyz="0 0 0" rpy="1.5708 0 0"/>
-      <geometry><cylinder radius="0.32" length="0.20"/></geometry>
+      <geometry><cylinder radius="0.358" length="0.20"/></geometry>
       <material name="wheel_dark"><color rgba="0.10 0.10 0.10 1.0"/></material>
     </visual>
   </link>
