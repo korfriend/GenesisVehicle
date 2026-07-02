@@ -492,6 +492,14 @@ def main():
     print("="*50)
     
     # 5회 시험 step 구동하여 스텝당 평균 물리 연산 시간 실측 (GPU일 때는 명시적 동기화 적용)
+    # [PROFILE] 계측 전 2스텝 예열: 첫 스텝에 taichi/torch 커널 JIT 컴파일 비용이
+    # 몰려 구간별 수치가 크게 과대측정된다 (실측: GPU SDK compute 100ms(PROFILE)
+    # vs 23ms(steady)). 예열 후 5스텝만 계측한다.
+    for _ in range(2):
+        vs.step()
+        if not args.cpu and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
     # [PROFILE] 워밍업 5스텝 동안 스텝 내부 구간별 시간을 실측해 1회 출력 —
     # 느릴 때 원인(raycast/proxy vs SDK compute vs genesis solver)을 현장에서 특정.
     _prof = {'ray': 0.0, 'sdk': 0.0, 'solver': 0.0}

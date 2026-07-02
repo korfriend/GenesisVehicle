@@ -10,6 +10,41 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.8] — 2026-07-02
+
+| 약자 | 의미 |
+|---|---|
+| kind | batched solver 의 배치 단위 (같은 cfg 객체를 공유하는 차량 그룹) |
+| MVP | `MultiVehiclePhysics` |
+| JIT | Just-In-Time 커널 컴파일 (taichi/torch 첫 스텝 비용) |
+
+### Fixed — per-entity server split K same-URDF vehicles into K kinds (batching never engaged)
+
+- The batched solver groups vehicles into kinds by **cfg object identity**
+  (`group_vehicles_by_cfg`), but `build_vehicle` called `build_cfg()` fresh
+  **per target** — so 10 identical tanks became **10 kinds × 1 vehicle** and
+  `MVP.step` ran 10 sequential single-vehicle pipelines instead of one
+  (B=10) batched pipeline.
+- Field report matched exactly: team measured `[PROFILE] SDK compute
+  37.79 ms` (CPU, 10 tanks); reproducing the fresh-cfg-per-target pattern in
+  a bench gives **MVP 33.8 ms vs 2.8 ms as one kind** (~12×). This — not the
+  map — was the dominant per-entity CPU cost.
+- Fixed: `build_cfg` caches and returns the **same cfg object** for identical
+  `(urdf_path, mapping, t_fric)` (`target_id` excluded — log-only), so
+  same-URDF targets land in one kind. Logs
+  `[Batch] Vehicle N: reusing shared cfg`. Targets with different
+  friction/mapping still get their own kind (correctness preserved).
+  Regression test: `test_build_cfg_shares_one_object_per_identical_target`.
+
+### Fixed — `[PROFILE]` overstated GPU section times (JIT in first steps)
+
+- The startup `[PROFILE]` measured the first 5 steps ever, which include
+  taichi/torch kernel JIT compilation — field report showed `SDK compute
+  100 ms` in PROFILE vs 23 ms steady-state on GPU (L3). Both servers now run
+  2 unprofiled warmup steps before the 5 profiled ones.
+
+---
+
 ## [1.0.7] — 2026-07-02
 
 | 약자 | 의미 |

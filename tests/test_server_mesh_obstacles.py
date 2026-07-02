@@ -57,6 +57,24 @@ def test_make_double_sided_mesh_doubles_without_legacy_api():
     assert len(out.faces) <= 2 * len(cube.faces)  # (minus any degenerate/dupes)
 
 
+def test_build_cfg_shares_one_object_per_identical_target():
+    """1.0.8 guard: the batched solver groups vehicles into kinds by cfg OBJECT
+    identity, so identical targets (same urdf/mapping/friction) must get the
+    SAME cfg instance. Per-target fresh cfgs split K vehicles into K kinds × 1
+    vehicle — the batched pipeline never engages and the server's SDK compute
+    scales ×K (measured: 10 tanks CPU 37.8 ms/step vs 2.8 ms as one kind)."""
+    from genesis_vehicle.server import vehicle_builder
+    urdf = os.path.join(os.path.dirname(env_builder.__file__),
+                        "..", "samples", "urdf", "car_4w.urdf")
+    urdf = os.path.abspath(urdf)
+    mapping = {"driveType": 0}
+    a = vehicle_builder.build_cfg(urdf, mapping, 1.0, target_id=0)
+    b = vehicle_builder.build_cfg(urdf, mapping, 1.0, target_id=1)
+    assert a is b                       # one kind → one batched pipeline
+    c = vehicle_builder.build_cfg(urdf, mapping, 2.0, target_id=2)
+    assert c is not a                   # different friction → its own kind
+
+
 # ---------------------------------------------------------------------------
 # End-to-end: every mesh-obstacle path REGISTERS without NameError / crash
 # ---------------------------------------------------------------------------
