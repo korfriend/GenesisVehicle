@@ -152,16 +152,19 @@ def test_kinematic_mirror_builds_with_collision_vis_mode(cpu_genesis):
     assert sb.entity_main.surface.vis_mode == "collision"   # caller honored for main
 
 
-def test_rco_road_single_scene_no_spurious_warning(cpu_genesis, cube_obj, caplog):
-    """0.9.6 guard refinement: in single_scene the rco road's wheel_raycast_morph
-    is the sole geometry (the raycast body), so the 'ignored in single_scene'
-    warning must NOT fire."""
-    import logging
+def test_collision_false_single_scene_fails_fast(cpu_genesis, cube_obj):
+    """1.0.7: collision=False is a dual_scene-only feature (kinematic raycast
+    surface in the raycast scene). In single_scene the wheel rays only hit rigid
+    collision geoms, so a no-collision static would be a fall-through surface —
+    pre-1.0.7 this warned and built a rigid from the rco road morph (which itself
+    carries collision=False): zero collision geoms, invisible to the raycaster,
+    vehicles fell straight through rco roads in the per-entity (inline) server.
+    add_static must now refuse (fail fast) instead of building a broken scene.
+    (The server pairs --road-raycast-only with raycast_mode='dual_scene'.)"""
+    import pytest
     vs = VehicleScene(n_envs=1, raycast_mode="single_scene",
                       init_genesis=False)
-    with caplog.at_level(logging.WARNING, logger="genesis_vehicle.vehicle_scene"):
+    with pytest.raises(ValueError, match="dual_scene"):
         env_builder.build_obstacles(
             vs=vs, init_data=_mesh_init(0, "[Complex]", cube_obj),
             ue_friction=1.0, ue_restitution=0.0, vis_mode=None, road_raycast_only=True)
-    assert not any("wheel_raycast_morph" in r.getMessage() for r in caplog.records)
-    assert vs.statics[0].entity_main is not None   # single_scene: the body exists
