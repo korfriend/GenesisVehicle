@@ -141,12 +141,31 @@ def strip_wheel_collisions(urdf_path):
     return temp_path
 
 
+# [Batch] cfg 공유 캐시 — VehicleScene 의 batched solver 는 cfg "객체 identity"
+# 로 kind 를 묶는다 (multi_vehicle.group_vehicles_by_cfg). per-entity 서버가
+# 타깃마다 새 cfg 를 만들면 K 대가 K kinds × 1 대로 쪼개져 배치 파이프라인이
+# 무력화되고 SDK compute 가 K 배가 된다 (실측: 탱크 10대 CPU 37.8ms vs 1 kind
+# 2.8ms). 같은 (urdf, mapping, friction) 이면 같은 cfg 객체를 돌려줘 한 kind 로
+# 묶는다. 키에 target_id 는 제외 (로그용 인자일 뿐 결과에 영향 없음).
+_cfg_cache: dict = {}
+
+
 def build_cfg(urdf_path, mapping, t_fric, target_id=0):
     """URDF + UE 매핑 JSON 으로부터 VehicleConfig 를 구성해 반환.
 
     per-entity 경로(build_vehicle)와 L3 멀티-env 경로(l3_runtime)가 공유하는
     차량 설정 단일 소스. 엔티티 생성/Raycaster/VehiclePhysics 는 포함하지 않는다.
+    동일 (urdf_path, mapping, t_fric) 호출은 **같은 cfg 객체**를 반환한다
+    (배치 kind 공유 — 위 _cfg_cache 주석 참고).
     """
+    _key = (os.path.abspath(urdf_path), float(t_fric),
+            repr(sorted(mapping.items())) if isinstance(mapping, dict) else repr(mapping))
+    _cached = _cfg_cache.get(_key)
+    if _cached is not None:
+        print(f" [Genesis] [Batch] Vehicle {target_id}: reusing shared cfg "
+              f"(same URDF/mapping/friction → one batched kind)")
+        return _cached
+
     # 1. Parse URDF to extract wheel information
     urdf_parsed = parse_urdf(urdf_path)
     wheels = urdf_parsed.wheels
@@ -427,6 +446,7 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
 
                     print(f"   - Applied overrides to wheel: {override_w_name} (matched to URDF link: {w.name})")
 
+    _cfg_cache[_key] = cfg
     return cfg
 
 
