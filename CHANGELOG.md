@@ -10,6 +10,28 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.9] — 2026-07-02
+
+### Added — `--max-catchup-steps` (server pacing knob)
+
+- The catch-up cap (max physics steps per loop when behind real-time) was
+  hardcoded to `max(5, 0.1/dt)` in both server modes. It is now overridable
+  via `--max-catchup-steps N` (floored at 1; default unchanged).
+- The cap does **not** make anything faster — once a step exceeds the dt
+  budget (20 ms at dt=0.02) slow-motion is unavoidable. It selects the
+  degradation mode: the default 5 tries to recover real-time by bursting up
+  to 5 steps in one loop (a 5×-step blocking burst → jerky frame pacing),
+  while `1` runs exactly one step per loop → a steady, burst-free slow
+  motion at a constant ratio (smoothest visual result under overload, paired
+  with the TimeDilation the server already sends). Irrelevant once the step
+  fits the budget (steps/loop reads ~1.0 either way).
+- Renamed the loop variable `MAX_SUBSTEPS` → `MAX_CATCHUP_STEPS` (both server
+  modes): it is a **server pacing cap** (steps per loop), unrelated to the
+  Genesis `SimOptions.substeps` physics sub-integration parameter the old
+  name suggested.
+
+---
+
 ## [1.0.8] — 2026-07-02
 
 | 약자 | 의미 |
