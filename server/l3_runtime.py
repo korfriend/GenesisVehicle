@@ -199,6 +199,12 @@ def run_l3(args):
             vs=vs, init_data=init_data,
             ue_friction=ue_friction, ue_restitution=ue_restitution,
             vis_mode=args.vis_mode, verbose=args.verbose,
+            # v1.0.7: forward --road-raycast-only (previously SILENTLY IGNORED in
+            # multi-env — argparse accepted it but it never reached build_obstacles,
+            # so "no difference" was literal). In raywheel the wheels already ride
+            # the exact kinematic mirror; rco additionally drops the main-scene
+            # CoACD road collider → no chassis-vs-road narrow-phase/SDF per env.
+            road_raycast_only=getattr(args, "road_raycast_only", False),
             structures_as_primitive=getattr(args, "structures_as_primitive", False),
         )
 
@@ -243,6 +249,31 @@ def run_l3(args):
     print("\n" + "="*50)
     print(" [INFO] [GENESIS] [L3] 하드웨어 연산 성능 실측 프로파일링 중...")
     print("="*50)
+    # [PROFILE] 워밍업 5스텝 동안 스텝 내부 구간별 시간을 실측해 1회 출력 —
+    # 느릴 때 원인(raycast/proxy vs SDK compute vs genesis solver)을 현장에서
+    # 바로 특정하기 위한 진단 로그. GPU 는 비동기 launch 라 구간 경계마다
+    # synchronize 해서 실제 소요를 귀속시킨다 (워밍업 5스텝 한정 비용).
+    _prof = {'ray': 0.0, 'sdk': 0.0, 'solver': 0.0}
+    def _psync():
+        if not use_cpu:
+            torch.cuda.synchronize()
+    _o_md = vs._measure_distances
+    def _p_md():
+        _psync(); t0 = time.perf_counter(); r = _o_md()
+        _psync(); _prof['ray'] += time.perf_counter() - t0; return r
+    vs._measure_distances = _p_md
+    _o_ph = vs.physics.step if vs.physics is not None else None
+    if _o_ph is not None:
+        def _p_ph(*a, **kw):
+            _psync(); t0 = time.perf_counter(); r = _o_ph(*a, **kw)
+            _psync(); _prof['sdk'] += time.perf_counter() - t0; return r
+        vs.physics.step = _p_ph
+    _o_sc = vs._main_scene.step
+    def _p_sc(*a, **kw):
+        _psync(); t0 = time.perf_counter(); r = _o_sc(*a, **kw)
+        _psync(); _prof['solver'] += time.perf_counter() - t0; return r
+    vs._main_scene.step = _p_sc
+
     warmup_starts = time.perf_counter()
     for _ in range(5):
         veh.set_inputs(throttle=0.0, brake=0.0, steer=0.0)
@@ -250,7 +281,18 @@ def run_l3(args):
         if not use_cpu:
             torch.cuda.synchronize()
     avg_step_time = (time.perf_counter() - warmup_starts) / 5.0
+
+    # 계측 해제 (본 루프는 무계측 원상 복구)
+    vs._measure_distances = _o_md
+    if _o_ph is not None:
+        vs.physics.step = _o_ph
+    vs._main_scene.step = _o_sc
+
+    _rest = avg_step_time * 1e3 - (_prof['ray'] + _prof['sdk'] + _prof['solver']) / 5.0 * 1e3
     print(f"  - 실측된 1스텝 평균 연산 속도: {avg_step_time * 1000.0:.2f} ms  (차량 {n_envs}대 분 배치)")
+    print(f"  - [PROFILE] 스텝 구간별: raycast/proxy {_prof['ray']/5*1e3:.2f} ms | "
+          f"SDK compute {_prof['sdk']/5*1e3:.2f} ms | "
+          f"genesis solver {_prof['solver']/5*1e3:.2f} ms | 기타 {_rest:.2f} ms")
 
     sim_dt = ue_dt
     print(f"  [OK] [Determinism] 물리 해상도(sim_dt) {sim_dt * 1000.0:.1f}ms ({1.0/sim_dt:.1f}Hz) 고정.")
@@ -277,6 +319,7 @@ def run_l3(args):
 
     log_loop_dur_sum = 0.0
     log_phys_dur_sum = 0.0
+    log_step_sum = 0
     log_count = 0
 
     # 입력 버퍼 (재할당 없이 재사용)
@@ -473,12 +516,19 @@ def run_l3(args):
         loop_dur = time.perf_counter() - loop_start
         log_loop_dur_sum += loop_dur
         log_phys_dur_sum += physics_dur_total
+        log_step_sum += catchup_steps
         log_count += 1
 
         if log_count >= 50:
             avg_loop = (log_loop_dur_sum / 50.0) * 1000.0
             avg_phys = (log_phys_dur_sum / 50.0) * 1000.0
-            print(f" [STATS] [L3 n_envs={n_envs}] Loop Avg: {avg_loop:.2f} ms | Physics Avg: {avg_phys:.2f} ms")
+            # Physics Avg 는 루프당 catch-up 스텝의 '합' — 스텝당 값과 혼동을
+            # 막기 위해 steps/loop 와 per-step 을 함께 표기 (v1.0.7).
+            steps_per_loop = log_step_sum / 50.0
+            per_step = (log_phys_dur_sum / max(log_step_sum, 1)) * 1000.0
+            print(f" [STATS] [L3 n_envs={n_envs}] Loop Avg: {avg_loop:.2f} ms | "
+                  f"Physics Avg: {avg_phys:.2f} ms "
+                  f"({steps_per_loop:.1f} steps/loop, {per_step:.2f} ms/step)")
 
             if not hasattr(run_l3, '_dilation_sent'):
                 run_l3._dilation_sent = True
@@ -489,6 +539,7 @@ def run_l3(args):
 
             log_loop_dur_sum = 0.0
             log_phys_dur_sum = 0.0
+            log_step_sum = 0
             log_count = 0
 
     osc.close()

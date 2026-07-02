@@ -88,16 +88,30 @@ def slerp(q0, q1, t):
     return s0 * q0 + s1 * q1
 
 
-def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles=None, sim_dt=0.02, update_angles=False):
+def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles=None, sim_dt=0.02, update_angles=False, mvp=None):
     """
     Captures positions and rotations for all target entities (including wheels if active)
     and dynamic obstacles in Genesis physics engine.
+
+    ``mvp``: the scene's batched ``MultiVehiclePhysics`` (``vs.physics``) when
+    solver="batched". Per-vehicle ``Vehicle.wheel_visual_transforms`` recomputes
+    the WHOLE K-vehicle batch and slices one vehicle, so calling it per target
+    is O(K²); with ``mvp`` the batch is computed ONCE here and sliced per slot.
     """
     state = {
         'targets': {},
         'dynamic_obstacles': {}
     }
-    
+
+    # [PERF] One batched closed-form wheel-pose compute for all K vehicles
+    # (flat list in Vehicle._slot order), instead of K per-vehicle calls.
+    wheel_tf_flat = None
+    if is_urdf_active and controllers and mvp is not None:
+        try:
+            wheel_tf_flat = mvp.wheel_visual_transforms("world")
+        except Exception:
+            wheel_tf_flat = None
+
     # 1. Target entities (Chassis & Wheels)
     if target_entities:
         tids = list(target_entities.keys())
@@ -131,7 +145,11 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
                 # quat directly; no separate spin to re-apply).
                 if hasattr(ctrl, 'wheel_visual_transforms'):
                     try:
-                        wp_all, wq_all = ctrl.wheel_visual_transforms("world")
+                        slot = getattr(ctrl, '_slot', -1)
+                        if wheel_tf_flat is not None and 0 <= slot < len(wheel_tf_flat):
+                            wp_all, wq_all = wheel_tf_flat[slot]   # pre-computed batch
+                        else:
+                            wp_all, wq_all = ctrl.wheel_visual_transforms("world")
                         if hasattr(wp_all, 'cpu'):
                             wp_all = wp_all.cpu().numpy(); wq_all = wq_all.cpu().numpy()
                         wp_all = wp_all[0]; wq_all = wq_all[0]   # env 0 (single-env)
@@ -263,6 +281,8 @@ def main():
 
     # [L3] 멀티-env 배칭 모드 — 동일 URDF 다수 차량 전용 경로로 분기
     if args.multi_env:
+        print(" [Genesis] [MODE] === MULTI-ENV (L3 batched) === "
+              "(1 vehicle entity x n_envs, non-interacting, GPU default)")
         from .l3_runtime import run_l3
         run_l3(args)
         return
@@ -271,6 +291,8 @@ def main():
     # (per-entity 모드에선 CPU 가 GPU 보다 빠름 — n_envs=1 다중 엔티티는 커널 런치 바운드)
     args.cpu = True
     args.lockstep = False
+    print(" [Genesis] [MODE] === PER-ENTITY === "
+          "(K interacting vehicles, n_envs=1, CPU-forced; use --multi-env for L3)")
 
     # 1. 제네시스 물리 엔진 초기화 및 백엔드 결정
     if args.cpu:
@@ -321,14 +343,21 @@ def main():
         'restitution': ue_restitution
     }
     
-    # 4. Genesis Scene Setup — VehicleScene(inline) for unified vehicle handling.
-    # Per-entity mode is interacting vehicles at n_envs=1 on CPU, where the
-    # two-scene raycast has no benefit, so inline == one scene == prior behavior.
+    # 4. Genesis Scene Setup — VehicleScene for unified vehicle handling.
+    # Per-entity mode is interacting vehicles at n_envs=1 on CPU. Default is
+    # inline (one scene == prior behavior: the raycast target is the rigid
+    # collider itself). --road-raycast-only REQUIRES dual_scene: the rco road is
+    # a KINEMATIC use_visual_raycasting surface, which only the raycast scene
+    # can host (single_scene rays only hit rigid collision geoms — add_static
+    # fails fast on collision=False there). dual_scene also keeps the road BVH
+    # static, so the wheels ride the exact mesh surface with no per-step re-fit
+    # and no chassis-vs-road narrow-phase.
     # All geometry is registered via vs.add_* (no raw scene access); build() /
     # step() and sim reads/tweaks route through vs accessors. Genesis is already
     # initialized above, so init_genesis=False.
     vs = VehicleScene(
-        n_envs=1, dt=ue_dt, raycast_mode="inline",
+        n_envs=1, dt=ue_dt,
+        raycast_mode="dual_scene" if args.road_raycast_only else "inline",
         gravity=(0, 0, ue_gravity), substeps=2, show_viewer=not args.headless,
         init_genesis=False,
         rigid_options=gs.options.RigidOptions(
@@ -463,6 +492,26 @@ def main():
     print("="*50)
     
     # 5회 시험 step 구동하여 스텝당 평균 물리 연산 시간 실측 (GPU일 때는 명시적 동기화 적용)
+    # [PROFILE] 워밍업 5스텝 동안 스텝 내부 구간별 시간을 실측해 1회 출력 —
+    # 느릴 때 원인(raycast/proxy vs SDK compute vs genesis solver)을 현장에서 특정.
+    _prof = {'ray': 0.0, 'sdk': 0.0, 'solver': 0.0}
+    _o_md = vs._measure_distances
+    def _p_md():
+        t0 = time.perf_counter(); r = _o_md()
+        _prof['ray'] += time.perf_counter() - t0; return r
+    vs._measure_distances = _p_md
+    _o_ph = vs.physics.step if vs.physics is not None else None
+    if _o_ph is not None:
+        def _p_ph(*a, **kw):
+            t0 = time.perf_counter(); r = _o_ph(*a, **kw)
+            _prof['sdk'] += time.perf_counter() - t0; return r
+        vs.physics.step = _p_ph
+    _o_sc = vs._main_scene.step
+    def _p_sc(*a, **kw):
+        t0 = time.perf_counter(); r = _o_sc(*a, **kw)
+        _prof['solver'] += time.perf_counter() - t0; return r
+    vs._main_scene.step = _p_sc
+
     warmup_starts = time.perf_counter()
     for _ in range(5):
         vs.step()
@@ -470,8 +519,18 @@ def main():
             torch.cuda.synchronize()
     warmup_ends = time.perf_counter()
     avg_step_time = (warmup_ends - warmup_starts) / 5.0
-    
+
+    # 계측 해제 (본 루프는 무계측 원상 복구)
+    vs._measure_distances = _o_md
+    if _o_ph is not None:
+        vs.physics.step = _o_ph
+    vs._main_scene.step = _o_sc
+
+    _rest = avg_step_time * 1e3 - (_prof['ray'] + _prof['sdk'] + _prof['solver']) / 5.0 * 1e3
     print(f"  - 실측된 1스텝 평균 연산 속도: {avg_step_time * 1000.0:.2f} ms")
+    print(f"  - [PROFILE] 스텝 구간별: raycast/proxy {_prof['ray']/5*1e3:.2f} ms | "
+          f"SDK compute {_prof['sdk']/5*1e3:.2f} ms | "
+          f"genesis solver {_prof['solver']/5*1e3:.2f} ms | 기타 {_rest:.2f} ms")
     
     # [CRITICAL FIX] 물리적 시간 흐름 및 동역학 일관성(Determinism)을 위해 sim_dt는 항상 고정 고수합니다.
     sim_dt = ue_dt
@@ -490,7 +549,7 @@ def main():
     last_slow_motion_warn_time = 0.0
 
     accumulated_wheel_angles = {}
-    prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False)
+    prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics)
     curr_state = prev_state
 
     step_count = 0
@@ -501,6 +560,7 @@ def main():
     
     log_loop_dur_sum = 0.0
     log_phys_dur_sum = 0.0
+    log_step_sum = 0
     log_count = 0
 
     # =========================================================================
@@ -591,7 +651,7 @@ def main():
                 # 타이밍 및 상태 초기화
                 last_time = time.perf_counter()
                 accumulator = 0.0
-                prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False)
+                prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics)
                 curr_state = prev_state
 
             recv['command'] = None
@@ -694,7 +754,7 @@ def main():
                         tentity.control_dofs_force(ft, slice(0, 6))
 
             # 오버라이드 반영 후 상태 갱신
-            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False)
+            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics)
 
         catchup_steps = 0
         physics_dur_total = 0.0
@@ -758,7 +818,7 @@ def main():
                     raise e
             
             # 최신 물리 상태 기록
-            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, True)
+            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, True, mvp=vs.physics)
             
             if not args.lockstep:
                 accumulator -= SIM_DT
@@ -816,15 +876,22 @@ def main():
             osc.send_step_ack(recv['frame_id'])
 
         loop_dur = time.perf_counter() - loop_start
-            
+
         log_loop_dur_sum += loop_dur
         log_phys_dur_sum += physics_dur_total
+        log_step_sum += catchup_steps
         log_count += 1
-        
+
         if log_count >= 50:
             avg_loop = (log_loop_dur_sum / 50.0) * 1000.0
             avg_phys = (log_phys_dur_sum / 50.0) * 1000.0
-            print(f" [STATS] Loop Avg: {avg_loop:.2f} ms | Physics Avg: {avg_phys:.2f} ms")
+            # Physics Avg 는 루프당 catch-up 스텝의 '합' — 스텝당 값과 혼동을
+            # 막기 위해 steps/loop 와 per-step 을 함께 표기 (v1.0.7).
+            steps_per_loop = log_step_sum / 50.0
+            per_step = (log_phys_dur_sum / max(log_step_sum, 1)) * 1000.0
+            print(f" [STATS] [per-entity] Loop Avg: {avg_loop:.2f} ms | "
+                  f"Physics Avg: {avg_phys:.2f} ms "
+                  f"({steps_per_loop:.1f} steps/loop, {per_step:.2f} ms/step)")
             
             # 최초 50프레임 평균 루프 시간 통계가 나오면, 언리얼에 해당 지연 배속 비율(TimeDilation)을 1회 전송합니다.
             if not hasattr(main, '_dilation_sent'):
@@ -839,6 +906,7 @@ def main():
                 
             log_loop_dur_sum = 0.0
             log_phys_dur_sum = 0.0
+            log_step_sum = 0
             log_count = 0
 
     osc.close()

@@ -192,15 +192,19 @@ with it in the main scene; **Wheels sense** = the wheel rays detect it as ground
 | `True` (default) | `dual_scene` | rigid (`collision_morph`) | kinematic mirror (`wheel_raycast_morph`) | ✅ | ✅ |
 | `True` | `single_scene` | rigid — serves both roles | — (same body) | ✅ | ✅ |
 | `False` | `dual_scene` | — (none) | kinematic mirror | ❌ | ✅ |
-| `False` | `single_scene` | rigid (raycast target) ⚠️ | — | ⚠️ **yes** | ✅ |
+| `False` | `single_scene` | ⛔ **`ValueError`** (since v1.0.7) | — | — | — |
 
-⚠️ **single_scene caveat:** with one scene the raycast target *is* a rigid body,
-so `collision=False` cannot be honored — it still collides (and now **logs a
-`[genesis_vehicle:single-scene]` warning**). For a true no-collision raycast
-surface use `dual_scene` (kinematic mirror, no collider). Likewise
-`wheel_raycast_morph` (a detailed raycast surface separate from the collider)
-needs the two bodies of dual_scene, so it is **ignored in single_scene and logs a
-warning**.
+⚠️ **single_scene caveats:** `collision=False` is a **dual_scene-only** feature
+(the kinematic `use_visual_raycasting` surface lives in the raycast scene) — in
+single_scene the wheel rays only hit rigid collision geoms, so a no-collision
+static would be a **fall-through** surface. Since v1.0.7 `add_static` **fails
+fast** with a `ValueError` (and a `[genesis_vehicle:single-scene]` error log);
+pre-1.0.7 it warned and built a rigid from the raycast morph, which (the rco
+road morph itself carries `collision=False`) had zero collision geoms and was
+invisible to the raycaster. Likewise `wheel_raycast_morph` (a detailed raycast
+surface separate from the collider) needs the two bodies of dual_scene, so it is
+**ignored in single_scene and logs a warning** — the rigid collider is also the
+raycast target (the wheels ride its convex bulge, not the true surface).
 
 ⚠️ **Non-convex mesh guard (rigid collider / raycast target):** any rigid body
 built from a `gs.morphs.Mesh` with `convexify=False` and **> 1000 faces**

@@ -538,6 +538,13 @@ class VehicleScene:
         VehicleScene owns the scene routing: the collision body lands in the main
         scene (rigid) and, in dual_scene mode, a kinematic raycast mirror lands in
         the raycast scene. Callers never touch the underlying scenes.
+
+        ``collision=False`` makes the body a pure wheel-raycast surface with NO
+        collision geometry — a **dual_scene-only** feature (the kinematic
+        ``use_visual_raycasting`` body lives in the raycast scene). In
+        single_scene it raises ``ValueError`` (since v1.0.7 — previously it
+        warned and built a rigid the wheel rays could not hit when the morph
+        itself carried ``collision=False``, i.e. a fall-through surface).
         """
         self._require_not_built()
         if morph is None and wheel_raycast_morph is None and collision_morph is None:
@@ -560,17 +567,23 @@ class VehicleScene:
                 "collision body is also the raycast target, so a distinct "
                 "wheel_raycast_morph is ignored.", name)
 
-        if not self._two_scene and not collision and rc_morph is not None:
-            # single_scene has ONE body, and the wheel-raycast target must be a
-            # rigid body the rays can hit — so collision=False cannot be honored:
-            # the body still collides (it is created as a rigid below). Use
-            # dual_scene for a true no-collision (kinematic) raycast surface.
-            _logger.warning(
+        if not self._two_scene and not collision:
+            # A no-collision static is a KINEMATIC raycast surface, which lives in
+            # the dual_scene raycast scene. single_scene has ONE body and the wheel
+            # rays only hit rigid collision geoms there — a collision=False body
+            # would be invisible to the rays (vehicles fall straight through it).
+            # Fail fast instead of building a silently broken scene (pre-1.0.7 this
+            # warned and built a rigid from the raycast morph; with the morph's own
+            # collision=False that rigid was exactly the fall-through case).
+            _logger.error(
                 "[genesis_vehicle:single-scene] add_static(%r): collision=False "
-                "cannot be honored in single_scene "
-                "— the lone rigid body is also the wheel-raycast target, so it "
-                "still collides. Use raycast_mode='dual_scene' for a true "
-                "no-collision (kinematic) raycast surface.", name)
+                "requires raycast_mode='dual_scene' (kinematic raycast surface in "
+                "the raycast scene). In single_scene the wheel rays cannot hit a "
+                "no-collision body — refusing to build a fall-through scene.", name)
+            raise ValueError(
+                f"add_static({name!r}): collision=False requires "
+                f"raycast_mode='dual_scene'; single_scene cannot host a "
+                f"no-collision wheel-raycast surface.")
 
         body = StaticBody(name=name, has_collision=bool(collision), has_raycast=True)
 

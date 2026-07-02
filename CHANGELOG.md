@@ -10,6 +10,106 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.7] — 2026-07-02
+
+| 약자 | 의미 |
+|---|---|
+| MVP | `MultiVehiclePhysics` (K vehicles batched into one compute) |
+| rco | `--road-raycast-only` (road mesh as wheel-raycast surface, no collider) |
+| OSC | Open Sound Control (UE ↔ physics-server wire protocol) |
+| K | number of vehicles (L2 batch size) |
+| CoACD | convex decomposition preprocessing for mesh colliders |
+| SDF | Signed Distance Field (per-geom cost a mesh collider pays every step) |
+| BVH | Bounding Volume Hierarchy (raycast acceleration tree) |
+| FK | Forward Kinematics (recomputes link poses on `set_pos`/`set_quat`) |
+
+### Fixed — rco roads were fall-through in the per-entity server (single_scene)
+
+- **`--road-raycast-only` + per-entity server mode silently built a
+  fall-through road.** The per-entity server ran `raycast_mode="inline"`
+  (single_scene), where `add_static(collision=False, ...)` warned and built a
+  plain rigid from the raycast morph. env_builder's rco road morph itself
+  carries `collision=False`, so that rigid had **no collision geoms and was
+  invisible to the wheel raycaster** — vehicles fell straight through the road.
+  Reproduced with 10 tanks on a 4.4k-face mesh road: tank z → −76 m (free
+  fall).
+- Two-part fix, keeping the design intent (a no-collision raycast surface is a
+  **dual_scene** feature — the kinematic `use_visual_raycasting` body lives in
+  the raycast scene, whose static BVH is the whole point):
+  - **`add_static(collision=False)` in single_scene now FAILS FAST** with a
+    `ValueError` + `[genesis_vehicle:single-scene]` error log instead of
+    building a silently broken scene (pre-1.0.7: warning + fall-through rigid).
+    dual_scene behavior is untouched.
+  - **The per-entity server switches to `raycast_mode="dual_scene"` when
+    `--road-raycast-only` is given** (default stays inline). The rco road then
+    lands where it was designed to: a kinematic exact-surface raycast body with
+    a build-once BVH, and no chassis-vs-road narrow-phase in the main scene.
+  Verified: same 10-tank mesh-road run drives normally on dual_scene + rco
+  (z ≈ surface, 5.6 m/s).
+- **Per-frame numbers** (10 tanks, 4.4k-face mesh road, CPU, `vs.step()` only):
+
+  | path | ms/step (p95) | wheel surface | build |
+  |---|---|---|---|
+  | inline + full CoACD collider (default) | 13.8 (19.3) | convex bulge (**+1.7 m** above the true concave surface) | **40.7 s** (CoACD) |
+  | dual_scene + rco (`--road-raycast-only`) | 20.2 (23.7) | exact mesh | 16 s |
+
+  dual+rco trades the road-collider cost (main_scene.step drops to 2.4 ms) for
+  a **per-vehicle proxy-sync cost**: `_sync_proxy` is a Python loop doing
+  `set_pos`/`set_quat` (each an FK) per vehicle — **9.9 ms at K=10** (~1
+  ms/vehicle), plus 5.3 ms raycast-scene step. On this *small* road inline+full
+  is faster; on real UE maps the full-collider path grows with mesh count/faces
+  (per-geom SDF, narrow-phase, refit) while dual+rco stays flat — and rides the
+  exact surface. **Known optimization target:** batch the K proxy syncs into
+  one solver write + single FK (est. 9.9 → ~1–2 ms, bringing dual+rco to
+  ~12–13 ms at K=10).
+- A/B-verified no dual_scene regression from this change
+  (`two_scene_terrain --compare --n-envs 64`, GPU: dual 37.3 ms pre-edit vs
+  39.7 ms post-edit — within run noise; single_scene varied 46–55 ms across
+  runs).
+
+### Fixed — `--road-raycast-only` was silently ignored in `--multi-env` (L3)
+
+- `run_l3` never forwarded `args.road_raycast_only` to
+  `env_builder.build_obstacles` — argparse accepted the flag but it changed
+  nothing, so an A/B test of the flag in multi-env mode was literally
+  no-op-vs-no-op. Now forwarded: in raywheel the wheels already ride the exact
+  kinematic mirror, so rco's effect in L3 is dropping the **main-scene CoACD
+  road collider** (no chassis-vs-road narrow-phase/SDF, replicated per env).
+
+### Added — server mode banner + per-step [STATS] + startup [PROFILE]
+
+- **Mode banner**: startup prints `[MODE] === PER-ENTITY ===` (K interacting
+  vehicles, n_envs=1, CPU-forced) or `[MODE] === MULTI-ENV (L3 batched) ===`
+  so reports are unambiguous about which path ran. `[STATS]` lines are tagged
+  `[per-entity]` / `[L3 n_envs=N]` too.
+- **`[STATS]` now shows per-step physics**: `Physics Avg` is the SUM of the
+  loop's catch-up steps (up to MAX_SUBSTEPS=5), which reads 4–5× the true
+  per-step cost when the server is saturated. Both modes now print
+  `(X steps/loop, Y ms/step)` alongside. `steps/loop` pinned at 5.0 = the
+  server cannot keep real-time (permanent slow-motion).
+- **`[PROFILE]` one-shot breakdown at startup**: during the 5 warmup steps the
+  server times each step's sections — `raycast/proxy | SDK compute | genesis
+  solver | 기타` — and prints one line (instrumentation removed afterwards; on
+  GPU each section boundary synchronizes for true attribution). Pinpoints
+  where a slow step goes without a repro environment.
+
+### Changed — OSC server `capture_state` batched wheel readback (O(K²) → O(K))
+
+- In batched solver mode, `Vehicle.wheel_visual_transforms()` recomputes the
+  **whole K-vehicle batch** and slices one vehicle
+  (`vehicle_scene.py` → `MultiVehiclePhysics.wheel_visual_transforms`). The
+  server's `capture_state` called it once **per target**, doing K× the full-K
+  compute every capture (twice per sim step). At K=10 tanks that readback cost
+  **5.6 ms/step** — 34 % of the 20 ms real-time budget on CPU.
+- `capture_state` now takes `mvp=` (the scene's `vs.physics`) and computes the
+  batch **once**, slicing each vehicle by its `_slot`. Measured: 5.64 →
+  **0.72 ms/step** (7.8×) at K=10; whole server loop ~16.3 → ~11.5 ms
+  (real-time headroom ×1.22 → ×1.73). Per-vehicle fallback kept for
+  `solver="per_vehicle"` / missing slot. Outputs bit-identical
+  (`np.allclose` parity-checked old vs new).
+
+---
+
 ## [1.0.6] — 2026-06-28
 
 ### Fixed — `car_4w.urdf` wheels floating above the ground
