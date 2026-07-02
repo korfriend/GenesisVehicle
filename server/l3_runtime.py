@@ -310,7 +310,13 @@ def run_l3(args):
     osc.client_cpp.send_message("/Genesis/Init/Pacing", [float(sim_dt)])
 
     SIM_DT = sim_dt
-    MAX_SUBSTEPS = max(5, int(0.1 / sim_dt))
+    # catch-up 상한 — physics_server 와 동일 의미 (--max-catchup-steps 참고).
+    _max_catchup = getattr(args, "max_catchup_steps", None)
+    if _max_catchup is not None:
+        MAX_CATCHUP_STEPS = max(1, int(_max_catchup))
+        print(f" [Pacing] [Catch-up] MAX_CATCHUP_STEPS 재정의: {MAX_CATCHUP_STEPS} (--max-catchup-steps)")
+    else:
+        MAX_CATCHUP_STEPS = max(5, int(0.1 / sim_dt))
     accumulator = 0.0
     last_time = time.perf_counter()
     last_slow_motion_warn_time = 0.0
@@ -459,7 +465,7 @@ def run_l3(args):
         catchup_steps = 0
         physics_dur_total = 0.0
 
-        while accumulator >= SIM_DT and catchup_steps < MAX_SUBSTEPS:
+        while accumulator >= SIM_DT and catchup_steps < MAX_CATCHUP_STEPS:
             # 입력: tid dict → (N,) 배열 → 배치 VehicleInputs 1개
             queued_input = osc.pop_urdf_input()
             if queued_input:
@@ -503,10 +509,10 @@ def run_l3(args):
             step_count += 1
 
         # 데스 스파이럴 방지 (legacy 와 동일)
-        if catchup_steps == MAX_SUBSTEPS and accumulator >= SIM_DT:
+        if catchup_steps == MAX_CATCHUP_STEPS and accumulator >= SIM_DT:
             t_warn = time.perf_counter()
             if t_warn - last_slow_motion_warn_time >= 5.0:
-                sim_ratio = (MAX_SUBSTEPS * SIM_DT) / frame_time if frame_time > 0 else 1.0
+                sim_ratio = (MAX_CATCHUP_STEPS * SIM_DT) / frame_time if frame_time > 0 else 1.0
                 print(f" [WARNING] [Slow-Motion] Simulation lagging behind real-time. Running at {sim_ratio:.2f}x speed. (Next warning in 5s)")
                 last_slow_motion_warn_time = t_warn
             accumulator = 0.0

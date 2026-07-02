@@ -277,6 +277,13 @@ def main():
                              "(one vehicle entity, GPU-batched). Requires all targets to share one URDF.")
     parser.add_argument("--force-cpu", action="store_true",
                         help="(multi-env mode) force CPU backend instead of GPU")
+    parser.add_argument("--max-catchup-steps", type=int, default=None,
+                        help="Max physics steps per loop when behind real-time "
+                             "(default: max(5, 0.1/dt)). The cap does NOT speed "
+                             "anything up — when a step exceeds the dt budget it "
+                             "trades catch-up bursts (jerky pacing) for a steady "
+                             "slow-motion: 1 = one step per loop, smoothest "
+                             "degradation. Irrelevant once a step fits the budget.")
     args = parser.parse_args()
 
     # [L3] 멀티-env 배칭 모드 — 동일 URDF 다수 차량 전용 경로로 분기
@@ -551,7 +558,14 @@ def main():
     osc.client_cpp.send_message("/Genesis/Init/Pacing", [float(sim_dt)])
         
     SIM_DT = sim_dt
-    MAX_SUBSTEPS = max(5, int(0.1 / sim_dt))
+    # catch-up 상한: 기본 max(5, 0.1/dt). --max-catchup-steps 로 재정의 가능 —
+    # 1 이면 루프당 1스텝(버스트 없는 균일 슬로모션), 값이 커질수록 실시간
+    # 복귀를 더 공격적으로 시도(밀린 만큼 몰아 돌려 프레임 간격이 출렁).
+    if args.max_catchup_steps is not None:
+        MAX_CATCHUP_STEPS = max(1, int(args.max_catchup_steps))
+        print(f" [Pacing] [Catch-up] MAX_CATCHUP_STEPS 재정의: {MAX_CATCHUP_STEPS} (--max-catchup-steps)")
+    else:
+        MAX_CATCHUP_STEPS = max(5, int(0.1 / sim_dt))
     accumulator = 0.0
     last_time = time.perf_counter()
     last_slow_motion_warn_time = 0.0
@@ -771,10 +785,10 @@ def main():
             # Lockstep 모드는 고정 1스텝씩 가동
             steps_limit = 1
         else:
-            steps_limit = MAX_SUBSTEPS
+            steps_limit = MAX_CATCHUP_STEPS
 
         # Catch-up Multi-Step Loop (물리 20ms 고정 단위 소비)
-        while (args.lockstep and steps_limit > 0) or (not args.lockstep and accumulator >= SIM_DT and catchup_steps < MAX_SUBSTEPS):
+        while (args.lockstep and steps_limit > 0) or (not args.lockstep and accumulator >= SIM_DT and catchup_steps < MAX_CATCHUP_STEPS):
             if controllers:
                 if not args.lockstep:
                     queued_input = osc.pop_urdf_input()
@@ -842,10 +856,10 @@ def main():
 
 
         # 데스 스파이럴 방지: 따라잡지 못하면 어큐뮬레이터 탕감 및 슬로우 모션 경고 (5초 간격으로 스로틀링 출력)
-        if not args.lockstep and catchup_steps == MAX_SUBSTEPS and accumulator >= SIM_DT:
+        if not args.lockstep and catchup_steps == MAX_CATCHUP_STEPS and accumulator >= SIM_DT:
             current_warn_time = time.perf_counter()
             if current_warn_time - last_slow_motion_warn_time >= 5.0:
-                sim_ratio = (MAX_SUBSTEPS * SIM_DT) / frame_time if frame_time > 0 else 1.0
+                sim_ratio = (MAX_CATCHUP_STEPS * SIM_DT) / frame_time if frame_time > 0 else 1.0
                 print(f" [WARNING] [Slow-Motion] Simulation lagging behind real-time. Running at {sim_ratio:.2f}x speed. (Next warning in 5s)")
                 last_slow_motion_warn_time = current_warn_time
             accumulator = 0.0
