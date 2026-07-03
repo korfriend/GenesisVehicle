@@ -382,10 +382,12 @@ def bench_render(cam, n: int = 20) -> tuple[float, int]:
     amortizes for ``n >= ~10``).
     """
     import torch
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(n):
         cam.render()
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     wall = time.perf_counter() - t0
     return (wall / n * 1000.0, n)

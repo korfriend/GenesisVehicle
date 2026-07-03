@@ -766,29 +766,55 @@ class OSCManager:
         """
         if not target_list:
             return
-            
-        payload = []
+
+        # [PERF v1.0.13] Vectorized UE-frame conversion: gather every chassis +
+        # wheel pose, do ONE numpy pass (scale + axis flips + quat reorder),
+        # then assemble the payload from plain-python .tolist() rows. The old
+        # loop cast ~8 numpy scalars through float() per pose (30 targets x
+        # 10 wheels ≈ 2,600 casts per send, twice per step). Wire format is
+        # byte-identical (OSC packs float32 either way).
+        import numpy as _np
+        tids, locs, rots, n_wheels = [], [], [], []
+        w_locs, w_rots, w_omegas = [], [], []
         for item in target_list:
             if len(item) == 4:
                 tid, location, rotation, wheels = item
             else:
                 tid, location, rotation = item
                 wheels = []
-                
-            ue_loc = [float(location[0] * 100.0), float(location[1] * -100.0), float(location[2] * 100.0)]
-            ue_quat = [float(-rotation[1]), float(rotation[2]), float(-rotation[3]), float(rotation[0])]
-            
-            payload.extend([int(tid), ue_loc[0], ue_loc[1], ue_loc[2], ue_quat[0], ue_quat[1], ue_quat[2], ue_quat[3]])
-            
-            payload.append(int(len(wheels)))
+            tids.append(int(tid))
+            locs.append(location)
+            rots.append(rotation)
+            n_wheels.append(len(wheels))
             for w_tuple in wheels:
-                w_loc, w_rot = w_tuple[0], w_tuple[1]
-                w_omega = w_tuple[2] if len(w_tuple) > 2 else 0.0
-                
-                w_ue_loc = [float(w_loc[0] * 100.0), float(w_loc[1] * -100.0), float(w_loc[2] * 100.0)]
-                w_ue_quat = [float(-w_rot[1]), float(w_rot[2]), float(-w_rot[3]), float(w_rot[0])]
-                payload.extend([w_ue_loc[0], w_ue_loc[1], w_ue_loc[2], w_ue_quat[0], w_ue_quat[1], w_ue_quat[2], w_ue_quat[3], float(w_omega)])
-            
+                w_locs.append(w_tuple[0])
+                w_rots.append(w_tuple[1])
+                w_omegas.append(float(w_tuple[2]) if len(w_tuple) > 2 else 0.0)
+
+        loc_a = _np.asarray(locs, dtype=_np.float64) * (100.0, -100.0, 100.0)
+        rot_a = _np.asarray(rots, dtype=_np.float64)
+        quat_a = _np.stack([-rot_a[:, 1], rot_a[:, 2], -rot_a[:, 3], rot_a[:, 0]], axis=1)
+        loc_l, quat_l = loc_a.tolist(), quat_a.tolist()
+        if w_locs:
+            wl_a = _np.asarray(w_locs, dtype=_np.float64) * (100.0, -100.0, 100.0)
+            wr_a = _np.asarray(w_rots, dtype=_np.float64)
+            wq_a = _np.stack([-wr_a[:, 1], wr_a[:, 2], -wr_a[:, 3], wr_a[:, 0]], axis=1)
+            wl_l, wq_l = wl_a.tolist(), wq_a.tolist()
+
+        payload = []
+        wi = 0
+        for i, tid in enumerate(tids):
+            payload.append(tid)
+            payload.extend(loc_l[i])
+            payload.extend(quat_l[i])
+            m = n_wheels[i]
+            payload.append(m)
+            for _ in range(m):
+                payload.extend(wl_l[wi])
+                payload.extend(wq_l[wi])
+                payload.append(w_omegas[wi])
+                wi += 1
+
         # Add sentinel to prevent OOB
         payload.append(-1)
         self.client_cpp.send_message("/Genesis/Vehicle/TargetBulk", payload)

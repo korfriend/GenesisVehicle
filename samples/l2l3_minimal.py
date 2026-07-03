@@ -41,7 +41,8 @@ def main():
     ap.add_argument("--n_envs", type=int, default=8, help="parallel scenarios (L3)")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--warmup", type=int, default=30)
-    ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU — faster below ~100 envs).")
     args = ap.parse_args()
 
     import genesis as gs
@@ -55,7 +56,7 @@ def main():
     # VehicleScene owns gs.init / the scene / build / step. solver="batched" (the
     # default) groups the K same-kind vehicles into ONE batched compute (this IS
     # MultiVehiclePhysics under the hood); n_envs=N replicates the world N× (L3).
-    VehicleScene.init_backend("cpu" if args.cpu else "gpu")
+    VehicleScene.init_backend("gpu" if args.gpu else "cpu")
     vs = VehicleScene(
         n_envs=N, raycast_mode="single_scene",
         dt=DT, substeps=10,
@@ -90,7 +91,7 @@ def main():
         veh.set_inputs(throttle=thr, brake=brk, steer=0.0)
 
     def sync():
-        if not args.cpu and torch.cuda.is_available():
+        if args.gpu and torch.cuda.is_available():
             torch.cuda.synchronize()
 
     for _ in range(args.warmup):

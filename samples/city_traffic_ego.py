@@ -173,6 +173,8 @@ def main():
                     help="Render top-down camera per step.")
     ap.add_argument("--native", action="store_true",
                     help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU — faster below ~100 envs).")
     args = ap.parse_args()
     if args.native:
         args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
@@ -198,7 +200,7 @@ def main():
     # ------------------------------------------------------------------
     # Scene + Genesis init.
     # ------------------------------------------------------------------
-    VehicleScene.init_backend("gpu")
+    VehicleScene.init_backend("gpu" if args.gpu else "cpu")
     DT = 0.02
     cam_h = 55.0
     from genesis_vehicle.samples import _hud
@@ -347,7 +349,8 @@ def main():
     print(f"[drive {n_steps} steps  ego throttle={args.ego_throttle:.2f}]\n")
 
     # Always-on timing — single sync before/after, zero per-step overhead.
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t_start = time.perf_counter()
     render_every = max(1, int(0.04 / DT))      # ~25 fps
     hud_perf = _hud.PerfMeter(window=60)
@@ -403,7 +406,8 @@ def main():
                 user_quit = True
                 break
 
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
     _hud.cv2_cleanup()
     n_done = step + 1 if user_quit else n_steps

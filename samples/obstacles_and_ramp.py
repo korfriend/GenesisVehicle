@@ -102,13 +102,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["dual_scene", "single_scene"], default="dual_scene",
                     help="raycast_mode for the educational run (default dual_scene).")
-    ap.add_argument("--cpu", action="store_true", help="run on CPU instead of GPU.")
+    ap.add_argument("--gpu", action="store_true",
+                    help="opt into the GPU backend (default: CPU — faster at small n_envs).")
     ap.add_argument("--bench", action="store_true",
                     help="time single_scene vs dual_scene over the drive loop.")
     ap.add_argument("--n-envs", type=int, default=1,
                     help="L3 batch size for --bench (default 1).")
     args = ap.parse_args()
-    backend = "cpu" if args.cpu else "gpu"
+    backend = "gpu" if args.gpu else "cpu"
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
 
     if args.bench:

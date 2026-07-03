@@ -62,7 +62,7 @@ import time
 # ---------------------------------------------------------------------------
 
 def _internal_run(solver: str, n_per_kind: int,
-                  warmup: int, steps: int) -> None:
+                  warmup: int, steps: int, gpu: bool = False) -> None:
     import genesis as gs
     import torch
     from genesis_vehicle import (
@@ -107,7 +107,7 @@ def _internal_run(solver: str, n_per_kind: int,
     # substeps=30 (not 10): the 6-wheel Truck kind NaNs the rigid solver at
     # substeps=10 in the per_vehicle path (same fix road_loop used at 0.9.21), so
     # both solvers run. It scales both equally — the solver comparison is unchanged.
-    VehicleScene.init_backend("gpu")
+    VehicleScene.init_backend("gpu" if gpu else "cpu")
     vs = VehicleScene(
         n_envs=1, raycast_mode="single_scene",
         solver=("batched" if solver == "multi_batched" else "per_vehicle"),
@@ -147,11 +147,13 @@ def _internal_run(solver: str, n_per_kind: int,
     for _ in range(warmup):
         vs.step()
 
-    torch.cuda.synchronize()
+    if gpu and torch.cuda.is_available():
+        torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(steps):
         vs.step()
-    torch.cuda.synchronize()
+    if gpu and torch.cuda.is_available():
+        torch.cuda.synchronize()
     wall = time.perf_counter() - t0
 
     ms_per_step = wall / steps * 1000.0
@@ -172,12 +174,14 @@ _RESULT_RE = re.compile(
 
 
 def _run_one(solver: str, n_per_kind: int,
-             warmup: int, steps: int) -> tuple[float, float] | None:
+             warmup: int, steps: int, gpu: bool = False) -> tuple[float, float] | None:
     cmd = [
         sys.executable, "-m", "genesis_vehicle.samples.perf_multi_vehicle",
         "--internal", "--solver", solver, "--n_per_kind", str(n_per_kind),
         "--warmup", str(warmup), "--steps", str(steps),
     ]
+    if gpu:
+        cmd.append("--gpu")
     print(f"  [solver={solver:>13}  n_per_kind={n_per_kind:>3}]  "
           f"spawning subprocess...", flush=True)
     env = os.environ.copy()
@@ -211,10 +215,14 @@ def main():
     ap.add_argument("--solver", default="per_vehicle",
                     choices=["per_vehicle", "multi_batched"])
     ap.add_argument("--n_per_kind", type=int, default=4)
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU — faster at "
+                         "these fleet sizes; GPU is kernel-launch bound).")
     args = ap.parse_args()
 
     if args.internal:
-        _internal_run(args.solver, args.n_per_kind, args.warmup, args.steps)
+        _internal_run(args.solver, args.n_per_kind, args.warmup, args.steps,
+                      gpu=args.gpu)
         return
 
     n_list = [int(x) for x in args.n_per_kind_list.split(",") if x.strip()]
@@ -226,8 +234,8 @@ def main():
 
     rows = []   # (n_per_kind, n_total, per_vehicle_ms, multi_batched_ms)
     for K in n_list:
-        per_v = _run_one("per_vehicle",   K, args.warmup, args.steps)
-        mul_b = _run_one("multi_batched", K, args.warmup, args.steps)
+        per_v = _run_one("per_vehicle",   K, args.warmup, args.steps, gpu=args.gpu)
+        mul_b = _run_one("multi_batched", K, args.warmup, args.steps, gpu=args.gpu)
         if per_v is None or mul_b is None:
             print(f"  [skipping K={K} due to subprocess failure]")
             continue

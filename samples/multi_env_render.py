@@ -65,6 +65,8 @@ def main():
                          "offscreen camera render (otherwise the demo is headless).")
     ap.add_argument("--native", action="store_true",
                     help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU — faster below ~100 envs).")
     args = ap.parse_args()
     if args.native:
         args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
@@ -79,7 +81,7 @@ def main():
     print(f"  drive    : throttle {args.throttle:.2f} × per-env scale, "
           f"{args.duration:.1f} s")
 
-    VehicleScene.init_backend("gpu")
+    VehicleScene.init_backend("gpu" if args.gpu else "cpu")
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
 
     from genesis_vehicle.samples import _hud
@@ -181,7 +183,8 @@ def main():
     # Per-env drive controls (the tensors built above) — set once, persists.
     veh.set_inputs(throttle=throttle, brake=brake, steer=steer)
     # Timed end-to-end with a single CUDA sync before/after (zero per-step overhead).
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t_start = time.perf_counter()
     user_quit = False
     for step in range(n_steps):
@@ -191,7 +194,8 @@ def main():
             if not _hud_render(step):
                 user_quit = True
                 break
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
     _hud.cv2_cleanup()
     n_done = step + 1 if user_quit else n_steps

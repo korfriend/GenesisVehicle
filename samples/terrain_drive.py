@@ -130,7 +130,8 @@ def main():
                          "exists to avoid; the SDK now REFUSES it (mesh-guard) "
                          "rather than risk an out-of-memory crash. Decimate the "
                          "terrain (raise --res-equivalent) to actually run it.")
-    ap.add_argument("--cpu", action="store_true", help="Force CPU backend.")
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU — faster at n_envs=1).")
     ap.add_argument("--amp", type=float, default=0.7,
                     help="Terrain undulation amplitude (m). Default 0.7 (severe); "
                          "try 1.0+ for extreme, 0.2 for gentle.")
@@ -158,7 +159,7 @@ def main():
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
     DT = cfg.recommended_dt
 
-    VehicleScene.init_backend("cpu" if args.cpu else "gpu")
+    VehicleScene.init_backend("gpu" if args.gpu else "cpu")
     vs = VehicleScene(
         raycast_mode=mode,
         dt=DT, substeps=10, n_envs=1,
@@ -271,7 +272,7 @@ def main():
     infinite = args.viewer or args.native
     x0 = float(veh.get_pos()[0][0])
     z_lo, z_hi, wraps = 1e9, -1e9, 0
-    torch.cuda.synchronize() if not args.cpu else None
+    torch.cuda.synchronize() if args.gpu else None
     t_start = time.perf_counter()
     user_quit = False
     step = 0
@@ -308,7 +309,7 @@ def main():
     except KeyboardInterrupt:
         user_quit = True
         print("\n  stopped.")
-    torch.cuda.synchronize() if not args.cpu else None
+    torch.cuda.synchronize() if args.gpu else None
     wall = time.perf_counter() - t_start
     _hud.cv2_cleanup()
 
