@@ -10,6 +10,41 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.11] — 2026-07-04
+
+| 약자 | 의미 |
+|---|---|
+| proxy sync | dual_scene에서 매 스텝 차량 포즈를 raycast scene 프록시에 복사 |
+| FK | Forward Kinematics (set_pos/set_quat 마다 raycast 씬 전체에 대해 실행되던 것) |
+| L2 / L3 | per-entity (K entities × 1 env) / multi-env (1 entity × n_envs) |
+
+### Changed — batched proxy sync (dual_scene): 2·K whole-scene FK passes → 1
+
+- `VehicleScene._measure_distances` synced each vehicle's proxy via
+  `Vehicle._sync_proxy()` — a python loop where every `set_pos`/`set_quat`
+  triggers a WHOLE-raycast-scene FK: 2·K FK passes + 4·K engine entries per
+  step (~1 ms/vehicle; measured **29.8 ms at K=30**, i.e. 80 % of the
+  L2-vs-L3 dual gap and the reason "no-collision L2 ≈ L3" did not hold).
+- New `_sync_proxies_batched()`: ONE batched `get_links_pos/quat` read from
+  the main solver + ONE `set_base_links_pos(skip_forward=True)` +
+  `set_base_links_quat` write (single FK) onto all proxies. Pose semantics
+  identical (user-frame read / world-frame write, same as `_sync_proxy`,
+  which is kept for `reset()` and as the automatic fallback — one-time
+  `[genesis_vehicle:proxy-sync]` warning if the batched path ever fails).
+- Measured (CPU, plane, 30 tanks, zero inter-vehicle contact, dual both):
+
+  | ms/step | L2 dual 이전 | L2 dual 이후 | L3 dual |
+  |---|---|---|---|
+  | raycast/proxy | 29.77 | **6.79** | 4.92 |
+  | vs.step() 합계 | 37.57 | **13.45** | 8.95 |
+
+  "충돌 없으면 L2 ≈ L3" now holds within ~1.5× (both real-time at 30
+  vehicles); L3 also gains slightly (its single proxy went 2 FK → 1:
+  10.4 → 9.0 ms). Equivalence pinned by `tests/test_proxy_sync_batched.py`
+  (batched == loop poses; step path takes the batched branch, no fallback).
+
+---
+
 ## [1.0.10] — 2026-07-03
 
 ### Added — `VehicleScene.add_raycast_surface()` (first-class raycast-only entity)
