@@ -185,6 +185,33 @@ def test_add_raycast_surface_dual_scene(cpu_genesis, cube_obj):
     assert type(body.entity_raycast).__name__ == "KinematicEntity"
 
 
+def test_dynamic_obstacle_gets_wheel_raycast_mirror_in_dual_scene(cpu_genesis):
+    """1.0.12: the per-entity server defaults to dual_scene, where a dynamic
+    body is INVISIBLE to the wheel rays unless it has a synced raycast mirror.
+    env_builder must pass wheel_raycast for dual_scene so wheels keep riding
+    moving ramps/platforms (the implicit single_scene behavior)."""
+    init = {"obstacles": {0: dict(
+        type=1, pos=[5.0, 0.0, 0.5], quat=[1.0, 0.0, 0.0, 0.0], scale=[1.0, 1.0, 1.0],
+        collision_source="", mesh_path="", b_dynamic=1,
+        mass=2.0, friction=-1.0, restitution=-1.0)}}
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
+    env_builder.build_obstacles(
+        vs=vs, init_data=init,
+        ue_friction=1.0, ue_restitution=0.0, vis_mode=None)
+    body = vs.dynamics[0]
+    assert body.has_raycast                     # mirror requested
+    assert body.entity_raycast is not None      # synced raycast-scene mirror
+
+    # single_scene (--single-scene): rays already hit the rigid body — the flag
+    # must be skipped (no mirror, and no per-obstacle warning spam).
+    vs2 = VehicleScene(n_envs=1, raycast_mode="single_scene", init_genesis=False)
+    env_builder.build_obstacles(
+        vs=vs2, init_data=init,
+        ue_friction=1.0, ue_restitution=0.0, vis_mode=None)
+    assert not vs2.dynamics[0].has_raycast
+    assert vs2.dynamics[0].entity_raycast is None
+
+
 def test_add_raycast_surface_single_scene_fails_fast(cpu_genesis, cube_obj):
     """single_scene rays only hit rigid collision geoms → same fail-fast as
     add_static(collision=False)."""

@@ -337,7 +337,13 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
                                        vis_mode=vis_mode, name=f"obs_{obs_id}")
             obs_entity = handle.entity_main if handle.entity_main is not None else handle.entity_raycast
         else:
+            # wheel_raycast: in dual_scene a dynamic body is invisible to the wheel
+            # rays unless it gets a synced raycast mirror — without it the wheels
+            # would clip through moving ramps/platforms that single_scene handled
+            # implicitly (rays hit rigid colliders there, so the flag is a no-op
+            # and is skipped to avoid the SDK's single-scene warning per obstacle).
             handle = vs.add_dynamic(morph, physics=(b_dynamic == 1),
+                                    wheel_raycast=vs.is_dual_scene,
                                     material=mat, surface=surface, vis_mode=vis_mode,
                                     mass=(obs_mass if b_dynamic == 1 else None),
                                     name=f"obs_{obs_id}")

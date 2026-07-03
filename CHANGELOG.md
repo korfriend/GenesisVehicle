@@ -10,6 +10,49 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.12] — 2026-07-04
+
+| 약자 | 의미 |
+|---|---|
+| rco | `--road-raycast-only` (도로를 레이캐스트 전용 표면으로, main scene 충돌체 생략) |
+| L2 / L3 | per-entity (K entities × 1 env) / multi-env (1 entity × n_envs) |
+| BVH | Bounding Volume Hierarchy (레이캐스트 가속 구조) |
+
+### Changed — per-entity (L2) server defaults to `dual_scene`
+
+- The per-entity server built `raycast_mode="inline"` (single_scene) unless
+  rco was given (`physics_server.py`) — the only entry point whose default
+  diverged from the SDK (`VehicleScene` default) and L3 (always `raywheel`).
+  Now **both server modes default to `dual_scene`**: statics get a kinematic
+  raycast mirror (static BVH — no per-step re-fit; wheels ride the exact mesh
+  surface), and rco composes on top (drops the main-scene road collider).
+- **Dynamic obstacles keep their wheel-raycast semantics**:
+  `env_builder.build_obstacles` now passes `wheel_raycast=vs.is_dual_scene`
+  to `add_dynamic`, so moving ramps/platforms get a per-step-synced raycast
+  mirror. Without this, switching to dual_scene would have made wheels clip
+  through every dynamic obstacle (rays only hit the raycast scene there;
+  single_scene sensed rigid colliders implicitly).
+- New `--single-scene` flag (per-entity only) restores the pre-1.0.12
+  one-scene behavior; rejected with `--road-raycast-only` at arg-parse time
+  (an rco road is a kinematic raycast surface — it needs the raycast scene),
+  ignored with a warning under `--multi-env`.
+- Docs: `docs/server.md` §3 documents the raycast-scene default + opt-out.
+
+### Changed — terminology: server modes labeled with their batching axes
+
+- "per-entity" IS the L2 axis (K interacting vehicles × 1 env) — the name
+  predates 1.0.8, when each vehicle really ran its own `VehiclePhysics`;
+  since then identical targets are batched per *kind*, so the mode is L2 in
+  both senses. Docs and the startup banner now say **per-entity (L2)** /
+  **multi-env (L3)** consistently (`docs/server.md` §3 mode table gains a
+  "Batching axis" column; the stale "N × VehiclePhysics loop" solver cell is
+  corrected). CLI flags are unchanged (`--multi-env` stays; no `--l3`).
+- Tests: `test_dynamic_obstacle_gets_wheel_raycast_mirror_in_dual_scene`
+  guards the mirror (dual: mirror present; single: flag skipped, no warning
+  spam). 106 pytest pass.
+
+---
+
 ## [1.0.11] — 2026-07-04
 
 | 약자 | 의미 |
