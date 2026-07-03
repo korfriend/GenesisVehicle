@@ -320,12 +320,13 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
                                           fixed=is_fixed, align=False, collision=False,
                                           visualization=True, convexify=False, decimate=False)
                 if road_raycast_only:
-                    # rco road: raycast surface ONLY — no chassis collision, no CoACD.
-                    # Skip the main-scene collider entirely so there is no redundant
-                    # no-collision rigid (halves road-mesh memory on big maps).
-                    handle = vs.add_static(collision=False, wheel_raycast_morph=rc_morph,
-                                           material=mat, surface=surface, vis_mode=vis_mode,
-                                           name=f"obs_{obs_id}")
+                    # rco road: raycast surface ONLY — no chassis collision, no CoACD,
+                    # no rigid-solver presence at all (v1.0.10 first-class API; the
+                    # kinematic use_visual_raycasting body lives in the raycast scene
+                    # with a build-once BVH). material/vis_mode are irrelevant for a
+                    # kinematic surface, so they are not passed.
+                    handle = vs.add_raycast_surface(rc_morph, surface=surface,
+                                                    name=f"obs_{obs_id}")
                 else:
                     # full road: convex CoACD collider (morph) + detailed raycast surface.
                     handle = vs.add_static(collision_morph=morph, wheel_raycast_morph=rc_morph,

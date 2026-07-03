@@ -10,6 +10,47 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.10] — 2026-07-03
+
+### Added — `VehicleScene.add_raycast_surface()` (first-class raycast-only entity)
+
+- A wheel-raycast-ONLY static surface: a Kinematic `use_visual_raycasting`
+  body in the raycast scene with **zero rigid-solver presence** — no
+  collision geoms, no FK/dynamics, no broadphase pairs, build-once BVH, and
+  the mesh-guard face limit does not apply. This is the first-class name for
+  `add_static(collision=False, wheel_raycast_morph=...)` — the negative-flag
+  spelling hid the intent (its single_scene fall-through was a real bug
+  pre-1.0.7). `dual_scene` only; single_scene raises the same fail-fast
+  `ValueError`. env_builder's `--road-raycast-only` road path now uses it.
+- Context: ray-cast wheels never need the road as a *collider* — the solver
+  already gates contact work (SAP broadphase + hibernation), but a road
+  mesh's AABB spans the whole map, so chassis-vs-road narrow-phase/SDF ran
+  every step with zero actual contact. A raycast-only surface removes those
+  pairs at the source. Measured (CPU L3, 4.4k-face road, 85 hulls): step
+  9.90 vs 11.09 ms — and with a CoACD road collider the chassis rubs the
+  convex bulge above the true surface, dragging cruise speed 5.53 → 4.66 m/s
+  (−16 %), so the raycast-only surface is also the *more correct* physics.
+
+### Changed — vectorized `lerp_state` (server interpolation, O(N·wheels) python → one numpy pass)
+
+- The server interpolates every chassis/wheel/obstacle pose each loop before
+  the OSC send. This was one python `slerp` call per quaternion — 30 tanks ×
+  10 wheels = 300+ calls/loop. Field data (CPU L3, 30 tanks): non-physics
+  loop overhead grew to **14.2 ms/loop**, rivaling the physics step itself
+  (15.5 ms) and pushing the loop past the 20 ms budget.
+- `lerp_state` now gathers all quats into flat arrays and slerps them in ONE
+  numpy pass (`_slerp_batch`: normalize → shortest path → spherical weights
+  with nlerp fallback — same semantics as the scalar `slerp`, which is kept).
+  Measured: **3.42 → 0.36 ms/call** at 30 targets × 10 wheels (9.4×),
+  1.12 → 0.18 ms at 10 targets. Output format unchanged (per-target tuples;
+  entries missing from `prev` still pass through untouched). Both server
+  modes benefit (L3 imports the same function).
+- Equivalence pinned by `tests/test_lerp_state_vectorized.py`: vectorized
+  output matches a verbatim copy of the old per-quaternion loop (positions,
+  quats, wheel-angle wrap lerp, passthrough) at α ∈ {0, 0.3, 0.9999}.
+
+---
+
 ## [1.0.9] — 2026-07-02
 
 ### Added — `--max-catchup-steps` (server pacing knob)

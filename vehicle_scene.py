@@ -624,6 +624,31 @@ class VehicleScene:
                                material=gs.materials.Rigid(friction=friction),
                                name="ground")
 
+    def add_raycast_surface(self, morph: Any, *, surface: Any = None,
+                            name: Optional[str] = None) -> StaticBody:
+        """Register a **wheel-raycast-ONLY** static surface (v1.0.10).
+
+        The body exists solely for the wheel rays: a Kinematic
+        ``use_visual_raycasting`` entity in the raycast scene — it has **zero
+        rigid-solver presence** (no collision geoms, no FK/dynamics, no
+        broadphase pairs, its BVH is built once). This is the first-class name
+        for what ``add_static(collision=False, wheel_raycast_morph=...)`` did —
+        the negative-flag spelling hid the intent (and its single_scene
+        fall-through was a real bug pre-1.0.7), so express it directly:
+
+        >>> vs.add_raycast_surface(gs.morphs.Mesh(file="road.obj",
+        ...                        collision=False), name="road")
+
+        Ideal for high-poly roads/terrain the vehicles drive on but whose
+        chassis-collision response you don't need (``--road-raycast-only``).
+        The mesh-guard face limit does not apply (kinematic, no SDF, static
+        BVH). ``dual_scene`` only — in ``single_scene`` the wheel rays only hit
+        rigid collision geoms, so this raises ``ValueError`` (same fail-fast
+        as ``add_static(collision=False)``).
+        """
+        return self.add_static(wheel_raycast_morph=morph, collision=False,
+                               surface=surface, name=name)
+
     def add_camera(self, *, res=(1280, 720), pos=(3.0, -3.0, 2.0),
                    lookat=(0.0, 0.0, 0.0), up=(0.0, 0.0, 1.0), fov=50.0,
                    GUI=False, name=None, **kwargs) -> Camera:
