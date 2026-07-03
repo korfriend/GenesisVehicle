@@ -185,63 +185,110 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
     return state
 
 
+def _slerp_batch(q0, q1, t):
+    """Vectorized quaternion slerp — ``q0``/``q1`` are ``(N, 4)`` ``[w,x,y,z]``,
+    ``t`` a scalar in [0, 1]. Semantics match the scalar ``slerp`` above
+    (normalize inputs, shortest path, nlerp fallback for near-parallel pairs);
+    one numpy pass replaces N python calls.
+    """
+    q0 = np.asarray(q0, dtype=np.float32).copy()
+    q1 = np.asarray(q1, dtype=np.float32).copy()
+    n0 = np.linalg.norm(q0, axis=1, keepdims=True)
+    n1 = np.linalg.norm(q1, axis=1, keepdims=True)
+    np.divide(q0, n0, out=q0, where=n0 > 0)
+    np.divide(q1, n1, out=q1, where=n1 > 0)
+
+    dot = np.sum(q0 * q1, axis=1)
+    q1 = np.where((dot < 0.0)[:, None], -q1, q1)          # shortest path
+    dot = np.abs(dot)
+
+    theta0 = np.arccos(np.clip(dot, -1.0, 1.0))
+    sin0 = np.sin(theta0)
+    spherical = (dot <= 0.9995) & (sin0 > 1e-6)
+    sin0_safe = np.where(sin0 > 1e-6, sin0, 1.0)
+    # spherical weights; near-parallel falls back to linear (nlerp) weights
+    s0 = np.where(spherical, np.sin((1.0 - t) * theta0) / sin0_safe, 1.0 - t)
+    s1 = np.where(spherical, np.sin(t * theta0) / sin0_safe, t)
+
+    out = s0[:, None] * q0 + s1[:, None] * q1
+    n = np.linalg.norm(out, axis=1, keepdims=True)
+    np.divide(out, n, out=out, where=n > 0)
+    return out
+
+
 def lerp_state(prev, curr, a):
     """
     Interpolates states between prev and curr with factor a in [0, 1).
+
+    v1.0.10: vectorized — all chassis/wheel/obstacle quats are gathered into
+    flat arrays and slerped in ONE numpy pass (`_slerp_batch`) instead of one
+    python `slerp` call per quaternion. The old per-wheel loop cost the server
+    ~0.4 ms/vehicle/loop (30 tanks x 10 wheels = 300 python slerps -> ~14 ms,
+    rivaling the physics step itself). Output format is unchanged.
     """
     interpolated = {
         'targets': [],
         'dynamic_obstacles': []
     }
-    
-    # 1. Target entities interpolation
+
+    # 1. Target entities — gather matched pairs, batch-interpolate, scatter.
+    tids, P0, P1, Q0, Q1 = [], [], [], [], []
+    wheel_counts = []
+    WP0, WP1, WQ0, WQ1, WA0, WA1 = [], [], [], [], [], []
     for tid, curr_data in curr['targets'].items():
-        if tid in prev['targets']:
-            prev_p, prev_q, prev_wheels = prev['targets'][tid]
-            curr_p, curr_q, curr_wheels = curr_data
-            
-            # Position LERP
-            interp_p = prev_p * (1.0 - a) + curr_p * a
-            # Rotation SLERP
-            interp_q = slerp(prev_q, curr_q, a)
-            
-            # Wheels LERP/SLERP
-            interp_wheels = []
-            for j in range(min(len(prev_wheels), len(curr_wheels))):
-                pw_tuple = prev_wheels[j]
-                cw_tuple = curr_wheels[j]
-                
-                pw_p, pw_q = pw_tuple[0], pw_tuple[1]
-                cw_p, cw_q = cw_tuple[0], cw_tuple[1]
-                pw_angle = pw_tuple[2] if len(pw_tuple) > 2 else 0.0
-                cw_angle = cw_tuple[2] if len(cw_tuple) > 2 else 0.0
-                
-                iw_p = pw_p * (1.0 - a) + cw_p * a
-                iw_q = slerp(pw_q, cw_q, a)
-                
-                # Boundary wrap-around LERP for wheel angle
-                diff = cw_angle - pw_angle
-                diff = (diff + np.pi) % (2.0 * np.pi) - np.pi
-                iw_angle = (pw_angle + diff * a) % (2.0 * np.pi)
-                
-                interp_wheels.append((iw_p, iw_q, iw_angle))
-                
-            interpolated['targets'].append((tid, interp_p, interp_q, interp_wheels))
-        else:
+        if tid not in prev['targets']:
             interpolated['targets'].append((tid, curr_data[0], curr_data[1], curr_data[2]))
-            
-    # 2. Dynamic obstacles interpolation
+            continue
+        prev_p, prev_q, prev_wheels = prev['targets'][tid]
+        curr_p, curr_q, curr_wheels = curr_data
+        tids.append(tid)
+        P0.append(prev_p); P1.append(curr_p)
+        Q0.append(prev_q); Q1.append(curr_q)
+        m = min(len(prev_wheels), len(curr_wheels))
+        wheel_counts.append(m)
+        for j in range(m):
+            pw = prev_wheels[j]; cw = curr_wheels[j]
+            WP0.append(pw[0]); WQ0.append(pw[1])
+            WA0.append(pw[2] if len(pw) > 2 else 0.0)
+            WP1.append(cw[0]); WQ1.append(cw[1])
+            WA1.append(cw[2] if len(cw) > 2 else 0.0)
+
+    if tids:
+        P0a = np.asarray(P0, dtype=np.float32); P1a = np.asarray(P1, dtype=np.float32)
+        iP = P0a * (1.0 - a) + P1a * a
+        iQ = _slerp_batch(Q0, Q1, a)
+        if WP0:
+            WP0a = np.asarray(WP0, dtype=np.float32); WP1a = np.asarray(WP1, dtype=np.float32)
+            iWP = WP0a * (1.0 - a) + WP1a * a
+            iWQ = _slerp_batch(WQ0, WQ1, a)
+            WA0a = np.asarray(WA0, dtype=np.float32); WA1a = np.asarray(WA1, dtype=np.float32)
+            # Boundary wrap-around LERP for wheel angle
+            diff = (WA1a - WA0a + np.pi) % (2.0 * np.pi) - np.pi
+            iWA = (WA0a + diff * a) % (2.0 * np.pi)
+        off = 0
+        for i, tid in enumerate(tids):
+            m = wheel_counts[i]
+            wheels = [(iWP[off + j], iWQ[off + j], float(iWA[off + j])) for j in range(m)]
+            off += m
+            interpolated['targets'].append((tid, iP[i], iQ[i], wheels))
+
+    # 2. Dynamic obstacles — same batched treatment.
+    oids, OP0, OP1, OQ0, OQ1 = [], [], [], [], []
     for o_id, curr_data in curr['dynamic_obstacles'].items():
-        if o_id in prev['dynamic_obstacles']:
-            prev_p, prev_q = prev['dynamic_obstacles'][o_id]
-            curr_p, curr_q = curr_data
-            
-            interp_p = prev_p * (1.0 - a) + curr_p * a
-            interp_q = slerp(prev_q, curr_q, a)
-            interpolated['dynamic_obstacles'].append((o_id, interp_p, interp_q))
-        else:
+        if o_id not in prev['dynamic_obstacles']:
             interpolated['dynamic_obstacles'].append((o_id, curr_data[0], curr_data[1]))
-            
+            continue
+        prev_p, prev_q = prev['dynamic_obstacles'][o_id]
+        oids.append(o_id)
+        OP0.append(prev_p); OP1.append(curr_data[0])
+        OQ0.append(prev_q); OQ1.append(curr_data[1])
+    if oids:
+        OP0a = np.asarray(OP0, dtype=np.float32); OP1a = np.asarray(OP1, dtype=np.float32)
+        iOP = OP0a * (1.0 - a) + OP1a * a
+        iOQ = _slerp_batch(OQ0, OQ1, a)
+        for i, o_id in enumerate(oids):
+            interpolated['dynamic_obstacles'].append((o_id, iOP[i], iOQ[i]))
+
     return interpolated
 
 

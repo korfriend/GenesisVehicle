@@ -194,6 +194,15 @@ with it in the main scene; **Wheels sense** = the wheel rays detect it as ground
 | `False` | `dual_scene` | — (none) | kinematic mirror | ❌ | ✅ |
 | `False` | `single_scene` | ⛔ **`ValueError`** (since v1.0.7) | — | — | — |
 
+**`add_raycast_surface(morph, *, surface=None, name=None)`** (v1.0.10) is the
+first-class spelling of the `collision=False` row: a wheel-raycast-ONLY
+surface — kinematic `use_visual_raycasting` body in the raycast scene, zero
+rigid-solver presence (no collision geoms / FK / broadphase pairs, build-once
+BVH, mesh-guard exempt). Prefer it over `add_static(collision=False, ...)`
+for roads/terrain the wheels drive on but the chassis need not collide with
+(the server's `--road-raycast-only` path uses it). dual_scene only — raises
+the same single_scene `ValueError`.
+
 ⚠️ **single_scene caveats:** `collision=False` is a **dual_scene-only** feature
 (the kinematic `use_visual_raycasting` surface lives in the raycast scene) — in
 single_scene the wheel rays only hit rigid collision geoms, so a no-collision
