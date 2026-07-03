@@ -466,6 +466,10 @@ class VehicleScene:
         self._config_version = 0
         self._grouped_version = -1
         self._built = False
+        # Batched proxy sync (dual_scene): lazy (main_idx, proxy_idx, rc_solver)
+        # cache + tri-state health flag (None=untried / True / False=fell back).
+        self._proxy_sync_cache = None
+        self._proxy_sync_ok = None
 
         # Ensure the Genesis physics backend is up (default cpu). To run on GPU,
         # call VehicleScene.init_backend("gpu") BEFORE constructing any VehicleScene;
@@ -924,8 +928,20 @@ class VehicleScene:
         self._require_built()
         if not self._two_scene:
             return {veh: None for veh in self._vehicles}
-        for veh in self._vehicles:
-            veh._sync_proxy()
+        if self._vehicles:
+            if self._proxy_sync_ok is not False:
+                try:
+                    self._sync_proxies_batched()
+                    self._proxy_sync_ok = True
+                except Exception:
+                    self._proxy_sync_ok = False
+                    _logger.warning(
+                        "[genesis_vehicle:proxy-sync] batched proxy sync failed; "
+                        "falling back to the per-vehicle loop (correct but ~1 ms/"
+                        "vehicle slower).", exc_info=True)
+            if self._proxy_sync_ok is False:
+                for veh in self._vehicles:
+                    veh._sync_proxy()
         for obs in self._dynamics:
             if obs.entity_raycast is not None:
                 self._sync_dynamic(obs)
@@ -936,6 +952,39 @@ class VehicleScene:
         self._raycast_scene.step(update_visualizer=False)
         return {veh: read_distances(veh.sensor, self.n_envs)
                 for veh in self._vehicles}
+
+    def _sync_proxies_batched(self) -> None:
+        """Mirror ALL chassis base poses onto the raycast-scene proxies in one
+        batched solver write + a SINGLE forward-kinematics pass (v1.0.11).
+
+        The per-vehicle ``Vehicle._sync_proxy`` loop pays a fixed engine-entry
+        overhead per call AND a whole-raycast-scene FK per ``set_pos``/
+        ``set_quat`` — 2·K FK passes for K vehicles (~1 ms/vehicle: measured
+        29.8 ms at K=30, which was 80 % of the L2-vs-L3 dual-scene gap).
+        This method reads every chassis base pose from the main solver in one
+        batched ``get_links_pos/quat`` and writes them onto the proxies via
+        ``set_base_links_pos(skip_forward=True)`` + ``set_base_links_quat``
+        (which runs FK once for the whole batch).
+
+        Pose semantics are identical to ``_sync_proxy``: read the USER-frame
+        base pose (what ``entity.get_pos()`` returns), write it WORLD-frame
+        onto the proxy (``relative=False``). ``_measure_distances`` falls back
+        to the per-vehicle loop (with a one-time warning) if this raises.
+        """
+        if self._proxy_sync_cache is None:
+            self._proxy_sync_cache = (
+                [v.entity_main.base_link_idx for v in self._vehicles],
+                [v.proxy.base_link_idx for v in self._vehicles],
+                self._vehicles[0].proxy._solver,
+            )
+        main_idx, proxy_idx, rc_solver = self._proxy_sync_cache
+        solver = self.rigid_solver
+        pos = solver.get_links_pos(main_idx, relative=True)     # (n_envs, K, 3)
+        quat = solver.get_links_quat(main_idx, relative=True)   # (n_envs, K, 4)
+        rc_solver.set_base_links_pos(pos, proxy_idx, relative=False,
+                                     skip_forward=True)
+        rc_solver.set_base_links_quat(quat, proxy_idx, relative=False,
+                                      skip_forward=False)       # ONE FK pass
 
     def step(self) -> None:
         """One simulation step.
