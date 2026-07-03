@@ -99,7 +99,8 @@ def run(mode: str, backend: str, horizontal_scale: float, n_envs: int = 1,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["dual_scene", "single_scene"], default="dual_scene")
-    ap.add_argument("--cpu", action="store_true", help="Use the CPU backend.")
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU — faster at small n_envs).")
     ap.add_argument("--compare", action="store_true",
                     help="Run single AND split, print pose match + timing.")
     ap.add_argument("--horizontal-scale", type=float, default=0.25,
@@ -108,7 +109,7 @@ def main():
                     help="L3 batch size. Split's win grows strongly with n_envs "
                          "(the static terrain BVH is shared across envs).")
     args = ap.parse_args()
-    backend = "cpu" if args.cpu else "gpu"
+    backend = "gpu" if args.gpu else "cpu"
 
     print(f"genesis_vehicle v{sdk_version}  |  two_scene_terrain  "
           f"(backend={backend}, horizontal_scale={args.horizontal_scale}, "

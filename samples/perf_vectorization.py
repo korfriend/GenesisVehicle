@@ -50,7 +50,7 @@ import time
 # Internal mode — one measurement, machine-parseable output
 # ---------------------------------------------------------------------------
 
-def _internal_run(n_envs: int, warmup: int, steps: int) -> None:
+def _internal_run(n_envs: int, warmup: int, steps: int, gpu: bool = False) -> None:
     """Run the SDK in this process at the given n_envs, print one line:
 
         RESULT n_envs=<N> ms_per_step=<X> env_steps_per_s=<Y>
@@ -66,7 +66,7 @@ def _internal_run(n_envs: int, warmup: int, steps: int) -> None:
     # VehicleScene owns gs.init / scene / build / step. Default solver="batched"
     # → this measures L3 scaling of the default single-vehicle path (a batched
     # kind-of-1); n_envs is the L3 batch axis.
-    VehicleScene.init_backend("gpu")
+    VehicleScene.init_backend("gpu" if gpu else "cpu")
     vs = VehicleScene(
         n_envs=n_envs, raycast_mode="single_scene", dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
@@ -98,11 +98,13 @@ def _internal_run(n_envs: int, warmup: int, steps: int) -> None:
         vs.step()
 
     # Measurement.
-    torch.cuda.synchronize()
+    if gpu and torch.cuda.is_available():
+        torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(steps):
         vs.step()
-    torch.cuda.synchronize()
+    if gpu and torch.cuda.is_available():
+        torch.cuda.synchronize()
     wall = time.perf_counter() - t0
 
     ms_per_step      = wall / steps * 1000.0
@@ -122,7 +124,8 @@ _RESULT_RE = re.compile(
 )
 
 
-def _run_one(n_envs: int, warmup: int, steps: int) -> tuple[float, float] | None:
+def _run_one(n_envs: int, warmup: int, steps: int,
+             gpu: bool = False) -> tuple[float, float] | None:
     """Spawn this script in --internal mode at the given n_envs.
     Returns (ms_per_step, env_steps_per_s) or None on failure."""
     cmd = [
@@ -130,6 +133,8 @@ def _run_one(n_envs: int, warmup: int, steps: int) -> tuple[float, float] | None
         "--internal", "--n_envs", str(n_envs),
         "--warmup", str(warmup), "--steps", str(steps),
     ]
+    if gpu:
+        cmd.append("--gpu")
     print(f"  [n_envs={n_envs:>5}]  spawning subprocess...", flush=True)
     # Pass PYTHONPATH so the subprocess can resolve `genesis_vehicle` regardless
     # of cwd (matches the bootstrap pattern at the top of this file).
@@ -168,10 +173,13 @@ def main():
                     help="Internal one-shot mode invoked by the parent process.")
     ap.add_argument("--n_envs",   type=int, default=1,
                     help="(internal) n_envs for this measurement.")
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU). GPU only wins "
+                         "at the large end of the sweep (hundreds of envs).")
     args = ap.parse_args()
 
     if args.internal:
-        _internal_run(args.n_envs, args.warmup, args.steps)
+        _internal_run(args.n_envs, args.warmup, args.steps, gpu=args.gpu)
         return
 
     n_envs_list = [int(x) for x in args.n_envs_list.split(",") if x.strip()]
@@ -182,7 +190,7 @@ def main():
 
     results = {}
     for n in n_envs_list:
-        r = _run_one(n, args.warmup, args.steps)
+        r = _run_one(n, args.warmup, args.steps, gpu=args.gpu)
         if r is not None:
             results[n] = r
 

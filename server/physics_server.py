@@ -88,7 +88,36 @@ def slerp(q0, q1, t):
     return s0 * q0 + s1 * q1
 
 
-def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles=None, sim_dt=0.02, update_angles=False, mvp=None):
+class _BatchPoseReader:
+    """One batched solver read for many entities' base poses (v1.0.13).
+
+    ``capture_state`` was calling ``entity.get_pos()``/``get_quat()`` once per
+    target AND per dynamic obstacle — 2·K engine entries per capture (and the
+    server captures twice per physics step). All those entities live in the
+    same rigid solver, so ONE ``get_links_pos``/``get_links_quat`` over their
+    base links returns the same env-0 user-frame poses (identical semantics:
+    ``entity.get_pos`` is ``solver.get_links_pos(base_link_idx,
+    relative=True)``). Build once after ``vs.build()``; ``read()`` per capture.
+    """
+
+    def __init__(self, entities):
+        self.entities = [e for e in entities]
+        self.idx = [e.base_link_idx for e in self.entities]
+        self.solver = self.entities[0]._solver if self.entities else None
+
+    def read(self):
+        """→ ``(pos, quat)`` numpy ``(K, 3)`` / ``(K, 4)``, env 0 — matching
+        capture_state's previous per-entity ``get_pos()[0]`` semantics."""
+        if not self.entities:
+            return np.zeros((0, 3), np.float32), np.zeros((0, 4), np.float32)
+        pos = self.solver.get_links_pos(self.idx, relative=True)
+        quat = self.solver.get_links_quat(self.idx, relative=True)
+        pos = pos.reshape(-1, len(self.idx), 3)[0]
+        quat = quat.reshape(-1, len(self.idx), 4)[0]
+        return pos.cpu().numpy(), quat.cpu().numpy()
+
+
+def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles=None, sim_dt=0.02, update_angles=False, mvp=None, readers=None):
     """
     Captures positions and rotations for all target entities (including wheels if active)
     and dynamic obstacles in Genesis physics engine.
@@ -97,11 +126,17 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
     solver="batched". Per-vehicle ``Vehicle.wheel_visual_transforms`` recomputes
     the WHOLE K-vehicle batch and slices one vehicle, so calling it per target
     is O(K²); with ``mvp`` the batch is computed ONCE here and sliced per slot.
+
+    ``readers``: optional ``(_BatchPoseReader(targets), _BatchPoseReader(
+    obstacles))`` — replaces the 2·K per-entity ``get_pos/get_quat`` engine
+    calls with ONE batched solver read each (v1.0.13). Entity order must match
+    the dicts' iteration order (build the readers from the same dicts).
     """
     state = {
         'targets': {},
         'dynamic_obstacles': {}
     }
+    t_reader, o_reader = readers if readers is not None else (None, None)
 
     # [PERF] One batched closed-form wheel-pose compute for all K vehicles
     # (flat list in Vehicle._slot order), instead of K per-vehicle calls.
@@ -115,25 +150,28 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
     # 1. Target entities (Chassis & Wheels)
     if target_entities:
         tids = list(target_entities.keys())
-        pos_tensors  = [ent.get_pos()  for ent in target_entities.values()]
-        quat_tensors = [ent.get_quat() for ent in target_entities.values()]
-        
-        if hasattr(pos_tensors[0], 'cpu'):
-            pos_batch  = torch.stack(pos_tensors).cpu().numpy()
-            quat_batch = torch.stack(quat_tensors).cpu().numpy()
+        if t_reader is not None:
+            pos_batch, quat_batch = t_reader.read()      # ONE solver read
         else:
-            pos_batch  = np.array(pos_tensors)
-            quat_batch = np.array(quat_tensors)
-            
+            pos_tensors  = [ent.get_pos()  for ent in target_entities.values()]
+            quat_tensors = [ent.get_quat() for ent in target_entities.values()]
+
+            if hasattr(pos_tensors[0], 'cpu'):
+                pos_batch  = torch.stack(pos_tensors).cpu().numpy()
+                quat_batch = torch.stack(quat_tensors).cpu().numpy()
+            else:
+                pos_batch  = np.array(pos_tensors)
+                quat_batch = np.array(quat_tensors)
+
         for i, tid in enumerate(tids):
+            # NB: rows are views into arrays freshly created THIS capture
+            # (reader output / .cpu().numpy()), never mutated afterwards —
+            # per-row .copy() removed in v1.0.13.
             p = pos_batch[i]
             q = quat_batch[i]
             if p.ndim > 1: p = p[0]
             if q.ndim > 1: q = q[0]
-            
-            p = p.copy()
-            q = q.copy()
-            
+
             wheels_states = []
             if is_urdf_active and controllers and tid in controllers:
                 ctrl = controllers[tid]
@@ -154,7 +192,7 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
                             wp_all = wp_all.cpu().numpy(); wq_all = wq_all.cpu().numpy()
                         wp_all = wp_all[0]; wq_all = wq_all[0]   # env 0 (single-env)
                         for j in range(wp_all.shape[0]):
-                            wheels_states.append((wp_all[j].copy(), wq_all[j].copy(), 0.0))
+                            wheels_states.append((wp_all[j], wq_all[j], 0.0))
                     except Exception:
                         pass
             state['targets'][tid] = (p, q, wheels_states)
@@ -162,16 +200,19 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
     # 2. Dynamic obstacles
     if dynamic_obstacles:
         oids = list(dynamic_obstacles.keys())
-        opos_tensors  = [ent.get_pos()  for ent in dynamic_obstacles.values()]
-        oquat_tensors = [ent.get_quat() for ent in dynamic_obstacles.values()]
-        
-        if hasattr(opos_tensors[0], 'cpu'):
-            opos_batch  = torch.stack(opos_tensors).cpu().numpy()
-            oquat_batch = torch.stack(oquat_tensors).cpu().numpy()
+        if o_reader is not None:
+            opos_batch, oquat_batch = o_reader.read()    # ONE solver read
         else:
-            opos_batch  = np.array(opos_tensors)
-            oquat_batch = np.array(oquat_tensors)
-            
+            opos_tensors  = [ent.get_pos()  for ent in dynamic_obstacles.values()]
+            oquat_tensors = [ent.get_quat() for ent in dynamic_obstacles.values()]
+
+            if hasattr(opos_tensors[0], 'cpu'):
+                opos_batch  = torch.stack(opos_tensors).cpu().numpy()
+                oquat_batch = torch.stack(oquat_tensors).cpu().numpy()
+            else:
+                opos_batch  = np.array(opos_tensors)
+                oquat_batch = np.array(oquat_tensors)
+
         for i, o_id in enumerate(oids):
             if o_id in ue_driven_obstacle_ids:
                 continue
@@ -179,8 +220,8 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
             q = oquat_batch[i]
             if p.ndim > 1: p = p[0]
             if q.ndim > 1: q = q[0]
-            
-            state['dynamic_obstacles'][o_id] = (p.copy(), q.copy())
+
+            state['dynamic_obstacles'][o_id] = (p, q)
             
     return state
 
@@ -298,7 +339,6 @@ def main():
     parser.add_argument("--recv_port", type=int, default=7001, help="Port to receive data from UE (default: 7001)")
     parser.add_argument("--send_port", type=int, default=7002, help="Port to send State data to UE (default: 7002)")
     parser.add_argument("--send_port_obs", type=int, default=7004, help="Port to send Observation data to UE (default: 7004)")
-    # parser.add_argument("--cpu", action="store_true", help="Force backend to CPU instead of GPU")
     parser.add_argument("--headless", action="store_true", help="Run without Genesis visualizer window")
     # parser.add_argument("--lockstep", action="store_true", help="Enable strict Frame-ID based synchronization (Default: False)")
     parser.add_argument("--no-floor", action="store_true", help="Disable the default ground plane")
@@ -328,9 +368,13 @@ def main():
                              "count. Use with --road-raycast-only (roads stay raycast surfaces).")
     parser.add_argument("--multi-env", action="store_true",
                         help="L3 batched mode: N identical, non-interacting vehicles as n_envs=N "
-                             "(one vehicle entity, GPU-batched). Requires all targets to share one URDF.")
-    parser.add_argument("--force-cpu", action="store_true",
-                        help="(multi-env mode) force CPU backend instead of GPU")
+                             "(one vehicle entity, batched). Requires all targets to share one URDF.")
+    parser.add_argument("--gpu", action="store_true",
+                        help="Opt into the GPU backend (default: CPU in BOTH modes). GPU is "
+                             "kernel-launch bound at small batch sizes, so it only pays off "
+                             "in --multi-env (L3) mode with hundreds of envs; per-entity (L2) "
+                             "and small fleets (n_envs<~100) are faster on CPU (measured: 30 "
+                             "tanks L3 CPU 8.4 vs GPU ~19 ms/step).")
     parser.add_argument("--max-catchup-steps", type=int, default=None,
                         help="Max physics steps per loop when behind real-time "
                              "(default: max(5, 0.1/dt)). The cap does NOT speed "
@@ -348,7 +392,7 @@ def main():
     # [L3] 멀티-env 배칭 모드 — 동일 URDF 다수 차량 전용 경로로 분기
     if args.multi_env:
         print(" [Genesis] [MODE] === MULTI-ENV (L3 batched) === "
-              "(1 vehicle entity x n_envs, non-interacting, GPU default)")
+              "(1 vehicle entity x n_envs, non-interacting, CPU default — --gpu to opt in)")
         if args.single_scene:
             print(" [Genesis] [WARN] --single-scene is a per-entity-mode flag; "
                   "multi-env (L3) is always dual_scene — ignoring it.")
@@ -356,24 +400,24 @@ def main():
         run_l3(args)
         return
 
-    # 배포용 강제 안전가드: 기본 CPU 가동 및 비-락스텝(OSC Pacing) 처리
+    # 백엔드 기본 CPU + 비-락스텝(OSC Pacing) 처리
     # (per-entity 모드에선 CPU 가 GPU 보다 빠름 — n_envs=1 다중 엔티티는 커널 런치 바운드)
-    args.cpu = True
+    args.cpu = not args.gpu
     args.lockstep = False
     print(" [Genesis] [MODE] === PER-ENTITY (L2) === "
-          "(K interacting vehicles, n_envs=1, CPU-forced; use --multi-env for L3)")
+          "(K interacting vehicles, n_envs=1, CPU default; use --multi-env for L3)")
 
     # 1. 제네시스 물리 엔진 초기화 및 백엔드 결정
     if args.cpu:
         backend = gs.cpu
-        # print(" [Genesis] [Init] 백엔드 모드: CPU (기본 강제 지정)")
+    elif torch.cuda.is_available():
+        backend = gs.gpu
+        print(" [Genesis] [Init] backend = GPU (--gpu; NB: per-entity mode is "
+              "usually FASTER on CPU — kernel-launch bound at n_envs=1)")
     else:
-        if torch.cuda.is_available():
-            backend = gs.gpu
-            # print(" [Genesis] [Init] 백엔드 모드: GPU (CUDA 가용)")
-        else:
-            backend = gs.cpu
-            # print(" [Genesis] [Warning] GPU 백엔드가 요청되었으나 CUDA를 사용할 수 없습니다. CPU 백엔드로 안전하게 폴백합니다.")
+        backend = gs.cpu
+        args.cpu = True
+        print(" [Genesis] [WARN] --gpu requested but CUDA is unavailable — falling back to CPU.")
 
     VehicleScene.init_backend("cpu" if backend is gs.cpu else "gpu")
 
@@ -633,7 +677,15 @@ def main():
     last_slow_motion_warn_time = 0.0
 
     accumulated_wheel_angles = {}
-    prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics)
+    # [PERF] 배치 포즈 리더 (v1.0.13): capture_state 의 타깃/장애물 chassis 포즈를
+    # per-entity get_pos/get_quat 대신 solver 일괄 read 1회씩으로. dict 순서와
+    # 리더의 엔티티 순서가 일치해야 하므로 같은 dict 로 생성.
+    try:
+        _readers = (_BatchPoseReader(target_entities.values()),
+                    _BatchPoseReader(dynamic_obstacles.values()))
+    except Exception:
+        _readers = None
+    prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers)
     curr_state = prev_state
 
     step_count = 0
@@ -735,7 +787,7 @@ def main():
                 # 타이밍 및 상태 초기화
                 last_time = time.perf_counter()
                 accumulator = 0.0
-                prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics)
+                prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers)
                 curr_state = prev_state
 
             recv['command'] = None
@@ -838,7 +890,7 @@ def main():
                         tentity.control_dofs_force(ft, slice(0, 6))
 
             # 오버라이드 반영 후 상태 갱신
-            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics)
+            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers)
 
         catchup_steps = 0
         physics_dur_total = 0.0
@@ -902,7 +954,7 @@ def main():
                     raise e
             
             # 최신 물리 상태 기록
-            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, True, mvp=vs.physics)
+            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, True, mvp=vs.physics, readers=_readers)
             
             if not args.lockstep:
                 accumulator -= SIM_DT

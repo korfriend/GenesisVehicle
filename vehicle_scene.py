@@ -928,7 +928,8 @@ class VehicleScene:
         self._require_built()
         if not self._two_scene:
             return {veh: None for veh in self._vehicles}
-        if self._vehicles:
+        has_mirrors = any(o.entity_raycast is not None for o in self._dynamics)
+        if self._vehicles or has_mirrors:
             if self._proxy_sync_ok is not False:
                 try:
                     self._sync_proxies_batched()
@@ -936,15 +937,15 @@ class VehicleScene:
                 except Exception:
                     self._proxy_sync_ok = False
                     _logger.warning(
-                        "[genesis_vehicle:proxy-sync] batched proxy sync failed; "
-                        "falling back to the per-vehicle loop (correct but ~1 ms/"
-                        "vehicle slower).", exc_info=True)
+                        "[genesis_vehicle:proxy-sync] batched raycast-mirror sync "
+                        "failed; falling back to the per-body loop (correct but "
+                        "~1 ms/body slower).", exc_info=True)
             if self._proxy_sync_ok is False:
                 for veh in self._vehicles:
                     veh._sync_proxy()
-        for obs in self._dynamics:
-            if obs.entity_raycast is not None:
-                self._sync_dynamic(obs)
+                for obs in self._dynamics:
+                    if obs.entity_raycast is not None:
+                        self._sync_dynamic(obs)
         # update_visualizer=False: the raycast scene is sensors-only and never
         # user-rendered, so skip the per-step visualizer/render update — the
         # sensor re-cast still runs inside sim.step(). Saves the render call the
@@ -954,36 +955,40 @@ class VehicleScene:
                 for veh in self._vehicles}
 
     def _sync_proxies_batched(self) -> None:
-        """Mirror ALL chassis base poses onto the raycast-scene proxies in one
-        batched solver write + a SINGLE forward-kinematics pass (v1.0.11).
+        """Mirror ALL raycast-scene followers — the K vehicle proxies AND every
+        dynamic obstacle's raycast mirror — in one batched solver write + a
+        SINGLE forward-kinematics pass (proxies v1.0.11; mirrors joined
+        v1.0.13; both live in the raycast scene's rigid solver).
 
-        The per-vehicle ``Vehicle._sync_proxy`` loop pays a fixed engine-entry
-        overhead per call AND a whole-raycast-scene FK per ``set_pos``/
-        ``set_quat`` — 2·K FK passes for K vehicles (~1 ms/vehicle: measured
-        29.8 ms at K=30, which was 80 % of the L2-vs-L3 dual-scene gap).
-        This method reads every chassis base pose from the main solver in one
-        batched ``get_links_pos/quat`` and writes them onto the proxies via
-        ``set_base_links_pos(skip_forward=True)`` + ``set_base_links_quat``
-        (which runs FK once for the whole batch).
+        The per-body loops (``Vehicle._sync_proxy`` / ``_sync_dynamic``) pay a
+        fixed engine-entry overhead per call AND a whole-raycast-scene FK per
+        ``set_pos``/``set_quat`` — 2 FK passes PER BODY (~1 ms/body: measured
+        29.8 ms for 30 proxies alone). This method reads every followed base
+        pose from the main solver in one batched ``get_links_pos/quat`` and
+        writes them all via ``set_base_links_pos(skip_forward=True)`` +
+        ``set_base_links_quat`` (which runs FK once for the whole batch).
 
-        Pose semantics are identical to ``_sync_proxy``: read the USER-frame
-        base pose (what ``entity.get_pos()`` returns), write it WORLD-frame
-        onto the proxy (``relative=False``). ``_measure_distances`` falls back
-        to the per-vehicle loop (with a one-time warning) if this raises.
+        Pose semantics are identical to the loops: read the USER-frame base
+        pose (what ``entity.get_pos()`` returns), write it WORLD-frame onto
+        the follower (``relative=False``). ``_measure_distances`` falls back
+        to the per-body loops (with a one-time warning) if this raises.
         """
         if self._proxy_sync_cache is None:
-            self._proxy_sync_cache = (
-                [v.entity_main.base_link_idx for v in self._vehicles],
-                [v.proxy.base_link_idx for v in self._vehicles],
-                self._vehicles[0].proxy._solver,
-            )
-        main_idx, proxy_idx, rc_solver = self._proxy_sync_cache
+            main_idx = [v.entity_main.base_link_idx for v in self._vehicles]
+            rc_idx = [v.proxy.base_link_idx for v in self._vehicles]
+            mirrors = [o for o in self._dynamics if o.entity_raycast is not None]
+            main_idx += [o.entity_main.base_link_idx for o in mirrors]
+            rc_idx += [o.entity_raycast.base_link_idx for o in mirrors]
+            rc_solver = (self._vehicles[0].proxy if self._vehicles
+                         else mirrors[0].entity_raycast)._solver
+            self._proxy_sync_cache = (main_idx, rc_idx, rc_solver)
+        main_idx, rc_idx, rc_solver = self._proxy_sync_cache
         solver = self.rigid_solver
-        pos = solver.get_links_pos(main_idx, relative=True)     # (n_envs, K, 3)
-        quat = solver.get_links_quat(main_idx, relative=True)   # (n_envs, K, 4)
-        rc_solver.set_base_links_pos(pos, proxy_idx, relative=False,
+        pos = solver.get_links_pos(main_idx, relative=True)     # (n_envs, B, 3)
+        quat = solver.get_links_quat(main_idx, relative=True)   # (n_envs, B, 4)
+        rc_solver.set_base_links_pos(pos, rc_idx, relative=False,
                                      skip_forward=True)
-        rc_solver.set_base_links_quat(quat, proxy_idx, relative=False,
+        rc_solver.set_base_links_quat(quat, rc_idx, relative=False,
                                       skip_forward=False)       # ONE FK pass
 
     def step(self) -> None:

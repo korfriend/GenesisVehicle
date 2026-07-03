@@ -45,8 +45,12 @@ has no engine dependency.
 # per-entity (L2) mode — the default: interacting / heterogeneous vehicles, one world
 python -m genesis_vehicle.server
 
-# multi-env (L3) mode: many IDENTICAL, NON-interacting vehicles, GPU
+# multi-env (L3) mode: many IDENTICAL, NON-interacting vehicles
 python -m genesis_vehicle.server --multi-env
+
+# both modes default to the CPU backend; --gpu opts into GPU
+# (only pays off at hundreds of envs in --multi-env mode)
+python -m genesis_vehicle.server --multi-env --gpu
 
 # common flags
 python -m genesis_vehicle.server --headless          # no Genesis viewer window
@@ -73,15 +77,17 @@ L2 mode, kept for the CLI and logs.
 | Sample goal | Mode | Batching axis | Backend | Vehicles interact? | Solver |
 |---|---|---|---|---|---|
 | Interacting traffic, heterogeneous, see collisions | **default (per-entity)** | **L2** (K vehicles × 1 env) | CPU | ✅ (one world) | batched per vehicle *kind* — identical targets share ONE pipeline (1.0.8) |
-| Many identical cars spread out, no mutual collision, max count | **`--multi-env`** | **L3** (1 vehicle × n_envs) | GPU | ❌ (parallel envs) | 1 × `VehiclePhysics(n_envs=N)` |
-| Interacting traffic × N parallel scenarios (RL / MPPI) | *(not in server)* | **L2 × L3** | GPU | ✅ within env | `MultiVehiclePhysics(n_envs=N)` — drive from Python, see [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) |
+| Many identical cars spread out, no mutual collision, max count | **`--multi-env`** | **L3** (1 vehicle × n_envs) | CPU (`--gpu` at hundreds of envs) | ❌ (parallel envs) | 1 × `VehiclePhysics(n_envs=N)` |
+| Interacting traffic × N parallel scenarios (RL / MPPI) | *(not in server)* | **L2 × L3** | CPU (GPU at large K×N) | ✅ within env | `MultiVehiclePhysics(n_envs=N)` — drive from Python, see [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) |
 
-**Why CPU for the default mode and GPU for `--multi-env`?** At `n_envs=1`
-(one Genesis world, a handful of entities) GPU kernel-launch overhead
-dominates and CPU wins (measured: 10 vehicles → CPU 47 ms vs GPU 160 ms
-per step). `--multi-env` replicates the world `N` times so the GPU has
-enough parallel work to amortize that overhead (measured: 30/50/100
-vehicles all ≈ 19 ms/step). The deciding factor is per-step compute
+**Why is CPU the default in BOTH modes?** GPU kernel-launch overhead is a
+fixed per-step cost that needs a lot of parallel work to amortize. At
+`n_envs=1` (per-entity) CPU wins outright (measured: 10 vehicles → CPU
+47 ms vs GPU 160 ms per step). Even batched (`--multi-env`), the GPU step
+is a flat ≈ 19 ms/step (30/50/100 vehicles alike) while the CPU step is
+8.4 ms at 30 tanks — so CPU stays ahead until roughly hundreds of envs,
+where the GPU's flat cost finally undercuts the CPU's growing one. Pass
+`--gpu` for fleets of that scale. The deciding factor is per-step compute
 weight, not vehicle count — for a collision-heavy real map, check the
 server's startup `실측된 1스텝 평균` log line and compare. See
 [`batching.md`](batching.md) for the full L1/L2/L3 story.

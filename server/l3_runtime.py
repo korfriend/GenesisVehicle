@@ -10,8 +10,9 @@
 Genesis 가 env 마다 자동 복제한다.
 
 per-entity 모드와 의도적으로 다른 점 / 한계:
-  - 백엔드 기본 GPU (per-entity 모드는 CPU 가 정답이었던 것과 반대 —
-    배칭이 있어야 GPU 커널 런치 고정비가 분산된다). ``--force-cpu`` 로 강제 가능.
+  - 백엔드 기본 CPU (per-entity 모드와 동일 — n_envs≲100 규모에선 GPU 가
+    커널 런치 바운드라 CPU 가 더 빠르다; 실측 탱크 30대 CPU 8.4 vs GPU
+    ~19 ms/step). 수백 env 급 대규모 배칭에서만 ``--gpu`` 로 옵트인.
   - 동적 장애물은 env 복사본이 N개 생기므로 "차량 A가 민 장애물을 차량 B가
     보는" 상호작용은 표현 불가. 상태 송신은 env 0 기준.
   - ``target_forces`` (지속 외력) 미지원 — 수신 시 1회 경고 후 무시.
@@ -93,12 +94,14 @@ class L3State:
             wp = wp.cpu().numpy(); wq = wq.cpu().numpy()
 
         state = {'targets': {}, 'dynamic_obstacles': {}}
+        # NB: bp/bq/wp/wq are freshly created THIS capture (.cpu().numpy())
+        # and never mutated — per-row .copy() removed in v1.0.13.
         for k, tid in enumerate(self.tids):
             wheels_states = [
-                (wp[k, j].copy(), wq[k, j].copy(), 0.0)
+                (wp[k, j], wq[k, j], 0.0)
                 for j in range(self.n_wheels)
             ]
-            state['targets'][tid] = (bp[k].copy(), bq[k].copy(), wheels_states)
+            state['targets'][tid] = (bp[k], bq[k], wheels_states)
 
         # 동적 장애물: env 복제 한계로 env 0 기준 송신
         for o_id, ent in dynamic_obstacles.items():
@@ -108,13 +111,19 @@ class L3State:
             if hasattr(p, 'cpu'):
                 p = p.cpu().numpy(); q = q.cpu().numpy()
             p = np.atleast_2d(p)[0]; q = np.atleast_2d(q)[0]
-            state['dynamic_obstacles'][o_id] = (p.copy(), q.copy())
+            state['dynamic_obstacles'][o_id] = (p, q)
         return state
 
 
 def run_l3(args):
-    # 1. 백엔드: 배칭 모드에선 GPU 가 기본 (커널 런치 고정비를 n_envs 로 분산)
-    use_cpu = bool(getattr(args, 'force_cpu', False)) or not torch.cuda.is_available()
+    # 1. 백엔드: 기본 CPU — 이 규모(n_envs≲100)에선 GPU 가 커널 런치 바운드라
+    #    CPU 가 더 빠르다 (실측: 탱크 30대 CPU 8.4 vs GPU ~19 ms/step).
+    #    수백 env 급 대규모 배칭에서만 --gpu 로 옵트인.
+    use_gpu = bool(getattr(args, 'gpu', False))
+    if use_gpu and not torch.cuda.is_available():
+        print(" [Genesis] [L3] [WARN] --gpu requested but CUDA is unavailable — falling back to CPU.")
+        use_gpu = False
+    use_cpu = not use_gpu
     VehicleScene.init_backend("cpu" if use_cpu else "gpu")
     print(f" [Genesis] [L3] Multi-env batched mode | backend = {'CPU' if use_cpu else 'GPU'}")
 

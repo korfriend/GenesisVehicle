@@ -10,6 +10,102 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.14] — 2026-07-04
+
+| 약자 | 의미 |
+|---|---|
+| L2 | per-entity 모드 (K대 상호작용, `n_envs=1`) |
+| L3 | multi-env 배치 모드 (`--multi-env`, 동일 URDF × `n_envs=N`) |
+| env | parallel sim instance (`n_envs` 축 1개) |
+
+### Changed — CPU is now the default backend EVERYWHERE; `--gpu` opts in
+
+GPU is kernel-launch bound at small batch sizes: measured, L3 GPU is a flat
+≈ 19 ms/step (30/50/100 tanks alike) while L3 CPU is 8.4 ms at 30 — CPU wins
+until roughly hundreds of envs, and per-entity (L2, `n_envs=1`) is not even
+close (10 vehicles: CPU 47 vs GPU 160 ms). The defaults now match that
+reality across the whole tree:
+
+- **Server**: `--multi-env` (L3) now defaults to CPU like per-entity (L2)
+  already did. `--force-cpu` is REMOVED; the new `--gpu` flag opts into GPU
+  in either mode (falls back to CPU with a warning when CUDA is
+  unavailable). L2 with `--gpu` warns that CPU is usually faster.
+- **Samples**: every sample that hard-coded `init_backend("gpu")` or had a
+  `--cpu` flag now defaults to CPU with a `--gpu` opt-in (`quickstart`,
+  `slope_hold`, `terrain_drive`, `obstacles_and_ramp`, `two_scene_terrain`,
+  `l2l3_minimal`, `road_loop`, `city_traffic_ego`, `batched_rollout`,
+  `multi_env_render`, `perf_vectorization`, `perf_multi_vehicle`,
+  `perf_l2_l3_combined` — the perf sweeps thread `--gpu` through their
+  `--internal` subprocesses). NB: `--cpu` flags are gone; the perf tables in
+  `docs/batching.md` were GPU-measured, so pass `--gpu` to reproduce them.
+- **GeneVehicle_\* demos**: `demo_drive.py` (HJW / JMK / KDU / Truck6w) and
+  KDU `demo_interactive.py` likewise default to `gs.cpu` with `--gpu`.
+- Bare `torch.cuda.synchronize()` timing calls are now guarded
+  (`torch.cuda.is_available()` / backend flag) so everything runs on
+  CUDA-less machines.
+
+No physics change; `VehicleScene.init_backend` itself already defaulted to
+"cpu". Docs updated: `server.md` (mode table + "why CPU by default"),
+`batching.md`, `quickstart.md`, `two-scene-raycast.md`, `README.md`.
+
+---
+
+## [1.0.13] — 2026-07-04
+
+| 약자 | 의미 |
+|---|---|
+| mirror | 동적 장애물의 raycast-scene 추종 바디 (매 스텝 재동기화) |
+| FK | Forward Kinematics (set 호출마다 raycast 씬 전체에 실행되던 것) |
+| capture | 서버가 UE 송신용 pose 를 읽는 함수 |
+
+### Batching audit — remaining per-item python loops in the step path
+
+Full audit of the SDK + server for unbatched per-item loops, with dispositions
+(✅ done earlier / 🔧 batched in this release / ❌ engine-limited / ➖ by design):
+
+| # | loop | disposition |
+|---|---|---|
+| 1 | vehicle proxy sync (dual) | ✅ 1.0.11 |
+| 2 | dynamic-obstacle mirror sync (dual) | 🔧 this release |
+| 3 | server capture chassis/obstacle pose reads | 🔧 this release |
+| 4 | capture wheel poses (K× full-batch recompute) | ✅ 1.0.7 |
+| 5 | `lerp_state` per-quaternion slerp | ✅ 1.0.10 |
+| 6 | OSC bulk-encode per-scalar `float()` casts | 🔧 this release |
+| 7 | capture per-row `.copy()` (fresh arrays anyway) | 🔧 this release |
+| 8 | K raycaster sensor reads | ❌ genesis per-sensor API (measured ~0.5 ms @K=10) |
+| 9 | MVP per-kind loop | ➖ kinds have different shapes by definition |
+| 10 | VisualJointSync per-entity loop | ⏸ viewer-only (headless/UE unaffected); revisit if native-viewer K grows |
+| 11 | per-vehicle `set_inputs` + rebucket | ➖ µs-scale python, negligible |
+
+### Changed — dynamic-obstacle raycast mirrors join the batched sync (#2)
+
+- 1.0.12 gave dynamic obstacles raycast mirrors, re-synced per step via
+  `_sync_dynamic` — a per-obstacle `set_pos`/`set_quat` loop with the same
+  2-FK-per-body cost the vehicle proxies had (~0.8 ms/mirror). The mirrors
+  live in the SAME raycast-scene rigid solver as the proxies, so
+  `_sync_proxies_batched` now writes proxies + mirrors in ONE batched set +
+  ONE FK. Measured (CPU, dual, 30 tanks + 20 mirrors, plane):
+  **30.5 → 16.5 ms/step** (measure_distances 22.5 → 8.7). Fallback loop keeps
+  both body types.
+
+### Changed — batched capture pose reads + zero-copy rows (#3, #7)
+
+- `capture_state` called `entity.get_pos()/get_quat()` per target and per
+  dynamic obstacle — 2·K engine entries per capture, twice per step. New
+  `_BatchPoseReader` does ONE `get_links_pos/quat` solver read per group
+  (identical env-0 user-frame semantics; falls back to the old path when
+  `readers=None`). Redundant per-row `.copy()` dropped in both servers'
+  captures (the source arrays are freshly created each capture).
+
+### Changed — vectorized OSC bulk encode (#6)
+
+- `send_target_states_bulk` cast ~8 numpy scalars through `float()` per pose
+  (30 targets × 10 wheels ≈ 2,600 casts per send). The UE-frame conversion
+  (cm scale + Y flip + quat reorder) is now one numpy pass with plain-python
+  `.tolist()` rows. Wire format unchanged (OSC packs float32 either way).
+
+---
+
 ## [1.0.12] — 2026-07-04
 
 | 약자 | 의미 |

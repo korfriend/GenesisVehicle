@@ -69,6 +69,8 @@ def main():
                     help="Grid cell spacing (m) when --viewer is on (default 12).")
     ap.add_argument("--native", action="store_true",
                     help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU — faster below ~100 envs).")
     args = ap.parse_args()
     if args.native:
         args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
@@ -78,7 +80,7 @@ def main():
           + ("  (viewer ON — grid)" if args.viewer else ""))
 
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
-    VehicleScene.init_backend("gpu")
+    VehicleScene.init_backend("gpu" if args.gpu else "cpu")
 
     from genesis_vehicle.samples import _hud
     if args.viewer and not _hud.have_cv2():

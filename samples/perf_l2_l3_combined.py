@@ -55,7 +55,7 @@ import time
 # Internal mode — one (K, N) measurement
 # ---------------------------------------------------------------------------
 
-def _internal_run(K: int, N: int, warmup: int, steps: int) -> None:
+def _internal_run(K: int, N: int, warmup: int, steps: int, gpu: bool = False) -> None:
     import torch, genesis as gs
     from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 
@@ -65,7 +65,7 @@ def _internal_run(K: int, N: int, warmup: int, steps: int) -> None:
     # VehicleScene owns gs.init / scene / build / step. Default solver="batched"
     # groups the K same-kind vehicles into ONE batched compute (L2); n_envs=N
     # replicates the world N× (L3) — so this measures the combined L2 × L3 path.
-    VehicleScene.init_backend("gpu")
+    VehicleScene.init_backend("gpu" if gpu else "cpu")
     vs = VehicleScene(
         n_envs=N, raycast_mode="single_scene", dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
@@ -81,7 +81,7 @@ def _internal_run(K: int, N: int, warmup: int, steps: int) -> None:
                            material=gs.materials.Rigid(friction=1.0))
             for k in range(K)]
     vs.build()
-    device = torch.device("cuda")
+    device = torch.device("cuda" if gpu else "cpu")
 
     # Per-vehicle, per-env random inputs (each env_i different to keep the compute
     # honest — no broadcasting freebies). Generated once, applied after settle.
@@ -105,11 +105,13 @@ def _internal_run(K: int, N: int, warmup: int, steps: int) -> None:
     for _ in range(warmup):
         vs.step()
 
-    torch.cuda.synchronize()
+    if gpu and torch.cuda.is_available():
+        torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(steps):
         vs.step()
-    torch.cuda.synchronize()
+    if gpu and torch.cuda.is_available():
+        torch.cuda.synchronize()
     wall = time.perf_counter() - t0
 
     ms_per_step  = wall / steps * 1000.0
@@ -130,10 +132,13 @@ _RESULT_RE = re.compile(
 )
 
 
-def _run_cell(K: int, N: int, warmup: int, steps: int) -> tuple[float, float] | None:
+def _run_cell(K: int, N: int, warmup: int, steps: int,
+              gpu: bool = False) -> tuple[float, float] | None:
     cmd = [sys.executable, "-m", "genesis_vehicle.samples.perf_l2_l3_combined",
            "--internal", "--K", str(K), "--N", str(N),
            "--warmup", str(warmup), "--steps", str(steps)]
+    if gpu:
+        cmd.append("--gpu")
     print(f"  [K={K:>3} N={N:>4}  total={K*N:>5}]  spawning...", flush=True)
     env = os.environ.copy()
     env["PYTHONPATH"] = _SDK_PARENT + os.pathsep + env.get("PYTHONPATH", "")
@@ -166,10 +171,13 @@ def main():
     ap.add_argument("--internal", action="store_true")
     ap.add_argument("--K", type=int, default=1)
     ap.add_argument("--N", type=int, default=1)
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU). GPU only wins "
+                         "at large K×N (hundreds of batched vehicles).")
     args = ap.parse_args()
 
     if args.internal:
-        _internal_run(args.K, args.N, args.warmup, args.steps)
+        _internal_run(args.K, args.N, args.warmup, args.steps, gpu=args.gpu)
         return
 
     K_part, N_part = args.grid.split(":")
@@ -182,7 +190,7 @@ def main():
     results = {}      # (K, N) → (ms, vps)
     for K in Ks:
         for N in Ns:
-            r = _run_cell(K, N, args.warmup, args.steps)
+            r = _run_cell(K, N, args.warmup, args.steps, gpu=args.gpu)
             if r is not None:
                 results[(K, N)] = r
 

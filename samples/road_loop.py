@@ -304,6 +304,9 @@ def main():
                          "vehicles into one batched compute — much faster for the "
                          "fleet) or 'per_vehicle' (one VehiclePhysics per vehicle — "
                          "simpler but slower). Maps to VehicleScene(solver=...).")
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU — faster at "
+                         "this fleet size; GPU is kernel-launch bound).")
     args = ap.parse_args()
     if args.native:
         args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
@@ -331,7 +334,7 @@ def main():
     urdf_paths = [_save_urdf(urdf_fn(), tmpdir, name.lower())
                   for name, _c, urdf_fn, _p, _wb, _nw in kinds]
 
-    VehicleScene.init_backend("gpu")
+    VehicleScene.init_backend("gpu" if args.gpu else "cpu")
     DT = 0.02
     cam_height = args.radius * 2.5
     from genesis_vehicle.samples import _hud
@@ -458,7 +461,8 @@ def main():
     # Apply per-vehicle constant Ackermann steer for the loop (persists).
     for veh, steer in zip(vehs, drive_steer):
         veh.set_inputs(throttle=args.throttle, brake=0.0, steer=steer)
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t_start = time.perf_counter()
     user_quit = False
     fps_every = max(1, int(0.5 / DT))    # live FPS line ~ every 0.5 s of sim time
@@ -474,7 +478,8 @@ def main():
             if not _hud_render(step):
                 user_quit = True
                 break
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
     _hud.cv2_cleanup()
     n_done = step + 1 if user_quit else n_steps

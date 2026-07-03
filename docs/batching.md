@@ -389,4 +389,7 @@ grouping/dispatch bookkeeping is now unit-tested in
 | L2 × L3 ego+traffic visual | [`samples/city_traffic_ego.py`](../samples/city_traffic_ego.py) | 8 vehicles × 4 envs = 32 batched; 3.5× throughput vs n_envs=1 |
 
 Re-run the samples on your machine — absolute numbers depend on GPU
-and WSL/native setup.
+and WSL/native setup. These tables were measured on the **GPU** backend;
+since v1.0.14 every sample defaults to **CPU** (faster below ~100 envs —
+GPU is kernel-launch bound at small batch), so pass `--gpu` to reproduce
+them.

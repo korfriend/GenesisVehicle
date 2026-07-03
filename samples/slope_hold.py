@@ -73,6 +73,8 @@ def main():
                     help="Render a side view of the slope + car each step.")
     ap.add_argument("--native", action="store_true",
                     help="Genesis native interactive viewer (orbit/zoom/ESC) instead of cv2.")
+    ap.add_argument("--gpu", action="store_true",
+                    help="Opt into the GPU backend (default: CPU — faster at n_envs=1).")
     args = ap.parse_args()
     if args.native:
         args.viewer = False        # --native uses the Genesis viewer, not the cv2 HUD
@@ -87,7 +89,7 @@ def main():
     # VehicleScene owns gs.init + the scene + build + step. Single, tilted ground
     # at n_envs=1 → single_scene (no heavy static terrain to amortize, so the
     # dual_scene raycast optimization has nothing to gain here).
-    VehicleScene.init_backend("gpu")
+    VehicleScene.init_backend("gpu" if args.gpu else "cpu")
     vs = VehicleScene(
         raycast_mode="single_scene",
         dt=cfg.recommended_dt, substeps=10,
@@ -171,7 +173,8 @@ def main():
           f"roll={roll0:+.2f}°  (expect roll ≈ {slope_deg:+.1f}° on slope)")
 
     # Timed end-to-end with a single CUDA sync before/after (zero per-step overhead).
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t_start = time.perf_counter()
     user_quit = False
     for step in range(n_hold):
@@ -182,7 +185,8 @@ def main():
             if not _hud_render(3.0 + step * DT, slip_mm=current_slip_mm):
                 user_quit = True
                 break
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     wall = time.perf_counter() - t_start
     _hud.cv2_cleanup()
     n_done = step + 1 if user_quit else n_hold

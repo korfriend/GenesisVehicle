@@ -104,9 +104,10 @@ from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 
 URDF = "<path to your 4-wheel-car URDF>"
 
-# Physics backend — process-global, set ONCE, before any scene (default cpu).
-# The renderer is separate (always GPU). Omit this line to run on cpu.
-VehicleScene.init_backend("gpu")
+# Physics backend — process-global, set ONCE, before any scene. Default is
+# "cpu" (faster below ~100 envs; GPU is kernel-launch bound at small batch).
+# The renderer is separate (always GPU). Use "gpu" only for large-n_envs L3.
+VehicleScene.init_backend("cpu")
 
 # VehicleScene is the single entry point: it owns gs.init / the scene(s) / build / step.
 vs = VehicleScene(raycast_mode="single_scene", dt=1/48, substeps=10)

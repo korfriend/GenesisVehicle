@@ -64,6 +64,65 @@ def test_batched_proxy_sync_matches_per_vehicle_loop(cpu_genesis):
                 or torch.allclose(rq, -qq, atol=1e-5)), f"quat {rq} != {qq}"
 
 
+def test_batched_sync_includes_dynamic_obstacle_mirrors(cpu_genesis):
+    """1.0.13: dynamic obstacles' raycast mirrors join the SAME batched write
+    (+ the single FK) as the vehicle proxies — the per-obstacle _sync_dynamic
+    loop cost ~1 ms/obstacle just like the proxies did."""
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
+    vs.add_ground_plane()
+    veh = vs.add_vehicle(URDF, car_4w_rwd_ackermann, pos=(0.0, 0.0, 1.0))
+    obs = [vs.add_dynamic(gs.morphs.Box(size=(1.0, 1.0, 1.0), pos=(8.0 + 3.0 * i, 0, 3.0)),
+                          wheel_raycast=True, name=f"ramp_{i}")
+           for i in range(2)]
+    vs.build()
+
+    # Distinct poses so the sync does real work.
+    for i, o in enumerate(obs):
+        o.entity_main.set_pos(torch.tensor([8.0 + 3.0 * i, 1.0 + i, 2.0]),
+                              relative=False)
+
+    # Reference: the per-body loops.
+    veh._sync_proxy()
+    for o in obs:
+        vs._sync_dynamic(o)
+    ref = [(o.entity_raycast.get_pos().clone(), o.entity_raycast.get_quat().clone())
+           for o in obs]
+
+    vs._proxy_sync_cache = None          # rebuild cache including mirrors
+    vs._sync_proxies_batched()
+    for (rp, rq), o in zip(ref, obs):
+        pp = o.entity_raycast.get_pos()
+        qq = o.entity_raycast.get_quat()
+        assert torch.allclose(rp, pp, atol=1e-5), f"mirror pos {rp} != {pp}"
+        assert (torch.allclose(rq, qq, atol=1e-5)
+                or torch.allclose(rq, -qq, atol=1e-5))
+
+    # And the step path must take the batched branch for this scene too.
+    vs.step()
+    assert vs._proxy_sync_ok is True
+
+
+def test_batch_pose_reader_matches_entity_get_pos(cpu_genesis):
+    """1.0.13: _BatchPoseReader must return exactly what entity.get_pos()/
+    get_quat() (env 0) returned per entity — same solver read, one call."""
+    from genesis_vehicle.server.physics_server import _BatchPoseReader
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
+    vs.add_ground_plane()
+    vehs = [vs.add_vehicle(URDF, car_4w_rwd_ackermann, pos=(4.0 * i, 0.0, 1.0))
+            for i in range(3)]
+    vs.build()
+    ents = [v.entity_main for v in vehs]
+    reader = _BatchPoseReader(ents)
+    pos_b, quat_b = reader.read()
+    import numpy as np
+    for i, e in enumerate(ents):
+        p = e.get_pos(); q = e.get_quat()
+        p = p[0] if p.dim() > 1 else p
+        q = q[0] if q.dim() > 1 else q
+        np.testing.assert_allclose(pos_b[i], p.cpu().numpy(), atol=1e-6)
+        np.testing.assert_allclose(quat_b[i], q.cpu().numpy(), atol=1e-6)
+
+
 def test_measure_distances_uses_batched_sync_without_fallback(cpu_genesis):
     """The step path must take the batched branch (health flag True) and not
     silently fall back to the per-vehicle loop."""
