@@ -273,3 +273,108 @@ class VisualJointSync:
             self.entity.control_dofs_position(
                 joint_pos, dofs_idx_local=self._susp_ctrl_dofs,
             )
+
+
+class KindVisualBatch:
+    """Batched writer for K same-kind ``VisualJointSync`` objects (v1.0.15).
+
+    Each ``VisualJointSync.step`` issues its own ``set_dofs_position`` (plus
+    the susp velocity-zero and, for heavy wheels, ``control_dofs_position``) —
+    and every solver entry pays a collider/constraint reset + FK pass. K
+    same-kind vehicles therefore paid K× that cost per step (the reason the
+    old perf advisory said ~0.85 ms/step *per vehicle*). Same-kind entities
+    share one dof LAYOUT (identical URDF/joints), so all K writes collapse
+    into ONE solver-level ``set_dofs_position`` over the concatenated GLOBAL
+    dof indices (``entity._dof_start + local``) — one solver entry, one FK.
+
+    Math is identical to ``VisualJointSync.step``, just computed on
+    ``(n_envs, K, n)`` slabs instead of K ``(n_envs, n)`` slices. The spin
+    accumulator lives here in batched form. Construction raises if the K
+    layouts differ (caller falls back to the per-entity loop).
+    """
+
+    def __init__(self, visuals: "list[VisualJointSync]"):
+        if not visuals:
+            raise ValueError("KindVisualBatch needs at least one VisualJointSync")
+        v0 = visuals[0]
+        for v in visuals[1:]:
+            if (v._batch_set_dofs != v0._batch_set_dofs
+                    or v._spin_idx_valid != v0._spin_idx_valid
+                    or v.steer_dofs != v0.steer_dofs
+                    or v.steer_wheel_idx != v0.steer_wheel_idx
+                    or v._susp_set_dofs != v0._susp_set_dofs
+                    or v._susp_set_idx != v0._susp_set_idx
+                    or v._susp_ctrl_dofs != v0._susp_ctrl_dofs
+                    or v._susp_ctrl_idx != v0._susp_ctrl_idx
+                    or v.n_wheels != v0.n_wheels):
+                raise ValueError("KindVisualBatch requires identical layouts")
+        self.proto = v0
+        self.K = len(visuals)
+        self.n_envs = v0.n_envs
+        self.solver = v0.entity._solver
+
+        def _globals(local_dofs):
+            return [int(v.entity._dof_start) + int(d)
+                    for v in visuals for d in local_dofs]
+
+        # Per-entity blocks, matching combined.reshape(n_envs, K*m) row order.
+        self._set_dofs_g = (_globals(v0._batch_set_dofs)
+                            if v0._batch_set_dofs else None)
+        self._susp_set_g = (_globals(v0._susp_set_dofs)
+                            if v0._susp_set_dofs else None)
+        self._susp_ctrl_g = (_globals(v0._susp_ctrl_dofs)
+                             if v0._susp_ctrl_dofs else None)
+
+        # Batched spin accumulator (replaces the K per-visual accumulators).
+        self._angle = torch.zeros(self.n_envs, self.K, v0.n_wheels,
+                                  device=v0.device, dtype=v0.dtype)
+
+    def step(self, steer_NK: torch.Tensor, dist_NK: torch.Tensor,
+             omega_NK: torch.Tensor, dt: float) -> None:
+        """Inputs are ``(n_envs, K, n_wheels)`` slabs (the kind's natural
+        layout) — no per-entity slicing."""
+        v0 = self.proto
+        N, K = self.n_envs, self.K
+        parts: list[torch.Tensor] = []
+
+        if v0._batch_spin:
+            self._angle.add_(omega_NK * dt)
+            two_pi = 2.0 * math.pi
+            self._angle = ((self._angle + math.pi) % two_pi) - math.pi
+            parts.append(self._angle[:, :, v0._spin_idx_valid])
+
+        if v0.steer_dofs:
+            phys = steer_NK[:, :, v0.steer_wheel_idx]
+            parts.append(-phys * v0._steer_signs.unsqueeze(0))   # (1,1,m) bcast
+
+        susp_written = False
+        if v0._susp_set_dofs:
+            d = dist_NK[:, :, v0._susp_set_idx]
+            air = (d <= 1e-6) | (d >= 19.9)
+            jp = v0.wheel_mesh_radius - d
+            jp = torch.where(air, torch.full_like(jp, -v0.l_susp), jp)
+            if v0._susp_set_clamp is not None:
+                c = v0._susp_set_clamp.unsqueeze(0)
+                jp = torch.maximum(-c, torch.minimum(c, jp))
+            parts.append(jp)
+            susp_written = True
+
+        if self._set_dofs_g is not None:
+            combined = parts[0] if len(parts) == 1 else torch.cat(parts, dim=2)
+            # (N, K, m) → (N, K·m): row blocks per entity = global-idx order.
+            self.solver.set_dofs_position(
+                combined.reshape(N, -1), self._set_dofs_g)
+
+        if susp_written:
+            self.solver.set_dofs_velocity(
+                torch.zeros(N, len(self._susp_set_g),
+                            device=v0.device, dtype=v0.dtype),
+                self._susp_set_g, skip_forward=True)
+
+        if self._susp_ctrl_g is not None:
+            d = dist_NK[:, :, v0._susp_ctrl_idx]
+            air = (d <= 1e-6) | (d >= 19.9)
+            jp = v0.wheel_mesh_radius - d
+            jp = torch.where(air, torch.full_like(jp, -v0.l_susp), jp)
+            self.solver.control_dofs_position(
+                jp.reshape(N, -1), self._susp_ctrl_g)

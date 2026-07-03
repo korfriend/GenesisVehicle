@@ -10,6 +10,57 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.15] — 2026-07-04
+
+| 약자 | 의미 |
+|---|---|
+| kind | batched solver의 배치 단위 (같은 cfg 객체를 공유하는 차량 그룹) |
+| VJS | VisualJointSync (Genesis 뷰어용 휠 비주얼 관절 구동) |
+| MVP | `MultiVehiclePhysics` |
+| FK | Forward Kinematics (solver 진입마다 유발되던 것) |
+
+### Changed — cross-kind solver I/O batching (batching audit #9)
+
+- A multi-kind ``MultiVehiclePhysics.step`` paid 6 solver entries PER KIND
+  (4 state reads + 2 force/torque applies). Kinds cannot share the *compute*
+  (different wheel counts / strategy code by definition), but the I/O can:
+  the step now pre-reads every kind's base-link state in ONE batched
+  ``get_links_*`` set (4 calls total), injects per-kind slices
+  (``kind.step(state=...)``), and applies all kinds' deferred force/torque in
+  ONE combined call pair (``defer_apply=True``). Single-kind scenes take the
+  unchanged fast path. First-step-protection kinds contribute zeros
+  (physically identical to the old skip).
+- Measured (10 kinds × 1 tank, dual, CPU — the worst case the pre-1.0.8
+  server used to create): step **27.7 → 20.2 ms** (MVP 19.2 → 12.2; ~54 solver
+  entries/step removed). The remaining per-kind pipeline overhead is the
+  documented per-kind compute floor.
+
+### Changed — `KindVisualBatch`: K visual writers → one solver call (audit #10)
+
+- With the Genesis viewer on, each of a kind's K ``VisualJointSync.step``
+  calls issued its own ``set_dofs_position`` (+ susp velocity-zero, + control
+  path) — each a solver entry with collider/constraint reset + FK. Same-kind
+  entities share one dof LAYOUT, so all K writes now collapse into ONE
+  solver-level ``set_dofs_position`` over concatenated global dof indices
+  (``entity._dof_start + local``), one velocity-zero, one control call —
+  identical math on ``(n_envs, K, n)`` slabs (equivalence pinned by
+  ``tests/test_kind_visual_batch.py``). Falls back to the per-entity loop if
+  layouts differ.
+- Measured (30 tanks, dual, CPU, VJS forced on): step **23.3 → 14.2 ms**
+  (MVP 12.4 → 3.4) — the viewer overlay now costs ~0.8 ms over the headless
+  baseline instead of ~9 ms. Headless / UE runs are unaffected (VJS off).
+
+### Docs — synced to v1.0.11–v1.0.15
+
+- `two-scene-raycast.md` step list now describes the batched proxy/mirror
+  sync; `batching.md` visual-write + cross-kind sections and the stale
+  road_loop "6 % faster" figures updated; `api-reference.md` MVP notes gain
+  the kinds-split warning and v1.0.15 numbers; `server.md` gains
+  `--max-catchup-steps` and the `[MODE]`/`[PROFILE]`/`[STATS]` diagnostics
+  reference.
+
+---
+
 ## [1.0.14] — 2026-07-04
 
 | 약자 | 의미 |

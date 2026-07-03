@@ -318,10 +318,14 @@ class MultiVehiclePhysics:
 
 Vehicles of the same kind must share the SAME ``cfg`` instance — group
 by passing ``cfg_per_kind[k]`` instead of calling the preset fresh per
-vehicle. ~6% faster than the per-vehicle loop at K=16 with full
-VisualJointSync, ~10% if visuals are off; bounded by Genesis's per-entity
-``scene.step()`` cost. For RL/MPPI throughput use ``n_envs > 1`` instead
-(L3 batching — see
+vehicle (a fresh cfg per vehicle splits K vehicles into K kinds × 1 and
+the batching never engages — measured 10 tanks: SDK compute 33.8 vs
+2.8 ms/step). Since v1.0.15 multi-kind steps also batch the solver I/O
+across kinds (one combined state read + one force/torque apply pair)
+and same-kind VisualJointSync writers collapse into one solver call
+(``KindVisualBatch`` — 30 tanks with visuals: 23.3 → 14.2 ms/step);
+bounded by Genesis's per-entity ``scene.step()`` cost. For RL/MPPI
+throughput use ``n_envs > 1`` instead (L3 batching — see
 [`../samples/perf_vectorization.py`](../samples/perf_vectorization.py)).
 
 State (read-only, all `(n_envs, n_wheels)`):
