@@ -225,9 +225,12 @@ Supported:
 
 Follow-up:
 
-- **Server unification**: the OSC server already routes complex road meshes to a
-  kinematic visual-raycast body via `--road-raycast-only`; `VehicleScene` can
-  subsume that path.
+- **Server unification**: DONE as of 1.0.12 — both OSC server modes default to
+  `dual_scene` (statics get kinematic mirrors, dynamic obstacles get
+  `wheel_raycast` mirrors via `env_builder`); `--road-raycast-only` composes on
+  top by additionally dropping the main-scene road collider
+  (`add_raycast_surface`). The legacy one-scene behavior remains as the
+  per-entity `--single-scene` flag — see `server.md` §3.
 
 The upstream-correct fix (no second scene) is Genesis splitting the rigid
 collision/raycast BVH into static + dynamic subsets so the static terrain is not

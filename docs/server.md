@@ -42,10 +42,10 @@ has no engine dependency.
 ## 2. Running
 
 ```bash
-# per-entity mode (default): interacting / heterogeneous vehicles, one world
+# per-entity (L2) mode — the default: interacting / heterogeneous vehicles, one world
 python -m genesis_vehicle.server
 
-# L3 batched mode: many IDENTICAL, NON-interacting vehicles, GPU
+# multi-env (L3) mode: many IDENTICAL, NON-interacting vehicles, GPU
 python -m genesis_vehicle.server --multi-env
 
 # common flags
@@ -66,11 +66,15 @@ into the same venv as `genesis-world` + `torch`.
 
 ## 3. Mode selection
 
-| Sample goal | Mode | Backend | Vehicles interact? | Solver |
-|---|---|---|---|---|
-| Interacting traffic, heterogeneous, see collisions | **default (per-entity)** | CPU | ✅ (one world) | N × `VehiclePhysics` loop |
-| Many identical cars spread out, no mutual collision, max count | **`--multi-env`** | GPU | ❌ (parallel envs) | 1 × `VehiclePhysics(n_envs=N)` |
-| Interacting traffic × N parallel scenarios (RL / MPPI) | *(not in server)* | GPU | ✅ within env | `MultiVehiclePhysics(n_envs=N)` — drive from Python, see [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) |
+The two server modes are the SDK's L2 / L3 batching axes (see
+[`batching.md`](batching.md)); "per-entity" is the historical name of the
+L2 mode, kept for the CLI and logs.
+
+| Sample goal | Mode | Batching axis | Backend | Vehicles interact? | Solver |
+|---|---|---|---|---|---|
+| Interacting traffic, heterogeneous, see collisions | **default (per-entity)** | **L2** (K vehicles × 1 env) | CPU | ✅ (one world) | batched per vehicle *kind* — identical targets share ONE pipeline (1.0.8) |
+| Many identical cars spread out, no mutual collision, max count | **`--multi-env`** | **L3** (1 vehicle × n_envs) | GPU | ❌ (parallel envs) | 1 × `VehiclePhysics(n_envs=N)` |
+| Interacting traffic × N parallel scenarios (RL / MPPI) | *(not in server)* | **L2 × L3** | GPU | ✅ within env | `MultiVehiclePhysics(n_envs=N)` — drive from Python, see [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) |
 
 **Why CPU for the default mode and GPU for `--multi-env`?** At `n_envs=1`
 (one Genesis world, a handful of entities) GPU kernel-launch overhead
@@ -86,6 +90,17 @@ server's startup `실측된 1스텝 평균` log line and compare. See
 to its own env (`target_id` sorted → env index); dynamic obstacles are
 per-env copies (state reported from env 0); `target_forces` and
 impulse/torque relative commands are not supported (logged at runtime).
+
+**Raycast scene**: since v1.0.12 BOTH modes default to the SDK's
+`dual_scene` raycast (matching `VehicleScene`'s own default) — statics get
+a kinematic mirror in a separate raycast scene (static BVH, wheels ride
+the exact mesh surface), and dynamic obstacles get a per-step-synced
+mirror so wheels can still drive onto moving ramps/platforms.
+`--road-raycast-only` composes on top: it additionally drops the
+main-scene road collider (no CoACD / chassis-vs-road narrow-phase). The
+pre-v1.0.12 per-entity behavior — one scene, rays hit the rigid colliders
+themselves — remains available as `--single-scene` (per-entity only;
+incompatible with `--road-raycast-only`, ignored by `--multi-env`).
 
 ---
 

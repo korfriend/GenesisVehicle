@@ -312,6 +312,13 @@ def main():
                              "decomposition and the chassis-vs-road narrow-phase entirely; "
                              "the ray-cast wheels still follow the surface. Big win for large "
                              "chassis (e.g. tanks) on complex maps.")
+    parser.add_argument("--single-scene", action="store_true",
+                        help="(per-entity mode) legacy single-scene raycast: the wheel rays hit "
+                             "the rigid collision geoms of the ONE main scene directly (the "
+                             "pre-v1.0.12 default). Cheaper to build, but the raycast BVH re-fits "
+                             "every step and wheels ride convex (CoACD) road colliders instead of "
+                             "the exact mesh surface. Incompatible with --road-raycast-only "
+                             "(rco roads only exist in the dual raycast scene).")
     parser.add_argument("--structures-as-primitive", action="store_true",
                         help="Replace every MESH collider (obstacles/structures) with its "
                              "bounding BOX. Mesh colliders carry a per-geom SDF processed each "
@@ -333,10 +340,18 @@ def main():
                              "degradation. Irrelevant once a step fits the budget.")
     args = parser.parse_args()
 
+    if args.single_scene and args.road_raycast_only:
+        parser.error("--single-scene is incompatible with --road-raycast-only: "
+                     "an rco road is a kinematic raycast surface, which only the "
+                     "dual raycast scene can host.")
+
     # [L3] 멀티-env 배칭 모드 — 동일 URDF 다수 차량 전용 경로로 분기
     if args.multi_env:
         print(" [Genesis] [MODE] === MULTI-ENV (L3 batched) === "
               "(1 vehicle entity x n_envs, non-interacting, GPU default)")
+        if args.single_scene:
+            print(" [Genesis] [WARN] --single-scene is a per-entity-mode flag; "
+                  "multi-env (L3) is always dual_scene — ignoring it.")
         from .l3_runtime import run_l3
         run_l3(args)
         return
@@ -345,7 +360,7 @@ def main():
     # (per-entity 모드에선 CPU 가 GPU 보다 빠름 — n_envs=1 다중 엔티티는 커널 런치 바운드)
     args.cpu = True
     args.lockstep = False
-    print(" [Genesis] [MODE] === PER-ENTITY === "
+    print(" [Genesis] [MODE] === PER-ENTITY (L2) === "
           "(K interacting vehicles, n_envs=1, CPU-forced; use --multi-env for L3)")
 
     # 1. 제네시스 물리 엔진 초기화 및 백엔드 결정
@@ -398,20 +413,20 @@ def main():
     }
     
     # 4. Genesis Scene Setup — VehicleScene for unified vehicle handling.
-    # Per-entity mode is interacting vehicles at n_envs=1 on CPU. Default is
-    # inline (one scene == prior behavior: the raycast target is the rigid
-    # collider itself). --road-raycast-only REQUIRES dual_scene: the rco road is
-    # a KINEMATIC use_visual_raycasting surface, which only the raycast scene
-    # can host (single_scene rays only hit rigid collision geoms — add_static
-    # fails fast on collision=False there). dual_scene also keeps the road BVH
-    # static, so the wheels ride the exact mesh surface with no per-step re-fit
-    # and no chassis-vs-road narrow-phase.
+    # Per-entity mode is interacting vehicles at n_envs=1 on CPU. v1.0.12:
+    # dual_scene is the DEFAULT (matching the SDK default and L3) — statics get a
+    # kinematic raycast mirror whose BVH is static (no per-step re-fit), wheels
+    # ride the exact mesh surface, and --road-raycast-only composes on top (it
+    # additionally drops the main-scene road collider). Dynamic obstacles keep
+    # their pre-dual semantics via wheel_raycast mirrors (env_builder). The
+    # legacy one-scene behavior (rays hit the rigid colliders themselves) stays
+    # available as --single-scene; rco is rejected there at arg-parse time.
     # All geometry is registered via vs.add_* (no raw scene access); build() /
     # step() and sim reads/tweaks route through vs accessors. Genesis is already
     # initialized above, so init_genesis=False.
     vs = VehicleScene(
         n_envs=1, dt=ue_dt,
-        raycast_mode="dual_scene" if args.road_raycast_only else "inline",
+        raycast_mode="single_scene" if args.single_scene else "dual_scene",
         gravity=(0, 0, ue_gravity), substeps=2, show_viewer=not args.headless,
         init_genesis=False,
         rigid_options=gs.options.RigidOptions(
