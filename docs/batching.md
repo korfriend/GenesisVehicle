@@ -109,11 +109,14 @@ overrides) and runs a single batched compute per kind:
   call with K link indices applies forces to all K base links.
 - **Sensor reads**: K small `sensor.read()` calls in a Python loop
   (one raycaster per vehicle — unavoidable per-vehicle I/O).
-- **Visual writes**: K per-entity `VisualJointSync.step()` calls (only when
-  `enable_visual_joint_sync=True`). Each lowers to **one** `set_dofs_position`
-  per entity — v0.7.16 batches spin + steer + suspension into a single call, so
-  one engine collider/constraint reset + FK pass per entity (was 3). Cost scales
-  with K; for headless / external rendering leave it off (closed-form, ~µs).
+- **Visual writes** (only when `enable_visual_joint_sync=True`): since
+  v1.0.15 the K same-kind writers collapse into **one** solver-level
+  `set_dofs_position` over concatenated global dof indices
+  (`KindVisualBatch` — one engine reset + FK pass for ALL K entities;
+  measured 30 tanks: visual-write cost 12.4 → 3.4 ms/step). The per-entity
+  `VisualJointSync.step()` loop (v0.7.16: one call per entity) remains as
+  the layout-mismatch fallback. For headless / external rendering leave it
+  off (closed-form `wheel_visual_transforms`, ~µs).
 
 ### When L2 matters
 
@@ -366,14 +369,14 @@ grouping/dispatch bookkeeping is now unit-tested in
 - **Cross-kind compute**. Different URDFs / wheel counts / cfgs cannot
   share one batched call — they're dispatched as separate per-kind
   batches. With 4 kinds × 4 vehicles each, that's 4 batched calls per
-  step (vs 16 in the per-vehicle pattern).
+  step (vs 16 in the per-vehicle pattern). Since v1.0.15 the cross-kind
+  solver **I/O** IS batched, though: one combined state read (4
+  `get_links_*` calls) + one combined force/torque apply (2 calls) for
+  ALL kinds via `kind.step(state=…, defer_apply=True)` — was 6 solver
+  entries per kind (measured 10 kinds × 1 tank: step 27.7 → 20.2 ms).
 - **Sensor reads** in L2 are per-vehicle (one raycaster per vehicle —
   Genesis doesn't expose a multi-sensor batch API). Cost is small but
-  scales with K.
-- **VisualJointSync writes** in L2 are per-entity: one batched
-  `set_dofs_position` each (v0.7.16 — spin + steer + suspension combined), so
-  one engine FK pass per entity, scaling with K. Only when
-  `enable_visual_joint_sync=True`.
+  scales with K (~0.5 ms at K=10, CPU).
 
 ---
 
@@ -385,7 +388,7 @@ grouping/dispatch bookkeeping is now unit-tested in
 | L2 sweep | [`samples/perf_multi_vehicle.py`](../samples/perf_multi_vehicle.py) | 1.14× at K=2, 1.07× at K=4 (4-kind fleet) |
 | L2 × L3 minimal | [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) | shortest runnable L2 × L3 (K interacting × N scenarios, per-scenario control) |
 | L2 × L3 combined | [`samples/perf_l2_l3_combined.py`](../samples/perf_l2_l3_combined.py) | 4.6× at K=2 N=4 (≈ product of L2 × L3 individual) |
-| Multi-vehicle visual | [`samples/road_loop.py`](../samples/road_loop.py) | 6% faster than per-vehicle loop with full VisualJointSync (16 vehicles, 4 kinds) |
+| Multi-vehicle visual | [`samples/road_loop.py`](../samples/road_loop.py) | pre-1.0.15 figure: 6% faster than per-vehicle loop (16 vehicles, 4 kinds). v1.0.15 `KindVisualBatch` batches the visual writes themselves — 30 tanks CPU: 23.3 → 14.2 ms/step with VJS on |
 | L2 × L3 ego+traffic visual | [`samples/city_traffic_ego.py`](../samples/city_traffic_ego.py) | 8 vehicles × 4 envs = 32 batched; 3.5× throughput vs n_envs=1 |
 
 Re-run the samples on your machine — absolute numbers depend on GPU

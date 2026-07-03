@@ -148,12 +148,21 @@ class MultiVehicleKindPhysics:
         # each visual.step(). (See the [VISUAL] block at the bottom of step().)
         self._proto.visual = None
         self.visuals: list[VisualJointSync] = []
+        self._visual_batch = None
         if self._proto.resolved.enable_visual_joint_sync:
             for ent in entities:
                 self.visuals.append(VisualJointSync(
                     entity=ent, resolved=self._proto.resolved,
                     n_envs=n_envs, device=self.dev, dtype=self.fdt,
                 ))
+            # v1.0.15: batch the K writers into ONE solver call per step (same
+            # kind → identical dof layouts). Falls back to the per-entity loop
+            # (self.visuals) if construction fails.
+            try:
+                from .visual import KindVisualBatch
+                self._visual_batch = KindVisualBatch(self.visuals)
+            except Exception:
+                self._visual_batch = None
 
     # ------------------------------------------------------------------
     # Expose proto attributes for callers (omega, last_*, etc.)
@@ -222,7 +231,9 @@ class MultiVehicleKindPhysics:
     # The step pipeline. Mirrors VehiclePhysics.step but with batched I/O.
     # ------------------------------------------------------------------
     def step(self, inputs_list: Sequence[VehicleStepInputs],
-             distances: "torch.Tensor | None" = None) -> None:
+             distances: "torch.Tensor | None" = None,
+             state: "tuple | None" = None,
+             defer_apply: bool = False):
         """Step K vehicles in one batched compute pipeline.
 
         Args
@@ -235,6 +246,15 @@ class MultiVehicleKindPhysics:
                       ``_read_distances_batched`` layout). When given, the kind's
                       own raycasters are NOT read — used to inject VehicleScene's
                       dual_scene raycast-scene distances into the batched compute.
+        state       : optional pre-read ``(pos, quat, vel, ang)`` flat-batched
+                      ``(NK, ·)`` tensors (the ``_read_state_batched`` layout).
+                      Injected by ``MultiVehiclePhysics`` when it batches the
+                      state read ACROSS kinds (v1.0.15) — this kind then does
+                      no solver reads of its own.
+        defer_apply : when True, do NOT apply force/torque here; instead return
+                      ``(total_F, total_T)`` shaped ``(N, K, 3)`` so the caller
+                      can apply all kinds in one solver call. Returns ``None``
+                      on the first-step protection path (caller applies zeros).
         """
         assert len(inputs_list) == self.K, (
             f"expected K={self.K} inputs, got {len(inputs_list)}")
@@ -294,10 +314,12 @@ class MultiVehicleKindPhysics:
         p.last_distances = distances.detach().clone()
         if not p._prev_init and torch.all(distances < 1e-6):
             p._prev_init = True
-            return
+            return None
 
-        # [CHASSIS STATE]  — single batched solver read for K vehicles.
-        pos, quat, vel, ang = self._read_state_batched()
+        # [CHASSIS STATE]  — single batched solver read for K vehicles, or the
+        # cross-kind pre-read injected by MultiVehiclePhysics (v1.0.15).
+        pos, quat, vel, ang = (state if state is not None
+                               else self._read_state_batched())
         ctx.vel = vel
         ctx.ang = ang
         for hook in p.pre_loop_hooks:
@@ -334,17 +356,19 @@ class MultiVehicleKindPhysics:
         p.last_compression = res.compression
         p.last_kappa = res.kappa; p.last_alpha = res.alpha
 
-        # [APPLY]  — single batched solver call for K vehicles.
-        self._apply_force_torque_batched(total_F, total_T)
+        # [APPLY]  — single batched solver call for K vehicles, or deferred to
+        # the caller for a single apply ACROSS kinds (v1.0.15).
+        if not defer_apply:
+            self._apply_force_torque_batched(total_F, total_T)
         p._prev_init = True
         p._stepped_once = True
 
-        # [VISUAL] — per-entity Python loop over K VisualJointSync objects, each
-        # built with n_envs=N. Compute outputs are flat (NK, n_wheels); we
-        # reshape to (N, K, n_wheels) and slice the k-th vehicle's slab
-        # ((N, n_wheels)) to feed its visual.step(). With N=1 this is the
-        # original L2-only path; with N>1 each visual gets a real n_envs-
-        # batched update.
+        # [VISUAL] — K same-kind VisualJointSync writers. Since v1.0.15 they are
+        # batched into ONE solver-level set_dofs_position across all K entities
+        # (KindVisualBatch — identical layouts by construction, so the K
+        # per-entity calls, each triggering its own solver reset + FK pass,
+        # collapse into one). Falls back to the per-entity loop if the batch
+        # writer could not be built.
         if self.visuals:
             # NB: 'N' got reassigned earlier in section (A) to the per-wheel
             # normal-force tensor — use the explicit self.n_envs / self.K
@@ -353,13 +377,21 @@ class MultiVehicleKindPhysics:
             steer_NK = steer_per_wheel.reshape((n_envs, K, n))
             dist_NK  = distances.reshape((n_envs, K, n))
             omega_NK = p.omega.reshape((n_envs, K, n))
-            for k_i, vis in enumerate(self.visuals):
-                vis.step(
-                    steer_NK[:, k_i, :].contiguous(),
-                    dist_NK[:, k_i, :].contiguous(),
-                    omega_NK[:, k_i, :].contiguous(),
-                    DT,
-                )
+            if self._visual_batch is not None:
+                self._visual_batch.step(steer_NK, dist_NK, omega_NK, DT)
+            else:
+                for k_i, vis in enumerate(self.visuals):
+                    vis.step(
+                        steer_NK[:, k_i, :].contiguous(),
+                        dist_NK[:, k_i, :].contiguous(),
+                        omega_NK[:, k_i, :].contiguous(),
+                        DT,
+                    )
+
+        if defer_apply:
+            return (total_F.reshape(self.n_envs, K, 3),
+                    total_T.reshape(self.n_envs, K, 3))
+        return None
 
     def wheel_visual_transforms(self, frame: str = "world"):
         """Closed-form wheel visual poses for this kind's K vehicles (× n_envs),
@@ -511,6 +543,14 @@ class MultiVehiclePhysics:
             self.kinds.append(
                 MultiVehicleKindPhysics(scene, entities, sensors, cfg, n_envs=n_envs))
 
+        # [v1.0.15] Cross-kind I/O batching: concatenated base-link indices of
+        # every kind (kind-major), so a multi-kind step does ONE state read
+        # (4 solver calls) + ONE force/torque apply (2 calls) for ALL kinds
+        # instead of 6 calls per kind. (Compute stays per-kind — kinds differ
+        # in wheel count and strategy code by definition.)
+        self._all_base_idx = (torch.cat([k.base_idx_tensor for k in self.kinds])
+                              if len(self.kinds) > 1 else None)
+
     @property
     def n_vehicles(self) -> int:
         return len(self.vehicles)
@@ -542,8 +582,44 @@ class MultiVehiclePhysics:
         per_kind_dist = (self._assemble_kind_distances(distances)
                          if distances is not None else [None] * len(self.kinds))
         # Dispatch.
+        if len(self.kinds) == 1:
+            self.kinds[0].step(per_kind[0], distances=per_kind_dist[0])
+            return
+
+        # [v1.0.15] Multi-kind: batch the solver I/O ACROSS kinds. One state
+        # read (4 calls) for every kind's base links, sliced per kind and
+        # injected; each kind defers its force/torque, applied here in one
+        # combined call pair. Physics is unchanged — same tensors, same order.
+        solver = self.kinds[0].solver
+        idx = self._all_base_idx
+        n_envs = self.kinds[0].n_envs
+        n_all = int(idx.shape[0])
+        pos  = solver.get_links_pos(idx).reshape(n_envs, n_all, 3)
+        quat = solver.get_links_quat(idx).reshape(n_envs, n_all, 4)
+        vel  = solver.get_links_vel(idx).reshape(n_envs, n_all, 3)
+        ang  = solver.get_links_ang(idx).reshape(n_envs, n_all, 3)
+
+        F_parts, T_parts = [], []
+        off = 0
         for kind, ins, dist in zip(self.kinds, per_kind, per_kind_dist):
-            kind.step(ins, distances=dist)
+            Kk = kind.K
+            st = (pos[:, off:off + Kk].reshape(n_envs * Kk, 3),
+                  quat[:, off:off + Kk].reshape(n_envs * Kk, 4),
+                  vel[:, off:off + Kk].reshape(n_envs * Kk, 3),
+                  ang[:, off:off + Kk].reshape(n_envs * Kk, 3))
+            out = kind.step(ins, distances=dist, state=st, defer_apply=True)
+            if out is None:
+                # first-step protection path: no force this step (zeros = no-op)
+                F_parts.append(torch.zeros(n_envs, Kk, 3,
+                                           device=pos.device, dtype=pos.dtype))
+                T_parts.append(torch.zeros(n_envs, Kk, 3,
+                                           device=pos.device, dtype=pos.dtype))
+            else:
+                F_parts.append(out[0])
+                T_parts.append(out[1])
+            off += Kk
+        solver.apply_links_external_force(torch.cat(F_parts, dim=1), idx)
+        solver.apply_links_external_torque(torch.cat(T_parts, dim=1), idx)
 
     def _assemble_kind_distances(self, distances):
         """Re-bucket a flat per-vehicle distances list (length ``n_vehicles``, each

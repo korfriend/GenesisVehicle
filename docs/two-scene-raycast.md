@@ -60,8 +60,12 @@ flowchart TB
 
 Per `vs.step()` in dual_scene mode:
 
-1. Mirror each vehicle's chassis base pose onto its raycast-scene **proxy**
-   (`proxy.set_pos` runs FK).
+1. Mirror every chassis base pose onto its raycast-scene **proxy** — since
+   v1.0.11 this is ONE batched solver write + a single FK pass for all K
+   proxies (and, since v1.0.13, the dynamic-obstacle mirrors in the same
+   call): `VehicleScene._sync_proxies_batched`. The per-vehicle
+   `proxy.set_pos`/`set_quat` loop (2 whole-scene FK passes PER body,
+   ~1 ms/body) remains only as the automatic fallback and the `reset()` path.
 2. `raycast_scene.step()` — refreshes the ray origins and re-casts against the
    **static** terrain BVH. No rebuild.
 3. Read the wheel distances and feed them to the main-scene physics via

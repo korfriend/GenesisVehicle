@@ -57,7 +57,27 @@ python -m genesis_vehicle.server --headless          # no Genesis viewer window
 python -m genesis_vehicle.server --recv_port 7001 --send_port 7002 --send_port_obs 7004
 python -m genesis_vehicle.server --override_dt 0.01  # 100 Hz physics
 python -m genesis_vehicle.server --no-floor --vis_mode visual -v
+
+# pacing: cap the catch-up steps per loop (default max(5, 0.1/dt)).
+# The cap does NOT speed anything up — it selects the degradation mode when a
+# step exceeds the dt budget: 5 bursts up to 5 steps trying to recover
+# real-time (jerky pacing), 1 runs one step per loop → steady, burst-free
+# slow motion (pairs with the TimeDilation the server sends). Irrelevant once
+# a step fits the budget.
+python -m genesis_vehicle.server --max-catchup-steps 1
 ```
+
+**Diagnostics** printed by both modes:
+- startup `[MODE] === PER-ENTITY === / === MULTI-ENV (L3 batched) ===` banner
+  (so perf reports are unambiguous about which path ran);
+- startup `[PROFILE]` — one-shot per-step section breakdown
+  (`raycast/proxy | SDK compute | genesis solver | 기타`), measured over 5
+  warmup steps after 2 unprofiled JIT-warm steps;
+- runtime `[STATS] [per-entity|L3 n_envs=N] Loop Avg | Physics Avg
+  (X steps/loop, Y ms/step)` every 50 loops. `Physics Avg` is the SUM of the
+  loop's catch-up steps — read the per-step value from the parenthesis;
+  `steps/loop` pinned at the cap (default 5.0) means the server cannot hold
+  real-time (permanent slow-motion), ~1.0 means it can.
 
 **Dependencies** (server only — NOT required by the SDK core):
 `pythonosc`, `psutil`, `trimesh` (obstacle-mesh preprocessing). Install
