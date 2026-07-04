@@ -177,6 +177,7 @@ def main():
 
     WRAP_PERIOD = 100.0    # terrain repeats every this many metres → seamless wrap
     terrain_obj, n_faces = make_bumpy_terrain(amp=args.amp, period=WRAP_PERIOD)
+    vis_obj = None         # coarse VISUAL terrain copy (viewer modes only)
     # Earthy Rough surface so the slopes catch the directional light (a bare
     # default surface + high ambient is what made the bumps look flat).
     terrain_surface = gs.surfaces.Rough(color=(0.52, 0.46, 0.34))
@@ -211,9 +212,16 @@ def main():
         # dual_scene keeps that terrain in the SEPARATE raycast scene, so the
         # main-scene camera/viewer would not see it. Add a collision-free VISUAL
         # copy to the main scene purely for rendering (no physics, no raycast).
+        # The copy is COARSER (res 1.0 vs 0.5, ~17k faces vs ~70k): the offscreen
+        # raster is geometry-bound (~15 ms/frame at 70k faces — alone over the
+        # 20.8 ms real-time budget; pixel count barely matters), while the coarse
+        # grid deviates ≤ ~5 mm from the exact full-res raycast surface the
+        # wheels ride — invisible, and the HUD/native view stays real-time.
         if need_render:
+            vis_obj, _ = make_bumpy_terrain(amp=args.amp, period=WRAP_PERIOD,
+                                            res=1.0)
             vs.add_dynamic(
-                gs.morphs.Mesh(file=terrain_obj, fixed=True, align=False,
+                gs.morphs.Mesh(file=vis_obj, fixed=True, align=False,
                                collision=False, visualization=True, convexify=False),
                 physics=False, wheel_raycast=False,
                 material=gs.materials.Rigid(), surface=terrain_surface)
@@ -223,7 +231,11 @@ def main():
 
     cam = None
     if args.viewer:
-        cam = vs.add_camera(res=(1280, 720), pos=(-8.0, -6.0, 4.0),
+        # 1024x576 (not 720p): the offscreen raster + HUD overlay + imshow cost
+        # ~25 ms/frame at 1280x720 — over the 20.8 ms real-time step budget on
+        # its own. At 1024x576 and 24 fps (every 2nd step) the whole loop fits
+        # the budget, so the 1x pacer below holds true real time.
+        cam = vs.add_camera(res=(1024, 576), pos=(-8.0, -6.0, 4.0),
                             lookat=(0.0, 0.0, 1.0), up=(0.0, 0.0, 1.0),
                             fov=55, near=0.1, far=200.0, GUI=False)
 
@@ -261,15 +273,15 @@ def main():
 
     n_settle = int(1.0 / DT)
     n_drive = int(args.duration / DT)
-    render_every = max(1, int(0.04 / DT))
+    render_every = max(1, round((1.0 / 24.0) / DT))   # HUD ~24 fps (real-time budget)
     hud_perf = _hud.PerfMeter(window=60)
 
-    def _hud_render(t_sim, throttle):
+    def _hud_render(t_sim, throttle, p, speed):
+        # p / speed are passed in from the drive loop (already read there this
+        # step) — re-reading them here would add 2 more engine reads per frame,
+        # which the real-time budget can't spare.
         if not args.viewer:
             return True
-        p = veh.get_pos()[0].cpu().numpy()
-        v = veh.get_vel()[0].cpu().numpy()
-        speed = float((v[0] ** 2 + v[1] ** 2) ** 0.5)
         # Follow ALONGSIDE the car (camera to its side, not behind) so the
         # chassis pitch/heave over the bumps is seen in profile against the
         # terrain skyline.
@@ -299,33 +311,56 @@ def main():
     t_start = time.perf_counter()
     user_quit = False
     step = 0
+    pace_next = time.perf_counter()   # real-time (1x) pacer for the cv2 HUD
     if infinite:
         print("\n[driving — press ESC in the window, or Ctrl+C here, to stop]")
+    # ONE pos read + ONE vel read per step, reused by the governor, centerline
+    # steer, z stats, wrap check and HUD. The naive version re-read them at
+    # each use (~6 engine reads/step ≈ +3 ms) — enough to blow the 20.8 ms
+    # real-time budget with the HUD on.
+    p_np = veh.get_pos()[0].cpu().numpy()
     try:
         while True:
             # Speed governor: coast above ~7 m/s so the car rides the hills at a
             # steady pace forever instead of accelerating until it launches off a
             # crest and tumbles (with kinematic terrain there's no floor to catch
             # it). Plus a gentle pull to the centerline so it doesn't drift off
-            # the side (+steer = right; left of centre → +).
-            v = veh.get_vel()[0]
-            speed = float((float(v[0]) ** 2 + float(v[1]) ** 2) ** 0.5)
+            # the side (+steer = right; left of centre → +). p_np is last step's
+            # pose — a 1-step-stale centerline correction is imperceptible.
+            v_np = veh.get_vel()[0].cpu().numpy()
+            speed = float((v_np[0] ** 2 + v_np[1] ** 2) ** 0.5)
             thr = 0.45 if speed < 7.0 else 0.0
-            y = float(veh.get_pos()[0][1])
-            steer = max(-0.18, min(0.18, 0.06 * y))
+            steer = max(-0.18, min(0.18, 0.06 * float(p_np[1])))
             veh.set_inputs(throttle=thr, brake=0.0, steer=steer)
             vs.step(); hud_perf.tick()
-            zc = float(veh.get_pos()[0][2]); z_lo = min(z_lo, zc); z_hi = max(z_hi, zc)
-            if float(veh.get_pos()[0][0]) - x0 >= WRAP_PERIOD:
+            p_np = veh.get_pos()[0].cpu().numpy()
+            zc = float(p_np[2]); z_lo = min(z_lo, zc); z_hi = max(z_hi, zc)
+            if float(p_np[0]) - x0 >= WRAP_PERIOD:
                 pos = veh.entity_main.get_pos().clone()
                 pos[..., 0] -= WRAP_PERIOD          # absolute pose, keep velocity
                 veh.entity_main.set_pos(pos, zero_velocity=False, relative=False)
+                p_np[0] -= WRAP_PERIOD
                 wraps += 1
             if step % render_every == 0:
                 _follow_native()
-                if not _hud_render(step * DT, thr):   # False = ESC pressed
+                if not _hud_render(step * DT, thr, p_np, speed):  # False = ESC
                     user_quit = True
                     break
+            if args.viewer:
+                # Real-time (1x) pacing for the cv2 HUD. --native gets this
+                # from the Genesis viewer's realtime_factor pacer (inside
+                # vs.step()); the cv2 path has no viewer, so it would free-run
+                # on a fast machine and looked sped-up. Debt must CARRY OVER
+                # between steps: the HUD renders every render_every-th step, so
+                # a render step overruns the budget and the steps between pay
+                # it back — resyncing on every overrun locks in ~0.8x. Only a
+                # real hitch (>0.25 s behind) resyncs, to avoid a catch-up rush.
+                pace_next += DT
+                now = time.perf_counter()
+                if pace_next > now:
+                    time.sleep(pace_next - now)
+                elif now - pace_next > 0.25:
+                    pace_next = now
             step += 1
             if not infinite and step >= n_drive:
                 break
@@ -358,6 +393,8 @@ def main():
         ],
     )
     os.unlink(terrain_obj)
+    if vis_obj is not None:
+        os.unlink(vis_obj)
 
 
 if __name__ == "__main__":

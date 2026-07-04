@@ -10,6 +10,46 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.18] — 2026-07-04
+
+| 약자 | 의미 |
+|---|---|
+| HUD | `--viewer`의 cv2 오버레이 창 (오프스크린 카메라 + 동기 렌더) |
+| pacer | 루프를 벽시계 실시간(1×)에 맞추는 sleep 로직 |
+| budget | 스텝당 실시간 예산 = dt (48 Hz → 20.8 ms) |
+
+### Changed — `terrain_drive --viewer` (cv2 HUD) now runs at TRUE real time (1x)
+
+The cv2 path had no pacing at all — but it was not "too fast": with the HUD
+rendering every step it ran at 0.6x (35 ms/step), i.e. slow motion, and would
+free-run on a faster machine. Measured on CPU/WSLg and fixed in four parts:
+
+- **Pacer with carry-over debt** (the subtle one): the HUD renders every
+  `render_every`-th step, so a render step overruns the budget and the steps
+  between must pay the debt back. A naive "resync on overrun" pacer zeroes
+  that debt at every render step and locks in ~0.8x (measured 40.1/48
+  steps/s with per-phase accounting). Debt now carries over; only a real
+  hitch (>0.25 s behind) resyncs. Result: **47.98 steps/s vs 48.0 target**.
+- **Coarse VISUAL terrain copy**: the offscreen raster is geometry-bound
+  (~15 ms/frame at the full 70k-face terrain, ~10 ms at 17k; pixel count
+  barely matters — 1280×720 vs 1024×576 was 15.9 vs 14.6 ms). The main-scene
+  visual copy (viewer modes only) now uses `res=1.0` (~17k faces), deviating
+  ≤ ~5 mm from the exact full-res raycast surface the wheels ride. The
+  raycast mesh (physics) is untouched.
+- **HUD at 24 fps, 1024×576**: render every 2nd step (was every step at
+  1280×720) — the whole loop now fits the 20.8 ms budget.
+- **One pos + one vel engine read per step**, reused by the governor,
+  centerline steer, z stats, wrap check and HUD (was ~6 reads ≈ +3 ms/step;
+  `_hud_render` takes `p`/`speed` as arguments now).
+
+`--native` needs none of this (the Genesis viewer's `realtime_factor=1.0`
+pacer already holds 1×, and it now draws the coarse visual copy too:
+47.2 steps/s). Headless stays UNPACED by design (benchmark/CI: ~102
+steps/s). 110 pytest pass; drive/on-terrain/bumps checks OK on all three
+paths.
+
+---
+
 ## [1.0.17] — 2026-07-04
 
 | 약자 | 의미 |
