@@ -67,8 +67,9 @@ python -m genesis_vehicle.server --no-floor --vis_mode visual -v
 # pacing: ADAPTIVE catch-up is the default (v1.0.20). The server monitors
 # steps/loop: sustained overload (window avg ≥ 1.5) drops the cap to 1 —
 # steady, burst-free slow motion; once step-loops run comfortably under the
-# dt budget again (a full window of consecutive < 0.8×dt loops) it returns
-# to cap=max(5, 0.1/dt) so backlog catch-up / real-time recovery resumes.
+# dt budget again (a full window of consecutive < 0.9×dt loops) it returns
+# to cap=max(5, 0.1/dt) so backlog catch-up / real-time recovery resumes
+# (plus a 100-loop startup grace so the build/JIT transient can't trigger it).
 # Switches log as [Pacing] [AdaptiveCatchup]; every [STATS] line shows the
 # current mode as [cap=N:burst|smooth|fixed:N].
 # Pass N to PIN the cap and disable the adaptive pacer:

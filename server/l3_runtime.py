@@ -116,18 +116,24 @@ class L3State:
         차체 pos/quat 2회 + SDK 닫힌형 wheel_visual_transforms 1회로 N대 전체를
         읽는다. 바퀴 pos/quat 은 steer+suspension+spin 이 모두 반영된 visual 포즈
         (VisualJointSync on/off 무관). spin 은 quat 에 포함되므로 w_angle=0."""
+        # 모든 read 를 텐서로 모은 뒤 [GPU 1-sync v1.1.1] _to_host_batched 로
+        # DtoH 동기화를 캡처당 1회로 몰아서 내려받는다 (CPU 백엔드는 기존과
+        # 동일한 개별 변환 — 헬퍼가 자동 판별).
         bp = self.car.get_pos()
         bq = self.car.get_quat()
-        if hasattr(bp, 'cpu'):
-            bp = bp.cpu().numpy(); bq = bq.cpu().numpy()
+        wp, wq = self.veh.wheel_visual_transforms("world")   # (N, n, 3/4)
+        obs_items = [(o_id, ent) for o_id, ent in dynamic_obstacles.items()
+                     if o_id not in ue_driven_obstacle_ids]
+        reads = [bp, bq, wp, wq]
+        for _, ent in obs_items:
+            reads.append(ent.get_pos())
+            reads.append(ent.get_quat())
+        hosts = _to_host_batched(reads)
+        bp, bq, wp, wq = hosts[0], hosts[1], hosts[2], hosts[3]
         bp = np.atleast_2d(bp); bq = np.atleast_2d(bq)
 
-        wp, wq = self.veh.wheel_visual_transforms("world")   # (N, n, 3/4)
-        if hasattr(wp, 'cpu'):
-            wp = wp.cpu().numpy(); wq = wq.cpu().numpy()
-
         state = {'targets': {}, 'dynamic_obstacles': {}}
-        # NB: bp/bq/wp/wq are freshly created THIS capture (.cpu().numpy())
+        # NB: bp/bq/wp/wq are freshly created THIS capture (host download)
         # and never mutated — per-row .copy() removed in v1.0.13.
         for k, tid in enumerate(self.tids):
             wheels_states = [
@@ -137,13 +143,9 @@ class L3State:
             state['targets'][tid] = (bp[k], bq[k], wheels_states)
 
         # 동적 장애물: env 복제 한계로 env 0 기준 송신
-        for o_id, ent in dynamic_obstacles.items():
-            if o_id in ue_driven_obstacle_ids:
-                continue
-            p = ent.get_pos(); q = ent.get_quat()
-            if hasattr(p, 'cpu'):
-                p = p.cpu().numpy(); q = q.cpu().numpy()
-            p = np.atleast_2d(p)[0]; q = np.atleast_2d(q)[0]
+        for i, (o_id, _ent) in enumerate(obs_items):
+            p = np.atleast_2d(hosts[4 + 2 * i])[0]
+            q = np.atleast_2d(hosts[4 + 2 * i + 1])[0]
             state['dynamic_obstacles'][o_id] = (p, q)
         return state
 
