@@ -410,7 +410,7 @@ class VehicleConfig:
     steering, drivetrain, coupling, tire
     chassis: ChassisConfig = field(default_factory=ChassisConfig)
     stability_hooks: list[StabilityHook] = field(default_factory=list)
-    recommended_dt: float = 1.0/48.0   # `dt` is a deprecated alias (v0.5.31)
+    recommended_dt: float = 0.025    # 40 Hz SDK default (v1.0.19); `dt` is a deprecated alias
     enable_visual_joint_sync: bool = False   # auto-managed by VehicleScene.build() (not a user knob)
     susp_visual_clamp: float | None = None   # v0.7.14: None=per-wheel rest_stroke
 

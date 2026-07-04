@@ -180,7 +180,7 @@ from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 import genesis as gs
 
 VehicleScene.init_backend("cpu")   # physics backend (default cpu; "gpu" only for large-n_envs L3)
-vs = VehicleScene(raycast_mode="dual_scene", dt=1/48, substeps=10)  # dual_scene is the default
+vs = VehicleScene(raycast_mode="dual_scene", dt=0.025, substeps=10)  # dual_scene is the default
 
 # Static body: rigid in main (collision) + kinematic in raycast (static BVH).
 # Provide collision_morph for a coarse/convex collider while raycasting a

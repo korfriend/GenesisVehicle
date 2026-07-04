@@ -914,6 +914,16 @@ class VehicleScene:
         for entity, mass in self._pending_mass:
             entity.set_mass(mass)
         self._built = True
+        # Resolved timing, logged on every run (v1.0.19) — dt is the one value
+        # perf reports keep needing; make it impossible to miss.
+        try:
+            _ss = int(self.sim_options.substeps)
+            print(f"[genesis_vehicle] timing: dt={self.dt * 1e3:.1f}ms "
+                  f"({1.0 / self.dt:.0f}Hz) x substeps={_ss} "
+                  f"(internal {self.dt / _ss * 1e3:.2f}ms) | n_envs={self.n_envs} "
+                  f"| raycast_mode={self.raycast_mode}")
+        except Exception:
+            pass
 
     def _measure_distances(self) -> dict:
         """Internal: return ``{vehicle: wheel-ground distances}`` for the step.
