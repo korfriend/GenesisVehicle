@@ -10,6 +10,38 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.19] — 2026-07-04
+
+| 약자 | 의미 |
+|---|---|
+| ss | substeps (스텝 내부 적분 분할) |
+| internal dt | dt/ss — 솔버 내부 적분 간격 |
+
+### Changed — SDK-wide default timing is now 40 Hz (dt = 0.025)
+
+- Follow-through on 1.0.17 (server fallback → 0.025): the presets and samples
+  now default to 40 Hz too, so the whole SDK speaks one default.
+  - `VehicleConfig.recommended_dt` default `1/48 → 0.025`.
+  - All five presets: car/awd/truck `1/48 → 0.025`; **tank `0.005 → 0.025`**
+    (the 200 Hz recommendation was KDU-legacy conservatism — the server has
+    been running tanks at dt 0.02–0.025 / ss2 = internal 10–12.5 ms
+    throughout the perf campaign, and the 1.0.17 bumpy-terrain A/B showed
+    cruise/z-oscillation/yaw within noise; samples use ss10 → internal
+    2.5 ms, far finer still).
+  - Samples pick this up via `cfg.recommended_dt` automatically;
+    `two_scene_terrain`'s hardcoded `1/48` updated to 0.025.
+- Users can still pick any dt (`VehicleScene(dt=...)` /
+  `SimOptions.dt` / server `--override_dt`); a client-sent dt still wins in
+  the server, and the preset-mismatch warning stays informational.
+- **The resolved timing is now logged on every run**:
+  `VehicleScene.build()` prints
+  `[genesis_vehicle] timing: dt=25.0ms (40Hz) x substeps=10 (internal
+  2.50ms) | n_envs=… | raycast_mode=…` — alongside the server's existing
+  `[Determinism]` line. Docs updated (`quickstart.md`, `README.md`,
+  `two-scene-raycast.md`, `api-reference.md`).
+
+---
+
 ## [1.0.18] — 2026-07-04
 
 | 약자 | 의미 |

@@ -102,9 +102,12 @@ class VehicleConfig:
     #   gs.Scene(sim_options=SimOptions(dt=cfg.recommended_dt, ...))
     # If the user picks a different ``SimOptions.dt``, VehiclePhysics
     # emits a one-time warning (per process) on the first mismatch but
-    # does not refuse — Genesis's value wins. Tanks generally need
-    # >=200 Hz (recommended_dt=0.005); cars are fine at 100 Hz.
-    recommended_dt: float = 1.0 / 48.0
+    # does not refuse — Genesis's value wins.
+    # v1.0.19: SDK-wide default is 40 Hz (0.025) — verified indistinguishable
+    # from 1/48 (and from the tank's legacy 0.005) on bumpy terrain: cruise
+    # speed / z-oscillation / yaw-rate within noise (see CHANGELOG 1.0.17).
+    # Users can always pick their own dt (server: --override_dt).
+    recommended_dt: float = 0.025
     # Drive the URDF wheel visual joints (spin/steer/suspension) through the
     # engine each step so the **Genesis native viewer** shows wheels moving.
     # Default False: the dominant path (headless / external UE·Unity renderer)
