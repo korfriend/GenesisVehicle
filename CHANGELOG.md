@@ -10,6 +10,38 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.16] — 2026-07-04
+
+| 약자 | 의미 |
+|---|---|
+| pacer | Genesis 뷰어의 realtime_factor 페이서 (`viewer.update()` 끝에서 sleep) |
+| HUD | `--viewer`의 cv2 오버레이 창 (오프스크린 카메라 + 동기 렌더) |
+
+### Fixed — `terrain_drive --native`: the car visibly "trembled" (camera one step behind)
+
+- The native-viewer follow set the camera **from the drive loop, after
+  `vs.step()` returned**. But the realtime pacer sleeps INSIDE
+  `viewer.update()` (i.e. inside `vs.step()`), right after the renderer
+  receives the fresh chassis pose — so for most of each ~21 ms frame the
+  async viewer thread drew car pose *k* against camera pose *k−1*. At
+  7 m/s that is a ~15 cm car-vs-camera offset flickering at the draw rate:
+  the car appeared to tremble/judder while `--viewer` (cv2 HUD: synchronous
+  `cam.set_pose` + render, always same-step) looked rock solid. Physics was
+  never affected — pure render-phase artifact.
+- Fix: use Genesis's `viewer.follow_entity(veh.entity_main)` — the camera
+  is updated inside `viewer.update()`, microseconds from the pose push, in
+  the same call. No smoothing, so the seamless 100 m wrap snap stays
+  invisible (a smoothed camera would sweep 100 m backwards through the
+  scene). `ViewerOptions.camera_pos` doubles as the follow offset
+  (`(0, -13, 2.8)`, matching the old side-follow view).
+- The per-step `set_camera_pose` follow is kept only as a fallback for
+  Genesis versions without `follow_entity`.
+- Verified: `--native` runs at the pacer's real-time 48 Hz (46.4 steps/s
+  measured) with the follow engaged; headless + cv2 paths unchanged;
+  110 pytest pass.
+
+---
+
 ## [1.0.15] — 2026-07-04
 
 | 약자 | 의미 |
