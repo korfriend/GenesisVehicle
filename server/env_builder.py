@@ -3,29 +3,30 @@ import trimesh
 import numpy as np
 import genesis as gs
 
-# [Fix] CoACD/Complex 콜라이더의 Face 꼬임 방지를 위해 생성된 전처리 임시 파일 목록
+# [Fix] List of preprocessing temp files created to prevent face winding issues in CoACD/Complex colliders
 created_temp_files = []
 
 def make_double_sided_mesh(mesh, thickness=0.02):
     """
-    오픈 메쉬의 모든 페이스를 복제하고 와인딩을 뒤집은 뒤 아래로 미세하게 이동하여,
-    양면에서 백페이스 컬링 없이 완벽히 투명하지 않게 보이도록 하는 이중면 메쉬를 만듭니다.
+    Build a double-sided mesh from an open mesh by duplicating all faces,
+    flipping their winding, and shifting them slightly downward so the mesh
+    is visible from both sides without backface culling.
     """
     v_orig = mesh.vertices.copy()
     f_orig = mesh.faces.copy()
     num_v = len(v_orig)
     
-    # Z축 아래로 thickness만큼 내린 정점 생성
+    # Create vertices shifted down along Z by thickness
     v_back = v_orig.copy()
     v_back[:, 2] -= thickness
     
     new_vertices = np.vstack([v_orig, v_back])
     
-    # 뒷면 face 생성 (정점 인덱스 오프셋 적용 및 와인딩 순서 반전 [c, b, a])
+    # Create back faces (apply vertex index offset and reverse winding order [c, b, a])
     f_back = f_orig + num_v
     f_back = f_back[:, [2, 1, 0]]
     
-    # 앞면과 뒷면 결합
+    # Combine front and back faces
     all_faces = np.vstack([f_orig, f_back])
     
     new_mesh = trimesh.Trimesh(vertices=new_vertices, faces=all_faces)
@@ -85,25 +86,29 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
                     verbose=False, road_raycast_only=False,
                     structures_as_primitive=False):
     """
-    언리얼 엔진으로부터 수신한 초기 장애물 리스트를 파싱하여
-    물질 특성(마찰력, 반발력 등)과 충돌 기하(SDF/Box/Convex 등)를 자동 튜닝하여
-    Genesis 물리 씬에 배치합니다.
+    Parse the initial obstacle list received from Unreal Engine, auto-tune
+    material properties (friction, restitution, etc.) and collision geometry
+    (SDF/Box/Convex, etc.), and place them into the Genesis physics scene.
 
-    road_raycast_only=True 이면 복합 도로/지형 메쉬(obs_type==5 + [Complex])를
-    **KINEMATIC 비주얼 메쉬**(material.Kinematic(use_visual_raycasting=True))로
-    로드합니다. 레이캐스트-휠 모델에서는 차체가 서스펜션 힘으로 떠 있고 휠은
-    레이캐스트로 지면을 따라가므로, 도로는 "광선에 맞기만" 하면 되고 강체 충돌
-    바디일 필요가 없습니다. Kinematic solver에 두면 그 레이캐스트 BVH가
-    maybe_static=True 가 되어 **매 스텝 rebuild가 스킵**됩니다(차량이 rigid solver
-    에서 움직여도). 이 경로는 CoACD·narrow-phase뿐 아니라 **레이캐스터의 per-frame
-    BVH 재빌드**까지 제거해, 큰 맵에서 step당 수십~수백 ms를 없앱니다.
+    With road_raycast_only=True, complex road/terrain meshes (obs_type==5 +
+    [Complex]) are loaded as **KINEMATIC visual meshes**
+    (material.Kinematic(use_visual_raycasting=True)). In the raycast-wheel
+    model the chassis floats on suspension forces and the wheels follow the
+    ground via raycasts, so the road only needs to "be hit by rays" and does
+    not need to be a rigid collision body. Placing it in the Kinematic solver
+    makes its raycast BVH maybe_static=True, so the **per-step rebuild is
+    skipped** (even while vehicles move in the rigid solver). This path
+    removes not only CoACD/narrow-phase but also the **raycaster's per-frame
+    BVH rebuild**, saving tens to hundreds of ms per step on large maps.
 
-    structures_as_primitive=True 이면 **모든 메쉬 콜라이더**(obs_type==5 / convex /
-    complex)를 그 bounding box(``gs.morphs.Box`` primitive)로 대체합니다. 메쉬는
-    geom당 SDF를 매 스텝 처리해(접촉 0이어도 ~0.6 ms/mesh) 구조물 수에 비례해
-    느려지지만, Box는 해석적 충돌이라 안 닿으면 ~0 입니다. 즉 구조물이 수백~수천
-    개여도 "실제 닿는 몇 개"의 비용만 들게 됩니다. (도로는 box가 부적합하니
-    road_raycast_only 가 우선 처리하고, 그 외 메쉬 구조물만 box로 바뀝니다.)
+    With structures_as_primitive=True, **all mesh colliders** (obs_type==5 /
+    convex / complex) are replaced by their bounding box (``gs.morphs.Box``
+    primitive). Meshes process a per-geom SDF every step (~0.6 ms/mesh even
+    with zero contact), slowing down proportionally to structure count, while
+    a Box collides analytically and costs ~0 when not touching. So even with
+    hundreds/thousands of structures, only "the few actually in contact" cost
+    anything. (A box is unsuitable for roads, so road_raycast_only takes
+    precedence there; only the other mesh structures become boxes.)
     """
     global created_temp_files
     obstacles = []
@@ -132,13 +137,13 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
         if b_dynamic == 2:
             ue_driven_obstacle_ids.add(obs_id)
 
-        # [User Choice] 사용자 지정 태그 확인
+        # [User Choice] Check user-specified tags
         col_src = obs_data.get('collision_source', '')
         is_user_simple = "[User:Simple]" in col_src
         is_user_convex = "[User:Convex]" in col_src
         is_user_complex = "[User:Complex]" in col_src
 
-        # 직관적인 물리 엔진 로딩 방식 이름으로 변환 (로그 출력용)
+        # Convert to an intuitive physics-engine loading-mode name (for log output)
         sim_handling = "Primitive"
         if is_user_simple: sim_handling = "PrimitiveBox_Override"
         elif obs_type == 5:
@@ -176,24 +181,24 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
         elif obs_type == 5 or is_user_complex or is_user_convex:
             mesh_path = obs_data.get('mesh_path', '')
             
-            # [Fix] 패키지 빌드 시 절대 경로가 다를 수 있으므로 자동 상대 경로 스캔 및 역추적을 수행합니다.
+            # [Fix] Absolute paths may differ in packaged builds, so perform automatic relative-path scanning and backtracking.
             if mesh_path and not os.path.exists(mesh_path):
                 filename = os.path.basename(mesh_path)
                 candidate_paths = [
-                    # 파이썬 실행 디렉토리 기준 (Content 폴더 우대)
+                    # Relative to the Python working directory (Content folder preferred)
                     os.path.join(os.getcwd(), "Content", "GenesisCache", filename),
                     os.path.join(os.getcwd(), "Content", "GenesisAutoMeshes", filename),
                     os.path.join(os.getcwd(), "Saved", "GenesisCache", filename),
                     
-                    # 소스코드 경로 기준
+                    # Relative to the source code path
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), "Content", "GenesisCache", filename),
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), "Saved", "GenesisCache", filename),
                     
-                    # Unreal 빌드 아웃풋 예상 폴더들 (Content 폴더 우대)
+                    # Expected Unreal build output folders (Content folder preferred)
                     os.path.join(os.getcwd(), "..", "Content", "GenesisCache", filename),
                     os.path.join(os.getcwd(), "Windows", "Content", "GenesisCache", filename),
                     
-                    # 프로젝트명 포함 폴더
+                    # Folders including the project name
                     os.path.join(os.getcwd(), "Windows", "Genesis_Unreal", "Content", "GenesisCache", filename),
                     os.path.join(os.getcwd(), "WindowsNoEditor", "Genesis_Unreal", "Content", "GenesisCache", filename)
                 ]

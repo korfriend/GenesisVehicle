@@ -1,12 +1,12 @@
 """Official OSC-server benchmark — the SDK server driven end-to-end over the
 real wire by a mock UE client (v1.0.20).
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
 | L2 / L3 | per-entity (K interacting entities × 1 env) / multi-env (1 entity × n_envs) |
 | simple / complex | plane ground only / plane + 88 static convex-hull structures |
-| ms/step | 물리 1스텝 비용 (`[STATS]` per-step 값) |
-| steps/loop | 루프당 catch-up 스텝 수 (~1.0 = 실시간 유지, 상한 고정 = 포화) |
+| ms/step | cost of one physics step (the `[STATS]` per-step value) |
+| steps/loop | catch-up steps per loop (~1.0 = holding real-time, pinned at cap = saturated) |
 
 For every configuration in {L2, L3} × {simple, complex} × {1, 10, 30, 100}
 tanks this script:
@@ -220,7 +220,7 @@ def run_config(mode: str, terrain: str, k: int, urdf: str, hull_obj: str,
             profile=profile_line[-1] if profile_line else "",
             mode_banner=mode_line[-1] if mode_line else "",
             pacing_events=list(pacing_events),
-            pacing_mode=rows[-1][4] if rows else "?",           # 마지막 [STATS]의 모드
+            pacing_mode=rows[-1][4] if rows else "?",           # mode from the last [STATS]
             pacing_switches=sum("switch#" in e for e in pacing_events),
         )
         return result

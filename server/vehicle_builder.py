@@ -1,12 +1,15 @@
-"""차량 빌더 (genesis_vehicle.server) — 원본: genesis_unreal_plugin/genesis_vehicle_builder.py.
+"""Vehicle builder (genesis_vehicle.server) — origin: genesis_unreal_plugin/genesis_vehicle_builder.py.
 
-이전하며 바뀐 점:
-  - cfg 구성 로직을 ``build_cfg()`` 로 추출 — per-entity 경로(build_vehicle)와
-    L3 멀티-env 경로(l3_runtime)가 동일한 차량 설정을 공유한다.
-  - 바퀴 충돌체 제거 임시 URDF 생성을 ``strip_wheel_collisions()`` 로 추출.
-  - [FIX] 조향 범위 키 불일치: UE ``FGenesisVehicleMapping.SteerScale`` 은 JSON 으로
-    ``steerScale`` 로 직렬화되는데 기존 코드는 ``maxSteerRad`` 만 읽어 UE 설정이
-    항상 무시되고 프리셋 기본(0.7 rad)이 적용됐다. 이제 steerScale 도 인식한다.
+Changes made during migration:
+  - cfg construction logic extracted into ``build_cfg()`` — the L2 path
+    (build_vehicle, per-entity) and the L3 multi-env path (l3_runtime) share
+    the same vehicle configuration.
+  - Temporary URDF generation with wheel colliders removed extracted into
+    ``strip_wheel_collisions()``.
+  - [FIX] Steering range key mismatch: UE ``FGenesisVehicleMapping.SteerScale``
+    serializes to JSON as ``steerScale``, but the old code only read
+    ``maxSteerRad``, so the UE setting was always ignored and the preset
+    default (0.7 rad) applied. Now steerScale is also recognized.
 """
 import os
 import xml.etree.ElementTree as ET
@@ -26,8 +29,8 @@ created_temp_urdfs = []
 
 
 def _mapping_steer_rad(mapping, default=None):
-    """매핑에서 최대 조향각(rad)을 읽는다. UE 쪽 필드명 변형을 모두 인식:
-    maxSteerRad / MaxSteerRad / steerScale / SteerScale."""
+    """Read the max steering angle (rad) from the mapping. Recognizes all
+    UE-side field-name variants: maxSteerRad / MaxSteerRad / steerScale / SteerScale."""
     for key in ("maxSteerRad", "MaxSteerRad", "steerScale", "SteerScale"):
         if key in mapping:
             return float(mapping[key])
@@ -36,8 +39,9 @@ def _mapping_steer_rad(mapping, default=None):
 
 def apply_monkey_patches(rigid_solver):
     """
-    GenesisVehicle의 3D Tensor(Batched) Force 입력을
-    현재 Genesis 엔진의 2D Tensor 요구사항에 맞게 변환해주는 Monkey Patch (SDK 원본 수정 방지)
+    Monkey patch that converts GenesisVehicle's 3D tensor (batched) force
+    inputs to the current Genesis engine's 2D tensor requirement (avoids
+    modifying the SDK source).
     """
     orig_apply_force = rigid_solver.apply_links_external_force
     def patched_apply_force(force, links_idx=None, envs_idx=None, **kwargs):
@@ -120,11 +124,14 @@ def is_wheel_match_fuzzy(override_wheel_name, wheel_config):
 
 
 def strip_wheel_collisions(urdf_path):
-    """원본 URDF를 수정하지 않고 바퀴 충돌체만 제거한 임시 URDF를 생성해 경로를 반환.
+    """Create a temporary URDF with only the wheel colliders removed, without
+    modifying the original URDF, and return its path.
 
-    레이휠 물리는 바퀴 충돌체를 쓰지 않으므로(레이캐스트가 접지 판정) 충돌체를
-    남겨두면 바닥과 이중 접촉이 생긴다. 임시 파일은 원본과 같은 디렉토리에 만들어
-    상대 메쉬 경로를 보존하며, created_temp_urdfs 에 등록되어 종료 시 청소된다.
+    Ray-wheel physics does not use wheel colliders (raycast handles ground
+    contact), so leaving them in creates double contact with the floor. The
+    temp file is created in the same directory as the original to preserve
+    relative mesh paths, and is registered in created_temp_urdfs for cleanup
+    on exit.
     """
     tree = ET.parse(urdf_path)
     root = tree.getroot()
@@ -141,22 +148,25 @@ def strip_wheel_collisions(urdf_path):
     return temp_path
 
 
-# [Batch] cfg 공유 캐시 — VehicleScene 의 batched solver 는 cfg "객체 identity"
-# 로 kind 를 묶는다 (multi_vehicle.group_vehicles_by_cfg). per-entity 서버가
-# 타깃마다 새 cfg 를 만들면 K 대가 K kinds × 1 대로 쪼개져 배치 파이프라인이
-# 무력화되고 SDK compute 가 K 배가 된다 (실측: 탱크 10대 CPU 37.8ms vs 1 kind
-# 2.8ms). 같은 (urdf, mapping, friction) 이면 같은 cfg 객체를 돌려줘 한 kind 로
-# 묶는다. 키에 target_id 는 제외 (로그용 인자일 뿐 결과에 영향 없음).
+# [Batch] Shared cfg cache — VehicleScene's batched solver groups kinds by
+# cfg "object identity" (multi_vehicle.group_vehicles_by_cfg). If the L2
+# server creates a new cfg per target, K vehicles split into K kinds × 1
+# vehicle, defeating the batched pipeline and multiplying SDK compute by K
+# (measured: 10 tanks CPU 37.8ms vs 1 kind 2.8ms). For the same
+# (urdf, mapping, friction), return the same cfg object so they group into
+# one kind. target_id is excluded from the key (log-only argument, no effect
+# on the result).
 _cfg_cache: dict = {}
 
 
 def build_cfg(urdf_path, mapping, t_fric, target_id=0):
-    """URDF + UE 매핑 JSON 으로부터 VehicleConfig 를 구성해 반환.
+    """Build and return a VehicleConfig from the URDF + UE mapping JSON.
 
-    per-entity 경로(build_vehicle)와 L3 멀티-env 경로(l3_runtime)가 공유하는
-    차량 설정 단일 소스. 엔티티 생성/Raycaster/VehiclePhysics 는 포함하지 않는다.
-    동일 (urdf_path, mapping, t_fric) 호출은 **같은 cfg 객체**를 반환한다
-    (배치 kind 공유 — 위 _cfg_cache 주석 참고).
+    Single source of vehicle configuration shared by the L2 path
+    (build_vehicle, per-entity) and the L3 multi-env path (l3_runtime). Does
+    not include entity creation/Raycaster/VehiclePhysics. Calls with the same
+    (urdf_path, mapping, t_fric) return the **same cfg object** (batched kind
+    sharing — see the _cfg_cache comment above).
     """
     _key = (os.path.abspath(urdf_path), float(t_fric),
             repr(sorted(mapping.items())) if isinstance(mapping, dict) else repr(mapping))
@@ -258,20 +268,20 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
         else: # Independent
             coupling = Independent()
 
-        # 4. 동적 서스펜션 파라미터 계산
+        # 4. Dynamic suspension parameter computation
         chassis_mass = urdf_parsed.chassis_mass if urdf_parsed.chassis_mass else 1500.0
         m_per_wheel = chassis_mass / len(wheels) if len(wheels) > 0 else chassis_mass / 4.0
 
         if chassis_mass < 1000.0:
-            fn = 1.8  # 초경량 / 스포츠카 / 카트
+            fn = 1.8  # ultra-light / sports car / kart
             damping_ratio_comp = 0.7
             damping_ratio_ext = 0.45
         elif chassis_mass > 3000.0:
-            fn = 1.2  # 대형 트럭 / 버스
+            fn = 1.2  # heavy truck / bus
             damping_ratio_comp = 0.7
             damping_ratio_ext = 0.45
         else:
-            fn = 1.5  # 일반 세단 / SUV
+            fn = 1.5  # regular sedan / SUV
             damping_ratio_comp = 0.7
             damping_ratio_ext = 0.45
 
@@ -295,7 +305,7 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
             w.c_compression = dynamic_c_comp
             w.c_extension = dynamic_c_ext
 
-            rest_stroke = 0.2  # 기본 20cm
+            rest_stroke = 0.2  # default 20cm
             if urdf_root is not None and w.susp_joint_name:
                 joint_elem = urdf_root.find(f".//joint[@name='{w.susp_joint_name}']")
                 if joint_elem is not None:
@@ -306,7 +316,7 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
                         if (upper - lower) > 0.05:
                             rest_stroke = upper - lower
 
-                    # dynamics 태그에서 강성 및 감쇠력 속성 파싱 지원
+                    # Support parsing stiffness and damping attributes from the dynamics tag
                     dyn_elem = joint_elem.find("dynamics")
                     if dyn_elem is not None:
                         stiff = dyn_elem.get("stiffness") or dyn_elem.get("spring_stiffness")
@@ -345,7 +355,7 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
         )
 
     # 6. Apply global strategies to loaded preset configurations if explicitly overridden in Unreal
-    # [FIX] UE FGenesisVehicleMapping 은 'steerScale' 로 직렬화하므로 그 키도 인식
+    # [FIX] UE FGenesisVehicleMapping serializes as 'steerScale', so recognize that key too
     steer_override = _mapping_steer_rad(mapping, default=None)
     if steer_override is not None:
         if hasattr(cfg.steering, 'max_steer_rad'):
@@ -451,7 +461,7 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
 
 
 def print_resolved_table(target_id, resolved_cfg):
-    """최종 resolve 된 차량 물리 설정 요약 테이블 출력."""
+    """Print a summary table of the final resolved vehicle physics settings."""
     print("\n=========================================================================================================")
     print("🚗 GENESIS RESOLVED VEHICLE PHYSICS SETTINGS")
     print(f"  Target ID: {target_id}")
@@ -480,30 +490,35 @@ def print_resolved_table(target_id, resolved_cfg):
 def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
                   urdf_path, mapping, ue_friction, ue_restitution, vis_mode):
     """
-    지정된 URDF 경로 및 매핑 설정을 기반으로 차량을 vs.add_vehicle 로 등록하고
-    cfg 를 동적 자동 튜닝하여 VehicleScene 에 등록합니다.
-    (per-entity 경로 — 차량마다 엔티티 1개. proxy/sensor/VehiclePhysics 는 vs.build()
-    에서 생성되므로, controllers 는 호출측이 build 후 채운다.)
+    Register a vehicle via vs.add_vehicle based on the given URDF path and
+    mapping settings, auto-tuning the cfg dynamically and registering it with
+    the VehicleScene.
+    (L2 path — one entity per vehicle (per-entity). proxy/sensor/VehiclePhysics
+    are created in vs.build(), so the caller fills controllers after build.)
 
-    VisualJointSync(휠 시각 관절 구동)는 VehicleScene.build()가 자동 관리한다 — main
-    씬이 Genesis로 렌더될 때(show_viewer)만 ON. 서버는 외부 렌더(UE)가 그리고
-    wheel_visual_transforms(닫힌형)로 capture하므로 헤드리스에선 OFF로 유지된다.
+    VisualJointSync (driving the visual wheel joints) is auto-managed by
+    VehicleScene.build() — ON only when the main scene is rendered by Genesis
+    (show_viewer). The server is drawn by an external renderer (UE) and
+    captures via wheel_visual_transforms (closed-form), so it stays OFF when
+    headless.
     """
     t_pos = target_info.get('pos', [0, 0, 2])
     t_quat = target_info.get('quat', [1, 0, 0, 0])
     t_fric = target_info.get('friction', ue_friction)
-    t_rest = 0.0  # 차체가 튕기는 현상 억제를 위해 0으로 강제
+    t_rest = 0.0  # forced to 0 to suppress chassis bouncing
 
     temp_path = strip_wheel_collisions(urdf_path)
     target_morph = gs.morphs.URDF(file=temp_path, pos=t_pos, quat=t_quat, fixed=False, align=False)
-    t_color = (1.0, 0.3, 0.3, 0.5)   # 디버그 색상 (semi-transparent red)
+    t_color = (1.0, 0.3, 0.3, 0.5)   # debug color (semi-transparent red)
 
-    # 차량 설정 구성 (L3 경로와 공유되는 단일 소스). enable_visual_joint_sync 는
-    # vs.build() 가 렌더 여부로 자동 설정하므로 여기서 건드리지 않는다.
+    # Build the vehicle config (single source shared with the L3 path).
+    # enable_visual_joint_sync is set automatically by vs.build() based on
+    # rendering, so it is not touched here.
     cfg = build_cfg(urdf_path, mapping, t_fric, target_id=target_id)
 
-    # VehicleScene 이 엔티티를 main 씬에 빌드 + raycaster/proxy/VehiclePhysics 를
-    # vs.build() 에서 생성. 호출측은 씬을 직접 만지지 않는다.
+    # VehicleScene builds the entity into the main scene + creates
+    # raycaster/proxy/VehiclePhysics in vs.build(). The caller never touches
+    # a scene directly.
     veh = vs.add_vehicle(
         urdf_path, cfg=cfg, morph=target_morph,
         material=gs.materials.Rigid(friction=t_fric, coup_restitution=t_rest, sdf_cell_size=10000.0),

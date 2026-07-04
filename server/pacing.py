@@ -1,29 +1,33 @@
 """Adaptive catch-up pacer (v1.0.20).
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| cap | 한 루프에서 몰아 돌릴 물리 스텝 상한 (catch-up cap) |
-| BURST | cap = max — 밀린 시간을 몰아 돌려 실시간 복귀를 시도하는 모드 |
-| SMOOTH | cap = 1 — 복귀를 포기하고 균일한 배속의 슬로모션으로 열화하는 모드 |
-| steps/loop | 루프당 실행한 물리 스텝 수 (~1.0 = 실시간 유지) |
+| cap | upper bound on physics steps run in one loop (catch-up cap) |
+| BURST | cap = max — mode that bursts through backlog to try to return to real-time |
+| SMOOTH | cap = 1 — mode that gives up recovery and degrades to uniform-speed slow motion |
+| steps/loop | physics steps executed per loop (~1.0 = holding real-time) |
 
-고정 cap 의 딜레마: 스텝이 dt 예산을 초과하는 과부하에서 cap=5 는 5-스텝
-버스트로 프레임 간격이 출렁(뚝뚝)이고, cap=1 은 부드럽지만 일시적 히컵
-(로딩 스파이크 등) 뒤에도 밀린 시간을 영원히 따라잡지 못한다.
+The fixed-cap dilemma: under overload where a step exceeds the dt budget,
+cap=5 causes 5-step bursts that make frame intervals stutter, while cap=1 is
+smooth but never catches up on backlog even after a transient hiccup (e.g. a
+loading spike).
 
-``AdaptiveCatchup`` 은 steps/loop 를 창(window) 평균으로 모니터링해 둘을
-자동 전환한다:
+``AdaptiveCatchup`` monitors a windowed average of steps/loop and switches
+between the two automatically:
 
-- **BURST → SMOOTH**: 창 평균 steps/loop ≥ ``hi``(기본 1.5) — 지속적 과부하.
-  버스트로 복귀가 안 되는 상태이므로 cap=1 로 내려 균일 저속으로 전환.
-- **SMOOTH → BURST**: '스텝을 실행한 루프'의 소요가 ``sim_dt × recover_ratio``
-  (기본 0.8) 미만으로 창 길이만큼 **연속** 유지 — 하드웨어에 여유가 돌아왔다는
-  뜻이므로 cap 을 max 로 되돌려 밀린 시간 따라잡기를 재개.
-- 전환 직후 ``cooldown`` 루프 동안은 재전환 금지 (진동 방지 히스테리시스).
+- **BURST → SMOOTH**: window-average steps/loop ≥ ``hi`` (default 1.5) —
+  sustained overload. Bursting cannot recover, so drop to cap=1 for uniform
+  slow speed.
+- **SMOOTH → BURST**: the duration of 'loops that executed a step' stays
+  below ``sim_dt × recover_ratio`` (default 0.8) for a full window
+  **consecutively** — hardware headroom has returned, so restore cap to max
+  and resume catching up on backlog.
+- Right after a switch, re-switching is forbidden for ``cooldown`` loops
+  (anti-oscillation hysteresis).
 
-``--max-catchup-steps N`` 을 준 경우(fixed) 적응 로직은 꺼지고 cap=N 고정.
-전환 시마다 ``[Pacing] [AdaptiveCatchup]`` 로그를 남기고, [STATS] 라인에
-현재 모드가 표기된다.
+If ``--max-catchup-steps N`` is given (fixed), the adaptive logic is off and
+cap=N is fixed. Every switch leaves a ``[Pacing] [AdaptiveCatchup]`` log, and
+the current mode is shown on the [STATS] line.
 """
 
 from __future__ import annotations
@@ -33,11 +37,12 @@ from collections import deque
 
 
 class AdaptiveCatchup:
-    """steps/loop 기반 catch-up cap 자동 전환기. 두 서버 루프가 공유한다.
+    """steps/loop-based automatic catch-up cap switcher. Shared by both server loops.
 
-    ``profile=True`` (서버 ``--pacing-profile``)면 전환 트리거 시점의 상황을
-    상세 덤프한다: 창의 steps/loop 이력, 루프 소요 통계(avg/p95), dt 예산
-    대비 추정 배속, 마지막 전환 이후 경과. 벤치마크는 이 옵션을 항상 켠다.
+    With ``profile=True`` (server ``--pacing-profile``), dumps details at the
+    moment a switch triggers: the window's steps/loop history, loop-duration
+    stats (avg/p95), estimated speed vs the dt budget, and time since the last
+    switch. Benchmarks always enable this option.
     """
 
     def __init__(self, max_cap: int, sim_dt: float, *,
@@ -52,22 +57,23 @@ class AdaptiveCatchup:
         self.hi = float(hi)
         self.recover_ratio = float(recover_ratio)
         self.cooldown = int(cooldown)
-        # 기동 유예: 첫 grace 루프는 관측만 하고 전환하지 않는다 — 빌드 직후의
-        # JIT/settle 과도기(스텝 50~200ms 스파이크)가 창을 오염시켜 스퓨리어스
-        # SMOOTH 전환을 만들던 것을 방지 (벤치 실측: L2×30이 t=1.4s에 오탐).
+        # Startup grace: the first `grace` loops only observe, never switch —
+        # prevents the post-build JIT/settle transient (50-200ms step spikes)
+        # from polluting the window and causing spurious SMOOTH switches
+        # (bench measurement: L2×30 false-triggered at t=1.4s).
         self.grace = int(grace)
         self.profile = bool(profile)
 
         self._mode = "BURST"          # BURST(cap=max) | SMOOTH(cap=1)
         self._steps_hist: deque = deque(maxlen=self.window)
-        self._dur_hist: deque = deque(maxlen=self.window)   # 루프 소요(초) 이력
-        self._good_streak = 0         # SMOOTH 회복 판정용 연속 카운터
+        self._dur_hist: deque = deque(maxlen=self.window)   # loop duration (sec) history
+        self._good_streak = 0         # consecutive counter for SMOOTH recovery decision
         self._cooldown_left = 0
         self._t0 = time.monotonic()
         self._last_switch_t: "float | None" = None
         self._n_switches = 0
 
-    # -- 루프가 읽는 값 ---------------------------------------------------
+    # -- Values the loop reads --------------------------------------------
     def cap(self) -> int:
         if self.fixed is not None:
             return self.fixed
@@ -79,16 +85,17 @@ class AdaptiveCatchup:
             return f"fixed:{self.fixed}"
         return "burst" if self._mode == "BURST" else "smooth"
 
-    # -- 루프가 매회 끝에서 호출 -------------------------------------------
+    # -- Called by the loop at the end of every iteration --------------------
     def update(self, catchup_steps: int, loop_dur: float) -> None:
-        """``catchup_steps``: 이번 루프에서 실행한 스텝 수. ``loop_dur``: 이번
-        루프의 전체 소요(초; 물리 + capture + 송신 포함, sleep 제외 경로만)."""
+        """``catchup_steps``: steps executed in this loop. ``loop_dur``: total
+        duration of this loop (sec; includes physics + capture + send,
+        non-sleep path only)."""
         if self.fixed is not None:
             return
-        if self.grace > 0:                 # 기동 유예 — 관측만, 전환 없음
+        if self.grace > 0:                 # startup grace — observe only, no switching
             self.grace -= 1
             if self.grace == 0:
-                self._steps_hist.clear()   # 과도기 표본은 창에서 버린다
+                self._steps_hist.clear()   # discard transient samples from the window
                 self._dur_hist.clear()
             else:
                 self._steps_hist.append(catchup_steps)
@@ -108,7 +115,7 @@ class AdaptiveCatchup:
                              f"창 평균 steps/loop "
                              f"{sum(self._steps_hist) / self.window:.1f} ≥ {self.hi}"
                              f" (지속 과부하) → cap=1 균일 슬로모션")
-        else:  # SMOOTH — 스텝을 실행한 루프의 소요로 회복 판정
+        else:  # SMOOTH — recovery judged by duration of loops that executed a step
             if catchup_steps >= 1:
                 if loop_dur < self.sim_dt * self.recover_ratio:
                     self._good_streak += 1
@@ -135,7 +142,7 @@ class AdaptiveCatchup:
             avg_steps = (sum(steps) / len(steps)) if steps else 0.0
             since = (f"{now - self._last_switch_t:.1f}s since last switch"
                      if self._last_switch_t is not None else "first switch")
-            # 추정 배속: 루프당 시뮬 진행(steps×dt) / 루프당 현실 시간
+            # Estimated speed: sim progress per loop (steps×dt) / real time per loop
             speed = ((avg_steps * self.sim_dt) / (avg_ms / 1e3)
                      if avg_ms > 0 else 0.0)
             print(f" [Pacing] [AdaptiveCatchup] [profile] switch#{self._n_switches} "

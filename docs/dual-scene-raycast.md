@@ -239,7 +239,7 @@ Follow-up:
   `wheel_raycast` mirrors via `env_builder`); `--road-raycast-only` composes on
   top by additionally dropping the main-scene road collider
   (`add_raycast_surface`). The legacy one-scene behavior remains as the
-  per-entity `--single-scene` flag — see `server.md` §3.
+  L2-mode `--single-scene` flag — see `server.md` §3.
 
 The upstream-correct fix (no second scene) is Genesis splitting the rigid
 collision/raycast BVH into static + dynamic subsets so the static terrain is not

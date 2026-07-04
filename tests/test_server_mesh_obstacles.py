@@ -186,7 +186,7 @@ def test_add_raycast_surface_dual_scene(cpu_genesis, cube_obj):
 
 
 def test_dynamic_obstacle_gets_wheel_raycast_mirror_in_dual_scene(cpu_genesis):
-    """1.0.12: the per-entity server defaults to dual_scene, where a dynamic
+    """1.0.12: the L2 server defaults to dual_scene, where a dynamic
     body is INVISIBLE to the wheel rays unless it has a synced raycast mirror.
     env_builder must pass wheel_raycast for dual_scene so wheels keep riding
     moving ramps/platforms (the implicit single_scene behavior)."""
@@ -229,7 +229,7 @@ def test_collision_false_single_scene_fails_fast(cpu_genesis, cube_obj):
     collision geoms, so a no-collision static would be a fall-through surface —
     pre-1.0.7 this warned and built a rigid from the rco road morph (which itself
     carries collision=False): zero collision geoms, invisible to the raycaster,
-    vehicles fell straight through rco roads in the per-entity (inline) server.
+    vehicles fell straight through rco roads in the L2 (inline) server.
     add_static must now refuse (fail fast) instead of building a broken scene.
     (The server pairs --road-raycast-only with raycast_mode='dual_scene'.)"""
     import pytest
