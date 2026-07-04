@@ -10,6 +10,34 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.1] — 2026-07-05
+
+### Added — collision-stress server benchmark (`server/benchmark_collision.py`)
+
+- New `python -m genesis_vehicle.server.benchmark_collision`: K tanks spawn
+  evenly on a ring (radius auto-scaled from K, `--radius` to override), each
+  rotated to face the center, and drive at identical constant throttle until
+  they all collide in the middle — the collision-regime companion to the
+  official grid benchmark (`server.benchmark`), whose tanks never touch.
+- Drives the REAL L2 server over the OSC wire (same mock-UE pattern as
+  `benchmark.py`, on its own ports 7111/7112/7114) and — new — LISTENS to
+  the `/Genesis/Vehicle/TargetBulk` state stream to track chassis positions
+  and yaw, so the whole path (contact solving + state encode) is exercised.
+  The listener sets `max_packet_size = 65535`: `TargetBulk` is one datagram
+  for all K tanks (~10.7 KB at K=30) and socketserver's 8 KB default
+  silently truncates it.
+- Steering is a P-controller aiming each tank at the origin; after the first
+  impact the tanks stay pressed together (sustained K-way contact) instead
+  of ricocheting out of the ring, which is the regime being measured.
+- Reports both "speed drops": physical (v_peak → v_end mean tank speed,
+  collision instant = first drop below 50 % of peak) and simulation
+  (mean ms/step before vs after the pile-up + slowdown factor), plus a
+  0.5 s-resolution timeline (mean ring radius, mean speed, ms/step).
+- Reference results (WSL2 laptop, CPU, dt = 0.025, throttle 0.8, in
+  `docs/server.md` §2.2): 10 tanks 12.9 → 13.8 ms/step (1.07×);
+  30 tanks 14.0 → 19.5 ms/step (1.39×, peak ~24) — the 30-way pile-up
+  stays inside the 25 ms real-time budget.
+
 ## [1.1.0] — 2026-07-05
 
 ### Changed — terminology unification: "two-scene" → dual-scene; official subsystem name = wheel-raycast

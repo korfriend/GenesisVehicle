@@ -188,6 +188,44 @@ L3's physics still fits the budget (17–25 ms/step) and the loop overrun is
 serving overhead (capture + OSC encode for 100 targets), the next
 optimization target for 100-vehicle fleets.
 
+## 2.2 Collision-stress benchmark (ring convergence)
+
+The official benchmark spawns tanks on a 15 m grid, so they never touch —
+it measures the contact-free cost. `genesis_vehicle.server.benchmark_collision`
+(v1.1.1) measures the other regime: K tanks on a circle (radius auto-scaled
+from K, `--radius` to override), each facing the center, driven at identical
+constant throttle until they all pile up in the middle. L2 only (vehicles
+must interact), plane terrain, CPU:
+
+```bash
+python -m genesis_vehicle.server.benchmark_collision              # 10, 30 tanks
+python -m genesis_vehicle.server.benchmark_collision --tanks 30 --duration 40
+python -m genesis_vehicle.server.benchmark_collision --radius 25 --throttle 1.0
+```
+
+Unlike `benchmark.py` it also LISTENS on the send port: chassis positions
+and yaw are read back from `/Genesis/Vehicle/TargetBulk`, and steering is a
+small P-controller aiming every tank at the origin — after the first impact
+the tanks stay pressed together (sustained K-way contact) instead of
+ricocheting out of the ring. It reports both "speed drops": the physical
+one (mean tank speed v_peak → v_end; the collision instant is the first
+drop below 50 % of peak) and the simulation one (mean ms/step before vs
+after the pile-up, plus the post/pre slowdown factor), with a 0.5 s
+timeline of mean ring radius / mean speed / ms/step per config.
+
+Reference results (v1.1.1, CPU, dt = 0.025, throttle 0.8, same WSL2 laptop
+as §2.1):
+
+| tanks | R (m) | v_peak → v_end (m/s) | collision t | ms/step pre → post | slowdown |
+|---|---|---|---|---|---|
+| 10 | 20.0 | 6.29 → 0.02 | 9.5 s | 12.9 → 13.8 | 1.07× |
+| 30 | 38.2 | 8.51 → 1.15 | 12.0 s | 14.0 → 19.5 | 1.39× |
+
+Reading: the pile-up is real but affordable. At 30 tanks the sustained
+30-way contact scrum costs ~+39 % per step vs the approach phase (peaking
+at ~24 ms/step in the densest jam) — still inside the 25 ms real-time
+budget that the contact-free grid holds at 15.7 ms/step (§2.1).
+
 **Dependencies** (server only — NOT required by the SDK core):
 `pythonosc`, `psutil`, `trimesh` (obstacle-mesh preprocessing). Install
 into the same venv as `genesis-world` + `torch`.
