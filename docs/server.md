@@ -64,13 +64,20 @@ python -m genesis_vehicle.server --override_dt 0.025
 python -m genesis_vehicle.server --override_dt 0.01  # 100 Hz physics (finer)
 python -m genesis_vehicle.server --no-floor --vis_mode visual -v
 
-# pacing: cap the catch-up steps per loop (default max(5, 0.1/dt)).
-# The cap does NOT speed anything up — it selects the degradation mode when a
-# step exceeds the dt budget: 5 bursts up to 5 steps trying to recover
-# real-time (jerky pacing), 1 runs one step per loop → steady, burst-free
-# slow motion (pairs with the TimeDilation the server sends). Irrelevant once
-# a step fits the budget.
-python -m genesis_vehicle.server --max-catchup-steps 1
+# pacing: ADAPTIVE catch-up is the default (v1.0.20). The server monitors
+# steps/loop: sustained overload (window avg ≥ 1.5) drops the cap to 1 —
+# steady, burst-free slow motion; once step-loops run comfortably under the
+# dt budget again (a full window of consecutive < 0.8×dt loops) it returns
+# to cap=max(5, 0.1/dt) so backlog catch-up / real-time recovery resumes.
+# Switches log as [Pacing] [AdaptiveCatchup]; every [STATS] line shows the
+# current mode as [cap=N:burst|smooth|fixed:N].
+# Pass N to PIN the cap and disable the adaptive pacer:
+python -m genesis_vehicle.server --max-catchup-steps 1   # always-smooth (old fixed behavior)
+
+# pacing diagnostics: dump the trigger context on every adaptive switch
+# (window steps/loop history, loop_dur avg/p95, dt budget, est speed ratio).
+# Off by default; the server benchmark (§2.1) always enables it.
+python -m genesis_vehicle.server --pacing-profile
 ```
 
 **Diagnostics** printed by both modes:
@@ -84,6 +91,64 @@ python -m genesis_vehicle.server --max-catchup-steps 1
   loop's catch-up steps — read the per-step value from the parenthesis;
   `steps/loop` pinned at the cap (default 5.0) means the server cannot hold
   real-time (permanent slow-motion), ~1.0 means it can.
+
+## 2.1 Official server benchmark
+
+`genesis_vehicle.server.benchmark` (v1.0.20) drives the REAL server
+end-to-end over the OSC wire with a built-in mock UE client — the official
+per-mode speed test:
+
+```bash
+python -m genesis_vehicle.server.benchmark                  # full matrix:
+#   {L2, L3} × {simple(plane), complex(88 convex hulls)} × {1,10,30,100 tanks}
+python -m genesis_vehicle.server.benchmark --modes L3 --tanks 10,30
+python -m genesis_vehicle.server.benchmark --terrain complex --gpu   # L3 GPU opt-in
+python -m genesis_vehicle.server.benchmark --urdf /path/to/tank.urdf
+```
+
+Per configuration it launches the server subprocess (`--headless
+--road-raycast-only`, CPU default, dt = 0.025), performs the full OSC
+handshake (`/Genesis/Init/Physics` → `/Genesis/Vehicle/Init` (SkidSteer
+mapping → `tank_10w_skid_belt`) → K `/Init/Target`s → 88 `/Init/Obstacle`s
+(complex) → `/Init/Done`), streams `/Genesis/Vehicle/Control` driving inputs
+at ~30 Hz, averages the server's `[STATS]` lines (first dropped as warm-up),
+then sends `stop`. The summary table reports ms/step, steps/loop, Loop Avg,
+the **pacing mode** (final adaptive-catchup state, with switch count — the
+benchmark always runs the server with `--pacing-profile`) and a real-time
+verdict (steps/loop ≤ 1.05 AND Loop Avg ≤ 25 ms). Every adaptive-catchup
+trigger context is echoed per config as a `[pacing]` line (window steps/loop
+history, loop_dur avg/p95, budget, est speed). The tank URDF defaults to
+`GeneVehicle_KDU/tank_ray.urdf` next to the repo.
+
+Official reference results (v1.0.20, CPU, dt = 0.025, rco on, WSL2 laptop —
+re-run on your hardware for absolute numbers):
+
+| mode | terrain | tanks | ms/step | steps/loop | Loop Avg | pacing | realtime |
+|---|---|---|---|---|---|---|---|
+| L2 | simple | 1 | 10.9 | 0.4 | 5.9 | burst | O |
+| L2 | simple | 10 | 12.7 | 0.5 | 9.0 | burst | O |
+| L2 | simple | 30 | 15.7 | 0.6 | 14.5 | burst | O |
+| L2 | simple | 100 | 31.1 | 1.0 | 57.8 | smooth (1sw) | X |
+| L2 | complex(88) | 1 | 10.5 | 0.4 | 5.8 | burst | O |
+| L2 | complex(88) | 10 | 13.0 | 0.5 | 9.2 | burst | O |
+| L2 | complex(88) | 30 | 16.7 | 0.7 | 16.2 | burst | O |
+| L2 | complex(88) | 100 | 35.8 | 1.0 | 64.1 | smooth (1sw) | X |
+| L3 | simple | 1 | 10.3 | 0.4 | 5.9 | burst | O |
+| L3 | simple | 10 | 11.4 | 0.5 | 8.3 | burst | O |
+| L3 | simple | 30 | 12.1 | 0.5 | 10.6 | burst | O |
+| L3 | simple | 100 | 17.4 | 1.0 | 40.5 | smooth (1sw) | X |
+| L3 | complex(88) | 1 | 11.0 | 0.4 | 6.0 | burst | O |
+| L3 | complex(88) | 10 | 12.2 | 0.5 | 8.7 | burst | O |
+| L3 | complex(88) | 30 | 13.5 | 0.5 | 11.6 | burst | O |
+| L3 | complex(88) | 100 | 24.5 | 1.0 | 51.4 | smooth (1sw) | X |
+
+Reading: both modes are real-time up to 30 tanks on simple AND complex
+terrain. At 100 tanks the adaptive pacer detects the sustained overload and
+switches to smooth (steps/loop pinned at 1.0, burst-free slow motion) — L2's
+limit is the physics itself (31–36 ms/step, 2 300 links in one env), while
+L3's physics still fits the budget (17–25 ms/step) and the loop overrun is
+serving overhead (capture + OSC encode for 100 targets), the next
+optimization target for 100-vehicle fleets.
 
 **Dependencies** (server only — NOT required by the SDK core):
 `pythonosc`, `psutil`, `trimesh` (obstacle-mesh preprocessing). Install

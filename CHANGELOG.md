@@ -10,6 +10,72 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.20] — 2026-07-04
+
+| 약자 | 의미 |
+|---|---|
+| L2 / L3 | per-entity (K entities × 1 env) / multi-env (1 entity × n_envs) |
+| ms/step | 물리 1스텝 비용 (`[STATS]` per-step 값) |
+| steps/loop | 루프당 catch-up 스텝 수 (~1.0 = 실시간, 상한 고정 = 포화) |
+
+### Added — `genesis_vehicle.server.benchmark` (official end-to-end server test)
+
+- Drives the REAL server subprocess over the OSC wire with a built-in mock
+  UE client: full handshake (`Init/Physics` dt=0.025 → `Vehicle/Init`
+  SkidSteer→tank preset → K `Init/Target` → 88 convex-hull `Init/Obstacle`
+  chunks → `Init/Done`), ~30 Hz `Vehicle/Control` input streaming, `[STATS]`
+  collection (first line dropped as warm-up), then `stop`.
+- Matrix: {L2, L3} × {simple(plane), complex(88 hulls)} × {1, 10, 30, 100}
+  tanks; CPU default (`--gpu` = L3 opt-in), `--road-raycast-only` on,
+  non-default ports (7101/7102/7104) so a live UE session is never hit.
+  Prints one summary table: ms/step, steps/loop, Loop Avg, and a real-time
+  verdict (steps/loop ≤ 1.05 AND Loop Avg ≤ 25 ms). Filters: `--modes`,
+  `--terrain`, `--tanks`, `--urdf`, `--stats`. See `docs/server.md` §2.1.
+
+### Added — adaptive catch-up pacer (`server/pacing.py`, both server modes)
+
+- The catch-up cap is now ADAPTIVE by default (`AdaptiveCatchup`): the server
+  monitors **steps/loop** and auto-switches between
+  - **burst** (cap = max(5, 0.1/dt)) — normal mode; backlog from a hiccup is
+    caught up and real-time is recovered, and
+  - **smooth** (cap = 1) — entered on sustained overload (window-average
+    steps/loop ≥ 1.5): recovery is impossible anyway, so degrade to a steady,
+    burst-free slow motion instead of jerky 5-step bursts. Returns to burst
+    once step-loops run a full window consecutively under 0.9×dt (headroom
+    back), with a switch cooldown as hysteresis and a startup **grace** of
+    100 loops (observe-only: the build/JIT transient right after init
+    polluted the window and spuriously switched a healthy L2×30 run to
+    smooth at t=1.4 s — with grace it stays burst, while genuine overload
+    still triggers right after the grace expires; bench-verified both ways).
+- `--max-catchup-steps N` now PINS the cap and disables the pacer (the old
+  fixed behavior; `1` = always-smooth). Switches log as
+  `[Pacing] [AdaptiveCatchup] …`; every `[STATS]` line carries the live mode
+  (`[cap=N:burst|smooth|fixed:N]`).
+- **`--pacing-profile`** (off by default; the server benchmark enables it):
+  every switch additionally dumps its trigger context on one greppable line —
+  the window's steps/loop history, loop-duration avg/p95, the dt budget, the
+  estimated speed ratio, and time since the previous switch. Example:
+  `[profile] switch#1 BURST→SMOOTH @t=1.7s | window steps/loop=[0,1,2,…]
+  (avg 2.40) | loop_dur avg 65.5 ms p95 111.1 ms | budget 25.0 ms | est
+  speed 0.92x`. The benchmark collects these per config and prints them as
+  `[pacing]` lines in the final report.
+- Verified end-to-end via the new server benchmark: overloaded L3×100 tanks
+  auto-switched within the first window (steps/loop 2.5 → cap=1) and settled
+  at 1.0 steps/loop with **Loop Avg 89.6 → ~38 ms** (bursts gone); healthy
+  L2×30 stayed `[cap=5:burst]` throughout. State machine pinned by
+  `tests/test_adaptive_catchup.py` (8 pure-python cases: overload switch,
+  recovery, streak reset, idle loops don't fake recovery, fixed mode,
+  cooldown).
+
+### Fixed — L3 server crashed on genesis builds lacking `prefer_parallel_linesearch`
+
+- `run_l3` passed `prefer_parallel_linesearch=False` unconditionally;
+  genesis builds without that RigidOptions attribute (e.g. the 1.2.0 PyPI
+  build) raised at startup. Unrecognized RigidOptions keys are now dropped
+  with a warning and construction retried.
+
+---
+
 ## [1.0.19] — 2026-07-04
 
 | 약자 | 의미 |
