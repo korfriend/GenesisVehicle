@@ -10,7 +10,38 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.2] — 2026-07-05
+
+### Fixed — stale "per-entity forces CPU by design" wording in docs/server.md
+
+- The §2.1 GPU-table intro claimed `--gpu` is L3-only. In fact BOTH server
+  modes accept `--gpu` since v1.0.14 (per-entity prints a CPU-is-faster
+  warning and proceeds on GPU); it is the BENCHMARK matrix that only
+  measures GPU on L3, because per-entity is `n_envs=1` — no GPU batch
+  width, so L2+GPU only pays kernel-launch overhead. Wording now says
+  exactly that. No code change.
+
 ## [1.1.1] — 2026-07-05
+
+### Changed — L3 capture downloads with ONE DtoH sync (`_to_host_batched`) + honest GPU-serving attribution
+
+- `L3State.capture` now gathers every read tensor (chassis pos/quat, wheel
+  visual poses, obstacle poses) and downloads them via a single on-device
+  concat + ONE `.cpu()` (`l3_runtime._to_host_batched`; CPU backend keeps
+  per-tensor conversion — the helper auto-detects; mixed dtypes fall back
+  safely). Pinned by `tests/test_to_host_batched.py` (4 cases incl. a
+  forced-concat parity run).
+- **Measured honestly: steady-state Loop did NOT move** (GPU L3×100 simple:
+  46.7 ms before/after) — so the earlier "per-read sync latency" attribution
+  of the +8 ms GPU serving gap was wrong as the *dominant* term. Per-section
+  [PROFILE] (sync-accurate) shows the gap is the **kernel-launch overhead of
+  capture-side GPU compute** (`wheel_visual_transforms` = dozens of small
+  kernels; 0.72 ms CPU vs 3.19 ms GPU for identical bytes), plus the
+  post-step `synchronize()` execution tail and HtoD input uploads. The
+  single-sync change is kept (strictly fewer round-trips, free on CPU);
+  the next lever, if GPU serving ever matters, is computing capture-side
+  wheel poses on the CPU from one raw-state download. `docs/server.md` GPU
+  section rewritten accordingly. CPU remains the server recommendation.
 
 ### Added — collision-stress server benchmark (`server/benchmark_collision.py`)
 

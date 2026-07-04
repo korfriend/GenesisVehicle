@@ -142,8 +142,10 @@ re-run on your hardware for absolute numbers):
 | L3 | complex(88) | 30 | 13.5 | 0.5 | 11.6 | burst | O |
 | L3 | complex(88) | 100 | 24.5 | 1.0 | 51.4 | smooth (1sw) | X |
 
-GPU backend (`--gpu`, **L3 only** — per-entity forces CPU by design), same
-matrix:
+GPU backend (`--gpu` — accepted by BOTH server modes, but the benchmark
+matrix only measures it on L3: per-entity is `n_envs=1`, which has no GPU
+batch width, so L2+GPU only pays kernel-launch overhead and is not worth
+measuring), same matrix:
 
 | mode | terrain | tanks | ms/step | steps/loop | Loop Avg | pacing | realtime |
 |---|---|---|---|---|---|---|---|
@@ -167,18 +169,24 @@ above mix in pre-switch burst windows, inflating Loop Avg):
 | CPU | 16.2 | 20.3 | 36.5 |
 | GPU | 18.2 | 28.5 | 46.7 |
 
-The +8 ms serving gap is NOT data volume (tens of KB/loop — µs over PCIe);
-it is **per-read synchronization latency**: capture runs twice per step with
-several read points each, and on the GPU backend every `.cpu()` blocks on a
-CUDA stream flush + DtoH round-trip (~0.3–0.5 ms/call under WSL2) — ~12–16
-sync points per step ≈ 5–8 ms. Direct evidence: the identical capture code
-costs 0.72 ms (CPU) vs 3.19 ms (GPU) per call at n_envs=10 — same few KB,
-×4.4. (Reducible if ever needed: concat the read tensors on-device and pay
-ONE sync — est. → ~2–3 ms.) On complex terrain the extra solver kernel
-launches additionally cost ~+5 ms/step even at 1 tank. Verdict: **CPU
-remains the server recommendation at every fleet size measured**; the GPU
-backend pays off for hundreds of envs driven directly through the SDK
-(RL/MPPI-style L3 batching), not through the OSC serving loop.
+The +8 ms serving gap is NOT data volume (tens of KB/loop — µs over PCIe).
+v1.1.1 tested the "sync count" hypothesis directly: capture now concats all
+read tensors on-device and pays ONE `.cpu()` DtoH sync
+(`l3_runtime._to_host_batched`) instead of 4+ — and the steady-state Loop
+did **not** move (46.7 ms before/after). So the gap decomposes as: the
+**kernel-launch overhead of running capture-side compute on the GPU**
+(`wheel_visual_transforms` ≈ dozens of small CUDA kernels per call, each
+paying WSL2 launch latency — the same code costs 0.72 ms CPU vs 3.19 ms GPU
+at n_envs=10 with identical bytes moved), plus the post-step
+`torch.cuda.synchronize()` execution tail and the per-step HtoD input
+uploads. The single-sync change is kept (strictly fewer round-trips, free on
+CPU); the next real lever — if GPU serving ever matters — is computing the
+capture-side wheel poses on the CPU from one raw-state download. On complex
+terrain the extra solver kernel launches additionally cost ~+5 ms/step even
+at 1 tank. Verdict: **CPU remains the server recommendation at every fleet
+size measured**; the GPU backend pays off for hundreds of envs driven
+directly through the SDK (RL/MPPI-style L3 batching), not through the OSC
+serving loop.
 
 Reading (CPU): both modes are real-time up to 30 tanks on simple AND complex
 terrain. At 100 tanks the adaptive pacer detects the sustained overload and
