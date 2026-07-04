@@ -344,7 +344,11 @@ def main():
     parser.add_argument("--no-floor", action="store_true", help="Disable the default ground plane")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose OSC logging")
     parser.add_argument("--vis_mode", type=str, default="collision", choices=["visual", "collision"], help="Visualization mode for the scene (default: collision)")
-    parser.add_argument("--override_dt", type=float, default=None, help="Override simulation time step (dt) in seconds (e.g. 0.01 for 100Hz)")
+    parser.add_argument("--override_dt", type=float, default=None,
+                        help="Override simulation time step (dt) in seconds, ignoring the dt "
+                             "the client sends (e.g. 0.025 for 40Hz — the recommended budget: "
+                             "verified physics-identical to 0.02 at substeps=2, +25%% step "
+                             "budget, ~-20%% total CPU; see CHANGELOG 1.0.17)")
     parser.add_argument("--no-target-collision", action="store_true", help="Disable collision between target entities")
     parser.add_argument("--road-raycast-only", action="store_true",
                         help="Load complex road/terrain meshes ([Complex]) as VISUAL raycast "
@@ -445,7 +449,7 @@ def main():
     init_data = osc.wait_for_initialization(timeout=300.0)
     init_physics = init_data.get('physics', {})
     ue_gravity = init_physics.get('gravity', -9.81)
-    ue_dt = args.override_dt if args.override_dt is not None else init_physics.get('dt', 0.02)
+    ue_dt = args.override_dt if args.override_dt is not None else init_physics.get('dt', 0.025)
     ue_friction = init_physics.get('friction', 2.0)
     ue_restitution = 0.0
     
