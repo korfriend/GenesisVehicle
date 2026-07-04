@@ -36,6 +36,9 @@ Run (from the workspace root, venv active):
     python -m genesis_vehicle.server.benchmark_collision --tanks 30 --duration 40
     python -m genesis_vehicle.server.benchmark_collision --radius 25 --throttle 1.0
     python -m genesis_vehicle.server.benchmark_collision --urdf /path/to/tank.urdf
+    python -m genesis_vehicle.server.benchmark_collision --tanks 10 --viewer
+        (--viewer: server runs WITH the Genesis viewer window so you can watch
+         the pile-up — rendering skews the timing, numbers indicative only)
 
 The tank URDF defaults to ``GeneVehicle_KDU/tank_ray.urdf`` next to the SDK
 repo (the workspace layout); pass ``--urdf`` explicitly elsewhere.
@@ -216,12 +219,14 @@ class RingClient:
 
 def run_config(k: int, urdf: str, radius: float, throttle: float,
                duration: float, init_timeout: float,
-               python_exe: str, verbose: bool) -> dict:
+               python_exe: str, verbose: bool, viewer: bool = False) -> dict:
     """One ring run: launch server, converge, sample, return the timeline."""
-    cmd = [python_exe, "-m", "genesis_vehicle.server", "--headless",
+    cmd = [python_exe, "-m", "genesis_vehicle.server",
            "--road-raycast-only", "--pacing-profile",
            "--recv_port", str(RECV_PORT), "--send_port", str(SEND_PORT),
            "--send_port_obs", str(OBS_PORT)]
+    if not viewer:
+        cmd.append("--headless")
 
     env = dict(os.environ)
     env.setdefault("GENESIS_VEHICLE_QUIET", "1")
@@ -334,6 +339,11 @@ def main():
     ap.add_argument("--duration", type=float, default=30.0,
                     help="measured seconds per config (server is real-time paced)")
     ap.add_argument("--init-timeout", type=float, default=300.0)
+    ap.add_argument("--viewer", action="store_true",
+                    help="run the server WITH the Genesis viewer window (drops "
+                         "--headless) to watch the ring converge and pile up. "
+                         "Rendering adds per-step overhead — treat the numbers "
+                         "as indicative only, not as reference results.")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="echo the server's stdout")
     args = ap.parse_args()
@@ -344,12 +354,16 @@ def main():
 
     print(f"[bench] collision benchmark — L2 ring convergence | tanks={tanks} "
           f"throttle={args.throttle} dt=0.025 plane-only rco=on CPU")
+    if args.viewer:
+        print("[bench] VIEWER mode — rendering adds per-step overhead; "
+              "numbers are indicative only, NOT reference results")
     results = []
     for k in tanks:
         radius = args.radius if args.radius else max(20.0, 8.0 * k / (2.0 * math.pi))
         print(f"[bench] >>> {k} tanks on R={radius:.1f} m ring ...", flush=True)
         r = run_config(k, args.urdf, radius, args.throttle, args.duration,
-                       args.init_timeout, sys.executable, args.verbose)
+                       args.init_timeout, sys.executable, args.verbose,
+                       viewer=args.viewer)
         results.append(r)
         if not r.get("ok"):
             print(f"[bench]     FAILED: {r.get('error')}", flush=True)
