@@ -58,3 +58,35 @@ def test_empty_and_numpy_inputs():
     arr = np.ones((2, 3), np.float32)
     out = _to_host_batched([arr])
     np.testing.assert_allclose(out[0], arr)
+
+
+def test_wheel_visual_transforms_host_matches_device_path():
+    """v1.1.3 'GPU 모드 = 물리만 GPU, 캡처 연산은 CPU' 경로: host 계산이
+    기존 device 계산과 동일한 휠 월드 포즈를 내야 한다 (CPU 백엔드에서 두
+    경로 모두 실행 가능 — 수학은 device 무관이므로 CPU 파리티가 곧 GPU
+    파리티다)."""
+    import os
+    import genesis as gs
+    from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
+
+    if not getattr(gs, "_initialized", False):
+        VehicleScene.init_backend("cpu")
+    URDF = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                        "..", "samples", "urdf", "car_4w.urdf"))
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
+    vs.add_ground_plane()
+    veh = vs.add_vehicle(URDF, car_4w_rwd_ackermann, pos=(0.0, 0.0, 1.0))
+    vs.build()
+    for _ in range(30):
+        veh.set_inputs(throttle=0.6, steer=0.2)
+        vs.step()
+
+    kind = vs.physics.kinds[0]
+    ref_wp, ref_wq = kind.wheel_visual_transforms("world")     # device path
+    reads = kind.wheel_visual_reads()
+    assert reads is not None
+    hosts = _to_host_batched(list(reads), force_batch=True)
+    args = [torch.from_numpy(np.ascontiguousarray(h)) for h in hosts]
+    wp, wq = kind.wheel_visual_transforms_host(*args, "world")  # host path
+    np.testing.assert_allclose(wp.numpy(), ref_wp.cpu().numpy(), atol=1e-5)
+    np.testing.assert_allclose(wq.numpy(), ref_wq.cpu().numpy(), atol=1e-5)
