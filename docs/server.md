@@ -170,24 +170,31 @@ above mix in pre-switch burst windows, inflating Loop Avg):
 | CPU | 16.2 | 20.3 | 36.5 |
 | GPU | 18.2 | 28.5 | 46.7 |
 
-The +8 ms serving gap is NOT data volume (tens of KB/loop — µs over PCIe).
-v1.1.1 tested the "sync count" hypothesis directly: capture now concats all
-read tensors on-device and pays ONE `.cpu()` DtoH sync
-(`l3_runtime._to_host_batched`) instead of 4+ — and the steady-state Loop
-did **not** move (46.7 ms before/after). So the gap decomposes as: the
-**kernel-launch overhead of running capture-side compute on the GPU**
-(`wheel_visual_transforms` ≈ dozens of small CUDA kernels per call, each
-paying WSL2 launch latency — the same code costs 0.72 ms CPU vs 3.19 ms GPU
-at n_envs=10 with identical bytes moved), plus the post-step
-`torch.cuda.synchronize()` execution tail and the per-step HtoD input
-uploads. The single-sync change is kept (strictly fewer round-trips, free on
-CPU); the next real lever — if GPU serving ever matters — is computing the
-capture-side wheel poses on the CPU from one raw-state download. On complex
-terrain the extra solver kernel launches additionally cost ~+5 ms/step even
-at 1 tank. Verdict: **CPU remains the server recommendation at every fleet
-size measured**; the GPU backend pays off for hundreds of envs driven
-directly through the SDK (RL/MPPI-style L3 batching), not through the OSC
-serving loop.
+The gap is NOT data volume (tens of KB/loop — µs over PCIe). Every
+hypothesis was implemented and measured (v1.1.1–v1.1.3):
+
+1. *"per-read sync count"* — capture now downloads everything with ONE
+   on-device concat + `.cpu()` (`_to_host_batched`): Loop unchanged.
+2. *"capture-side GPU compute"* — the closed-form wheel poses are now
+   computed **on the CPU** from one raw-state download
+   (`wheel_visual_transforms_host`; "GPU mode = physics-only on GPU,
+   serving math on CPU"): Loop unchanged.
+3. *"post-step sync tail"* — the L3 loop's `synchronize()` moved inside the
+   physics timing (a measurement fix: ~2 ms of GPU execution tail was being
+   booked as serving).
+
+Final steady-state decomposition (100-simple, smooth cap=1 windows): CPU
+physics 16.2 / serving ~20.3; GPU physics **21.7** / serving ~25.6. So the
+dominant term is **GPU physics itself** (launch-bound — still +5.5 ms over
+CPU physics at n_envs=100); the residual serving delta (~5 ms) is per-step
+HtoD input uploads + capture getter kernels, within run noise (±3 ms). The
+serving-on-CPU architecture is now in place, so at the hundreds-of-envs
+scale where GPU physics starts winning, serving will not be the bottleneck.
+On complex terrain the extra solver kernel launches additionally cost
+~+5 ms/step even at 1 tank. Verdict: **CPU remains the server
+recommendation at every fleet size measured**; the GPU backend pays off for
+hundreds of envs driven directly through the SDK (RL/MPPI-style L3
+batching), not through the OSC serving loop.
 
 Reading (CPU): both modes are real-time up to 30 tanks on simple AND complex
 terrain. At 100 tanks the adaptive pacer detects the sustained overload and

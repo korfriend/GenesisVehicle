@@ -116,21 +116,49 @@ class L3State:
         차체 pos/quat 2회 + SDK 닫힌형 wheel_visual_transforms 1회로 N대 전체를
         읽는다. 바퀴 pos/quat 은 steer+suspension+spin 이 모두 반영된 visual 포즈
         (VisualJointSync on/off 무관). spin 은 quat 에 포함되므로 w_angle=0."""
-        # 모든 read 를 텐서로 모은 뒤 [GPU 1-sync v1.1.1] _to_host_batched 로
-        # DtoH 동기화를 캡처당 1회로 몰아서 내려받는다 (CPU 백엔드는 기존과
-        # 동일한 개별 변환 — 헬퍼가 자동 판별).
-        bp = self.car.get_pos()
-        bq = self.car.get_quat()
-        wp, wq = self.veh.wheel_visual_transforms("world")   # (N, n, 3/4)
+        # [GPU-mode 서빙 아키텍처 v1.1.3] 순수 물리만 GPU, 캡처 연산은 CPU:
+        # 원시 read 5개(pos/quat/steer/dist/spin) + 장애물 포즈를
+        # _to_host_batched 로 **DtoH 1회**에 내려받고, 닫힌형 휠 포즈 계산은
+        # wheel_visual_transforms_host 로 **CPU 에서** 수행한다 — GPU 백엔드
+        # 캡처가 유발하던 수십 개의 작은 커널 launch 제거. CPU 백엔드에서는
+        # 같은 수학이 원래도 CPU 라 동작/비용 동일.
         obs_items = [(o_id, ent) for o_id, ent in dynamic_obstacles.items()
                      if o_id not in ue_driven_obstacle_ids]
-        reads = [bp, bq, wp, wq]
-        for _, ent in obs_items:
-            reads.append(ent.get_pos())
-            reads.append(ent.get_quat())
-        hosts = _to_host_batched(reads)
-        bp, bq, wp, wq = hosts[0], hosts[1], hosts[2], hosts[3]
-        bp = np.atleast_2d(bp); bq = np.atleast_2d(bq)
+        mvp = getattr(getattr(self.veh, "_scene", None), "_mvp", None)
+        kind = mvp.kinds[0] if (mvp is not None and len(mvp.kinds) == 1) else None
+        reads = kind.wheel_visual_reads() if kind is not None else None
+
+        if reads is not None:
+            tensors = list(reads)
+            for _, ent in obs_items:
+                tensors.append(ent.get_pos())
+                tensors.append(ent.get_quat())
+            hosts = _to_host_batched(tensors)            # ONE DtoH sync (GPU)
+            pos_h = torch.from_numpy(np.ascontiguousarray(hosts[0]))
+            quat_h = torch.from_numpy(np.ascontiguousarray(hosts[1]))
+            steer_h = torch.from_numpy(np.ascontiguousarray(hosts[2]))
+            dist_h = torch.from_numpy(np.ascontiguousarray(hosts[3]))
+            spin_h = torch.from_numpy(np.ascontiguousarray(hosts[4]))
+            wp_t, wq_t = kind.wheel_visual_transforms_host(
+                pos_h, quat_h, steer_h, dist_h, spin_h, "world")
+            wp = wp_t[:, 0].numpy()                      # L3: K=1 → (N, n, 3)
+            wq = wq_t[:, 0].numpy()
+            bp = np.atleast_2d(hosts[0])                 # (N, 3)
+            bq = np.atleast_2d(hosts[1])
+            obs_hosts = hosts[5:]
+        else:
+            # 폴백: 첫 스텝 이전(rest pose) / 다중 kind / 예외 — 기존 경로.
+            bp = self.car.get_pos()
+            bq = self.car.get_quat()
+            wp, wq = self.veh.wheel_visual_transforms("world")   # (N, n, 3/4)
+            fb = [bp, bq, wp, wq]
+            for _, ent in obs_items:
+                fb.append(ent.get_pos())
+                fb.append(ent.get_quat())
+            hosts = _to_host_batched(fb)
+            bp, bq, wp, wq = hosts[0], hosts[1], hosts[2], hosts[3]
+            bp = np.atleast_2d(bp); bq = np.atleast_2d(bq)
+            obs_hosts = hosts[4:]
 
         state = {'targets': {}, 'dynamic_obstacles': {}}
         # NB: bp/bq/wp/wq are freshly created THIS capture (host download)
@@ -144,8 +172,8 @@ class L3State:
 
         # 동적 장애물: env 복제 한계로 env 0 기준 송신
         for i, (o_id, _ent) in enumerate(obs_items):
-            p = np.atleast_2d(hosts[4 + 2 * i])[0]
-            q = np.atleast_2d(hosts[4 + 2 * i + 1])[0]
+            p = np.atleast_2d(obs_hosts[2 * i])[0]
+            q = np.atleast_2d(obs_hosts[2 * i + 1])[0]
             state['dynamic_obstacles'][o_id] = (p, q)
         return state
 
@@ -561,6 +589,11 @@ def run_l3(args):
                     osc.close()
                     sys.exit(0)
                 raise
+            # [계측 v1.1.3] GPU 는 launch 가 비동기라, 여기서 동기화해야
+            # Physics Avg 가 실제 실행 시간을 담는다 — 이전엔 스텝 뒤의
+            # 실행 꼬리가 루프 하단 synchronize 로 넘어가 '서빙'으로 오귀속됐다.
+            if not use_cpu:
+                torch.cuda.synchronize()
             physics_dur_total += time.perf_counter() - physics_start
 
             curr_state = st.capture(dynamic_obstacles, ue_driven_obstacle_ids, update_angles=True)

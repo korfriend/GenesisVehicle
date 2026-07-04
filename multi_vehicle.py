@@ -444,6 +444,73 @@ class MultiVehicleKindPhysics:
         world_quat = _quat_mul(cqb, local_quat)
         return world_pos.reshape(N, K, n, 3), world_quat.reshape(N, K, n, 4)
 
+    # ------------------------------------------------------------------
+    # Host-side capture math (v1.1.3): GPU 백엔드에서 서빙용 캡처가 수십 개의
+    # 작은 CUDA 커널 launch 를 유발하지 않도록, 원시 read 5개만 내려받아
+    # 닫힌형 휠 포즈 계산을 CPU 에서 수행하는 경로. "GPU 모드 = 순수 물리만
+    # GPU, 서빙 연산은 CPU" 아키텍처의 캡처 절반.
+    # ------------------------------------------------------------------
+    def wheel_visual_reads(self):
+        """캡처가 한 번에 host 로 내려받을 원시 DEVICE 텐서 5개를 반환:
+        ``(pos (NK,3), quat (NK,4), steer (NK,n), dist (NK,n), spin (NK,n))``.
+        ``_stepped_once`` 이전에는 ``None`` (호출측이 rest-pose 폴백)."""
+        p = self._proto
+        if not p._stepped_once:
+            return None
+        pos, quat, _v, _a = self._read_state_batched()
+        spin = (p.wheel_spin_angle if p._visual_spin_enabled
+                else torch.zeros_like(p.wheel_spin_angle))
+        return pos, quat, p.last_steer_per_wheel, p.last_distances, spin
+
+    def _host_visual_static(self):
+        """닫힌형 계산의 정적 입력 CPU 캐시 (1회 다운로드 후 재사용)."""
+        if getattr(self, "_host_static_cache", None) is None:
+            p = self._proto
+            if p._rest_wheel_pos_local is None:
+                p._capture_rest_wheel_pose(self.entities[0])
+            self._host_static_cache = (
+                p._rest_wheel_pos_local.detach().cpu(),
+                p._rest_wheel_quat_local.detach().cpu(),
+                p._susp_clamp.detach().cpu() if torch.is_tensor(p._susp_clamp)
+                else p._susp_clamp,
+            )
+        return self._host_static_cache
+
+    def wheel_visual_transforms_host(self, pos, quat, steer, dist, spin,
+                                     frame: str = "world"):
+        """``wheel_visual_transforms`` 와 동일한 닫힌형 계산을 **CPU 텐서**로
+        수행 (입력은 ``wheel_visual_reads()`` 를 host 로 내려받은 것). 반환
+        shape 동일: ``(n_envs, K, n, 3)`` / ``(…, 4)`` — CPU torch 텐서."""
+        if frame not in ("world", "local"):
+            raise ValueError(f"frame must be 'world' or 'local', got {frame!r}")
+        p = self._proto
+        NK, N, K = self.NK, self.n_envs, self.K
+        n = p.wheel_meta.n_wheels
+        rest_pos_c, rest_quat_c, clamp_c = self._host_visual_static()
+        rest_pos = rest_pos_c.unsqueeze(0)                       # (1, n, 3)
+        rest_quat = rest_quat_c.unsqueeze(0)                     # (1, n, 4)
+
+        steer_z = -steer
+        susp_off = _susp_visual_offset(dist, p._mesh_radius, p._l_susp, clamp_c)
+        z_off = torch.stack(
+            [torch.zeros_like(susp_off), torch.zeros_like(susp_off), susp_off],
+            dim=-1)
+        local_pos = rest_pos + z_off                             # (NK, n, 3)
+        local_quat = _quat_mul(
+            rest_quat,
+            _quat_mul(_quat_axis_angle("z", steer_z), _quat_axis_angle("y", spin)),
+        )
+        if frame == "local":
+            return local_pos.reshape(N, K, n, 3), local_quat.reshape(N, K, n, 4)
+
+        cqb = quat.unsqueeze(1).expand(NK, n, 4)
+        world_pos = pos.unsqueeze(1) + transform_by_quat(
+            local_pos.reshape(NK * n, 3).contiguous(),
+            cqb.reshape(NK * n, 4).contiguous(),
+        ).reshape(NK, n, 3)
+        world_quat = _quat_mul(cqb, local_quat)
+        return world_pos.reshape(N, K, n, 3), world_quat.reshape(N, K, n, 4)
+
 
 def group_vehicles_by_cfg(vehicles: Sequence[tuple]):
     """Group a flat vehicle list by cfg identity (same Python object → same kind).
