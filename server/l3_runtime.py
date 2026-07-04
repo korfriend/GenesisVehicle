@@ -20,6 +20,7 @@ per-entity 모드와 의도적으로 다른 점 / 한계:
 """
 
 import os
+import re
 import sys
 import time
 import argparse
@@ -31,6 +32,7 @@ import genesis as gs
 from genesis_vehicle import VehicleScene
 
 from .osc_manager import OSCManager
+from .pacing import AdaptiveCatchup
 from . import env_builder
 from . import vehicle_builder
 
@@ -168,7 +170,7 @@ def run_l3(args):
     print(f" [Genesis] [L3] {n_envs} targets → scene.build(n_envs={n_envs}) | URDF: {urdf_path}")
 
     # 3. 씬 구성 — 환경은 1세트만 추가 (env 마다 자동 복제)
-    _rigid_opts = gs.options.RigidOptions(
+    _rigid_kwargs = dict(
         enable_self_collision=False,
         enable_adjacent_collision=False,
         enable_neutral_collision=False,
@@ -181,6 +183,21 @@ def run_l3(args):
         broadphase_traversal=gs.broadphase_traversal.SAP,
         max_collision_pairs=2048,
     )
+    # genesis 빌드에 따라 일부 옵션이 없을 수 있다 (예: 1.2.0 PyPI 빌드에는
+    # prefer_parallel_linesearch 가 없음) — 인식 안 되는 키를 지우고 재시도
+    # (v1.0.20: 이전엔 여기서 서버가 하드 크래시).
+    while True:
+        try:
+            _rigid_opts = gs.options.RigidOptions(**_rigid_kwargs)
+            break
+        except Exception as e:
+            m = re.search(r"Unrecognized attribute '([^']+)'", str(e))
+            if m and m.group(1) in _rigid_kwargs:
+                print(f" [Genesis] [L3] [WARN] RigidOptions '{m.group(1)}' 은 이 "
+                      f"genesis 빌드에 없음 — 제외하고 재시도.")
+                _rigid_kwargs.pop(m.group(1))
+                continue
+            raise
     # Unified two-scene raycast (VehicleScene raywheel): the road is RIGID in the
     # main scene (collision / rollover) and a KINEMATIC mirror is raycast in a
     # SEPARATE scene whose BVH is static and shared across envs — same trick as
@@ -319,13 +336,14 @@ def run_l3(args):
     osc.client_cpp.send_message("/Genesis/Init/Pacing", [float(sim_dt)])
 
     SIM_DT = sim_dt
-    # catch-up 상한 — physics_server 와 동일 의미 (--max-catchup-steps 참고).
-    _max_catchup = getattr(args, "max_catchup_steps", None)
-    if _max_catchup is not None:
-        MAX_CATCHUP_STEPS = max(1, int(_max_catchup))
-        print(f" [Pacing] [Catch-up] MAX_CATCHUP_STEPS 재정의: {MAX_CATCHUP_STEPS} (--max-catchup-steps)")
+    # catch-up 상한 — v1.0.20부터 적응형 (physics_server 와 동일; pacing.py 참고).
+    pacer = AdaptiveCatchup(max_cap=max(5, int(0.1 / sim_dt)), sim_dt=SIM_DT,
+                            fixed=getattr(args, "max_catchup_steps", None),
+                            profile=bool(getattr(args, "pacing_profile", False)))
+    if getattr(args, "max_catchup_steps", None) is not None:
+        print(f" [Pacing] [Catch-up] 고정 cap={pacer.cap()} (--max-catchup-steps; 적응 전환 꺼짐)")
     else:
-        MAX_CATCHUP_STEPS = max(5, int(0.1 / sim_dt))
+        print(f" [Pacing] [Catch-up] 적응형 cap: burst={pacer.max_cap} ↔ smooth=1 (steps/loop 모니터링)")
     accumulator = 0.0
     last_time = time.perf_counter()
     last_slow_motion_warn_time = 0.0
@@ -473,8 +491,9 @@ def run_l3(args):
 
         catchup_steps = 0
         physics_dur_total = 0.0
+        steps_limit = pacer.cap()
 
-        while accumulator >= SIM_DT and catchup_steps < MAX_CATCHUP_STEPS:
+        while accumulator >= SIM_DT and catchup_steps < steps_limit:
             # 입력: tid dict → (N,) 배열 → 배치 VehicleInputs 1개
             queued_input = osc.pop_urdf_input()
             if queued_input:
@@ -518,10 +537,10 @@ def run_l3(args):
             step_count += 1
 
         # 데스 스파이럴 방지 (legacy 와 동일)
-        if catchup_steps == MAX_CATCHUP_STEPS and accumulator >= SIM_DT:
+        if catchup_steps == steps_limit and accumulator >= SIM_DT:
             t_warn = time.perf_counter()
             if t_warn - last_slow_motion_warn_time >= 5.0:
-                sim_ratio = (MAX_CATCHUP_STEPS * SIM_DT) / frame_time if frame_time > 0 else 1.0
+                sim_ratio = (steps_limit * SIM_DT) / frame_time if frame_time > 0 else 1.0
                 print(f" [WARNING] [Slow-Motion] Simulation lagging behind real-time. Running at {sim_ratio:.2f}x speed. (Next warning in 5s)")
                 last_slow_motion_warn_time = t_warn
             accumulator = 0.0
@@ -538,6 +557,7 @@ def run_l3(args):
             osc.send_dynamic_states_bulk(interpolated['dynamic_obstacles'])
 
         loop_dur = time.perf_counter() - loop_start
+        pacer.update(catchup_steps, loop_dur)   # 적응형 cap 전환 판정
         log_loop_dur_sum += loop_dur
         log_phys_dur_sum += physics_dur_total
         log_step_sum += catchup_steps
@@ -552,7 +572,8 @@ def run_l3(args):
             per_step = (log_phys_dur_sum / max(log_step_sum, 1)) * 1000.0
             print(f" [STATS] [L3 n_envs={n_envs}] Loop Avg: {avg_loop:.2f} ms | "
                   f"Physics Avg: {avg_phys:.2f} ms "
-                  f"({steps_per_loop:.1f} steps/loop, {per_step:.2f} ms/step)")
+                  f"({steps_per_loop:.1f} steps/loop, {per_step:.2f} ms/step) "
+                  f"[cap={pacer.cap()}:{pacer.mode}]")
 
             if not hasattr(run_l3, '_dilation_sent'):
                 run_l3._dilation_sent = True

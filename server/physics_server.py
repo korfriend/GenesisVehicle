@@ -38,6 +38,7 @@ if sys.platform == "win32":
         pass
 
 from .osc_manager import OSCManager
+from .pacing import AdaptiveCatchup
 from genesis_vehicle import (
     PacejkaAnisotropic, VehicleScene
 )
@@ -380,12 +381,20 @@ def main():
                              "and small fleets (n_envs<~100) are faster on CPU (measured: 30 "
                              "tanks L3 CPU 8.4 vs GPU ~19 ms/step).")
     parser.add_argument("--max-catchup-steps", type=int, default=None,
-                        help="Max physics steps per loop when behind real-time "
-                             "(default: max(5, 0.1/dt)). The cap does NOT speed "
-                             "anything up — when a step exceeds the dt budget it "
-                             "trades catch-up bursts (jerky pacing) for a steady "
-                             "slow-motion: 1 = one step per loop, smoothest "
-                             "degradation. Irrelevant once a step fits the budget.")
+                        help="FIXED catch-up cap (disables the adaptive pacer). "
+                             "Default (unset): ADAPTIVE — the server monitors "
+                             "steps/loop and auto-switches between burst "
+                             "(cap=max(5,0.1/dt), real-time recovery) and smooth "
+                             "(cap=1, steady slow-motion) under sustained "
+                             "overload, returning to burst when headroom comes "
+                             "back. Pass N to pin the cap (1 = always-smooth, "
+                             "old --max-catchup-steps 1 behavior).")
+    parser.add_argument("--pacing-profile", action="store_true",
+                        help="Log a detailed context dump on every adaptive "
+                             "catch-up switch (window steps/loop history, loop "
+                             "duration avg/p95, dt budget, estimated speed "
+                             "ratio, time since last switch). Off by default; "
+                             "the server benchmark enables it.")
     args = parser.parse_args()
 
     if args.single_scene and args.road_raycast_only:
@@ -668,14 +677,17 @@ def main():
     osc.client_cpp.send_message("/Genesis/Init/Pacing", [float(sim_dt)])
         
     SIM_DT = sim_dt
-    # catch-up 상한: 기본 max(5, 0.1/dt). --max-catchup-steps 로 재정의 가능 —
-    # 1 이면 루프당 1스텝(버스트 없는 균일 슬로모션), 값이 커질수록 실시간
-    # 복귀를 더 공격적으로 시도(밀린 만큼 몰아 돌려 프레임 간격이 출렁).
+    # catch-up 상한 — v1.0.20부터 적응형(AdaptiveCatchup): steps/loop 를
+    # 모니터링해 지속 과부하면 cap=1(균일 슬로모션), 여유가 돌아오면 cap=max
+    # (실시간 복귀 재개)로 자동 전환. --max-catchup-steps N 은 고정 cap 으로
+    # 적응 로직을 끈다.
+    pacer = AdaptiveCatchup(max_cap=max(5, int(0.1 / sim_dt)), sim_dt=SIM_DT,
+                            fixed=args.max_catchup_steps,
+                            profile=bool(getattr(args, "pacing_profile", False)))
     if args.max_catchup_steps is not None:
-        MAX_CATCHUP_STEPS = max(1, int(args.max_catchup_steps))
-        print(f" [Pacing] [Catch-up] MAX_CATCHUP_STEPS 재정의: {MAX_CATCHUP_STEPS} (--max-catchup-steps)")
+        print(f" [Pacing] [Catch-up] 고정 cap={pacer.cap()} (--max-catchup-steps; 적응 전환 꺼짐)")
     else:
-        MAX_CATCHUP_STEPS = max(5, int(0.1 / sim_dt))
+        print(f" [Pacing] [Catch-up] 적응형 cap: burst={pacer.max_cap} ↔ smooth=1 (steps/loop 모니터링)")
     accumulator = 0.0
     last_time = time.perf_counter()
     last_slow_motion_warn_time = 0.0
@@ -903,10 +915,10 @@ def main():
             # Lockstep 모드는 고정 1스텝씩 가동
             steps_limit = 1
         else:
-            steps_limit = MAX_CATCHUP_STEPS
+            steps_limit = pacer.cap()
 
-        # Catch-up Multi-Step Loop (물리 20ms 고정 단위 소비)
-        while (args.lockstep and steps_limit > 0) or (not args.lockstep and accumulator >= SIM_DT and catchup_steps < MAX_CATCHUP_STEPS):
+        # Catch-up Multi-Step Loop (물리 SIM_DT 고정 단위 소비; cap 은 적응형)
+        while (args.lockstep and steps_limit > 0) or (not args.lockstep and accumulator >= SIM_DT and catchup_steps < steps_limit):
             if controllers:
                 if not args.lockstep:
                     queued_input = osc.pop_urdf_input()
@@ -974,10 +986,10 @@ def main():
 
 
         # 데스 스파이럴 방지: 따라잡지 못하면 어큐뮬레이터 탕감 및 슬로우 모션 경고 (5초 간격으로 스로틀링 출력)
-        if not args.lockstep and catchup_steps == MAX_CATCHUP_STEPS and accumulator >= SIM_DT:
+        if not args.lockstep and catchup_steps == steps_limit and accumulator >= SIM_DT:
             current_warn_time = time.perf_counter()
             if current_warn_time - last_slow_motion_warn_time >= 5.0:
-                sim_ratio = (MAX_CATCHUP_STEPS * SIM_DT) / frame_time if frame_time > 0 else 1.0
+                sim_ratio = (steps_limit * SIM_DT) / frame_time if frame_time > 0 else 1.0
                 print(f" [WARNING] [Slow-Motion] Simulation lagging behind real-time. Running at {sim_ratio:.2f}x speed. (Next warning in 5s)")
                 last_slow_motion_warn_time = current_warn_time
             accumulator = 0.0
@@ -1016,6 +1028,8 @@ def main():
             osc.send_step_ack(recv['frame_id'])
 
         loop_dur = time.perf_counter() - loop_start
+        if not args.lockstep:
+            pacer.update(catchup_steps, loop_dur)   # 적응형 cap 전환 판정
 
         log_loop_dur_sum += loop_dur
         log_phys_dur_sum += physics_dur_total
@@ -1031,7 +1045,8 @@ def main():
             per_step = (log_phys_dur_sum / max(log_step_sum, 1)) * 1000.0
             print(f" [STATS] [per-entity] Loop Avg: {avg_loop:.2f} ms | "
                   f"Physics Avg: {avg_phys:.2f} ms "
-                  f"({steps_per_loop:.1f} steps/loop, {per_step:.2f} ms/step)")
+                  f"({steps_per_loop:.1f} steps/loop, {per_step:.2f} ms/step) "
+                  f"[cap={pacer.cap()}:{pacer.mode}]")
             
             # 최초 50프레임 평균 루프 시간 통계가 나오면, 언리얼에 해당 지연 배속 비율(TimeDilation)을 1회 전송합니다.
             if not hasattr(main, '_dilation_sent'):
