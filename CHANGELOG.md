@@ -10,6 +10,39 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.0.17] — 2026-07-04
+
+| 약자 | 의미 |
+|---|---|
+| ss | substeps (스텝 내부 적분 분할; 서버는 2) |
+| internal dt | dt/ss — 솔버 내부 적분 간격 |
+| z osc-std | 정속 주행 중 차체 z 진동 표준편차 (서스펜션 안정성 지표) |
+
+### Changed — server default dt fallback 0.02 → 0.025 (40 Hz budget)
+
+- The 20 ms budget was tight for large fleets/maps; 25 ms gives +25 % per-step
+  budget and ~−20 % total CPU (40 loops/s instead of 50). Verified the physics
+  is indistinguishable before changing the default — tank on bumpy rco
+  terrain, CPU, settle + 4 s cruise + 2 s turn:
+
+  | | 0.02/ss2 (old) | **0.025/ss2 (new)** | 0.025/ss3 |
+  |---|---|---|---|
+  | internal dt | 10.0 ms | 12.5 ms | 8.3 ms |
+  | cruise speed | 5.596 m/s | 5.594 m/s | 5.587 m/s |
+  | z osc-std | 14.3 mm | 14.3 mm | 14.4 mm |
+  | turn yaw-rate | −1.127 rad/s | −1.112 (−1.3 %) | −1.113 |
+  | NaN / divergence | none | none | none |
+
+  ss3 (finer internal dt) buys nothing → substeps stays 2.
+- Scope: this changes the server **fallback** only — a client-sent dt still
+  wins (`/Genesis/Init/Physics` arg 1). To actually run 40 Hz against a
+  client that sends 0.02, either change the client's dt or launch with
+  `--override_dt 0.025` (help text + `docs/server.md` updated with the
+  rationale). The resolved value is printed in the `[Determinism]` line and
+  echoed to the client via the Pacing message, as before.
+
+---
+
 ## [1.0.16] — 2026-07-04
 
 | 약자 | 의미 |

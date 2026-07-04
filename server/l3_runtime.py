@@ -148,7 +148,7 @@ def run_l3(args):
     init_data = osc.wait_for_initialization(timeout=300.0)
     init_physics = init_data.get('physics', {})
     ue_gravity = init_physics.get('gravity', -9.81)
-    ue_dt = args.override_dt if args.override_dt is not None else init_physics.get('dt', 0.02)
+    ue_dt = args.override_dt if args.override_dt is not None else init_physics.get('dt', 0.025)
     ue_friction = init_physics.get('friction', 2.0)
     ue_restitution = 0.0
 

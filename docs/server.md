@@ -55,7 +55,13 @@ python -m genesis_vehicle.server --multi-env --gpu
 # common flags
 python -m genesis_vehicle.server --headless          # no Genesis viewer window
 python -m genesis_vehicle.server --recv_port 7001 --send_port 7002 --send_port_obs 7004
-python -m genesis_vehicle.server --override_dt 0.01  # 100 Hz physics
+# dt: the client-sent dt wins; the server fallback default is 0.025 (40 Hz,
+# v1.0.17). To force 40 Hz regardless of what the client sends:
+python -m genesis_vehicle.server --override_dt 0.025
+# Rationale: verified physics-identical to 0.02 at substeps=2 on bumpy terrain
+# (cruise/z-oscillation/yaw within noise), while the per-step budget grows
+# 20 → 25 ms (+25 %) and total CPU drops ~20 % (40 loops/s instead of 50).
+python -m genesis_vehicle.server --override_dt 0.01  # 100 Hz physics (finer)
 python -m genesis_vehicle.server --no-floor --vis_mode visual -v
 
 # pacing: cap the catch-up steps per loop (default max(5, 0.1/dt)).
