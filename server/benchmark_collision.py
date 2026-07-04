@@ -1,13 +1,13 @@
 """Collision-stress OSC-server benchmark — a ring of tanks converging on the
 center of a plane until they all pile up (v1.1.1).
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| L2 | per-entity mode (K interacting entities × 1 env) — 이 벤치의 유일한 모드 |
-| ms/step | 물리 1스텝 비용 (`[STATS]` per-step 값) |
-| R | 스폰 원(circle) 반경 (m) |
-| v_peak / v_end | 접근 중 최대 평균 속도 / 종료 시점 평균 속도 (m/s) |
-| steps/loop | 루프당 catch-up 스텝 수 (~1.0 = 실시간 유지) |
+| L2 | per-entity mode (K interacting entities × 1 env) — the only mode in this bench |
+| ms/step | cost of one physics step (the `[STATS]` per-step value) |
+| R | spawn circle radius (m) |
+| v_peak / v_end | peak mean speed during approach / mean speed at the end (m/s) |
+| steps/loop | catch-up steps per loop (~1.0 = holding real-time) |
 
 The official matrix benchmark (``genesis_vehicle.server.benchmark``) spawns
 tanks on a 15 m grid, so they never touch — it measures the contact-free

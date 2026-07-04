@@ -10,49 +10,91 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.4] — 2026-07-05
+
+### Changed — server mode terminology unified: L2 / L3 ("per-entity" demoted to a gloss)
+
+- The two server modes were named asymmetrically: one by implementation
+  ("per-entity"), the other by batching axis ("L3"). Official names are now
+  batching-axis based — **L2 mode** (K interacting entities in one world)
+  and **L3 mode** (1 entity × n_envs) — matching what the benchmarks
+  already called them. "per-entity" survives only as a parenthetical gloss
+  on first mention.
+- User-facing surfaces updated: `[MODE] === L2 (per-entity) === / === L3
+  (multi-env) ===` banners, the `[STATS] [L2]` tag (was `[per-entity]`), a
+  new **`--l3` alias** for `--multi-env`, and the mode naming in help
+  texts, `docs/server.md` / `batching.md` / `dual-scene-raycast.md`, and
+  server-module comments.
+- Deliberately kept: phrases like "per-entity loop / per-entity get_pos"
+  that DESCRIBE per-entity iteration — those are not mode names and
+  renaming them would change the meaning. No external-parser impact (both
+  benchmarks' `[STATS]` regexes are tag-agnostic).
+
+### Changed — server package comments/docstrings translated to English
+
+- All Korean comments and docstrings across `genesis_vehicle/server/*.py`
+  (legacy-migrated `osc_manager` / `physics_server` / `env_builder` /
+  `vehicle_builder` plus the newer `l3_runtime` / `pacing` / `benchmark*`)
+  are now English, matching the SDK-core convention. Korean **log/print
+  strings are intentionally kept** (operator-facing console output). No
+  code or behavior change — verified by py_compile, the full test suite,
+  and an end-to-end benchmark smoke run.
+
+### Added — `--viewer` on the collision benchmark
+
+- `benchmark_collision.py --viewer` runs the server WITH the Genesis viewer
+  window (drops `--headless`) so the ring convergence + pile-up can be
+  watched live. Rendering adds per-step overhead (~22 vs ~12 ms/step at 4
+  tanks), so viewer runs print a warning and their numbers are indicative
+  only — reference results stay headless.
+
 ## [1.1.3] — 2026-07-05
 
 | 약자 | 의미 |
 |---|---|
-| host 경로 | 캡처용 닫힌형 휠 포즈 계산을 CPU 에서 수행 (물리만 GPU) |
+| host path | 캡처용 닫힌형 휠 포즈 계산을 CPU 에서 수행 (물리만 GPU) |
 | DtoH / HtoD | GPU→CPU / CPU→GPU 전송 |
-| launch 바운드 | 커널 호출당 고정 지연이 지배하는 상태 |
+| launch-bound | 커널 호출당 고정 지연이 지배하는 상태 |
 
-### Changed — "GPU 모드 = 순수 물리만 GPU, 서빙 연산은 CPU" 완성 (host-side capture math)
+### Changed — "GPU mode = physics-only on GPU, serving math on CPU" completed (host-side capture math)
 
-- `MultiVehicleKindPhysics.wheel_visual_reads()` (원시 DEVICE 텐서 5개:
-  pos/quat/steer/dist/spin) + `wheel_visual_transforms_host(...)` (동일한
-  닫힌형 계산을 CPU 텐서로 수행; 정적 입력은 1회 CPU 캐시) 추가.
-  `L3State.capture` 는 이제 원시 read 5개 + 장애물 포즈를 `_to_host_batched`
-  로 **DtoH 1회**에 내려받고 휠 월드 포즈를 **CPU 에서** 계산한다 — GPU
-  백엔드 캡처가 유발하던 수십 개의 소형 커널 launch 제거. 차체 pos/quat 도
-  같은 다운로드를 재사용(이중 read 제거). 파리티는
-  `test_wheel_visual_transforms_host_matches_device_path` 로 고정
-  (수학이 device 무관이므로 CPU 파리티 = GPU 파리티). 첫 스텝 이전 /
-  다중 kind 는 기존 device 경로 폴백.
+- Added `MultiVehicleKindPhysics.wheel_visual_reads()` (the 5 raw DEVICE
+  tensors: pos/quat/steer/dist/spin) and `wheel_visual_transforms_host(...)`
+  (the identical closed-form math on CPU tensors; static inputs cached on
+  the host once). `L3State.capture` now downloads the 5 raw reads + the
+  obstacle poses in ONE DtoH sync via `_to_host_batched` and computes the
+  wheel world poses **on the CPU** — removing the dozens of small kernel
+  launches that GPU-backend capture used to trigger. The chassis pos/quat
+  reuse the same download (double read removed). Parity is pinned by
+  `test_wheel_visual_transforms_host_matches_device_path` (the math is
+  device-agnostic, so CPU parity == GPU parity). Pre-first-step and
+  multi-kind cases fall back to the device path.
 
-### Fixed — GPU Physics Avg 가 실행 꼬리를 '서빙'으로 오귀속하던 계측
+### Fixed — GPU Physics Avg mis-attributed the execution tail to "serving"
 
-- L3 루프의 `torch.cuda.synchronize()` 가 물리 타이밍 **밖**(루프 하단)에
-  있어, GPU 의 비동기 실행 꼬리(~2 ms)가 Physics Avg 에서 빠지고 서빙으로
-  계상됐다. 동기화를 스텝 타이밍 안쪽으로 이동 — `[STATS]` 의 per-step 이
-  GPU 에서도 실제 실행 시간을 담는다.
+- The L3 loop's `torch.cuda.synchronize()` sat OUTSIDE the physics timing
+  (bottom of the loop), so ~2 ms of asynchronous GPU execution tail was
+  missing from Physics Avg and booked as serving instead. The synchronize
+  moved inside the step timing — `[STATS]` per-step now reflects the real
+  execution time on GPU too.
 
-### 결론 — GPU L3×100 정상상태 최종 분해 (모든 가설 실측 후)
+### Conclusion — final steady-state decomposition, GPU L3×100 (all hypotheses measured)
 
-| | 물리 ms/step (정직 계측) | 서빙 ms/loop | Loop |
+| | physics ms/step (honest timing) | serving ms/loop | Loop |
 |---|---|---|---|
 | CPU | 16.2 | ~20.3 | 36.5 |
 | GPU | **21.7** | ~25.6 | ~47.3 |
 
-- 캡처 sync 몰아주기(1.1.1)와 캡처 연산 CPU 이관(이번)은 각각 정상상태
-  Loop 를 유의미하게 바꾸지 않았고, 계측 수정 후 격차의 주인은 **GPU 물리
-  자체**(launch 바운드: n_envs=100 에서도 CPU 물리보다 +5.5 ms)로 확정.
-  잔여 서빙 차이 ~5 ms 는 스텝당 입력 3텐서 HtoD 업로드 + 캡처 getter 커널
-  + 런 노이즈(±3 ms) 수준.
-- 의미: "물리만 GPU, 서빙은 CPU" 구조는 이제 완성되어 있으므로, GPU 가
-  물리에서 이기기 시작하는 수백 env 규모에서 서빙이 발목을 잡지 않는다.
-  100 env 이하 서버 용도는 여전히 CPU 권장 (변화 없음).
+- Neither the capture sync batching (1.1.1) nor the CPU migration of the
+  capture math (this release) moved the steady-state Loop meaningfully;
+  after the timing fix the dominant term is **GPU physics itself**
+  (launch-bound: still +5.5 ms over CPU physics at n_envs=100). The
+  residual ~5 ms serving delta is the per-step HtoD upload of the 3 input
+  tensors + capture getter kernels, within ±3 ms run noise.
+- Meaning: the "physics-only on GPU, serving on CPU" architecture is now in
+  place, so at the hundreds-of-envs scale where GPU physics starts winning,
+  serving will not be the bottleneck. For fleets ≤100 envs the server
+  recommendation stays CPU (unchanged).
 
 ## [1.1.2] — 2026-07-05
 

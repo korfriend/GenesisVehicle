@@ -171,7 +171,7 @@ class OSCManager:
             # Send Handshake Ping to Unreal Engine asking them to execute BroadcastInitializationData()
             self.client_cpp.send_message("/Genesis/RequestInit", [])
             
-            # 응답이 왔는지 1초간 체크
+            # Check for a response for 1 second
             if self.init_done_event.wait(timeout=1.0):
                 print(f" [Genesis] Initialization Complete. Obstacles: {len(self.received_obstacles)}, Physics: {self.init_physics_data}")
                 return {'obstacles': self.received_obstacles, 'physics': self.init_physics_data, 'target': self.init_target_data}
@@ -246,7 +246,7 @@ class OSCManager:
 
     def _handle_init_target(self, address, *args):
         # args: [ID], Type, Px, Py, Pz, Qx, Qy, Qz, Qw, Sx, Sy, Sz, Mass, Friction, Restitution
-        # C++ GenesisBridge 플러그인 버전업에 따라 ID가 생략(14개)되거나 포함(15개)될 수 있음
+        # Depending on the C++ GenesisBridge plugin version, the ID may be omitted (14 args) or included (15 args)
         if len(args) in [14, 15]:
             offset = 1 if len(args) == 15 else 0
             target_id = int(args[0]) if len(args) == 15 else 0
@@ -296,12 +296,12 @@ class OSCManager:
             print(f" [Genesis] Address: {address} | Args: {args}")
 
     def _handle_location(self, address, *args):
-        # UE에서 이미 변환된 상태로 오므로 전적으로 신뢰하고 그대로 받습니다.
+        # UE sends this already converted, so we trust it fully and take it as-is.
         self.received_data['location'] = [args[0], args[1], args[2]]
         self.received_data['updated'] = True
 
     def _handle_rotation(self, address, *args):
-        # UE에서 이미 [w, x, y, z] 또는 필요한 순서대로 맞춰서 온다고 신뢰합니다.
+        # We trust UE to send this already ordered as [w, x, y, z] (or whatever order is required).
         self.received_data['rotation'] = [args[0], args[1], args[2], args[3]]
         self.received_data['updated'] = True
 
@@ -573,18 +573,20 @@ class OSCManager:
     def pop_urdf_input(self):
         """
         [CRITICAL FIX FOR NO-LOCKSTEP RACE CONDITION]
-        언리얼 엔진의 틱 레이트(예: 60Hz~120Hz)가 제네시스 물리 루프(50Hz)보다 빠를 경우
-        큐에 데이터가 무한히 쌓이는 병목(Lag) 현상이 발생합니다.
-        가장 최근에 수신된 최신 제어 입력값만 반환하면서, 멀티스레딩(OSC 수신 쓰레드 vs 물리 루프 쓰레드)
-        상황에서 중간 패킷이 소실되지 않도록 큐를 안전하게(Atomically) 교체(Swap)합니다.
+        When Unreal Engine's tick rate (e.g. 60Hz~120Hz) is faster than the Genesis
+        physics loop (50Hz), data piles up in the queue indefinitely, causing lag.
+        Returns only the most recently received control input, while atomically
+        swapping the queue so no in-flight packet is lost in the multithreaded
+        situation (OSC receiver thread vs physics loop thread).
         """
-        # [RACE CONDITION FIX] .clear()를 쓰면 파이썬 리스트 스레드 안전성 문제로 
-        # 그 찰나의 순간에 도착한 언리얼의 2번째 패킷(예: Set Steering)이 증발해버립니다.
-        # 따라서 현재까지 쌓인 리스트를 통째로 가져오고 빈 리스트로 덮어씌웁니다 (GIL 덕분에 완벽히 Atomic).
+        # [RACE CONDITION FIX] Using .clear() has a Python list thread-safety problem:
+        # a 2nd Unreal packet (e.g. Set Steering) arriving in that split second would evaporate.
+        # So we take the accumulated list wholesale and overwrite with a fresh empty list
+        # (perfectly atomic thanks to the GIL).
         queue_copy = self.received_data['input_queue']
         if queue_copy:
             self.received_data['input_queue'] = []
-            return queue_copy[-1] # 가져온 뭉치 중 가장 최신(마지막) 패킷만 사용
+            return queue_copy[-1] # Use only the newest (last) packet from the grabbed batch
         return None
 
     def pop_relative_cmds(self):

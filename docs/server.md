@@ -42,7 +42,7 @@ has no engine dependency.
 ## 2. Running
 
 ```bash
-# per-entity (L2) mode — the default: interacting / heterogeneous vehicles, one world
+# L2 mode (per-entity) — the default: interacting / heterogeneous vehicles, one world
 python -m genesis_vehicle.server
 
 # multi-env (L3) mode: many IDENTICAL, NON-interacting vehicles
@@ -82,12 +82,12 @@ python -m genesis_vehicle.server --pacing-profile
 ```
 
 **Diagnostics** printed by both modes:
-- startup `[MODE] === PER-ENTITY === / === MULTI-ENV (L3 batched) ===` banner
+- startup `[MODE] === L2 (per-entity) === / === L3 (multi-env) ===` banner
   (so perf reports are unambiguous about which path ran);
 - startup `[PROFILE]` — one-shot per-step section breakdown
   (`raycast/proxy | SDK compute | genesis solver | 기타`), measured over 5
   warmup steps after 2 unprofiled JIT-warm steps;
-- runtime `[STATS] [per-entity|L3 n_envs=N] Loop Avg | Physics Avg
+- runtime `[STATS] [L2|L3 n_envs=N] Loop Avg | Physics Avg
   (X steps/loop, Y ms/step)` every 50 loops. `Physics Avg` is the SUM of the
   loop's catch-up steps — read the per-step value from the parenthesis;
   `steps/loop` pinned at the cap (default 5.0) means the server cannot hold
@@ -144,7 +144,7 @@ re-run on your hardware for absolute numbers):
 | L3 | complex(88) | 100 | 24.5 | 1.0 | 51.4 | smooth (1sw) | X |
 
 GPU backend (`--gpu` — accepted by BOTH server modes, but the benchmark
-matrix only measures it on L3: per-entity is `n_envs=1`, which has no GPU
+matrix only measures it on L3: L2 is `n_envs=1`, which has no GPU
 batch width, so L2+GPU only pays kernel-launch overhead and is not worth
 measuring), same matrix:
 
@@ -259,13 +259,13 @@ L2 mode, kept for the CLI and logs.
 
 | Sample goal | Mode | Batching axis | Backend | Vehicles interact? | Solver |
 |---|---|---|---|---|---|
-| Interacting traffic, heterogeneous, see collisions | **default (per-entity)** | **L2** (K vehicles × 1 env) | CPU | ✅ (one world) | batched per vehicle *kind* — identical targets share ONE pipeline (1.0.8) |
+| Interacting traffic, heterogeneous, see collisions | **default (L2)** | **L2** (K vehicles × 1 env) | CPU | ✅ (one world) | batched per vehicle *kind* — identical targets share ONE pipeline (1.0.8) |
 | Many identical cars spread out, no mutual collision, max count | **`--multi-env`** | **L3** (1 vehicle × n_envs) | CPU (`--gpu` at hundreds of envs) | ❌ (parallel envs) | 1 × `VehiclePhysics(n_envs=N)` |
 | Interacting traffic × N parallel scenarios (RL / MPPI) | *(not in server)* | **L2 × L3** | CPU (GPU at large K×N) | ✅ within env | `MultiVehiclePhysics(n_envs=N)` — drive from Python, see [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) |
 
 **Why is CPU the default in BOTH modes?** GPU kernel-launch overhead is a
 fixed per-step cost that needs a lot of parallel work to amortize. At
-`n_envs=1` (per-entity) CPU wins outright (measured: 10 vehicles → CPU
+`n_envs=1` (L2) CPU wins outright (measured: 10 vehicles → CPU
 47 ms vs GPU 160 ms per step). Even batched (`--multi-env`), the GPU step
 is a flat ≈ 19 ms/step (30/50/100 vehicles alike) while the CPU step is
 8.4 ms at 30 tanks — so CPU stays ahead until roughly hundreds of envs,
@@ -287,8 +287,8 @@ the exact mesh surface), and dynamic obstacles get a per-step-synced
 mirror so wheels can still drive onto moving ramps/platforms.
 `--road-raycast-only` composes on top: it additionally drops the
 main-scene road collider (no CoACD / chassis-vs-road narrow-phase). The
-pre-v1.0.12 per-entity behavior — one scene, rays hit the rigid colliders
-themselves — remains available as `--single-scene` (per-entity only;
+pre-v1.0.12 L2 behavior — one scene, rays hit the rigid colliders
+themselves — remains available as `--single-scene` (L2 mode only;
 incompatible with `--road-raycast-only`, ignored by `--multi-env`).
 
 ---
@@ -346,7 +346,7 @@ After build, the server also emits topology once:
 | `…/TargetControl/Position` · `…/Rotation` | per-component teleport |
 | `…/TargetControl/AddLocalOffset` · `AddWorldOffset` | `id:i, dx,dy,dz` | relative move |
 | `…/TargetControl/AddLocalRotation` · `AddWorldRotation` | `id:i, qw,qx,qy,qz` | relative rotate |
-| `…/TargetControl/AddWorldForce` · `AddWorldImpulse` · `AddWorldTorque` | `id:i, x,y,z` | per-vehicle external wrench (per-entity mode only) |
+| `…/TargetControl/AddWorldForce` · `AddWorldImpulse` · `AddWorldTorque` | `id:i, x,y,z` | per-vehicle external wrench (L2 mode only) |
 | `/Genesis/Obstacle/Transform` | `id:i, Px,Py,Pz, Qx,Qy,Qz,Qw` | drive a dynamic obstacle from the client |
 
 ### 4.5 Runtime — server → client

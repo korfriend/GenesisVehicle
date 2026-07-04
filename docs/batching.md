@@ -88,7 +88,7 @@ strategy all process every wheel in one call. Nothing to tune.
 > solver operations the batched path doesn't expose the same way —
 > independent per-vehicle external forces / impulses, or per-vehicle
 > teleport+reset mid-rollout. (This is exactly why
-> `genesis_vehicle.server`'s default per-entity mode still loops: the OSC
+> `genesis_vehicle.server`'s default L2 (per-entity) mode still loops: the OSC
 > protocol must apply `target_forces` / `AddWorldImpulse` to individual
 > vehicles.) If you don't need those, prefer `MultiVehiclePhysics`.
 >

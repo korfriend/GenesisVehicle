@@ -1,22 +1,26 @@
-"""L3 멀티-env 런타임 (genesis_vehicle.server) — ``--multi-env`` 모드 구현.
+"""L3 multi-env runtime (genesis_vehicle.server) — implements ``--multi-env`` mode.
 
-전제: 모든 타겟이 **동일 URDF** 의 차량이고 **차량 간 인터랙션이 없다**.
-이때 N대의 차량을 "한 씬에 N개 엔티티"(per-entity, 선형 비용) 대신
-**차량 1대 + ``scene.build(n_envs=N)``** 평행 환경으로 구동한다. 모든 물리
-커널이 N개 환경을 동시에 처리하므로 스텝 비용이 차량 수와 거의 무관해진다
-(실측: 30/50/100대 모두 ~19 ms/step, per-entity GPU 30대 1,115 ms 대비 57×).
+Premise: all targets are vehicles of the **same URDF** and there is **no
+vehicle-to-vehicle interaction**. Instead of "N entities in one scene"
+(per-entity, linear cost), N vehicles are driven as **one vehicle +
+``scene.build(n_envs=N)``** parallel environments. All physics kernels process
+the N environments simultaneously, so step cost is nearly independent of
+vehicle count (measured: 30/50/100 vehicles all ~19 ms/step, 57x vs
+per-entity GPU 30 vehicles at 1,115 ms).
 
-매핑: target_id(정렬 순) ↔ env index. 환경(바닥/장애물)은 1세트만 추가하면
-Genesis 가 env 마다 자동 복제한다.
+Mapping: target_id (sorted order) ↔ env index. The environment
+(floor/obstacles) is added once; Genesis auto-replicates it per env.
 
-per-entity 모드와 의도적으로 다른 점 / 한계:
-  - 백엔드 기본 CPU (per-entity 모드와 동일 — n_envs≲100 규모에선 GPU 가
-    커널 런치 바운드라 CPU 가 더 빠르다; 실측 탱크 30대 CPU 8.4 vs GPU
-    ~19 ms/step). 수백 env 급 대규모 배칭에서만 ``--gpu`` 로 옵트인.
-  - 동적 장애물은 env 복사본이 N개 생기므로 "차량 A가 민 장애물을 차량 B가
-    보는" 상호작용은 표현 불가. 상태 송신은 env 0 기준.
-  - ``target_forces`` (지속 외력) 미지원 — 수신 시 1회 경고 후 무시.
-  - lockstep 미지원 (OSC pacing 모드 고정).
+Intentional differences / limitations vs the L2 (per-entity) mode:
+  - Backend defaults to CPU (same as L2 mode — at n_envs≲100 scale the GPU is
+    kernel-launch bound, so CPU is faster; measured 30 tanks CPU 8.4 vs GPU
+    ~19 ms/step). Opt in with ``--gpu`` only for large-scale batching at
+    hundreds of envs.
+  - Dynamic obstacles get N env copies, so interactions like "vehicle B sees
+    the obstacle vehicle A pushed" cannot be expressed. State is sent from env 0.
+  - ``target_forces`` (persistent external forces) unsupported — warned once
+    and ignored on receipt.
+  - lockstep unsupported (OSC pacing mode fixed).
 """
 
 import os
@@ -38,16 +42,18 @@ from . import vehicle_builder
 
 
 def _to_host_batched(tensors, force_batch=False):
-    """torch 텐서 목록을 디바이스에서 1-D 로 concat 해 ``.cpu()`` **1회**로
-    내려받고, 원 shape 의 numpy 배열 목록으로 돌려준다 (v1.1.1).
+    """Concat a list of torch tensors to 1-D on-device, download with a
+    **single** ``.cpu()`` call, and return a list of numpy arrays with the
+    original shapes (v1.1.1).
 
-    GPU 백엔드에서 capture 는 read 지점마다 ``.cpu()`` 가 CUDA 스트림 flush +
-    DtoH 왕복(~0.3–0.5 ms/호출, WSL2)을 블로킹으로 치렀다 — 데이터량(수 KB)이
-    아니라 호출 횟수가 비용. 여기서 동기화를 캡처당 1회로 몰아낸다 (실측:
-    동일 capture 코드 0.72 ms CPU vs 3.19 ms GPU @n_envs=10 의 격차 완화).
-    CPU 백엔드에서는 concat 복사가 오히려 손해라 개별 변환을 유지한다
-    (``force_batch`` 는 테스트용 강제 스위치). dtype 이 섞이면 안전하게 개별
-    변환으로 폴백."""
+    On the GPU backend, capture paid a blocking CUDA stream flush + DtoH
+    round-trip (~0.3-0.5 ms/call, WSL2) at every read site — the cost is the
+    number of calls, not the data volume (a few KB). Here the synchronization
+    is collapsed to one per capture (measured: mitigates the gap of the same
+    capture code, 0.72 ms CPU vs 3.19 ms GPU @n_envs=10).
+    On the CPU backend the concat copy is actually a loss, so per-tensor
+    conversion is kept (``force_batch`` is a test-only override switch). If
+    dtypes are mixed, safely fall back to per-tensor conversion."""
     if not tensors:
         return []
     ts = list(tensors)
@@ -69,7 +75,7 @@ def _to_host_batched(tensors, force_batch=False):
 
 
 def _parse_input_triplet(raw):
-    """legacy 와 동일한 입력 해석: len==4 → [_, steer, throttle, brake],
+    """Same input interpretation as legacy: len==4 → [_, steer, throttle, brake],
     len>=3 → [steer, throttle, brake]."""
     raw = list(raw)
     if len(raw) == 4:
@@ -97,12 +103,12 @@ def _q_rot(v, q):
 
 
 class L3State:
-    """배치 텐서 ↔ tid 별 상태 dict 변환 + 스핀각 누적을 담당."""
+    """Handles batch tensor ↔ per-tid state dict conversion + spin angle accumulation."""
 
     def __init__(self, car, veh, tids, n_envs, sim_dt):
         self.car = car
         self.veh = veh                          # Vehicle handle (solver-agnostic)
-        self.tids = list(tids)                  # env index 순서의 target id
+        self.tids = list(tids)                  # target ids in env-index order
         self.n_envs = n_envs
         self.sim_dt = sim_dt
         self.n_wheels = len(veh.resolved.wheels)
@@ -111,17 +117,19 @@ class L3State:
         pass   # spin is owned by the SDK (wheel_visual_transforms); nothing to reset here
 
     def capture(self, dynamic_obstacles, ue_driven_obstacle_ids, update_angles):
-        """state dict 를 배치 읽기로 생성.
+        """Build the state dict via batched reads.
 
-        차체 pos/quat 2회 + SDK 닫힌형 wheel_visual_transforms 1회로 N대 전체를
-        읽는다. 바퀴 pos/quat 은 steer+suspension+spin 이 모두 반영된 visual 포즈
-        (VisualJointSync on/off 무관). spin 은 quat 에 포함되므로 w_angle=0."""
-        # [GPU-mode 서빙 아키텍처 v1.1.3] 순수 물리만 GPU, 캡처 연산은 CPU:
-        # 원시 read 5개(pos/quat/steer/dist/spin) + 장애물 포즈를
-        # _to_host_batched 로 **DtoH 1회**에 내려받고, 닫힌형 휠 포즈 계산은
-        # wheel_visual_transforms_host 로 **CPU 에서** 수행한다 — GPU 백엔드
-        # 캡처가 유발하던 수십 개의 작은 커널 launch 제거. CPU 백엔드에서는
-        # 같은 수학이 원래도 CPU 라 동작/비용 동일.
+        Reads all N vehicles with 2 body pos/quat reads + 1 SDK closed-form
+        wheel_visual_transforms call. Wheel pos/quat is the visual pose with
+        steer+suspension+spin all applied (regardless of VisualJointSync
+        on/off). Spin is included in the quat, so w_angle=0."""
+        # [GPU-mode serving architecture v1.1.3] Only pure physics on GPU,
+        # capture math on CPU: the 5 raw reads (pos/quat/steer/dist/spin) +
+        # obstacle poses are downloaded in **one DtoH** via _to_host_batched,
+        # and the closed-form wheel pose computation runs **on CPU** via
+        # wheel_visual_transforms_host — removes the dozens of small kernel
+        # launches GPU-backend capture used to trigger. On the CPU backend the
+        # same math was already on CPU, so behavior/cost is identical.
         obs_items = [(o_id, ent) for o_id, ent in dynamic_obstacles.items()
                      if o_id not in ue_driven_obstacle_ids]
         mvp = getattr(getattr(self.veh, "_scene", None), "_mvp", None)
@@ -147,7 +155,7 @@ class L3State:
             bq = np.atleast_2d(hosts[1])
             obs_hosts = hosts[5:]
         else:
-            # 폴백: 첫 스텝 이전(rest pose) / 다중 kind / 예외 — 기존 경로.
+            # Fallback: before the first step (rest pose) / multiple kinds / exceptions — original path.
             bp = self.car.get_pos()
             bq = self.car.get_quat()
             wp, wq = self.veh.wheel_visual_transforms("world")   # (N, n, 3/4)
@@ -170,7 +178,7 @@ class L3State:
             ]
             state['targets'][tid] = (bp[k], bq[k], wheels_states)
 
-        # 동적 장애물: env 복제 한계로 env 0 기준 송신
+        # Dynamic obstacles: sent from env 0 due to the env-replication limitation
         for i, (o_id, _ent) in enumerate(obs_items):
             p = np.atleast_2d(obs_hosts[2 * i])[0]
             q = np.atleast_2d(obs_hosts[2 * i + 1])[0]
@@ -179,9 +187,9 @@ class L3State:
 
 
 def run_l3(args):
-    # 1. 백엔드: 기본 CPU — 이 규모(n_envs≲100)에선 GPU 가 커널 런치 바운드라
-    #    CPU 가 더 빠르다 (실측: 탱크 30대 CPU 8.4 vs GPU ~19 ms/step).
-    #    수백 env 급 대규모 배칭에서만 --gpu 로 옵트인.
+    # 1. Backend: default CPU — at this scale (n_envs≲100) the GPU is
+    #    kernel-launch bound, so CPU is faster (measured: 30 tanks CPU 8.4 vs
+    #    GPU ~19 ms/step). Opt in with --gpu only for hundreds-of-envs batching.
     use_gpu = bool(getattr(args, 'gpu', False))
     if use_gpu and not torch.cuda.is_available():
         print(" [Genesis] [L3] [WARN] --gpu requested but CUDA is unavailable — falling back to CPU.")
@@ -190,11 +198,11 @@ def run_l3(args):
     VehicleScene.init_backend("cpu" if use_cpu else "gpu")
     print(f" [Genesis] [L3] Multi-env batched mode | backend = {'CPU' if use_cpu else 'GPU'}")
 
-    # [Engine Hack] RigidGeom.n_cells Monkey-patch (legacy 와 동일)
+    # [Engine Hack] RigidGeom.n_cells monkey-patch (same as legacy)
     import genesis.engine.entities.rigid_entity.rigid_geom as rigid_geom
     rigid_geom.RigidGeom.n_cells = property(lambda self: 1)
 
-    # 2. OSC 핸드셰이크 (legacy 와 동일 프로토콜)
+    # 2. OSC handshake (same protocol as legacy)
     osc = OSCManager(
         send_ip=args.send_ip,
         recv_port=args.recv_port,
@@ -230,7 +238,7 @@ def run_l3(args):
     tid_to_env = {tid: k for k, tid in enumerate(tids)}
     print(f" [Genesis] [L3] {n_envs} targets → scene.build(n_envs={n_envs}) | URDF: {urdf_path}")
 
-    # 3. 씬 구성 — 환경은 1세트만 추가 (env 마다 자동 복제)
+    # 3. Scene setup — add the environment once (auto-replicated per env)
     _rigid_kwargs = dict(
         enable_self_collision=False,
         enable_adjacent_collision=False,
@@ -244,9 +252,9 @@ def run_l3(args):
         broadphase_traversal=gs.broadphase_traversal.SAP,
         max_collision_pairs=2048,
     )
-    # genesis 빌드에 따라 일부 옵션이 없을 수 있다 (예: 1.2.0 PyPI 빌드에는
-    # prefer_parallel_linesearch 가 없음) — 인식 안 되는 키를 지우고 재시도
-    # (v1.0.20: 이전엔 여기서 서버가 하드 크래시).
+    # Some options may be absent depending on the genesis build (e.g. the
+    # 1.2.0 PyPI build lacks prefer_parallel_linesearch) — drop unrecognized
+    # keys and retry (v1.0.20: previously the server hard-crashed here).
     while True:
         try:
             _rigid_opts = gs.options.RigidOptions(**_rigid_kwargs)
@@ -295,8 +303,9 @@ def run_l3(args):
             structures_as_primitive=getattr(args, "structures_as_primitive", False),
         )
 
-    # 차량: cfg + morph 만 넘기면 VehicleScene 이 main 엔티티 + raycast proxy/sensor 를
-    # 만들고 build 에서 VehiclePhysics(sensor=None, 거리 주입)를 구성한다.
+    # Vehicle: pass only cfg + morph and VehicleScene creates the main entity +
+    # raycast proxy/sensor, then constructs VehiclePhysics (sensor=None,
+    # distance injection) at build.
     first_info = target_dict[tids[0]]
     t_fric = first_info.get('friction', ue_friction)
     temp_urdf = vehicle_builder.strip_wheel_collisions(urdf_path)
@@ -313,14 +322,14 @@ def run_l3(args):
         name="L3-shared")
     car = veh.entity_main
 
-    # 4. 배치 빌드 — VehicleScene 이 main + raycast 씬을 함께 빌드하고 VehiclePhysics 생성
+    # 4. Batched build — VehicleScene builds the main + raycast scenes together and creates VehiclePhysics
     vs.build()
     print(f" [DEBUG] Total rigid geoms after build: {vs.rigid_solver.n_geoms}")
     print(f" [DEBUG] Total rigid links after build: {vs.rigid_solver.n_links}")
 
     vehicle_builder.print_resolved_table("L3-shared", veh.resolved)
 
-    # env 별 초기 포즈
+    # Per-env initial poses
     init_pos = np.array([target_dict[tid].get('pos', [0, 0, 2]) for tid in tids], dtype=np.float32)
     init_quat = np.array([target_dict[tid].get('quat', [1, 0, 0, 0]) for tid in tids], dtype=np.float32)
     car.set_pos(init_pos)
@@ -332,23 +341,25 @@ def run_l3(args):
 
     st = L3State(car, veh, tids, n_envs, ue_dt)
 
-    # 5. 하드웨어 프로파일링 + Pacing (legacy 와 동일 절차)
+    # 5. Hardware profiling + pacing (same procedure as legacy)
     print("\n" + "="*50)
     print(" [INFO] [GENESIS] [L3] 하드웨어 연산 성능 실측 프로파일링 중...")
     print("="*50)
-    # [PROFILE] 계측 전 2스텝 예열: 첫 스텝에 taichi/torch 커널 JIT 컴파일 비용이
-    # 몰려 구간별 수치가 크게 과대측정된다 (실측: GPU SDK compute 100ms(PROFILE)
-    # vs 23ms(steady)). 예열 후 5스텝만 계측한다.
+    # [PROFILE] 2 warmup steps before measuring: taichi/torch kernel JIT
+    # compile cost piles onto the first step and grossly inflates per-section
+    # numbers (measured: GPU SDK compute 100ms (PROFILE) vs 23ms (steady)).
+    # Measure only 5 steps after warmup.
     for _ in range(2):
         veh.set_inputs(throttle=0.0, brake=0.0, steer=0.0)
         vs.step()
         if not use_cpu:
             torch.cuda.synchronize()
 
-    # [PROFILE] 워밍업 5스텝 동안 스텝 내부 구간별 시간을 실측해 1회 출력 —
-    # 느릴 때 원인(raycast/proxy vs SDK compute vs genesis solver)을 현장에서
-    # 바로 특정하기 위한 진단 로그. GPU 는 비동기 launch 라 구간 경계마다
-    # synchronize 해서 실제 소요를 귀속시킨다 (워밍업 5스텝 한정 비용).
+    # [PROFILE] Measure per-section time inside the step during the 5 warmup
+    # steps and print once — a diagnostic log to pinpoint the cause of
+    # slowness (raycast/proxy vs SDK compute vs genesis solver) on the spot.
+    # GPU launches are async, so synchronize at each section boundary to
+    # attribute actual time (cost limited to the 5 warmup steps).
     _prof = {'ray': 0.0, 'sdk': 0.0, 'solver': 0.0}
     def _psync():
         if not use_cpu:
@@ -378,7 +389,7 @@ def run_l3(args):
             torch.cuda.synchronize()
     avg_step_time = (time.perf_counter() - warmup_starts) / 5.0
 
-    # 계측 해제 (본 루프는 무계측 원상 복구)
+    # Remove instrumentation (main loop restored to unmeasured originals)
     vs._measure_distances = _o_md
     if _o_ph is not None:
         vs.physics.step = _o_ph
@@ -397,7 +408,7 @@ def run_l3(args):
     osc.client_cpp.send_message("/Genesis/Init/Pacing", [float(sim_dt)])
 
     SIM_DT = sim_dt
-    # catch-up 상한 — v1.0.20부터 적응형 (physics_server 와 동일; pacing.py 참고).
+    # catch-up cap — adaptive since v1.0.20 (same as physics_server; see pacing.py).
     pacer = AdaptiveCatchup(max_cap=max(5, int(0.1 / sim_dt)), sim_dt=SIM_DT,
                             fixed=getattr(args, "max_catchup_steps", None),
                             profile=bool(getattr(args, "pacing_profile", False)))
@@ -409,7 +420,7 @@ def run_l3(args):
     last_time = time.perf_counter()
     last_slow_motion_warn_time = 0.0
 
-    from .physics_server import lerp_state   # 보간 로직 재사용 (state 포맷 동일)
+    from .physics_server import lerp_state   # reuse interpolation logic (same state format)
 
     prev_state = st.capture(dynamic_obstacles, ue_driven_obstacle_ids, update_angles=False)
     curr_state = prev_state
@@ -425,13 +436,13 @@ def run_l3(args):
     log_step_sum = 0
     log_count = 0
 
-    # 입력 버퍼 (재할당 없이 재사용)
+    # Input buffers (reused without reallocation)
     steer_arr = np.zeros(n_envs, dtype=np.float32)
     throttle_arr = np.zeros(n_envs, dtype=np.float32)
     brake_arr = np.zeros(n_envs, dtype=np.float32)
 
     # =========================================================================
-    # 메인 시뮬레이션 루프 (legacy 와 동일한 accumulator pacing)
+    # Main simulation loop (same accumulator pacing as legacy)
     # =========================================================================
     while True:
         loop_start = time.perf_counter()
@@ -479,7 +490,7 @@ def run_l3(args):
             safe_overrides = osc.pop_overrides()
             safe_relative_cmds = osc.pop_relative_cmds()
 
-            # [UE-DRIVEN OBSTACLE SYNC] — env 전체 브로드캐스트
+            # [UE-DRIVEN OBSTACLE SYNC] — broadcast to all envs
             safe_obstacle_overrides = osc.pop_obstacle_overrides()
             for obs_id, obs_ent in dynamic_obstacles.items():
                 if obs_id in safe_obstacle_overrides:
@@ -489,7 +500,7 @@ def run_l3(args):
                     if 'quat' in ovrd:
                         obs_ent.set_quat(np.tile(np.array(ovrd['quat'], dtype=np.float32), (n_envs, 1)))
 
-            # 타겟 텔레포트/상대 명령 — envs_idx 로 해당 env 만 갱신
+            # Target teleport/relative commands — update only that env via envs_idx
             for tid, k in tid_to_env.items():
                 needs_pos = needs_quat = needs_vel = False
                 t_pos = t_quat = None
@@ -529,8 +540,8 @@ def run_l3(args):
                             t_quat = _q_mul(cdata, t_quat); needs_quat = True
                             if tp: needs_vel = True
                         else:
-                            # AddWorldImpulse / AddWorldTorque: env 단위 속도 조작은
-                            # 배치 모드 v1 미지원 — 경고 후 무시
+                            # AddWorldImpulse / AddWorldTorque: per-env velocity
+                            # manipulation unsupported in batched mode v1 — warn and ignore
                             print(f" [Genesis] [L3] [WARN] relative cmd '{ctype}' 은 multi-env 모드에서 미지원 (무시).")
 
                 if needs_pos:
@@ -555,7 +566,7 @@ def run_l3(args):
         steps_limit = pacer.cap()
 
         while accumulator >= SIM_DT and catchup_steps < steps_limit:
-            # 입력: tid dict → (N,) 배열 → 배치 VehicleInputs 1개
+            # Inputs: tid dict → (N,) arrays → one batched VehicleInputs
             queued_input = osc.pop_urdf_input()
             if queued_input:
                 last_frame_id = queued_input['frame_id']
@@ -589,9 +600,10 @@ def run_l3(args):
                     osc.close()
                     sys.exit(0)
                 raise
-            # [계측 v1.1.3] GPU 는 launch 가 비동기라, 여기서 동기화해야
-            # Physics Avg 가 실제 실행 시간을 담는다 — 이전엔 스텝 뒤의
-            # 실행 꼬리가 루프 하단 synchronize 로 넘어가 '서빙'으로 오귀속됐다.
+            # [Instrumentation v1.1.3] GPU launches are async, so we must
+            # synchronize here for Physics Avg to reflect actual execution
+            # time — previously the execution tail after the step spilled into
+            # the loop-bottom synchronize and was misattributed to 'serving'.
             if not use_cpu:
                 torch.cuda.synchronize()
             physics_dur_total += time.perf_counter() - physics_start
@@ -602,7 +614,7 @@ def run_l3(args):
             catchup_steps += 1
             step_count += 1
 
-        # 데스 스파이럴 방지 (legacy 와 동일)
+        # Death-spiral prevention (same as legacy)
         if catchup_steps == steps_limit and accumulator >= SIM_DT:
             t_warn = time.perf_counter()
             if t_warn - last_slow_motion_warn_time >= 5.0:
@@ -614,7 +626,7 @@ def run_l3(args):
         if catchup_steps > 0 and not use_cpu:
             torch.cuda.synchronize()
 
-        # 보간 + 송신 (legacy lerp_state / osc 인코딩 재사용)
+        # Interpolate + send (reuses legacy lerp_state / osc encoding)
         alpha = float(np.clip(accumulator / SIM_DT, 0.0, 0.9999))
         interpolated = lerp_state(prev_state, curr_state, alpha)
         if interpolated['targets']:
@@ -623,7 +635,7 @@ def run_l3(args):
             osc.send_dynamic_states_bulk(interpolated['dynamic_obstacles'])
 
         loop_dur = time.perf_counter() - loop_start
-        pacer.update(catchup_steps, loop_dur)   # 적응형 cap 전환 판정
+        pacer.update(catchup_steps, loop_dur)   # adaptive cap switch decision
         log_loop_dur_sum += loop_dur
         log_phys_dur_sum += physics_dur_total
         log_step_sum += catchup_steps
@@ -632,8 +644,9 @@ def run_l3(args):
         if log_count >= 50:
             avg_loop = (log_loop_dur_sum / 50.0) * 1000.0
             avg_phys = (log_phys_dur_sum / 50.0) * 1000.0
-            # Physics Avg 는 루프당 catch-up 스텝의 '합' — 스텝당 값과 혼동을
-            # 막기 위해 steps/loop 와 per-step 을 함께 표기 (v1.0.7).
+            # Physics Avg is the 'sum' of catch-up steps per loop — print
+            # steps/loop and per-step together to avoid confusion with the
+            # per-step value (v1.0.7).
             steps_per_loop = log_step_sum / 50.0
             per_step = (log_phys_dur_sum / max(log_step_sum, 1)) * 1000.0
             print(f" [STATS] [L3 n_envs={n_envs}] Loop Avg: {avg_loop:.2f} ms | "

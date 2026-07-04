@@ -1,18 +1,18 @@
-"""OSC 기반 Genesis 차량 물리 서버 (genesis_vehicle.server).
+"""OSC-based Genesis vehicle physics server (genesis_vehicle.server).
 
-원본: genesis_unreal_plugin/physics_server.py — UE 전용이 아닌 범용 OSC
-클라이언트 서버로 SDK 안에 편입. 변경점:
-  - Windows 전용 코드(ctypes 패치, HIGH_PRIORITY_CLASS)에 플랫폼 가드
-  - 패키지 상대 임포트 (sys.path 핵 제거)
-  - ``--multi-env`` 플래그: 동일 URDF·비인터랙션 다수 차량을 L3(n_envs)
-    배칭으로 구동 (l3_runtime.run_l3 로 디스패치)
+Origin: genesis_unreal_plugin/physics_server.py — folded into the SDK as a
+general-purpose OSC client server (not UE-only). Changes:
+  - Platform guards around Windows-only code (ctypes patch, HIGH_PRIORITY_CLASS)
+  - Package-relative imports (sys.path hack removed)
+  - ``--multi-env`` flag: drive many same-URDF, non-interacting vehicles via
+    L3 (n_envs) batching (dispatches to l3_runtime.run_l3)
 """
 
 import os
 import sys
 
-# [Fix] PyInstaller ctypes wrapper crash monkey-patch (Windows 배포용 —
-# Linux 에서는 Genesis 가 ctypes.CDLL(None) 으로 libc 를 여는 것을 깨뜨리므로 가드)
+# [Fix] PyInstaller ctypes wrapper crash monkey-patch (for Windows deployment —
+# guarded because on Linux it breaks Genesis opening libc via ctypes.CDLL(None))
 if sys.platform == "win32":
     import ctypes
     orig_CDLL = ctypes.CDLL
@@ -29,7 +29,7 @@ import argparse
 import numpy as np
 import genesis as gs
 
-# HIGH PRIORITY CLASS 설정 (Windows 전용 상수 — 타 플랫폼은 통상 우선순위 유지)
+# Set HIGH PRIORITY CLASS (Windows-only constant — other platforms keep normal priority)
 if sys.platform == "win32":
     try:
         import psutil
@@ -43,11 +43,11 @@ from genesis_vehicle import (
     PacejkaAnisotropic, VehicleScene
 )
 
-# 쪼갠 모듈들 임포트 (패키지 내부 모듈 — 기존 코드의 참조 이름을 유지하기 위한 별칭)
+# Import the split-out modules (package-internal modules — aliased to keep the reference names used by existing code)
 from . import env_builder as genesis_env_builder
 from . import vehicle_builder as genesis_vehicle_builder
 
-# [Fix] Quadrants CUDA Graph 버그(환경변수 인식 오류) 해결
+# [Fix] Resolve the Quadrants CUDA Graph bug (environment-variable detection error)
 if "CUDA_PATH" in os.environ and "CUDA_HOME" not in os.environ:
     os.environ["CUDA_HOME"] = os.environ["CUDA_PATH"]
 
@@ -358,7 +358,7 @@ def main():
                              "the ray-cast wheels still follow the surface. Big win for large "
                              "chassis (e.g. tanks) on complex maps.")
     parser.add_argument("--single-scene", action="store_true",
-                        help="(per-entity mode) legacy single-scene raycast: the wheel rays hit "
+                        help="(L2 mode) legacy single-scene raycast: the wheel rays hit "
                              "the rigid collision geoms of the ONE main scene directly (the "
                              "pre-v1.0.12 default). Cheaper to build, but the raycast BVH re-fits "
                              "every step and wheels ride convex (CoACD) road colliders instead of "
@@ -371,13 +371,15 @@ def main():
                              "structures = 100s of ms). Box collision is analytic (~0 when not "
                              "touching), so cost scales with actual contacts, not structure "
                              "count. Use with --road-raycast-only (roads stay raycast surfaces).")
-    parser.add_argument("--multi-env", action="store_true",
-                        help="L3 batched mode: N identical, non-interacting vehicles as n_envs=N "
-                             "(one vehicle entity, batched). Requires all targets to share one URDF.")
+    parser.add_argument("--multi-env", "--l3", dest="multi_env", action="store_true",
+                        help="L3 mode (alias: --l3): N identical, non-interacting vehicles as "
+                             "n_envs=N (one vehicle entity, batched). Requires all targets to "
+                             "share one URDF. Without it the server runs L2 mode (per-entity: "
+                             "K interacting entities in one world).")
     parser.add_argument("--gpu", action="store_true",
                         help="Opt into the GPU backend (default: CPU in BOTH modes). GPU is "
                              "kernel-launch bound at small batch sizes, so it only pays off "
-                             "in --multi-env (L3) mode with hundreds of envs; per-entity (L2) "
+                             "in --multi-env (L3) mode with hundreds of envs; L2 "
                              "and small fleets (n_envs<~100) are faster on CPU (measured: 30 "
                              "tanks L3 CPU 8.4 vs GPU ~19 ms/step).")
     parser.add_argument("--max-catchup-steps", type=int, default=None,
@@ -402,9 +404,9 @@ def main():
                      "an rco road is a kinematic raycast surface, which only the "
                      "dual raycast scene can host.")
 
-    # [L3] 멀티-env 배칭 모드 — 동일 URDF 다수 차량 전용 경로로 분기
+    # [L3] Multi-env batching mode — branch to the dedicated path for many same-URDF vehicles
     if args.multi_env:
-        print(" [Genesis] [MODE] === MULTI-ENV (L3 batched) === "
+        print(" [Genesis] [MODE] === L3 (multi-env) === "
               "(1 vehicle entity x n_envs, non-interacting, CPU default — --gpu to opt in)")
         if args.single_scene:
             print(" [Genesis] [WARN] --single-scene is a per-entity-mode flag; "
@@ -413,14 +415,14 @@ def main():
         run_l3(args)
         return
 
-    # 백엔드 기본 CPU + 비-락스텝(OSC Pacing) 처리
-    # (per-entity 모드에선 CPU 가 GPU 보다 빠름 — n_envs=1 다중 엔티티는 커널 런치 바운드)
+    # Default backend CPU + non-lockstep (OSC pacing) handling
+    # (in per-entity mode CPU beats GPU — multiple entities at n_envs=1 are kernel-launch bound)
     args.cpu = not args.gpu
     args.lockstep = False
-    print(" [Genesis] [MODE] === PER-ENTITY (L2) === "
-          "(K interacting vehicles, n_envs=1, CPU default; use --multi-env for L3)")
+    print(" [Genesis] [MODE] === L2 (per-entity) === "
+          "(K interacting vehicles, n_envs=1, CPU default; use --multi-env/--l3 for L3)")
 
-    # 1. 제네시스 물리 엔진 초기화 및 백엔드 결정
+    # 1. Initialize the Genesis physics engine and pick the backend
     if args.cpu:
         backend = gs.cpu
     elif torch.cuda.is_available():
@@ -438,7 +440,7 @@ def main():
     import genesis.engine.entities.rigid_entity.rigid_geom as rigid_geom
     rigid_geom.RigidGeom.n_cells = property(lambda self: 1)
 
-    # 2. OSC 통신 매니저 생성
+    # 2. Create the OSC communication manager
     osc = OSCManager(
         send_ip=args.send_ip,
         recv_port=args.recv_port,
@@ -453,8 +455,9 @@ def main():
     print(" 언리얼 엔진에서 '플레이(Play)' 버튼을 누를 때까지 대기합니다...")
     print("="*50 + "\n")
 
-    # [Correct Fix] osc_manager.py의 wait_for_initialization 내부에서 자동으로 1초 주기로 RequestInit을 보내며 대기하므로,
-    # 여기서 이중 루프를 돌며 초기 데이터 버퍼를 비워버리는 병목을 원천 제거합니다.
+    # [Correct Fix] wait_for_initialization in osc_manager.py already waits while
+    # automatically sending RequestInit every 1 s, so we eliminate at the source the
+    # bottleneck of running a second loop here that drains the initial data buffer.
     init_data = osc.wait_for_initialization(timeout=300.0)
     init_physics = init_data.get('physics', {})
     ue_gravity = init_physics.get('gravity', -9.81)
@@ -492,11 +495,11 @@ def main():
             enable_neutral_collision=False,
             enable_collision=True,
             tolerance=0.001,
-            use_gjk_collision=False, # [최적화] MPR 전환
+            use_gjk_collision=False, # [Optimization] switch to MPR
             box_box_detection=True,
-            use_hibernation=True, # [최적화] Sleep 모드 활성화
-            broadphase_traversal=gs.broadphase_traversal.SAP, # [최적화] Sweep-and-Prune
-            max_collision_pairs=2048, # [최적화] 충돌 쌍 사전할당
+            use_hibernation=True, # [Optimization] enable sleep mode
+            broadphase_traversal=gs.broadphase_traversal.SAP, # [Optimization] Sweep-and-Prune
+            max_collision_pairs=2048, # [Optimization] preallocate collision pairs
         ),
     )
     target_entities = {}
@@ -506,7 +509,7 @@ def main():
     is_urdf_active = False
     urdf_path = ""
     
-    # 바닥면(Plane) 생성
+    # Create the ground plane
     plane = None
     if not args.no_floor:
         plane = vs.add_static(morph=gs.morphs.Plane(),
@@ -525,7 +528,7 @@ def main():
         
     for target_id, target_info in target_dict.items():
         if is_urdf_active:
-            # 헬퍼 모듈을 이용해 URDF 차량 세팅 및 Raycaster 인스턴스화 수행
+            # Use the helper module to set up the URDF vehicle and instantiate the Raycaster
             mapping = osc.urdf_init_request.get('mapping', {})
             genesis_vehicle_builder.build_vehicle(
                 vs=vs,
@@ -543,7 +546,7 @@ def main():
                 # wheel_visual_transforms, so no per-step engine FK is paid.
             )
         else:
-            # 일반 타겟 빌딩
+            # Generic target building
             t_pos = target_info.get('pos', [0, 0, 2])
             t_quat = target_info.get('quat', [1, 0, 0, 0])
             obs_type = target_info.get('type', 2)
@@ -572,7 +575,7 @@ def main():
             target_entities[target_id] = _obs.entity_main
             print(f" [Genesis] Created Target {target_id} at {t_pos}")
             
-    # 5. 언리얼 엔진 환경 동기화 (헬퍼 모듈에 위임)
+    # 5. Sync the Unreal Engine environment (delegated to the helper module)
     obstacles, dynamic_obstacles, initial_dynamic_states, ue_driven_obstacle_ids, extra_mass_entities = genesis_env_builder.build_obstacles(
         vs=vs,
         init_data=init_data,
@@ -585,7 +588,7 @@ def main():
     )
     entities_to_set_mass.extend(extra_mass_entities)
 
-    # 6. 배경 및 시뮬레이션 설정
+    # 6. Background and simulation settings
     if args.no_target_collision:
         print(" [Genesis] 옵션에 의해 차량(Target) 상호 간의 충돌을 비활성화합니다.")
         for idx, (tid, tentity) in enumerate(target_entities.items()):
@@ -605,29 +608,29 @@ def main():
         controllers[tid] = veh
         genesis_vehicle_builder.print_resolved_table(tid, veh.resolved)
 
-    # 텐서 관련 Monkey Patch 적용
+    # Apply tensor-related monkey patches
     genesis_vehicle_builder.apply_monkey_patches(vs.rigid_solver)
 
-    # 질량 덮어쓰기 적용
+    # Apply mass overrides
     for entity, mass in entities_to_set_mass:
         entity.set_mass(mass)
         
-    # [NEW] 하드웨어 성능 자율 측정 기반 1배속 정속 자동 튜닝 (Auto-Pacing)
+    # [NEW] Auto-pacing: self-measured hardware performance drives automatic tuning for steady 1x real-time speed
     print("\n" + "="*50)
     print(" [INFO] [GENESIS] 하드웨어 연산 성능 실측 프로파일링 중...")
     print("="*50)
     
-    # 5회 시험 step 구동하여 스텝당 평균 물리 연산 시간 실측 (GPU일 때는 명시적 동기화 적용)
-    # [PROFILE] 계측 전 2스텝 예열: 첫 스텝에 taichi/torch 커널 JIT 컴파일 비용이
-    # 몰려 구간별 수치가 크게 과대측정된다 (실측: GPU SDK compute 100ms(PROFILE)
-    # vs 23ms(steady)). 예열 후 5스텝만 계측한다.
+    # Run 5 trial steps to measure the average physics compute time per step (with explicit sync on GPU)
+    # [PROFILE] 2 warm-up steps before measuring: taichi/torch kernel JIT compile cost
+    # piles onto the first step, grossly inflating the per-section numbers (measured:
+    # GPU SDK compute 100ms(PROFILE) vs 23ms(steady)). Measure only 5 steps after warm-up.
     for _ in range(2):
         vs.step()
         if not args.cpu and torch.cuda.is_available():
             torch.cuda.synchronize()
 
-    # [PROFILE] 워밍업 5스텝 동안 스텝 내부 구간별 시간을 실측해 1회 출력 —
-    # 느릴 때 원인(raycast/proxy vs SDK compute vs genesis solver)을 현장에서 특정.
+    # [PROFILE] During the 5 warm-up steps, measure per-section time inside the step and print once —
+    # pinpoints on-site what is slow (raycast/proxy vs SDK compute vs genesis solver).
     _prof = {'ray': 0.0, 'sdk': 0.0, 'solver': 0.0}
     _o_md = vs._measure_distances
     def _p_md():
@@ -654,7 +657,7 @@ def main():
     warmup_ends = time.perf_counter()
     avg_step_time = (warmup_ends - warmup_starts) / 5.0
 
-    # 계측 해제 (본 루프는 무계측 원상 복구)
+    # Remove instrumentation (restore the main loop to un-instrumented originals)
     vs._measure_distances = _o_md
     if _o_ph is not None:
         vs.physics.step = _o_ph
@@ -666,21 +669,21 @@ def main():
           f"SDK compute {_prof['sdk']/5*1e3:.2f} ms | "
           f"genesis solver {_prof['solver']/5*1e3:.2f} ms | 기타 {_rest:.2f} ms")
     
-    # [CRITICAL FIX] 물리적 시간 흐름 및 동역학 일관성(Determinism)을 위해 sim_dt는 항상 고정 고수합니다.
+    # [CRITICAL FIX] Always keep sim_dt fixed, for consistent physical time flow and dynamics determinism.
     sim_dt = ue_dt
     vs.sim_options.dt = sim_dt
     print(f"  [OK] [Determinism] 물리 해상도(sim_dt)가 표준 {sim_dt * 1000.0:.1f}ms ({1.0/sim_dt:.1f}Hz)로 설정되었습니다.")
     print("="*50 + "\n")
     
-    # 언리얼 엔진에 고정 동기 주기를 확인 전송합니다.
+    # Send the fixed sync period to Unreal Engine for confirmation.
     print(f" [Pacing] [Auto-Pacing] 언리얼 엔진으로 동조 주기({sim_dt * 1000.0:.1f}ms)를 전송합니다...")
     osc.client_cpp.send_message("/Genesis/Init/Pacing", [float(sim_dt)])
         
     SIM_DT = sim_dt
-    # catch-up 상한 — v1.0.20부터 적응형(AdaptiveCatchup): steps/loop 를
-    # 모니터링해 지속 과부하면 cap=1(균일 슬로모션), 여유가 돌아오면 cap=max
-    # (실시간 복귀 재개)로 자동 전환. --max-catchup-steps N 은 고정 cap 으로
-    # 적응 로직을 끈다.
+    # Catch-up cap — adaptive (AdaptiveCatchup) since v1.0.20: monitors steps/loop
+    # and auto-switches to cap=1 (uniform slow-motion) under sustained overload,
+    # back to cap=max (resume real-time recovery) when headroom returns.
+    # --max-catchup-steps N pins a fixed cap and disables the adaptive logic.
     pacer = AdaptiveCatchup(max_cap=max(5, int(0.1 / sim_dt)), sim_dt=SIM_DT,
                             fixed=args.max_catchup_steps,
                             profile=bool(getattr(args, "pacing_profile", False)))
@@ -693,9 +696,10 @@ def main():
     last_slow_motion_warn_time = 0.0
 
     accumulated_wheel_angles = {}
-    # [PERF] 배치 포즈 리더 (v1.0.13): capture_state 의 타깃/장애물 chassis 포즈를
-    # per-entity get_pos/get_quat 대신 solver 일괄 read 1회씩으로. dict 순서와
-    # 리더의 엔티티 순서가 일치해야 하므로 같은 dict 로 생성.
+    # [PERF] Batched pose readers (v1.0.13): read capture_state's target/obstacle
+    # chassis poses via ONE batched solver read each instead of per-entity
+    # get_pos/get_quat. The readers' entity order must match the dicts' iteration
+    # order, so they are built from the same dicts.
     try:
         _readers = (_BatchPoseReader(target_entities.values()),
                     _BatchPoseReader(dynamic_obstacles.values()))
@@ -716,7 +720,7 @@ def main():
     log_count = 0
 
     # =========================================================================
-    # 메인 시뮬레이션 루프
+    # Main simulation loop
     # =========================================================================
     last_physics_time = time.perf_counter()
     last_real_time = time.perf_counter()
@@ -737,7 +741,7 @@ def main():
 
             accumulator += frame_time
 
-            # CPU 보호용 Sleep 기법: 남은 시간이 너무 크면 대기하여 100% CPU 방지
+            # CPU-protection sleep: if the remaining time is large enough, wait to avoid 100% CPU
             time_to_wait = SIM_DT - accumulator
             if time_to_wait > 0.002:
                 time.sleep(time_to_wait - 0.001)
@@ -790,7 +794,7 @@ def main():
                 
                 accumulated_wheel_angles.clear()
 
-                # 리셋 신호 발생 시 언리얼 Dilation 배속도 1.0배속으로 초기화 복원
+                # On a reset signal, restore Unreal's time-dilation speed to 1.0x as well
                 osc.client_cpp.send_message("/Genesis/Init/TimeDilation", [1.0])
                 if hasattr(main, '_dilation_sent'):
                     delattr(main, '_dilation_sent')
@@ -800,7 +804,7 @@ def main():
                 if plane and hasattr(plane, 'set_friction'): plane.set_friction(initial_physics_state['friction'])
                 if plane and hasattr(plane, 'set_restitution'): plane.set_restitution(initial_physics_state['restitution'])
                 
-                # 타이밍 및 상태 초기화
+                # Reset timing and state
                 last_time = time.perf_counter()
                 accumulator = 0.0
                 prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers)
@@ -905,19 +909,19 @@ def main():
                         ft[0:3] = fw
                         tentity.control_dofs_force(ft, slice(0, 6))
 
-            # 오버라이드 반영 후 상태 갱신
+            # Refresh state after applying overrides
             curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers)
 
         catchup_steps = 0
         physics_dur_total = 0.0
 
         if args.lockstep:
-            # Lockstep 모드는 고정 1스텝씩 가동
+            # Lockstep mode runs a fixed 1 step at a time
             steps_limit = 1
         else:
             steps_limit = pacer.cap()
 
-        # Catch-up Multi-Step Loop (물리 SIM_DT 고정 단위 소비; cap 은 적응형)
+        # Catch-up Multi-Step Loop (consumes physics time in fixed SIM_DT units; cap is adaptive)
         while (args.lockstep and steps_limit > 0) or (not args.lockstep and accumulator >= SIM_DT and catchup_steps < steps_limit):
             if controllers:
                 if not args.lockstep:
@@ -952,7 +956,7 @@ def main():
                             last_printed_inputs[tid] = curr_inp
                             print(f" [DEBUG] Vehicle {tid} Inputs: steer={steer:.3f}, throttle={throttle:.3f}, brake={brake:.3f}")
             
-            # 이전 물리 상태 보존
+            # Preserve the previous physics state
             prev_state = curr_state
             
             try:
@@ -969,7 +973,7 @@ def main():
                 else:
                     raise e
             
-            # 최신 물리 상태 기록
+            # Record the latest physics state
             curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, True, mvp=vs.physics, readers=_readers)
             
             if not args.lockstep:
@@ -985,7 +989,7 @@ def main():
 
 
 
-        # 데스 스파이럴 방지: 따라잡지 못하면 어큐뮬레이터 탕감 및 슬로우 모션 경고 (5초 간격으로 스로틀링 출력)
+        # Death-spiral prevention: if we can't catch up, forgive the accumulator and warn about slow motion (throttled to every 5 s)
         if not args.lockstep and catchup_steps == steps_limit and accumulator >= SIM_DT:
             current_warn_time = time.perf_counter()
             if current_warn_time - last_slow_motion_warn_time >= 5.0:
@@ -994,24 +998,24 @@ def main():
                 last_slow_motion_warn_time = current_warn_time
             accumulator = 0.0
 
-        # 모든 캐치업 물리 연산 완료 시 GPU 동기화
+        # GPU sync once all catch-up physics computations are done
         if catchup_steps > 0:
             if not args.cpu and torch.cuda.is_available():
                 torch.cuda.synchronize()
 
-        # [상태 보간(LERP/SLERP) 및 언리얼 텔레메트리 송신]
+        # [State interpolation (LERP/SLERP) and Unreal telemetry send]
         if not args.lockstep:
             alpha = accumulator / SIM_DT
             alpha = float(np.clip(alpha, 0.0, 0.9999))
             interpolated = lerp_state(prev_state, curr_state, alpha)
             
-            # 최종 보간 상태 벌크 전송
+            # Bulk-send the final interpolated state
             if interpolated['targets']:
                 osc.send_target_states_bulk(interpolated['targets'])
             if interpolated['dynamic_obstacles']:
                 osc.send_dynamic_states_bulk(interpolated['dynamic_obstacles'])
         else:
-            # Lockstep 모드는 보간 없이 최신 상태 전송
+            # Lockstep mode sends the latest state without interpolation
             if target_entities:
                 target_states_to_send = []
                 for tid, target_data in curr_state['targets'].items():
@@ -1029,7 +1033,7 @@ def main():
 
         loop_dur = time.perf_counter() - loop_start
         if not args.lockstep:
-            pacer.update(catchup_steps, loop_dur)   # 적응형 cap 전환 판정
+            pacer.update(catchup_steps, loop_dur)   # adaptive cap switch decision
 
         log_loop_dur_sum += loop_dur
         log_phys_dur_sum += physics_dur_total
@@ -1039,16 +1043,16 @@ def main():
         if log_count >= 50:
             avg_loop = (log_loop_dur_sum / 50.0) * 1000.0
             avg_phys = (log_phys_dur_sum / 50.0) * 1000.0
-            # Physics Avg 는 루프당 catch-up 스텝의 '합' — 스텝당 값과 혼동을
-            # 막기 위해 steps/loop 와 per-step 을 함께 표기 (v1.0.7).
+            # Physics Avg is the SUM of catch-up steps per loop — steps/loop and
+            # per-step are shown together to avoid confusion with a per-step value (v1.0.7).
             steps_per_loop = log_step_sum / 50.0
             per_step = (log_phys_dur_sum / max(log_step_sum, 1)) * 1000.0
-            print(f" [STATS] [per-entity] Loop Avg: {avg_loop:.2f} ms | "
+            print(f" [STATS] [L2] Loop Avg: {avg_loop:.2f} ms | "
                   f"Physics Avg: {avg_phys:.2f} ms "
                   f"({steps_per_loop:.1f} steps/loop, {per_step:.2f} ms/step) "
                   f"[cap={pacer.cap()}:{pacer.mode}]")
             
-            # 최초 50프레임 평균 루프 시간 통계가 나오면, 언리얼에 해당 지연 배속 비율(TimeDilation)을 1회 전송합니다.
+            # Once the first 50-frame average loop-time statistic is available, send the corresponding lag speed ratio (TimeDilation) to Unreal once.
             if not hasattr(main, '_dilation_sent'):
                 main._dilation_sent = True
                 avg_loop_sec = log_loop_dur_sum / 50.0
@@ -1067,11 +1071,11 @@ def main():
     osc.close()
 
 def cli():
-    """`python -m genesis_vehicle.server` 진입점 — main() 종료 시 임시 파일 청소 보장."""
+    """`python -m genesis_vehicle.server` entry point — guarantees temp-file cleanup when main() exits."""
     try:
         main()
     finally:
-        # 분할된 env_builder의 created_temp_files 목록을 호출하여 청소
+        # Clean up using the split-out env_builder's created_temp_files list
         if hasattr(genesis_env_builder, 'created_temp_files') and genesis_env_builder.created_temp_files:
             print(f"\n [Genesis] Cleaning up {len(genesis_env_builder.created_temp_files)} temporary preprocessed meshes...")
             for temp_file in genesis_env_builder.created_temp_files:
@@ -1082,7 +1086,7 @@ def cli():
                     except Exception as e:
                         print(f"  └ Failed to remove temp file {temp_file}: {e}")
                         
-        # 임시 생성된 차량 URDF 파일들 청소
+        # Clean up temporarily generated vehicle URDF files
         if hasattr(genesis_vehicle_builder, 'created_temp_urdfs') and genesis_vehicle_builder.created_temp_urdfs:
             print(f"\n [Genesis] Cleaning up {len(genesis_vehicle_builder.created_temp_urdfs)} temporary preprocessed URDFs...")
             for temp_urdf in genesis_vehicle_builder.created_temp_urdfs:
