@@ -37,6 +37,37 @@ from . import env_builder
 from . import vehicle_builder
 
 
+def _to_host_batched(tensors, force_batch=False):
+    """torch 텐서 목록을 디바이스에서 1-D 로 concat 해 ``.cpu()`` **1회**로
+    내려받고, 원 shape 의 numpy 배열 목록으로 돌려준다 (v1.1.1).
+
+    GPU 백엔드에서 capture 는 read 지점마다 ``.cpu()`` 가 CUDA 스트림 flush +
+    DtoH 왕복(~0.3–0.5 ms/호출, WSL2)을 블로킹으로 치렀다 — 데이터량(수 KB)이
+    아니라 호출 횟수가 비용. 여기서 동기화를 캡처당 1회로 몰아낸다 (실측:
+    동일 capture 코드 0.72 ms CPU vs 3.19 ms GPU @n_envs=10 의 격차 완화).
+    CPU 백엔드에서는 concat 복사가 오히려 손해라 개별 변환을 유지한다
+    (``force_batch`` 는 테스트용 강제 스위치). dtype 이 섞이면 안전하게 개별
+    변환으로 폴백."""
+    if not tensors:
+        return []
+    ts = list(tensors)
+    all_torch = all(torch.is_tensor(t) for t in ts)
+    use_batch = (force_batch or (all_torch and ts[0].is_cuda))
+    if not use_batch or not all_torch or len({t.dtype for t in ts}) != 1:
+        return [t.detach().cpu().numpy() if torch.is_tensor(t) else np.asarray(t)
+                for t in ts]
+    shapes = [tuple(t.shape) for t in ts]
+    host = torch.cat([t.reshape(-1) for t in ts]).detach().cpu().numpy()  # 1 sync
+    out, o = [], 0
+    for sh in shapes:
+        n = 1
+        for d in sh:
+            n *= d
+        out.append(host[o:o + n].reshape(sh))
+        o += n
+    return out
+
+
 def _parse_input_triplet(raw):
     """legacy 와 동일한 입력 해석: len==4 → [_, steer, throttle, brake],
     len>=3 → [steer, throttle, brake]."""
@@ -198,15 +229,15 @@ def run_l3(args):
                 _rigid_kwargs.pop(m.group(1))
                 continue
             raise
-    # Unified two-scene raycast (VehicleScene raywheel): the road is RIGID in the
+    # Unified dual-scene wheel-raycast (VehicleScene raycast_mode=dual_scene): the road is RIGID in the
     # main scene (collision / rollover) and a KINEMATIC mirror is raycast in a
     # SEPARATE scene whose BVH is static and shared across envs — same trick as
-    # the high-level API (see docs/two-scene-raycast.md). Supersedes the old
+    # the high-level API (see docs/dual-scene-raycast.md). Supersedes the old
     # single-scene --road-raycast-only (kinematic road, no collision). Genesis is
     # already initialized above via VehicleScene.init_backend, so init_genesis=False.
     vs = VehicleScene(
         n_envs=n_envs, dt=ue_dt,
-        raycast_mode="raywheel", gravity=(0, 0, ue_gravity), substeps=2,
+        raycast_mode="dual_scene", gravity=(0, 0, ue_gravity), substeps=2,
         rigid_options=_rigid_opts, show_viewer=not args.headless,
         init_genesis=False,
     )
@@ -214,7 +245,7 @@ def run_l3(args):
     plane = None
     if not args.no_floor:
         # VehicleScene routes the floor: rigid in main + kinematic raycast mirror
-        # (raywheel) — no manual main/raycast handling here.
+        # (dual_scene) — no manual main/raycast handling here.
         plane = vs.add_static(
             morph=gs.morphs.Plane(),
             material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution),

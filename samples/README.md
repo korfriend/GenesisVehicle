@@ -16,7 +16,7 @@ API surface. They depend only on the SDK itself and the bundled
 | 8 | [`perf_l2_l3_combined.py`](perf_l2_l3_combined.py) | **L2 × L3 combined scaling.** 2D grid sweep `(K, N)` showing that L2 (cross-vehicle in one env) and L3 (parallel envs) stack multiplicatively. e.g. K=2 alone gives 1.5×, N=4 alone gives 2.8×, K=2×N=4 combined gives **4.6×** vs single-vehicle baseline — close to the theoretical product. Subprocess per cell. The headline batching pattern for autonomous-driving ego + traffic in MPPI / multi-agent RL. | ✗ headless by design |
 | 9 | [`city_traffic_ego.py`](city_traffic_ego.py) | **Autonomous-driving scenario — ego + traffic on a 4-lane highway.** 1 red AWD ego + 7 traffic agents (3 RWD blue coupes, 3 FWD small dark-red sedans, 1 yellow truck) under a simple P lane-keeper. Top-down camera frames the road. `--n_envs N` enables the L2 × L3 combined batching pattern (one MPPI candidate per env, all 8×N vehicles batched). The reference setup for "MPPI ego in surrounding traffic" workflows. | ✓ `--viewer` |
 | 10 | [`l2l3_minimal.py`](l2l3_minimal.py) | **Shortest L2 × L3 program (~90 lines).** K interacting vehicles share one world (collide — L2) × N parallel scenarios (L3), advanced by one `MultiVehiclePhysics(scene, vehicles, n_envs=N)`. Demonstrates per-(scenario, vehicle) control: the lead car brakes in scenario 0 only and diverges from the rolling copies. The clean reference for "how do I use L2 × L3" before reading the full `city_traffic_ego` demo. `--k`, `--n_envs`, `--cpu`. | ✗ headless |
-| 11 | [`two_scene_terrain.py`](two_scene_terrain.py) | **`VehicleScene` unified API + ray-wheel raycast split.** Drives a car over a heightfield terrain with the high-level `VehicleScene` (no manual `gs.init`/`build`/`step`). `--compare` times `dual_scene` (default; terrain raycast in a separate static-BVH scene) vs `single_scene` (classic one scene); `--n-envs N` shows the dual_scene win growing with L3 batch size (the static BVH is shared across envs). `--horizontal-scale`, `--cpu`. | ✗ headless |
+| 11 | [`dual_scene_terrain.py`](dual_scene_terrain.py) | **`VehicleScene` unified API + wheel-raycast dual/single scene modes.** Drives a car over a heightfield terrain with the high-level `VehicleScene` (no manual `gs.init`/`build`/`step`). `--compare` times `dual_scene` (default; terrain raycast in a separate static-BVH scene) vs `single_scene` (classic one scene); `--n-envs N` shows the dual_scene win growing with L3 batch size (the static BVH is shared across envs). `--horizontal-scale`, `--cpu`. | ✗ headless |
 | 12 | [`obstacles_and_ramp.py`](obstacles_and_ramp.py) | **The encapsulated obstacle API + parameter-behavior matrix.** Builds a course entirely with `VehicleScene` — `add_ground_plane`, `add_static` (a wheel-raycast platform/block, with the `collision_morph`/`wheel_raycast_morph` split), and `add_dynamic` (a collide-only box the car pushes; a `wheel_raycast=True` ramp the wheels sense). Prints the body registry (each body's main/raycast entities — `docs/api-reference.md` §0.2 made concrete), then drives through and reports. `--mode single_scene`, `--cpu`. | ✗ headless |
 
 The three perf benchmarks (5, 7, 8) are intentionally headless — camera
@@ -72,8 +72,8 @@ python -m genesis_vehicle.samples.perf_l2_l3_combined
 python -m genesis_vehicle.samples.perf_l2_l3_combined --grid 1,4:1,4,16,64
 python -m genesis_vehicle.samples.city_traffic_ego --viewer
 python -m genesis_vehicle.samples.city_traffic_ego --n_envs 16 --bench
-python -m genesis_vehicle.samples.two_scene_terrain --compare
-python -m genesis_vehicle.samples.two_scene_terrain --compare --n-envs 64
+python -m genesis_vehicle.samples.dual_scene_terrain --compare
+python -m genesis_vehicle.samples.dual_scene_terrain --compare --n-envs 64
 python -m genesis_vehicle.samples.obstacles_and_ramp
 python -m genesis_vehicle.samples.obstacles_and_ramp --mode single_scene --cpu
 ```
