@@ -22,7 +22,7 @@ swept across L3 `--n-envs`), to show how dual_scene pays off here. Spoiler: thes
 obstacles are PRIMITIVES (cheap BVH), so single_scene's per-step BVH re-fit is
 nearly free and dual_scene's extra scene + synced ramp-mirror make it ~even-to-
 slower at small n_envs — dual_scene's win needs a heavy *static mesh* terrain
-and/or large `n_envs` (see `two_scene_terrain.py`).
+and/or large `n_envs` (see `dual_scene_terrain.py`).
 
 Run
 ---

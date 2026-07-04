@@ -577,7 +577,7 @@ class VehiclePhysics:
             ``self.sensor`` — this is the hook :class:`VehicleScene` "split"
             mode uses to feed distances measured in a SEPARATE static-terrain
             raycast scene (whose BVH is built once, never re-fit per step; see
-            ``docs/two-scene-raycast.md``). When ``None`` (default) the sensor
+            ``docs/dual-scene-raycast.md``). When ``None`` (default) the sensor
             is read exactly as before — fully backward compatible.
         """
         steering = self.resolved.steering

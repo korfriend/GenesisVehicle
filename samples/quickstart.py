@@ -18,8 +18,8 @@ How to read this script
 The pipeline is documented in detail in ``docs/pipeline-and-hooks.md``; here
 you'll see only the top-level API surface, no per-wheel internals. For the
 obstacle / ramp API (``add_static`` / ``add_dynamic``) see
-``obstacles_and_ramp.py``; for heightfield terrain + the two-scene raycast see
-``two_scene_terrain.py``.
+``obstacles_and_ramp.py``; for heightfield terrain + the dual-scene wheel-raycast see
+``dual_scene_terrain.py``.
 
 Run
 ---
@@ -75,7 +75,7 @@ def main():
 
     # VehicleScene owns gs.init + the scene(s) + build + step. Flat ground at
     # n_envs=1 → single_scene (the classic one-scene raycast; the dual_scene
-    # optimization only pays off on heavy static terrain — see two_scene_terrain).
+    # optimization only pays off on heavy static terrain — see dual_scene_terrain).
     VehicleScene.init_backend("gpu" if args.gpu else "cpu")
     vs = VehicleScene(
         raycast_mode="single_scene",

@@ -41,7 +41,7 @@ Two raycast modes (``raycast_mode=``):
   every step** because the vehicle moves, so the per-step cost scales with
   terrain face count.
 
-Why ``"dual_scene"`` is the default (see ``docs/two-scene-raycast.md``): complex
+Why ``"dual_scene"`` is the default (see ``docs/dual-scene-raycast.md``): complex
 terrain is the common case, and keeping the terrain BVH static stops the wheel
 raycast from re-fitting it each step. The win is small at ``n_envs=1`` on GPU
 (~1–1.3x; ~1.5–5.5x on CPU) but **grows strongly with L3 batch size** because the
@@ -303,7 +303,7 @@ class Vehicle:
         self.sensor: Any = None        # wheel raycaster (main in single, raycast-scene in split)
         self.proxy: Any = None         # raycast-scene pose carrier (split only)
         self._inputs = VehicleInputs(throttle=0.0, brake=0.0, steer=0.0)
-        self._two_scene = False
+        self._dual_scene = False
         self._n_envs = 1
         self._scene = None         # back-ref to VehicleScene (for batched accessors)
         self._slot = -1            # this vehicle's flat index in the scene
@@ -437,7 +437,7 @@ class VehicleScene:
         self.n_envs = n_envs
         self.dt = dt
         self.raycast_mode = raycast_mode
-        self._two_scene = raycast_mode == "dual_scene"
+        self._dual_scene = raycast_mode == "dual_scene"
         # Render mode (all on the MAIN scene; the raycast scene never renders):
         #   None    — headless (no Genesis rendering)
         #   "native"— open the native Genesis viewer window
@@ -503,7 +503,7 @@ class VehicleScene:
         self._raycast_scene = (
             gs.Scene(sim_options=gs.options.SimOptions(dt=dt, substeps=1, gravity=(0, 0, 0)),
                      show_viewer=False)
-            if self._two_scene else None
+            if self._dual_scene else None
         )
 
         self._vehicles: list[Vehicle] = []
@@ -557,7 +557,7 @@ class VehicleScene:
         col_morph = collision_morph or morph
         name = name or f"static_{len(self._statics)}"
 
-        if (not self._two_scene and wheel_raycast_morph is not None
+        if (not self._dual_scene and wheel_raycast_morph is not None
                 and collision and col_morph is not None):
             # A distinct raycast surface vs collider split needs the two bodies of
             # dual_scene. In single_scene the one rigid collision body is the
@@ -571,7 +571,7 @@ class VehicleScene:
                 "collision body is also the raycast target, so a distinct "
                 "wheel_raycast_morph is ignored.", name)
 
-        if not self._two_scene and not collision:
+        if not self._dual_scene and not collision:
             # A no-collision static is a KINEMATIC raycast surface, which lives in
             # the dual_scene raycast scene. single_scene has ONE body and the wheel
             # rays only hit rigid collision geoms there — a collision=False body
@@ -598,7 +598,7 @@ class VehicleScene:
                 col_morph, **_add_kwargs(mat, surface, vis_mode))
 
         if rc_morph is not None:
-            if self._two_scene:
+            if self._dual_scene:
                 # Kinematic visual-raycast body in the raycast scene → static BVH.
                 # Force vis_mode="visual": a KinematicEntity is visual-only (it has
                 # vgeoms, not collision geoms), so the renderer's on_rigid must take
@@ -705,7 +705,7 @@ class VehicleScene:
         name = name or f"dynamic_{len(self._dynamics)}"
         mat = material if material is not None else gs.materials.Rigid()
 
-        if wheel_raycast and not self._two_scene:
+        if wheel_raycast and not self._dual_scene:
             # wheel_raycast adds a dedicated raycast-scene mirror, which only
             # exists in dual_scene. In single_scene there is no raycast scene, and
             # a rigid body is already a wheel-raycast target via the main scene, so
@@ -733,7 +733,7 @@ class VehicleScene:
         if mass is not None:
             self._pending_mass.append((obs.entity_main, float(mass)))
 
-        if wheel_raycast and self._two_scene:
+        if wheel_raycast and self._dual_scene:
             # Rigid + fixed + collision mirror in the raycast scene's RIGID
             # solver (a separate BVH context from the kinematic terrain), so
             # re-syncing it each step re-fits only this small body.
@@ -783,7 +783,7 @@ class VehicleScene:
         wheel_positions = [w.position for w in parsed.wheels]
 
         veh = Vehicle(name, urdf_path, cfg, wheel_positions, pos, quat, material)
-        veh._two_scene = self._two_scene
+        veh._dual_scene = self._dual_scene
         veh._n_envs = self.n_envs
         # Kind key for the batched solver: vehicles registered the same way are one
         # kind and get batched. preset → grouped by (urdf, preset fn, stability);
@@ -805,7 +805,7 @@ class VehicleScene:
         veh.entity_main = self._main_scene.add_entity(
             morph, **_add_kwargs(material, surface, vis_mode))
 
-        if self._two_scene:
+        if self._dual_scene:
             # raycast scene: lightweight pose-carrier proxy + wheel sensor.
             # The proxy MUST be a RIGID, fixed-base, collision-free body, NOT a
             # kinematic one. Why: (a) collision=False → no collision faces → not
@@ -817,7 +817,7 @@ class VehicleScene:
             # solver and its set_pos would invalidate the terrain BVH every step
             # (measured ~6x slower). The ray origins still track the vehicle
             # because raycast_scene.step() refreshes them each frame from the
-            # proxy's link pose. See docs/two-scene-raycast.md.
+            # proxy's link pose. See docs/dual-scene-raycast.md.
             veh.proxy = self._raycast_scene.add_entity(
                 gs.morphs.Box(size=(0.02, 0.02, 0.02), pos=pos,
                               fixed=True, collision=False),
@@ -867,7 +867,7 @@ class VehicleScene:
             _kw["n_envs_per_row"] = n_envs_per_row
         if center_envs_at_origin is not None:
             _kw["center_envs_at_origin"] = center_envs_at_origin
-        if self._two_scene:
+        if self._dual_scene:
             self._raycast_scene.build(n_envs=self.n_envs, **_kw)
             # Populate the raycast sensors once so the static BVH is built and
             # the first read() returns valid data (Genesis sensors are empty
@@ -906,7 +906,7 @@ class VehicleScene:
         else:
             for veh in self._vehicles:
                 veh.cfg.enable_visual_joint_sync = renders   # auto-managed (see above)
-                sensor = None if self._two_scene else veh.sensor
+                sensor = None if self._dual_scene else veh.sensor
                 veh.physics = VehiclePhysics(
                     self._main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
 
@@ -936,7 +936,7 @@ class VehicleScene:
         so it must run exactly once per :meth:`step`. ``step`` is the only caller.
         """
         self._require_built()
-        if not self._two_scene:
+        if not self._dual_scene:
             return {veh: None for veh in self._vehicles}
         has_mirrors = any(o.entity_raycast is not None for o in self._dynamics)
         if self._vehicles or has_mirrors:
@@ -1017,7 +1017,7 @@ class VehicleScene:
                 inputs_list = [veh._inputs for veh in self._vehicles]
                 # dual_scene: inject the per-vehicle raycast-scene distances into the
                 # batched compute; single_scene: None → the MVP reads each sensor.
-                inj = [dists[veh] for veh in self._vehicles] if self._two_scene else None
+                inj = [dists[veh] for veh in self._vehicles] if self._dual_scene else None
                 self._mvp.step(inputs_list, distances=inj)
         else:
             for veh in self._vehicles:
@@ -1031,7 +1031,7 @@ class VehicleScene:
         for veh in self._vehicles:
             if veh.physics is not None:
                 veh.physics.reset()
-            if self._two_scene:
+            if self._dual_scene:
                 veh._sync_proxy()
 
     # ---- kind grouping for the batched solver (lazy + dirty-tracked) ----
@@ -1098,7 +1098,7 @@ class VehicleScene:
     @property
     def is_dual_scene(self) -> bool:
         """True in ``raycast_mode="dual_scene"`` (a separate raycast scene exists)."""
-        return self._two_scene
+        return self._dual_scene
 
     @property
     def viewer(self):

@@ -10,6 +10,37 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.0] — 2026-07-05
+
+### Changed — terminology unification: "two-scene" → dual-scene; official subsystem name = wheel-raycast
+
+- Official naming, everywhere in docs and APIs: the subsystem is the
+  **wheel-raycast** (ray-cast wheels sensing the ground); its
+  ``raycast_mode`` has two modes — **``dual_scene``** (default; separate
+  static-BVH raycast scene) and **``single_scene``**. The older "two-scene"
+  phrasing (which meant ``dual_scene``) is retired from all current docs and
+  docstrings; legacy aliases (``raywheel``/``split``/``inline``/``single``)
+  remain accepted by ``raycast_mode``.
+- Renames (with back-compat shims):
+  - ``docs/two-scene-raycast.md`` → ``docs/dual-scene-raycast.md``
+    (old path keeps a one-line redirect stub; the doc now opens with the
+    official-terminology note).
+  - ``samples/two_scene_terrain.py`` → ``samples/dual_scene_terrain.py``
+    (old module name still runs via a deprecation shim that forwards to the
+    new one).
+  - Internal ``VehicleScene._two_scene`` → ``_dual_scene`` (private).
+  - ``l3_runtime`` now passes the canonical ``raycast_mode="dual_scene"``
+    (was the ``"raywheel"`` alias).
+- All cross-references updated (``docs/index.md``, ``api-reference.md``,
+  ``concepts.md``, ``samples/README.md``, sample docstrings, module
+  comments). CHANGELOG history is intentionally left as written.
+- Version jumps to **1.1.0**: the terminology freeze plus the v1.0.x
+  performance campaign (40 Hz default, batched proxy/mirror sync, kinds fix,
+  adaptive catch-up pacer, official server benchmark) make a natural minor
+  milestone.
+
+---
+
 ## [1.0.20] — 2026-07-04
 
 | 약자 | 의미 |

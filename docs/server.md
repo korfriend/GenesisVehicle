@@ -142,7 +142,45 @@ re-run on your hardware for absolute numbers):
 | L3 | complex(88) | 30 | 13.5 | 0.5 | 11.6 | burst | O |
 | L3 | complex(88) | 100 | 24.5 | 1.0 | 51.4 | smooth (1sw) | X |
 
-Reading: both modes are real-time up to 30 tanks on simple AND complex
+GPU backend (`--gpu`, **L3 only** — per-entity forces CPU by design), same
+matrix:
+
+| mode | terrain | tanks | ms/step | steps/loop | Loop Avg | pacing | realtime |
+|---|---|---|---|---|---|---|---|
+| L3-GPU | simple | 1 | 13.8 | 0.4 | 8.2 | burst | O |
+| L3-GPU | simple | 10 | 15.8 | 0.6 | 14.4 | burst | O |
+| L3-GPU | simple | 30 | 14.5 | 0.8 | 19.2 | burst | O |
+| L3-GPU | simple | 100 | 15.6 | 1.9 | 57.5 | smooth (1sw) | X |
+| L3-GPU | complex(88) | 1 | 19.6 | 2.2 | 60.0 | smooth (1sw) | X |
+| L3-GPU | complex(88) | 10 | 18.4 | 1.6 | 40.3 | smooth (1sw) | X |
+| L3-GPU | complex(88) | 30 | 19.3 | 2.4 | 67.0 | smooth (1sw) | X |
+| L3-GPU | complex(88) | 100 | 21.5 | 2.5 | 91.1 | smooth (1sw) | X |
+
+GPU reading: the physics step barely grows with n_envs (13.8 → 15.6 ms from
+1 → 100 tanks — launch-bound, exactly as designed) and reaches CPU parity /
+crossover around 100 tanks. The GPU loses on the **serving** side — measured
+in steady state (100-simple, smooth cap=1 windows only; the table averages
+above mix in pre-switch burst windows, inflating Loop Avg):
+
+| backend | physics ms/step | serving ms/loop | Loop |
+|---|---|---|---|
+| CPU | 16.2 | 20.3 | 36.5 |
+| GPU | 18.2 | 28.5 | 46.7 |
+
+The +8 ms serving gap is NOT data volume (tens of KB/loop — µs over PCIe);
+it is **per-read synchronization latency**: capture runs twice per step with
+several read points each, and on the GPU backend every `.cpu()` blocks on a
+CUDA stream flush + DtoH round-trip (~0.3–0.5 ms/call under WSL2) — ~12–16
+sync points per step ≈ 5–8 ms. Direct evidence: the identical capture code
+costs 0.72 ms (CPU) vs 3.19 ms (GPU) per call at n_envs=10 — same few KB,
+×4.4. (Reducible if ever needed: concat the read tensors on-device and pay
+ONE sync — est. → ~2–3 ms.) On complex terrain the extra solver kernel
+launches additionally cost ~+5 ms/step even at 1 tank. Verdict: **CPU
+remains the server recommendation at every fleet size measured**; the GPU
+backend pays off for hundreds of envs driven directly through the SDK
+(RL/MPPI-style L3 batching), not through the OSC serving loop.
+
+Reading (CPU): both modes are real-time up to 30 tanks on simple AND complex
 terrain. At 100 tanks the adaptive pacer detects the sustained overload and
 switches to smooth (steps/loop pinned at 1.0, burst-free slow motion) — L2's
 limit is the physics itself (31–36 ms/step, 2 300 links in one env), while

@@ -19,7 +19,7 @@ otherwise noted. For the mental model behind these names, read
 The high-level API that owns the Genesis scene(s), the registered vehicles and
 static bodies, and the per-step loop — no manual `gs.init` / `scene.build` /
 `scene.step` / `sensor.read`. It wraps `VehiclePhysics` (§1) internally. Full
-notes in [`two-scene-raycast.md`](two-scene-raycast.md). **Start here and drop to
+notes in [`dual-scene-raycast.md`](dual-scene-raycast.md). **Start here and drop to
 the low-level `VehiclePhysics` / `MultiVehiclePhysics` (§1) only for control it
 doesn't expose** — see the two-API-layers guide in
 [`concepts.md`](concepts.md#start-here-the-two-api-layers).
