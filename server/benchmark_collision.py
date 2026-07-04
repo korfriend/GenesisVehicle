@@ -38,7 +38,9 @@ Run (from the workspace root, venv active):
     python -m genesis_vehicle.server.benchmark_collision --urdf /path/to/tank.urdf
     python -m genesis_vehicle.server.benchmark_collision --tanks 10 --viewer
         (--viewer: server runs WITH the Genesis viewer window so you can watch
-         the pile-up — rendering skews the timing, numbers indicative only)
+         the pile-up — rendering skews the timing, numbers indicative only.
+         Viewer geometry defaults to --vis_mode visual so the ray-cast wheels
+         show; pass --vis_mode collision for the chassis collision boxes.)
 
 The tank URDF defaults to ``GeneVehicle_KDU/tank_ray.urdf`` next to the SDK
 repo (the workspace layout); pass ``--urdf`` explicitly elsewhere.
@@ -219,13 +221,16 @@ class RingClient:
 
 def run_config(k: int, urdf: str, radius: float, throttle: float,
                duration: float, init_timeout: float,
-               python_exe: str, verbose: bool, viewer: bool = False) -> dict:
+               python_exe: str, verbose: bool, viewer: bool = False,
+               vis_mode: str = "visual") -> dict:
     """One ring run: launch server, converge, sample, return the timeline."""
     cmd = [python_exe, "-m", "genesis_vehicle.server",
            "--road-raycast-only", "--pacing-profile",
            "--recv_port", str(RECV_PORT), "--send_port", str(SEND_PORT),
            "--send_port_obs", str(OBS_PORT)]
-    if not viewer:
+    if viewer:
+        cmd += ["--vis_mode", vis_mode]
+    else:
         cmd.append("--headless")
 
     env = dict(os.environ)
@@ -344,6 +349,13 @@ def main():
                          "--headless) to watch the ring converge and pile up. "
                          "Rendering adds per-step overhead — treat the numbers "
                          "as indicative only, not as reference results.")
+    ap.add_argument("--vis_mode", default="visual",
+                    choices=["visual", "collision"],
+                    help="viewer geometry (--viewer only): 'visual' = URDF "
+                         "visual meshes incl. the ray-cast wheels (default "
+                         "here — the wheels have no collision geometry, so "
+                         "the server's own 'collision' default shows chassis "
+                         "boxes only); 'collision' = collision geoms.")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="echo the server's stdout")
     args = ap.parse_args()
@@ -363,7 +375,7 @@ def main():
         print(f"[bench] >>> {k} tanks on R={radius:.1f} m ring ...", flush=True)
         r = run_config(k, args.urdf, radius, args.throttle, args.duration,
                        args.init_timeout, sys.executable, args.verbose,
-                       viewer=args.viewer)
+                       viewer=args.viewer, vis_mode=args.vis_mode)
         results.append(r)
         if not r.get("ok"):
             print(f"[bench]     FAILED: {r.get('error')}", flush=True)

@@ -10,6 +10,19 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.5] — 2026-07-05
+
+### Added — `--vis_mode` on the collision benchmark's viewer
+
+- `benchmark_collision.py --viewer` now passes `--vis_mode` through to the
+  server, defaulting to **`visual`** (URDF visual meshes — turret, hull and
+  the ten ray-cast wheels). The server's own default is `collision`, which
+  for `tank_ray.urdf` renders only the single chassis collision box (the
+  wheels are visual-only by wheel-raycast design: ground contact comes from
+  the raycast + tire model, not wheel meshes), so viewer runs previously
+  showed bare green boxes. `--vis_mode collision` restores that view.
+- Headless (measurement) runs are unchanged — no vis flag is passed.
+
 ## [1.1.4] — 2026-07-05
 
 ### Changed — server mode terminology unified: L2 / L3 ("per-entity" demoted to a gloss)
