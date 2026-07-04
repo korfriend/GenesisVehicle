@@ -160,10 +160,16 @@ def main():
     DT = cfg.recommended_dt
 
     VehicleScene.init_backend("gpu" if args.gpu else "cpu")
+    # --native: camera_pos doubles as the follow OFFSET for viewer.follow_entity
+    # below (Genesis adds it to the followed entity's position every update).
+    viewer_opts = gs.options.ViewerOptions(
+        camera_pos=(0.0, -13.0, 2.8),
+        camera_lookat=(0.0, 0.0, 0.7)) if args.native else None
     vs = VehicleScene(
         raycast_mode=mode,
         dt=DT, substeps=10, n_envs=1,
-        vis_options=_vis_options(), show_viewer=args.native)
+        vis_options=_vis_options(), show_viewer=args.native,
+        viewer_options=viewer_opts)
     if args.viewer and not _hud.have_cv2():
         print("WARN: --viewer needs opencv-python. Continuing headless.")
         args.viewer = False
@@ -223,10 +229,27 @@ def main():
 
     vs.build()
 
+    # Native-viewer follow must happen INSIDE viewer.update() — the same call
+    # that pushes the fresh chassis pose to the renderer (and then sleeps for
+    # the realtime pacer). Setting the camera from the drive loop instead
+    # (after vs.step() returns) leaves it one physics step behind the car for
+    # most of each frame: at 7 m/s that is a ~15 cm camera-vs-car offset that
+    # flickers at the viewer's draw rate — the car visibly "trembles" while
+    # the cv2 --viewer (synchronous set_pose + render) looks rock solid.
+    # follow_entity closes the gap; no smoothing, so the seamless 100 m wrap
+    # snap stays invisible (a smoothed camera would sweep 100 m backwards).
+    follow_fallback = False
+    if args.native:
+        try:
+            vs.viewer.follow_entity(veh.entity_main)
+        except Exception:
+            follow_fallback = True     # older Genesis: per-step follow below
+
     def _follow_native():
-        # Keep the native viewer camera tracking the car (best-effort; the API
-        # name varies across Genesis versions, so guard it).
-        if not args.native:
+        # Fallback camera follow for Genesis versions without follow_entity.
+        # Updated from the drive loop → lags the car by up to one step (the
+        # trembling this fallback tolerates is what follow_entity fixes).
+        if not (args.native and follow_fallback):
             return
         p = veh.get_pos()[0].cpu().numpy()
         try:
