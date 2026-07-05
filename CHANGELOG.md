@@ -10,6 +10,14 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.10] — 2026-07-06
+
+### Changed — CHANGELOG glossary tables translated to English
+
+- All 15 `| 약자 | 의미 |` abbreviation tables in this file are now
+  `| abbr | meaning |` with English descriptions (headers + every
+  Korean cell). Content unchanged — translation only.
+
 ## [1.1.9] — 2026-07-05
 
 ### Changed — terminology sweep completed: "split"/"single"/"raywheel" retired from all prose
@@ -182,11 +190,11 @@ running version the first time it is instantiated in a process.
 
 ## [1.1.3] — 2026-07-05
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| host path | 캡처용 닫힌형 휠 포즈 계산을 CPU 에서 수행 (물리만 GPU) |
-| DtoH / HtoD | GPU→CPU / CPU→GPU 전송 |
-| launch-bound | 커널 호출당 고정 지연이 지배하는 상태 |
+| host path | closed-form wheel-pose capture math computed on the CPU (physics stays on GPU) |
+| DtoH / HtoD | GPU→CPU / CPU→GPU transfer |
+| launch-bound | regime dominated by the fixed latency per kernel launch |
 
 ### Changed — "GPU mode = physics-only on GPU, serving math on CPU" completed (host-side capture math)
 
@@ -320,11 +328,11 @@ running version the first time it is instantiated in a process.
 
 ## [1.0.20] — 2026-07-04
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
 | L2 / L3 | per-entity (K entities × 1 env) / multi-env (1 entity × n_envs) |
-| ms/step | 물리 1스텝 비용 (`[STATS]` per-step 값) |
-| steps/loop | 루프당 catch-up 스텝 수 (~1.0 = 실시간, 상한 고정 = 포화) |
+| ms/step | cost of one physics step (the `[STATS]` per-step value) |
+| steps/loop | catch-up steps per loop (~1.0 = real-time, pinned at the cap = saturated) |
 
 ### Added — `genesis_vehicle.server.benchmark` (official end-to-end server test)
 
@@ -386,10 +394,10 @@ running version the first time it is instantiated in a process.
 
 ## [1.0.19] — 2026-07-04
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| ss | substeps (스텝 내부 적분 분할) |
-| internal dt | dt/ss — 솔버 내부 적분 간격 |
+| ss | substeps (integration subdivisions within one step) |
+| internal dt | dt/ss — the solver's internal integration interval |
 
 ### Changed — SDK-wide default timing is now 40 Hz (dt = 0.025)
 
@@ -418,11 +426,11 @@ running version the first time it is instantiated in a process.
 
 ## [1.0.18] — 2026-07-04
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| HUD | `--viewer`의 cv2 오버레이 창 (오프스크린 카메라 + 동기 렌더) |
-| pacer | 루프를 벽시계 실시간(1×)에 맞추는 sleep 로직 |
-| budget | 스텝당 실시간 예산 = dt (48 Hz → 20.8 ms) |
+| HUD | the `--viewer` cv2 overlay window (offscreen camera + synchronous render) |
+| pacer | sleep logic that holds the loop to wall-clock real time (1×) |
+| budget | real-time budget per step = dt (48 Hz → 20.8 ms) |
 
 ### Changed — `terrain_drive --viewer` (cv2 HUD) now runs at TRUE real time (1x)
 
@@ -458,11 +466,11 @@ paths.
 
 ## [1.0.17] — 2026-07-04
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| ss | substeps (스텝 내부 적분 분할; 서버는 2) |
-| internal dt | dt/ss — 솔버 내부 적분 간격 |
-| z osc-std | 정속 주행 중 차체 z 진동 표준편차 (서스펜션 안정성 지표) |
+| ss | substeps (integration subdivisions within one step; the server uses 2) |
+| internal dt | dt/ss — the solver's internal integration interval |
+| z osc-std | std-dev of chassis z oscillation during steady cruise (suspension-stability metric) |
 
 ### Changed — server default dt fallback 0.02 → 0.025 (40 Hz budget)
 
@@ -491,10 +499,10 @@ paths.
 
 ## [1.0.16] — 2026-07-04
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| pacer | Genesis 뷰어의 realtime_factor 페이서 (`viewer.update()` 끝에서 sleep) |
-| HUD | `--viewer`의 cv2 오버레이 창 (오프스크린 카메라 + 동기 렌더) |
+| pacer | the Genesis viewer's realtime_factor pacer (sleeps at the end of `viewer.update()`) |
+| HUD | the `--viewer` cv2 overlay window (offscreen camera + synchronous render) |
 
 ### Fixed — `terrain_drive --native`: the car visibly "trembled" (camera one step behind)
 
@@ -523,12 +531,12 @@ paths.
 
 ## [1.0.15] — 2026-07-04
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| kind | batched solver의 배치 단위 (같은 cfg 객체를 공유하는 차량 그룹) |
-| VJS | VisualJointSync (Genesis 뷰어용 휠 비주얼 관절 구동) |
+| kind | the batched solver's batching unit (vehicles sharing one cfg object) |
+| VJS | VisualJointSync (drives the wheel visual joints for the Genesis viewer) |
 | MVP | `MultiVehiclePhysics` |
-| FK | Forward Kinematics (solver 진입마다 유발되던 것) |
+| FK | Forward Kinematics (was triggered on every solver entry) |
 
 ### Changed — cross-kind solver I/O batching (batching audit #9)
 
@@ -574,11 +582,11 @@ paths.
 
 ## [1.0.14] — 2026-07-04
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| L2 | per-entity 모드 (K대 상호작용, `n_envs=1`) |
-| L3 | multi-env 배치 모드 (`--multi-env`, 동일 URDF × `n_envs=N`) |
-| env | parallel sim instance (`n_envs` 축 1개) |
+| L2 | per-entity mode (K interacting vehicles, `n_envs=1`) |
+| L3 | multi-env batched mode (`--multi-env`, one URDF × `n_envs=N`) |
+| env | parallel sim instance (one slot on the `n_envs` axis) |
 
 ### Changed — CPU is now the default backend EVERYWHERE; `--gpu` opts in
 
@@ -614,11 +622,11 @@ No physics change; `VehicleScene.init_backend` itself already defaulted to
 
 ## [1.0.13] — 2026-07-04
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| mirror | 동적 장애물의 raycast-scene 추종 바디 (매 스텝 재동기화) |
-| FK | Forward Kinematics (set 호출마다 raycast 씬 전체에 실행되던 것) |
-| capture | 서버가 UE 송신용 pose 를 읽는 함수 |
+| mirror | a dynamic obstacle's raycast-scene follower body (re-synced every step) |
+| FK | Forward Kinematics (ran over the whole raycast scene on every set call) |
+| capture | the server function that reads poses for the UE stream |
 
 ### Batching audit — remaining per-item python loops in the step path
 
@@ -670,11 +678,11 @@ Full audit of the SDK + server for unbatched per-item loops, with dispositions
 
 ## [1.0.12] — 2026-07-04
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| rco | `--road-raycast-only` (도로를 레이캐스트 전용 표면으로, main scene 충돌체 생략) |
+| rco | `--road-raycast-only` (road as a raycast-only surface, main-scene collider omitted) |
 | L2 / L3 | per-entity (K entities × 1 env) / multi-env (1 entity × n_envs) |
-| BVH | Bounding Volume Hierarchy (레이캐스트 가속 구조) |
+| BVH | Bounding Volume Hierarchy (raycast acceleration structure) |
 
 ### Changed — per-entity (L2) server defaults to `dual_scene`
 
@@ -713,10 +721,10 @@ Full audit of the SDK + server for unbatched per-item loops, with dispositions
 
 ## [1.0.11] — 2026-07-04
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| proxy sync | dual_scene에서 매 스텝 차량 포즈를 raycast scene 프록시에 복사 |
-| FK | Forward Kinematics (set_pos/set_quat 마다 raycast 씬 전체에 대해 실행되던 것) |
+| proxy sync | copying each vehicle's pose to its raycast-scene proxy every step (dual_scene) |
+| FK | Forward Kinematics (ran over the whole raycast scene on every set_pos/set_quat) |
 | L2 / L3 | per-entity (K entities × 1 env) / multi-env (1 entity × n_envs) |
 
 ### Changed — batched proxy sync (dual_scene): 2·K whole-scene FK passes → 1
@@ -811,11 +819,11 @@ Full audit of the SDK + server for unbatched per-item loops, with dispositions
 
 ## [1.0.8] — 2026-07-02
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| kind | batched solver 의 배치 단위 (같은 cfg 객체를 공유하는 차량 그룹) |
+| kind | the batched solver's batching unit (vehicles sharing one cfg object) |
 | MVP | `MultiVehiclePhysics` |
-| JIT | Just-In-Time 커널 컴파일 (taichi/torch 첫 스텝 비용) |
+| JIT | Just-In-Time kernel compilation (taichi/torch first-step cost) |
 
 ### Fixed — per-entity server split K same-URDF vehicles into K kinds (batching never engaged)
 
@@ -846,7 +854,7 @@ Full audit of the SDK + server for unbatched per-item loops, with dispositions
 
 ## [1.0.7] — 2026-07-02
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
 | MVP | `MultiVehiclePhysics` (K vehicles batched into one compute) |
 | rco | `--road-raycast-only` (road mesh as wheel-raycast surface, no collider) |
@@ -2614,11 +2622,11 @@ want per-vehicle torque re-tune). Lets the wheel mass / inertia "band-aid"
 (inflated `i_wheel`) be reverted to realistic values without re-introducing
 the oscillation.
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
-| F_long | 종방향 타이어 마찰력 |
-| omega_target | 구름조건 각속도 (= v_long/R) |
-| C_kappa | 종슬립 강성 ∂F_long/∂kappa |
+| F_long | longitudinal tire friction force |
+| omega_target | rolling-condition wheel angular velocity (= v_long/R) |
+| C_kappa | longitudinal slip stiffness ∂F_long/∂kappa |
 
 ### Added — per-link transforms in world / base / **parent (URDF-hierarchy-local)** frames
 
@@ -2651,12 +2659,12 @@ batched builds `(n_envs, n_links, …)`, matching `get_links_pos`. Re-exported
 as `genesis_vehicle.get_link_transforms` / `LinkTransforms` (lazy import —
 needs a built entity).
 
-| 약자 | 의미 |
+| abbr | meaning |
 |---|---|
 | P / C | Parent link / Child link |
 | W | World frame |
-| `q_WC` | 월드→자식 링크 쿼터니언 (wxyz) |
-| `R_WP` | 월드→부모 링크 회전행렬 |
+| `q_WC` | world→child-link quaternion (wxyz) |
+| `R_WP` | world→parent-link rotation matrix |
 
 ---
 
