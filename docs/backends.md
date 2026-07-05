@@ -6,6 +6,8 @@
 | launch-bound | fixed per-kernel-call latency dominates over the compute itself |
 | DtoH / HtoD | GPU→CPU / CPU→GPU transfer |
 | crossover | the scale at which GPU becomes faster than CPU |
+| K / N | interacting vehicles per env (L2 axis) / parallel envs (`n_envs`, L3 axis) |
+| veh-steps/s | vehicle-steps per second of wall time (K × N × steps / s) |
 
 ## 1. Two independent "backends"
 
@@ -37,7 +39,9 @@ enough parallel work to amortize it. The SDK's torch pipeline follows the
 same backend, so small `(n_envs, n_wheels)` tensors on GPU are
 launch-bound too.
 
-## 3. Measured crossover (v1.1.6 — 10-wheel tanks, simple terrain, OSC server, ms/step)
+## 3. Measured crossovers
+
+### L2 and L3 separately (v1.1.6 — 10-wheel tanks, simple terrain, OSC server, ms/step)
 
 | tanks | L2 CPU | L2 GPU | L3 CPU | L3 GPU |
 |---|---|---|---|---|
@@ -54,14 +58,37 @@ launch-bound too.
   there is no env-axis batch width to amortize it. Link-level parallelism
   does not rescue it.
 
+### L2 × L3 combined (v1.1.8 — `car_4w`, SDK-direct via [`perf_l2_l3_combined.py`](../samples/perf_l2_l3_combined.py), ms/step, **bold = winner**)
+
+| CPU / GPU | N=1 | N=10 | N=50 | N=100 | N=300 |
+|---|---|---|---|---|---|
+| K=1 | **13.1** / 37.8 | **13.8** / 42.8 | **17.3** / 47.7 | **21.8** / 42.8 | **43.7** / 46.4 |
+| K=2 | **15.9** / 40.3 | **18.6** / 46.3 | **29.0** / 48.1 | **40.6** / 49.8 | 105.0 / **49.6** |
+| K=5 | **17.6** / 51.3 | **22.8** / 52.8 | **49.3** / 58.0 | 83.1 / **63.6** | 250.2 / **72.7** |
+| K=10 | **18.3** / 59.2 | **29.3** / 69.5 | 85.6 / **76.2** | 165.7 / **94.3** | 509.7 / **123.7** |
+
+- **The crossover invariant is TOTAL batched vehicles: K×N ≈ 300–400.**
+  The crossover N shifts left as K grows (K=1 → N~310, K=2 → ~150,
+  K=5 → ~65, K=10 → ~40) because CPU cost is ~linear in K·N while GPU
+  stays launch-bound-flat in N; the K×N product at the crossover stays
+  roughly constant. (Consistent with the L3 tank figure above — 10-wheel
+  tanks do more work per vehicle, so they cross slightly earlier.)
+- The GPU floor still rises mildly with K (N=1: 37.8 → 59.2 ms as K
+  1 → 10 — the residual L2 anti-scaling term), so tiny-N configs stay CPU
+  regardless of K.
+- **Throughput ceilings differ 4×**: CPU saturates at ~6,000 veh-steps/s
+  for ANY K/N mix, while GPU reaches 24,200 veh-steps/s at K=10×N=300
+  (3,000 vehicles, 4.1×) and is still climbing — for MPPI/RL rollout
+  volume, the GPU ceiling is what matters.
+
 **Rules of thumb**
 
 | workload | backend |
 |---|---|
-| Interacting vehicles (L2), any count | **CPU, always** |
+| Interacting vehicles (L2, `n_envs=1`), any count | **CPU, always** |
 | Non-interacting fleet (L3) ≤ ~250 envs | **CPU** |
 | Non-interacting fleet (L3) ~300+ envs | **GPU** (`--gpu` / `init_backend("gpu")`) |
-| RL / MPPI rollouts driven directly through the SDK (no OSC serving) | GPU from a few hundred envs — see [`../samples/perf_vectorization.py`](../samples/perf_vectorization.py) |
+| L2 × L3 (K interacting × N envs, e.g. MPPI/RL with traffic) | **GPU once K×N ≳ 300–400 total vehicles** (measured, table above); CPU below |
 
 ## 4. GPU serving architecture (OSC server specifics)
 
