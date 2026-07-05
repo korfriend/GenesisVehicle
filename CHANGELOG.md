@@ -10,6 +10,25 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.7] — 2026-07-05
+
+### Docs — new `docs/backends.md`: consolidated CPU-vs-GPU physics backend guide
+
+- Backend-selection guidance was scattered (vehicle_scene docstrings,
+  `server.md` §2.1/§3, `batching.md` perf notes). New `docs/backends.md`
+  consolidates it: physics backend vs renderer, `VehicleScene.init_backend`
+  / server `--gpu` selection semantics (process-global, set once; explicit
+  mismatch warns, missing CUDA propagates), why CPU is the default
+  (launch-bound at small batch width), the v1.1.6 measured crossover table
+  with rules of thumb per workload (L2 always CPU; L3 `--gpu` at ~300+
+  envs), the GPU-serving architecture notes (physics-only on GPU, capture
+  math on host, sync-inside-timing), and WSL2 notes (`LD_LIBRARY_PATH`,
+  crossover shifts left on native hardware).
+- Cross-linked from `docs/index.md` (nav table), `server.md` §3 rationale,
+  and `batching.md` perf section. No code changes.
+
+---
+
 ## [1.1.6] — 2026-07-05
 
 ### Fixed — server crashed at ≥~180 targets: TargetBulk burst the 64 KB UDP datagram limit

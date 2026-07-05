@@ -296,6 +296,7 @@ for fleets of that scale. L2 has NO GPU crossover at any size — it
 anti-scales (see the crossover table in §2.1). The deciding factor is per-step compute
 weight, not vehicle count — for a collision-heavy real map, check the
 server's startup `실측된 1스텝 평균` log line and compare. See
+[`backends.md`](backends.md) for the consolidated CPU-vs-GPU guide and
 [`batching.md`](batching.md) for the full L1/L2/L3 story.
 
 `--multi-env` requirements: all targets share ONE URDF; each target maps
