@@ -97,7 +97,7 @@ def main():
     # opens the Genesis viewer, "cv2" renders the overhead camera for the cv2 HUD.
     view = "native" if args.native else ("cv2" if args.viewer else None)
     vs = VehicleScene(
-        n_envs=n_envs, raycast_mode="single_scene", view=view,
+        n_envs=n_envs, view=view,
         dt=cfg.recommended_dt, substeps=10,
         rigid_options=gs.options.RigidOptions(
             dt=cfg.recommended_dt, enable_collision=True,

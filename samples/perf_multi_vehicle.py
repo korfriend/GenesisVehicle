@@ -109,7 +109,7 @@ def _internal_run(solver: str, n_per_kind: int,
     # both solvers run. It scales both equally — the solver comparison is unchanged.
     VehicleScene.init_backend("gpu" if gpu else "cpu")
     vs = VehicleScene(
-        n_envs=1, raycast_mode="single_scene",
+        n_envs=1,
         solver=("batched" if solver == "multi_batched" else "per_vehicle"),
         dt=DT, substeps=30,
         rigid_options=gs.options.RigidOptions(
