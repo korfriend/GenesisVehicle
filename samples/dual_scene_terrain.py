@@ -55,7 +55,7 @@ URDF_PATH = os.path.join(os.path.dirname(__file__), "urdf", "car_4w.urdf")
 
 def _terrain(horizontal_scale: float):
     """A single flat subterrain. Bump face count with a smaller horizontal_scale
-    (faces ~= 2*(size/horizontal_scale)^2) to see the split advantage grow."""
+    (faces ~= 2*(size/horizontal_scale)^2) to see the dual_scene advantage grow."""
     return gs.morphs.Terrain(
         n_subterrains=(1, 1), subterrain_size=(40.0, 40.0),
         horizontal_scale=horizontal_scale, subterrain_types="flat_terrain")
@@ -102,11 +102,11 @@ def main():
     ap.add_argument("--gpu", action="store_true",
                     help="Opt into the GPU backend (default: CPU — faster at small n_envs).")
     ap.add_argument("--compare", action="store_true",
-                    help="Run single AND split, print pose match + timing.")
+                    help="Run single_scene AND dual_scene, print pose match + timing.")
     ap.add_argument("--horizontal-scale", type=float, default=0.25,
-                    help="Terrain cell size; smaller = more faces (split wins more).")
+                    help="Terrain cell size; smaller = more faces (dual_scene wins more).")
     ap.add_argument("--n-envs", type=int, default=1,
-                    help="L3 batch size. Split's win grows strongly with n_envs "
+                    help="L3 batch size. dual_scene's win grows strongly with n_envs "
                          "(the static terrain BVH is shared across envs).")
     args = ap.parse_args()
     backend = "gpu" if args.gpu else "cpu"

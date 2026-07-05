@@ -10,6 +10,28 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.9] — 2026-07-05
+
+### Changed — terminology sweep completed: "split"/"single"/"raywheel" retired from all prose
+
+- The 1.1.0 unification retired "two-scene" but left the older mode
+  shorthands in tables, docstrings and comments. All prose now uses the
+  official names `dual_scene` / `single_scene`:
+  - `docs/dual-scene-raycast.md` — every performance table header/cell and
+    surrounding prose (was "raycast: split (re-cast)", "single (GPU)", …);
+    the "in the tables below, split = dual_scene" legend is gone.
+  - Code docstrings/comments: `core.py` (distance-injection hook),
+    `vehicle_scene.py` (StaticBody/Vehicle handles, add_static routing),
+    `samples/dual_scene_terrain.py` help texts, `server/env_builder.py`
+    ("inline-vs-raywheel" → single_scene-vs-dual_scene),
+    `server/l3_runtime.py` ("in raywheel" → dual_scene),
+    `samples/terrain_drive.py` (stale `two-scene-raycast.md` doc link).
+- Deliberately kept: the alias documentation (`raywheel`/`split`/`inline`/
+  `single` remain ACCEPTED by `raycast_mode`), the `two_scene_terrain.py` /
+  `two-scene-raycast.md` redirect stubs, legacy sandbox filenames
+  (`car_raywheel.py`), and English uses of "split" (torque split, morph
+  split, string.split).
+
 ## [1.1.8] — 2026-07-05
 
 ### Docs — L2×L3 combined GPU crossover measured: the invariant is K×N ≈ 300–400 total vehicles

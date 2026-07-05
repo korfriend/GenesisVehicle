@@ -311,7 +311,7 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
         mat = gs.materials.Rigid(friction=obs_friction,
                                  coup_restitution=obs_restitution, sdf_cell_size=10000.0)
 
-        # Route through VehicleScene — it owns the inline-vs-raywheel scene
+        # Route through VehicleScene — it owns the single_scene-vs-dual_scene
         # distribution (collision body in main + a static/synced raycast mirror in
         # the raycast scene). The caller never touches a scene.
         #   b_dynamic 0 = static structure/road  -> add_static

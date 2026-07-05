@@ -296,7 +296,7 @@ def run_l3(args):
             vis_mode=args.vis_mode, verbose=args.verbose,
             # v1.0.7: forward --road-raycast-only (previously SILENTLY IGNORED in
             # multi-env — argparse accepted it but it never reached build_obstacles,
-            # so "no difference" was literal). In raywheel the wheels already ride
+            # so "no difference" was literal). In dual_scene the wheels already ride
             # the exact kinematic mirror; rco additionally drops the main-scene
             # CoACD road collider → no chassis-vs-road narrow-phase/SDF per env.
             road_raycast_only=getattr(args, "road_raycast_only", False),
