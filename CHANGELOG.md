@@ -10,6 +10,60 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.6] — 2026-07-05
+
+### Fixed — server crashed at ≥~180 targets: TargetBulk burst the 64 KB UDP datagram limit
+
+- `send_target_states_bulk` packed ALL targets into ONE datagram. A 10-wheel
+  target is ~90 args ≈ 450 B encoded, so ~180 tanks crossed the 65,507-byte
+  UDP maximum — `OSError: [Errno 90] Message too long` and the server died
+  (discovered the moment 200-tank configs were added to the benchmark; 100
+  tanks ≈ 36 KB had always been safe). Now chunked into self-contained
+  packets of ≤120 targets, each ending with the `-1` sentinel — the client
+  parses per-packet `[ID, …]` records, so this is wire-compatible (one
+  frame's states simply arrive in a few packets). `send_dynamic_states_bulk`
+  already chunked; TargetBulk had been missed. Verified: L3×200 now serves
+  (27.9 ms/step) where it previously died before the first `[STATS]`.
+
+### Changed — samples/docs stop overriding `raycast_mode`: dual_scene (the default) everywhere
+
+- Removed the explicit `raycast_mode="single_scene"` from `quickstart.py`,
+  `batched_rollout.py`, `city_traffic_ego.py`, `l2l3_minimal.py`,
+  `multi_env_render.py`, `perf_vectorization.py`, `perf_l2_l3_combined.py`,
+  `perf_multi_vehicle.py` and the `docs/quickstart.md` snippet — they now
+  use the SDK default (`dual_scene`). The L3 samples were directly
+  contradicting the docs (dual is 3.4× at 256 envs); the flat-plane ones
+  were saving ~6 % (~0.7 ms full-step) at the cost of teaching every reader
+  a non-default configuration. Perf-sample baselines shift accordingly
+  (n_envs>1 rows improve).
+- `docs/dual-scene-raycast.md` recommendation wording demoted: flat-ground
+  `n_envs=1` `single_scene` is now described as an optional
+  micro-optimization, not the recommended mode ("switch to single_scene
+  only for..." removed). Comparison samples (`dual_scene_terrain.py`,
+  `obstacles_and_ramp.py --mode/--bench`) keep both modes on purpose.
+
+### Changed — benchmark: default tank matrix gains 200 and 400; `--gpu` now valid for L2 too
+
+- Default `--tanks` is now `1,10,30,100,200,400`.
+- `--gpu` is applied to BOTH modes (previously the benchmark only forwarded
+  it for L3). Measured crossover campaign (simple terrain, ms/step):
+
+  | tanks | L2 CPU | L2 GPU | L3 CPU | L3 GPU |
+  |---|---|---|---|---|
+  | 30 | 15.7 | 109.5 | 12.1 | 14.5 |
+  | 100 | 31.1 | 684.0 | 17.4 | 15.6 |
+  | 200 | 73.2 | (impractical) | 27.4 | 31.5 |
+  | 400 | — | — | 46.2 | **27.8** |
+
+  **L3 crosses over at ~250–300 envs** (400: GPU wins 1.66×) — the
+  long-standing "hundreds of envs" guidance now has a measured location.
+  **L2 has NO practical GPU crossover — it anti-scales** (30 tanks 7×,
+  100 tanks 22× slower than CPU; the GPU build alone took >14 min): growing
+  K grows ONE env's system, so every per-vehicle sensor read / solver stage
+  pays launch+sync latency with no env-axis batch width to amortize it.
+  Recorded in `docs/server.md` §2.1/§3; `--gpu` help and the L3 module
+  docstring updated with the measured numbers.
+
 ## [1.1.5] — 2026-07-05
 
 ### Added — `--vis_mode` on the collision benchmark's viewer

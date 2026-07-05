@@ -12,10 +12,10 @@ Mapping: target_id (sorted order) ↔ env index. The environment
 (floor/obstacles) is added once; Genesis auto-replicates it per env.
 
 Intentional differences / limitations vs the L2 (per-entity) mode:
-  - Backend defaults to CPU (same as L2 mode — at n_envs≲100 scale the GPU is
+  - Backend defaults to CPU (same as L2 mode — at n_envs≲200 the GPU is
     kernel-launch bound, so CPU is faster; measured 30 tanks CPU 8.4 vs GPU
-    ~19 ms/step). Opt in with ``--gpu`` only for large-scale batching at
-    hundreds of envs.
+    ~19 ms/step). Opt in with ``--gpu`` beyond the measured crossover at
+    ~250–300 envs (v1.1.6: L3×400 GPU 27.8 vs CPU 46.2 ms/step).
   - Dynamic obstacles get N env copies, so interactions like "vehicle B sees
     the obstacle vehicle A pushed" cannot be expressed. State is sent from env 0.
   - ``target_forces`` (persistent external forces) unsupported — warned once

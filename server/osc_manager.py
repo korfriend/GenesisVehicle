@@ -803,8 +803,17 @@ class OSCManager:
             wq_a = _np.stack([-wr_a[:, 1], wr_a[:, 2], -wr_a[:, 3], wr_a[:, 0]], axis=1)
             wl_l, wq_l = wl_a.tolist(), wq_a.tolist()
 
+        # [v1.1.6] CHUNKED sends: a single datagram holding ALL targets bursts
+        # the 64 KB UDP limit at ~180 tanks (each 10-wheel target ≈ 90 args ≈
+        # 450 B encoded; 200 targets ≈ 71 KB → OSError "Message too long" and
+        # the server died). Split into packets of ≤ _BULK_CHUNK_TARGETS
+        # targets, each self-contained and ending with the -1 sentinel — the
+        # client parses per-packet [ID, ...] records, so chunking is
+        # wire-compatible (states of one frame just arrive in a few packets).
+        _BULK_CHUNK_TARGETS = 120     # ≈54 KB worst-case (10 wheels/target)
         payload = []
         wi = 0
+        chunk_count = 0
         for i, tid in enumerate(tids):
             payload.append(tid)
             payload.extend(loc_l[i])
@@ -816,10 +825,17 @@ class OSCManager:
                 payload.extend(wq_l[wi])
                 payload.append(w_omegas[wi])
                 wi += 1
+            chunk_count += 1
+            if chunk_count >= _BULK_CHUNK_TARGETS:
+                payload.append(-1)    # sentinel closes this packet
+                self.client_cpp.send_message("/Genesis/Vehicle/TargetBulk", payload)
+                payload = []
+                chunk_count = 0
 
-        # Add sentinel to prevent OOB
-        payload.append(-1)
-        self.client_cpp.send_message("/Genesis/Vehicle/TargetBulk", payload)
+        if payload:
+            # Add sentinel to prevent OOB
+            payload.append(-1)
+            self.client_cpp.send_message("/Genesis/Vehicle/TargetBulk", payload)
 
     def send_observation(self, obs_array):
         """

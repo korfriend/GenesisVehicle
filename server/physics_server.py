@@ -378,10 +378,10 @@ def main():
                              "K interacting entities in one world).")
     parser.add_argument("--gpu", action="store_true",
                         help="Opt into the GPU backend (default: CPU in BOTH modes). GPU is "
-                             "kernel-launch bound at small batch sizes, so it only pays off "
-                             "in --multi-env (L3) mode with hundreds of envs; L2 "
-                             "and small fleets (n_envs<~100) are faster on CPU (measured: 30 "
-                             "tanks L3 CPU 8.4 vs GPU ~19 ms/step).")
+                             "kernel-launch bound at small batch sizes; the measured "
+                             "crossover is ~250-300 envs in --multi-env (L3) mode (v1.1.6: "
+                             "L3x400 GPU 27.8 vs CPU 46.2 ms/step). L2 has NO GPU crossover "
+                             "at any size - it anti-scales (L2x100 GPU 684 vs CPU 31 ms/step).")
     parser.add_argument("--max-catchup-steps", type=int, default=None,
                         help="FIXED catch-up cap (disables the adaptive pacer). "
                              "Default (unset): ADAPTIVE — the server monitors "

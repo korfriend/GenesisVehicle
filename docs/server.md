@@ -49,7 +49,7 @@ python -m genesis_vehicle.server
 python -m genesis_vehicle.server --multi-env
 
 # both modes default to the CPU backend; --gpu opts into GPU
-# (only pays off at hundreds of envs in --multi-env mode)
+# (pays off in --multi-env mode at ~300+ envs — measured crossover, see 2.1)
 python -m genesis_vehicle.server --multi-env --gpu
 
 # common flags
@@ -101,7 +101,7 @@ per-mode speed test:
 
 ```bash
 python -m genesis_vehicle.server.benchmark                  # full matrix:
-#   {L2, L3} × {simple(plane), complex(88 convex hulls)} × {1,10,30,100 tanks}
+#   {L2, L3} × {simple(plane), complex(88 convex hulls)} × {1,10,30,100,200,400 tanks}
 python -m genesis_vehicle.server.benchmark --modes L3 --tanks 10,30
 python -m genesis_vehicle.server.benchmark --terrain complex --gpu   # L3 GPU opt-in
 python -m genesis_vehicle.server.benchmark --urdf /path/to/tank.urdf
@@ -143,10 +143,9 @@ re-run on your hardware for absolute numbers):
 | L3 | complex(88) | 30 | 13.5 | 0.5 | 11.6 | burst | O |
 | L3 | complex(88) | 100 | 24.5 | 1.0 | 51.4 | smooth (1sw) | X |
 
-GPU backend (`--gpu` — accepted by BOTH server modes, but the benchmark
-matrix only measures it on L3: L2 is `n_envs=1`, which has no GPU
-batch width, so L2+GPU only pays kernel-launch overhead and is not worth
-measuring), same matrix:
+GPU backend (`--gpu` — accepted by BOTH server modes; since v1.1.6 the
+benchmark forwards it to L2 as well, which is how the L2 anti-scaling below
+was measured), same matrix:
 
 | mode | terrain | tanks | ms/step | steps/loop | Loop Avg | pacing | realtime |
 |---|---|---|---|---|---|---|---|
@@ -191,10 +190,32 @@ HtoD input uploads + capture getter kernels, within run noise (±3 ms). The
 serving-on-CPU architecture is now in place, so at the hundreds-of-envs
 scale where GPU physics starts winning, serving will not be the bottleneck.
 On complex terrain the extra solver kernel launches additionally cost
-~+5 ms/step even at 1 tank. Verdict: **CPU remains the server
-recommendation at every fleet size measured**; the GPU backend pays off for
-hundreds of envs driven directly through the SDK (RL/MPPI-style L3
-batching), not through the OSC serving loop.
+~+5 ms/step even at 1 tank.
+
+**GPU crossover (measured, v1.1.6 — simple terrain, ms/step):**
+
+| tanks | L2 CPU | L2 GPU | L3 CPU | L3 GPU |
+|---|---|---|---|---|
+| 30 | 15.7 | 109.5 | 12.1 | 14.5 |
+| 100 | 31.1 | **684.0** | 17.4 | 15.6 |
+| 200 | 73.2 | (impractical) | 27.4 | 31.5 |
+| 400 | — | — | 46.2 | **27.8** |
+
+- **L3 crosses over between 200 and 400 envs**: CPU grows ~linearly
+  (17 → 27 → 46 ms) while GPU stays launch-bound-flat (~16–31 ms), so at
+  400 envs GPU wins 1.66×. The long-standing "hundreds of envs" guidance
+  now has a measured location (~250–300).
+- **L2 has NO practical GPU crossover — it anti-scales**: 30 tanks 7×
+  slower than CPU, 100 tanks 22× slower (684 ms/step; the GPU build alone
+  took >14 minutes). Growing K grows ONE env's system — every per-vehicle
+  sensor read and solver stage pays GPU launch/sync latency with no
+  env-axis batch width to amortize it. Need interaction at scale → stay on
+  CPU; need hundreds of vehicles without interaction → L3 (+`--gpu`
+  beyond ~300).
+
+Verdict: **CPU remains the server recommendation for L2 at every size and
+for L3 up to ~200–300 envs**; the GPU backend pays off for L3 at ~300+
+envs (and for RL/MPPI-style batching driven directly through the SDK).
 
 Reading (CPU): both modes are real-time up to 30 tanks on simple AND complex
 terrain. At 100 tanks the adaptive pacer detects the sustained overload and
@@ -260,7 +281,7 @@ L2 mode, kept for the CLI and logs.
 | Sample goal | Mode | Batching axis | Backend | Vehicles interact? | Solver |
 |---|---|---|---|---|---|
 | Interacting traffic, heterogeneous, see collisions | **default (L2)** | **L2** (K vehicles × 1 env) | CPU | ✅ (one world) | batched per vehicle *kind* — identical targets share ONE pipeline (1.0.8) |
-| Many identical cars spread out, no mutual collision, max count | **`--multi-env`** | **L3** (1 vehicle × n_envs) | CPU (`--gpu` at hundreds of envs) | ❌ (parallel envs) | 1 × `VehiclePhysics(n_envs=N)` |
+| Many identical cars spread out, no mutual collision, max count | **`--multi-env`** | **L3** (1 vehicle × n_envs) | CPU (`--gpu` at ~300+ envs — measured, see §2.1) | ❌ (parallel envs) | 1 × `VehiclePhysics(n_envs=N)` |
 | Interacting traffic × N parallel scenarios (RL / MPPI) | *(not in server)* | **L2 × L3** | CPU (GPU at large K×N) | ✅ within env | `MultiVehiclePhysics(n_envs=N)` — drive from Python, see [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) |
 
 **Why is CPU the default in BOTH modes?** GPU kernel-launch overhead is a
@@ -268,9 +289,11 @@ fixed per-step cost that needs a lot of parallel work to amortize. At
 `n_envs=1` (L2) CPU wins outright (measured: 10 vehicles → CPU
 47 ms vs GPU 160 ms per step). Even batched (`--multi-env`), the GPU step
 is a flat ≈ 19 ms/step (30/50/100 vehicles alike) while the CPU step is
-8.4 ms at 30 tanks — so CPU stays ahead until roughly hundreds of envs,
-where the GPU's flat cost finally undercuts the CPU's growing one. Pass
-`--gpu` for fleets of that scale. The deciding factor is per-step compute
+8.4 ms at 30 tanks — so CPU stays ahead until the measured crossover at
+~250–300 envs (v1.1.6: L3×400 GPU 27.8 vs CPU 46.2 ms/step — 1.66×), where
+the GPU's flat cost finally undercuts the CPU's growing one. Pass `--gpu`
+for fleets of that scale. L2 has NO GPU crossover at any size — it
+anti-scales (see the crossover table in §2.1). The deciding factor is per-step compute
 weight, not vehicle count — for a collision-heavy real map, check the
 server's startup `실측된 1스텝 평균` log line and compare. See
 [`batching.md`](batching.md) for the full L1/L2/L3 story.
