@@ -226,14 +226,14 @@ class StaticBody:
     """Handle for a registered static body. ``is_static``/``has_collision``/
     ``has_raycast`` are the "static physics" properties that drive routing:
     a collision body lands in the main scene (rigid); a raycast body lands in
-    the raycast scene (kinematic, split mode) or is the same rigid body (single
-    mode)."""
+    the raycast scene (kinematic, dual_scene mode) or is the same rigid body
+    (single_scene mode)."""
     name: str
     has_collision: bool
     has_raycast: bool
     is_static: bool = True
     entity_main: Any = None       # rigid collision entity (main scene)
-    entity_raycast: Any = None    # kinematic raycast entity (raycast scene, split)
+    entity_raycast: Any = None    # kinematic raycast entity (raycast scene, dual_scene)
 
 
 @dataclass
@@ -285,8 +285,8 @@ class Camera:
 class Vehicle:
     """Handle for a registered vehicle. Set inputs each step; read pose anytime.
 
-    Wraps the main-scene rigid entity, its :class:`VehiclePhysics`, and (split
-    mode) the raycast-scene proxy + sensor."""
+    Wraps the main-scene rigid entity, its :class:`VehiclePhysics`, and
+    (dual_scene mode) the raycast-scene proxy + sensor."""
 
     def __init__(self, name: str, urdf_path: str, cfg: Any,
                  wheel_positions: list, pos, quat, material) -> None:
@@ -300,8 +300,8 @@ class Vehicle:
         # filled during VehicleScene.add_vehicle / build
         self.entity_main: Any = None   # main-scene rigid URDF entity
         self.physics: Optional[VehiclePhysics] = None
-        self.sensor: Any = None        # wheel raycaster (main in single, raycast-scene in split)
-        self.proxy: Any = None         # raycast-scene pose carrier (split only)
+        self.sensor: Any = None        # wheel raycaster (main scene in single_scene, raycast scene in dual_scene)
+        self.proxy: Any = None         # raycast-scene pose carrier (dual_scene only)
         self._inputs = VehicleInputs(throttle=0.0, brake=0.0, steer=0.0)
         self._dual_scene = False
         self._n_envs = 1
@@ -611,7 +611,7 @@ class VehicleScene:
                         gs.materials.Kinematic(use_visual_raycasting=True),
                         surface, "visual"))
             else:
-                # single mode: the rigid collision body IS the raycast target.
+                # single_scene mode: the rigid collision body IS the raycast target.
                 if body.entity_main is None:
                     _guard_collision_mesh(rc_morph, f"add_static({name!r})")
                     mat = material if material is not None else gs.materials.Rigid()

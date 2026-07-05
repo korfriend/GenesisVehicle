@@ -574,8 +574,8 @@ class VehiclePhysics:
             Externally-supplied wheel-ground ray distances, shape
             ``(n_envs, n_wheels)`` (``(n_wheels,)`` accepted for a single env).
             When given, the pipeline uses these instead of reading
-            ``self.sensor`` — this is the hook :class:`VehicleScene` "split"
-            mode uses to feed distances measured in a SEPARATE static-terrain
+            ``self.sensor`` — this is the hook :class:`VehicleScene`
+            ``dual_scene`` mode uses to feed distances measured in a SEPARATE static-terrain
             raycast scene (whose BVH is built once, never re-fit per step; see
             ``docs/dual-scene-raycast.md``). When ``None`` (default) the sensor
             is read exactly as before — fully backward compatible.
@@ -612,7 +612,7 @@ class VehiclePhysics:
         ctx = PipelineContext(throttle=throttle, brake=brake, wheel_meta=wm)
 
         # [RAYCAST] — distances may be injected by an external raycast source
-        # (VehicleScene "split" mode reads them from a separate kinematic-terrain
+        # (VehicleScene dual_scene mode reads them from a separate kinematic-terrain
         # scene whose BVH is static). When omitted, read this vehicle's own
         # sensor exactly as before.
         if distances is None:

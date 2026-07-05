@@ -11,7 +11,7 @@ the default ``raycast_mode="dual_scene"``, registers it with
 chassis pitches/heaves), but that scene's BVH is *static* → the raycaster
 **skips rebuilding it every step**. A high-poly mesh as a `Rigid` collider would
 instead be re-fit into the wheel-raycaster BVH on every step (the dominant cost
-on big maps — see ``docs/two-scene-raycast.md`` / CHANGELOG v0.7.17). Pass
+on big maps — see ``docs/dual-scene-raycast.md`` / CHANGELOG v0.7.17). Pass
 ``--rigid-terrain`` to run that slow path (``raycast_mode="single_scene"`` with a
 rigid mesh) for an A/B comparison.
 

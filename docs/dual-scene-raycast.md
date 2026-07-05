@@ -22,8 +22,8 @@ directly. It also hosts the dual-scene wheel-raycast optimization.
 **Modes.** `raycast_mode="dual_scene"` (default) is the wheel-raycast-dedicated
 optimization described below; `raycast_mode="single_scene"` is the classic
 one-scene path. The legacy names `"raywheel"` / `"inline"` and `"split"` /
-`"single"` are accepted as aliases for `"dual_scene"` / `"single_scene"`. In the
-tables below, "single" = `single_scene`, "split" = `dual_scene`.
+`"single"` are accepted as aliases for `"dual_scene"` / `"single_scene"` but
+retired from prose — the tables below use the official mode names.
 
 ## The problem it solves
 
@@ -120,9 +120,9 @@ have a viewer.
 
 `raycast_mode` changes only the *raycast* cost. The vehicle physics is shared.
 
-| terrain faces | raycast: single (rebuild) | raycast: split (re-cast) | raycast ratio | **full step** single | **full step** split | **full-step ratio** |
+| terrain faces | raycast: single_scene (BVH rebuild) | raycast: dual_scene (re-cast only) | raycast ratio | **full step** single_scene | **full step** dual_scene | **full-step ratio** |
 |---|---|---|---|---|---|---|
-| 3 k   | ~4 ms  | ~2.5 ms | 1.7x  | ~7 ms  | ~7.7 ms | **0.94x** (split slower) |
+| 3 k   | ~4 ms  | ~2.5 ms | 1.7x  | ~7 ms  | ~7.7 ms | **0.94x** (dual_scene slower) |
 | 13 k  | ~7 ms  | ~2.5 ms | 2.9x  | ~11 ms | ~7.5 ms | 1.47x |
 | 51 k  | ~17 ms | ~2.5 ms | 4.7x  | ~20 ms | ~7.1 ms | 2.79x |
 | 205 k | ~44 ms | ~2.5 ms | 17.7x | ~49 ms | ~8.9 ms | **5.49x** |
@@ -130,7 +130,7 @@ have a viewer.
 - The **raycast cost** drops ~2–18x and the gap grows with face count.
 - The **full-step** speedup is smaller because the shared vehicle physics
   (~6 ms here) does not change; it dominates once the rebuild is gone.
-- On **small/flat terrain split is slightly slower** (two scenes + ~2x terrain
+- On **small/flat terrain dual_scene is slightly slower** (two scenes + ~2x terrain
   memory; full-step 0.94x above — ~0.7 ms). **Stay on the default
   (`dual_scene`) anyway**: the deficit is a rounding error, and the default
   keeps working unchanged when the ground becomes a mesh or `n_envs` grows.
@@ -140,45 +140,46 @@ have a viewer.
 ### Performance on GPU (n_envs=1) — much smaller gap
 
 The CPU numbers above do **not** carry over to GPU: the BVH rebuild parallelizes,
-so single-scene barely grows with face count, and split's fixed dual-scene /
+so single_scene barely grows with face count, and dual_scene's fixed two-scene /
 kernel-launch overhead dominates at `n_envs=1`:
 
-| terrain faces | single (GPU) | split (GPU) | full-step ratio |
+| terrain faces | single_scene (GPU) | dual_scene (GPU) | full-step ratio |
 |---|---|---|---|
-| 13 k  | 21.1 ms | 21.5 ms | **0.98x** (split slower) |
+| 13 k  | 21.1 ms | 21.5 ms | **0.98x** (dual_scene slower) |
 | 51 k  | 25.6 ms | 23.3 ms | 1.10x |
 | 205 k | 30.5 ms | 23.3 ms | 1.31x |
 
-So on GPU split is **break-even to ~1.3x** for heavy terrain and slightly slower
+So on GPU dual_scene is **break-even to ~1.3x** for heavy terrain and slightly slower
 for small/medium **at `n_envs=1`**. But it earns its keep elsewhere — and the
 biggest case is L3 batching.
 
 ### Performance on GPU across L3 batch size (`n_envs`) — the real win
 
-The static terrain BVH is built **once and shared across envs**, so split's
-per-step cost is nearly **flat** in `n_envs`, while single re-fits per env and
-scales ~linearly. The speedup therefore grows strongly with batch size
-(GPU, 51 k-face terrain):
+The static terrain BVH is built **once and shared across envs**, so
+dual_scene's per-step cost is nearly **flat** in `n_envs`, while single_scene
+re-fits per env and scales ~linearly. The speedup therefore grows strongly
+with batch size (GPU, 51 k-face terrain):
 
-| n_envs | single ms | split ms | ratio | single env-steps/s | split env-steps/s |
+| n_envs | single_scene ms | dual_scene ms | ratio | single_scene env-steps/s | dual_scene env-steps/s |
 |---|---|---|---|---|---|
 | 1   | 24.4  | 23.6 | 1.03x | 41   | 42   |
 | 16  | 32.5  | 28.8 | 1.13x | 493  | 555  |
 | 64  | 47.7  | 30.3 | 1.57x | 1343 | 2111 |
 | 256 | 101.6 | 29.9 | **3.40x** | 2521 | **8576** |
 
-Split scales near-linearly (42 → 8576 env-steps/s ≈ 204x for 256x envs); single
-scales sublinearly (41 → 2521 ≈ 61x) because each env adds rebuild cost.
+dual_scene scales near-linearly (42 → 8576 env-steps/s ≈ 204x for 256x envs);
+single_scene scales sublinearly (41 → 2521 ≈ 61x) because each env adds
+rebuild cost.
 **For batched RL / MPPI / Real2Sim rollouts (high `n_envs`), `dual_scene` (the
 default) is clearly the right mode.** A flat-ground `n_envs=1` sim is the one
 case where `single_scene` is marginally (~6 %) faster — an optional
 micro-optimization, not the recommended configuration.
 
-Caveat: split replicates the terrain BVH per env, so at very high `n_envs` it
+Caveat: dual_scene replicates the terrain BVH per env, so at very high `n_envs` it
 hits a memory ceiling (≈512 envs for a 51 k-face terrain here). Genesis #2914
 ("share static raycast BVH across envs") lifts that ceiling once merged.
 
-Split also helps independent of speed via (a) very-high-poly terrain on GPU and
+dual_scene also helps independent of speed via (a) very-high-poly terrain on GPU and
 (b) **accuracy** on non-convex mesh terrain (see below).
 
 ## API
