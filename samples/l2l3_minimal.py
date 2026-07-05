@@ -58,7 +58,7 @@ def main():
     # MultiVehiclePhysics under the hood); n_envs=N replicates the world N× (L3).
     VehicleScene.init_backend("gpu" if args.gpu else "cpu")
     vs = VehicleScene(
-        n_envs=N, raycast_mode="single_scene",
+        n_envs=N,
         dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(dt=DT, enable_collision=True,
                                               enable_self_collision=False),

@@ -131,9 +131,11 @@ have a viewer.
 - The **full-step** speedup is smaller because the shared vehicle physics
   (~6 ms here) does not change; it dominates once the rebuild is gone.
 - On **small/flat terrain split is slightly slower** (two scenes + ~2x terrain
-  memory). It is still the **default** (`dual_scene`) because complex terrain is
-  the common case and the win grows with `n_envs`; switch to `single_scene` only
-  for a flat ground at `n_envs=1`.
+  memory; full-step 0.94x above — ~0.7 ms). **Stay on the default
+  (`dual_scene`) anyway**: the deficit is a rounding error, and the default
+  keeps working unchanged when the ground becomes a mesh or `n_envs` grows.
+  `single_scene` is an optional micro-optimization for a flat-ground,
+  `n_envs=1` sim you know will stay that way — not a recommendation.
 
 ### Performance on GPU (n_envs=1) — much smaller gap
 
@@ -168,8 +170,9 @@ scales ~linearly. The speedup therefore grows strongly with batch size
 Split scales near-linearly (42 → 8576 env-steps/s ≈ 204x for 256x envs); single
 scales sublinearly (41 → 2521 ≈ 61x) because each env adds rebuild cost.
 **For batched RL / MPPI / Real2Sim rollouts (high `n_envs`), `dual_scene` (the
-default) is clearly the right mode.** Only a flat-ground, `n_envs=1` interactive
-sim is marginally better on `single_scene`.
+default) is clearly the right mode.** A flat-ground `n_envs=1` sim is the one
+case where `single_scene` is marginally (~6 %) faster — an optional
+micro-optimization, not the recommended configuration.
 
 Caveat: split replicates the terrain BVH per env, so at very high `n_envs` it
 hits a memory ceiling (≈512 envs for a 51 k-face terrain here). Genesis #2914

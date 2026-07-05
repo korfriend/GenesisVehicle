@@ -67,7 +67,7 @@ def _internal_run(K: int, N: int, warmup: int, steps: int, gpu: bool = False) ->
     # replicates the world N× (L3) — so this measures the combined L2 × L3 path.
     VehicleScene.init_backend("gpu" if gpu else "cpu")
     vs = VehicleScene(
-        n_envs=N, raycast_mode="single_scene", dt=DT, substeps=10,
+        n_envs=N, dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
             dt=DT, enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,

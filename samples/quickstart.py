@@ -73,12 +73,11 @@ def main():
 
     cfg = car_4w_rwd_ackermann(URDF_PATH, stability="control")
 
-    # VehicleScene owns gs.init + the scene(s) + build + step. Flat ground at
-    # n_envs=1 → single_scene (the classic one-scene raycast; the dual_scene
-    # optimization only pays off on heavy static terrain — see dual_scene_terrain).
+    # VehicleScene owns gs.init + the scene(s) + build + step. raycast_mode is
+    # left at its default (dual_scene) — the one mode that scales to mesh
+    # terrain and n_envs>1; see docs/dual-scene-raycast.md.
     VehicleScene.init_backend("gpu" if args.gpu else "cpu")
     vs = VehicleScene(
-        raycast_mode="single_scene",
         dt=cfg.recommended_dt, substeps=10,
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),

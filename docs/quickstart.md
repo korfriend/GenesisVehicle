@@ -27,7 +27,9 @@ URDF = "<path to your 4-wheel-car URDF>"
 VehicleScene.init_backend("cpu")
 
 # 1. VehicleScene owns gs.init / the scene(s) / build / step — the single entry point.
-vs = VehicleScene(raycast_mode="single_scene", dt=0.025, substeps=10)
+#    raycast_mode defaults to "dual_scene" — keep it; it scales to mesh terrain
+#    and n_envs>1 unchanged (see dual-scene-raycast.md).
+vs = VehicleScene(dt=0.025, substeps=10)
 vs.add_ground_plane(friction=1.0)
 
 # 2. Register a vehicle from a preset (it discovers wheels + builds the raycaster).

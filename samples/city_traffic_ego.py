@@ -213,7 +213,7 @@ def main():
     # solver="batched" groups the traffic kinds (L2); n_envs is the L3 axis.
     view = "native" if args.native else ("cv2" if args.viewer else None)
     vs = VehicleScene(
-        n_envs=args.n_envs, raycast_mode="single_scene", view=view,
+        n_envs=args.n_envs, view=view,
         # substeps=10 is the floor for this vehicle stack (verified in road_loop).
         dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
