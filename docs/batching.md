@@ -395,4 +395,5 @@ Re-run the samples on your machine — absolute numbers depend on GPU
 and WSL/native setup. These tables were measured on the **GPU** backend;
 since v1.0.14 every sample defaults to **CPU** (faster below ~100 envs —
 GPU is kernel-launch bound at small batch), so pass `--gpu` to reproduce
-them.
+them. For the consolidated CPU-vs-GPU decision guide (measured crossover
+per batching axis, v1.1.6), see [`backends.md`](backends.md).
