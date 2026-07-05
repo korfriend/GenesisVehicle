@@ -9,7 +9,7 @@ real wire by a mock UE client (v1.0.20).
 | steps/loop | catch-up steps per loop (~1.0 = holding real-time, pinned at cap = saturated) |
 
 For every configuration in {L2, L3} × {simple, complex} × {1, 10, 30, 100}
-tanks this script:
+tanks this script (default matrix now includes 200 and 400):
 
 1. launches the REAL server (`python -m genesis_vehicle.server [--multi-env]
    --headless`) as a subprocess (CPU backend — the SDK default; ``--gpu`` to
@@ -149,8 +149,11 @@ def run_config(mode: str, terrain: str, k: int, urdf: str, hull_obj: str,
            "--send_port_obs", str(OBS_PORT)]
     if mode == "L3":
         cmd.append("--multi-env")
-        if gpu:
-            cmd.append("--gpu")
+    if gpu:
+        # Both modes accept --gpu (since v1.0.14). For L2 the GPU parallelizes
+        # over LINKS within the one env (23·K of them) rather than over envs —
+        # measured here to locate the L2 GPU crossover, if any.
+        cmd.append("--gpu")
 
     env = dict(os.environ)
     env.setdefault("GENESIS_VEHICLE_QUIET", "1")
@@ -237,7 +240,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--modes", default="L2,L3")
     ap.add_argument("--terrain", default="simple,complex")
-    ap.add_argument("--tanks", default="1,10,30,100")
+    ap.add_argument("--tanks", default="1,10,30,100,200,400")
     ap.add_argument("--urdf", default=_default_urdf())
     ap.add_argument("--gpu", action="store_true",
                     help="L3 on the GPU backend (CPU is the SDK default)")
