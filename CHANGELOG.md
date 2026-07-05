@@ -10,6 +10,30 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.8] — 2026-07-05
+
+### Docs — L2×L3 combined GPU crossover measured: the invariant is K×N ≈ 300–400 total vehicles
+
+- Measured the CPU/GPU crossover for the combined L2×L3 path
+  (`MultiVehiclePhysics(n_envs=N)`, SDK-direct via
+  `samples/perf_l2_l3_combined.py`): K ∈ {1,2,5,10} × N ∈ {1,10,50,100,300}
+  × both backends, 40 cells, `car_4w`, all clean.
+- Headline: the crossover N shifts left as K grows (K=1 → N~310, K=2 →
+  ~150, K=5 → ~65, K=10 → ~40) — CPU cost is ~linear in K·N while GPU
+  stays launch-bound-flat in N — so the practical rule is **GPU once
+  K×N ≳ 300–400 total batched vehicles**, consistent with the v1.1.6
+  L3-only tank figure. The GPU floor still rises mildly with K
+  (N=1: 37.8 → 59.2 ms for K 1 → 10, the residual L2 anti-scaling term),
+  so tiny-N configs stay CPU regardless of K.
+- Throughput ceilings differ 4×: CPU saturates at ~6,000 veh-steps/s for
+  any K/N mix; GPU reaches 24,200 veh-steps/s at K=10×N=300 (3,000
+  vehicles, 4.1× over CPU) and is still climbing.
+- Full table + per-workload rules recorded in `docs/backends.md` §3
+  (section restructured into "L2 and L3 separately" / "L2 × L3 combined").
+  Docs-only; no code changes.
+
+---
+
 ## [1.1.7] — 2026-07-05
 
 ### Docs — new `docs/backends.md`: consolidated CPU-vs-GPU physics backend guide
