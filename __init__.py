@@ -145,6 +145,7 @@ from .presets import (
     tank_10w_skid_belt,
     stability_hooks_for_profile,
 )
+from .control import PathFollower, SweepTable
 
 # --- Lazy (require Genesis at import time) -----------------------------------
 
@@ -228,4 +229,6 @@ __all__ = [
     "car_4w_rwd_ackermann", "car_4w_fwd_ackermann", "car_4w_awd_ackermann",
     "truck_6w_partial_ackermann", "tank_10w_skid_belt",
     "stability_hooks_for_profile",
+    # Control utilities (path following; state extractors live in .control)
+    "PathFollower", "SweepTable",
 ]

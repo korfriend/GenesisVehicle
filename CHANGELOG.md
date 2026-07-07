@@ -10,6 +10,173 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.13] — 2026-07-08
+
+### Changed — path-following stack moved to the recommended dt (0.025 × 10); demo override bug found and fixed
+
+| abbr | meaning |
+|---|---|
+| quadruple | sweep validity contract: (URDF, preset, config overrides, dt/substeps) |
+| MVP | MultiVehiclePhysics (VehicleScene's default batched solver) |
+
+- **Timing**: `sweep_measure` gains `--dt` / `--substeps`, defaulting to
+  **0.025 × 10** (the presets' `recommended_dt`, internal 2.5 ms; was a
+  hard-coded 0.01 × 4 inherited from the deliverable). Settle/measure
+  windows are now defined in seconds and derived from dt.
+  `path_follow_demo` runs at 0.025 × 10 and no longer trips the
+  recommended-dt WARN. dt/substeps are documented as part of the table's
+  validity contract (measure at the dt you drive at) — the triple is now
+  a quadruple.
+- **Demo bug found while switching dt (present since 1.1.11)**: the demo
+  applied `TankTuning` AFTER `vs.build()` — with the default batched
+  solver, post-build cfg mutations are ignored without
+  `mark_config_dirty()`, and the `if tank.physics is not None` guard
+  silently skipped the runtime overrides (`physics` is None under MVP).
+  **The demo had been driving on preset defaults** while its CSV was
+  measured WITH the overrides. At 10 ms the mismatch was benign (forward
+  drive is tolerant); at 25 ms the un-tuned tank cannot break away from
+  standstill under combined throttle+steer (43 s stall), which exposed
+  the bug. Isolated by experiment: not raycast_mode / initial yaw /
+  brake-settle / RigidOptions / solver mode / SFL — a config-dirty
+  rebuild alone fixed the launch. Fix: cfg overrides BEFORE `build()`;
+  post-build overrides via `Vehicle.resolved` (works in both solver
+  modes) — new `TankTuning.apply_resolved`. Documented as the
+  "override-ordering trap" in `path-following.md` §1.
+- Bundled reference table re-measured at 0.025 × 10 (GPU full grid,
+  ~3.6 min). Verified with overrides actually applied: demo PASS
+  (err 1.46 m, 31.8 s) and the forward–reverse–forward cusp run PASS in
+  13.8 s (was 64 s — the overrides' `T_BRAKE_MAX` makes the cusp stop
+  immediate; the old 20 s creep-stop was a symptom of the unapplied
+  overrides, not a follower property).
+- Docs: `path-following.md` §2 restructured — new "two-stage controller"
+  concept section (stage 1: path errors → desired physical response
+  `a_target`/`ω_target`, vehicle-agnostic; stage 2: sweep-table inverse at
+  the current operating point → actuator commands, all vehicle specifics
+  in the table) with a Mermaid dataflow diagram, plus the step-by-step
+  mechanics. NOT changed: the legacy `DT = 0.02` samples
+  (`road_loop`, `city_traffic_ego`, `l2l3_minimal`, perf benches) — their
+  published benchmark figures are tied to that dt.
+
+---
+
+## [1.1.12] — 2026-07-07
+
+### Changed — sweep measurement: deliverables_v3 accuracy + build-once fixes adopted
+
+| abbr | meaning |
+|---|---|
+| A1/A2 | v3 accuracy fix IDs (measurement frame / wheel radius) |
+| P1–P3 | v3 performance fix IDs (build-once / batched gravity / fewer reads) |
+| build-once | build the scene once, reuse across chunks via reset |
+
+`genesis_vehicle.control.sweep_measure` now carries the deliverables_v3
+revision of the measurement pipeline (CLI, CSV schema, grid unchanged):
+
+- **[A1] `a_measured` frame: world-x → body-longitudinal.** Acceleration
+  is now measured on the yaw-projected longitudinal speed
+  (`v_long = vx·cos ψ + vy·sin ψ`) — the same definition
+  `extract_state` feeds `PathFollower`, so the table is produced and
+  consumed in one frame. The old world-x read under-measured by cos(yaw)
+  whenever steer ≠ 0 rotated the vehicle during the 2 s window (full-grid
+  v2-vs-v3 audit: mean |Δa| 1.6–1.8 m/s², p95 ≈ 7, max 12 m/s² on
+  |steer| ≥ 0.5 rows; high-speed + full-steer combos turned past 90° yaw,
+  making the old values meaningless).
+- **[A2] wheel-spin init**: per-wheel resolved radii with a mean fallback
+  for unresolved wheels (1.1.11 had already removed the deliverable's
+  `TIRE_R = 0.4` hard-code; this adds the fallback).
+- **[P1] build-once**: the scene/physics are built ONCE and reused across
+  chunks via `scene.reset()` + `physics.reset()`; the last chunk is padded
+  to the chunk size (excess rows discarded) so the batch shape stays fixed
+  and nothing re-JITs. Chunk count also stops over-building
+  (`n_envs = min(n_envs, combos)`).
+- **[P2] batched per-env gravity**: one `(n_envs, 3)` `set_gravity` call
+  instead of an env-indexed Python loop (17,500 solver calls on the full
+  grid).
+- **[P3] measure-loop reads**: velocity (+quat) only at the window's
+  start/end, omega_z as a running sum — no per-step history stacking.
+- v3 reference timings: full grid GPU 3 m 37 s (vs v2 4 m 40 s, 1.29×);
+  CPU ≈ 20 min. Reset-vs-rebuild physics parity on steer = 0 rows:
+  max |Δa| ≈ 0.05 m/s² (verified here too: 3-chunk-with-padding vs
+  single-chunk max |Δa| 0.006, |Δω_z| 0.000 on the smoke grid).
+- **Bundled reference table re-measured** with the corrected CLI
+  (`samples/data/tank_sweep_signed.csv`, full grid, GPU): the v2-era
+  steer ≠ 0 rows were A1-biased. NB: the deliverables_v3 canonical CSV
+  (`tank_sweep_v3_gpu.csv`) was measured WITHOUT the TankTuning overrides
+  (`Config: (none)` in its logs), so it is not a valid drop-in for the
+  demo's (URDF, preset, overrides) triple — hence the re-measurement.
+  The overrides now live in `samples/tank_tuning.py` (importable
+  `TankTuning` + module-level `apply_config`/`apply_runtime_config`,
+  directly usable as `sweep_measure --config`), documenting the triple
+  next to the CSV.
+- Re-verified with the new table: `path_follow_demo` PASS (err 1.50 m,
+  32.2 s) and the forward–reverse–forward cusp run PASS (lateral
+  deviation 0.00 m). 144 tests pass.
+- Docs: `index.md` gains a **Built-in utilities** section — a categorized
+  map (control & workflow / model preparation & scene assembly /
+  telemetry & rendering feed) of every shipped utility with its one-line
+  function, entry point, and detail-doc link.
+
+---
+
+## [1.1.11] — 2026-07-07
+
+### Added — `genesis_vehicle.control`: path following as an official SDK utility
+
+| abbr | meaning |
+|---|---|
+| sweep table | measured (v, throttle, steer, pitch, roll) → (a, ω_z) grid of one vehicle |
+| cusp | sign flip of a waypoint's `target_speed` = gear change (stop, then reverse) |
+| block | maximal run of same-speed-sign waypoints (the follower's driving unit) |
+
+- The `deliverables_v2` path2ST pipeline (path + signed target speeds →
+  per-step throttle/steer/brake via sweep-table inversion) is now the
+  built-in `genesis_vehicle/control/` subpackage:
+  - `PathFollower` / `SweepTable` exported at top level;
+    `extract_state(_from_arrays)` in `genesis_vehicle.control`.
+  - `python -m genesis_vehicle.control.sweep_measure` measures the sweep
+    CSV for any (URDF, preset, config-override) triple. CPU default per
+    SDK convention; `--gpu` recommended (the measurement is a ~500-env L3
+    batch, past the crossover in `docs/backends.md`). Wheel-spin
+    initialization now takes per-wheel radii from the resolved config
+    (the deliverable hard-coded `TIRE_R = 0.4`).
+  - Dependencies dropped: pandas/scipy removed (the SDK never used them) —
+    CSV IO via numpy, `RegularGridInterpolator` replaced by an equivalent
+    clamped 4-D multilinear interpolation, `brentq` by bisection at the
+    same 1e-3 tolerance. Control-side code needs numpy only (usable
+    without Genesis/torch installed).
+- Two deliverable bugs fixed during adoption:
+  - **Backward-yaw flip was a no-op**: `(yaw + pi) % (2*pi) - pi` is a
+    plain normalization, so backward waypoints stored chassis yaw off by
+    pi; masked on collinear reversing where the position-error term
+    vanishes.
+  - **Cross-cusp lookahead contamination**: v_target and the steering
+    geometry took the direction of the lookahead waypoint BEYOND the cusp
+    while the transition state machine keyed on the current index, so
+    approaching a cusp applied backward geometry while still driving
+    forward (the follower could leave the path without ever triggering
+    the stop-and-reverse). The follower now splits the path into
+    direction blocks: projection/lookahead never cross the active block's
+    boundary, |v_target| tapers into the cusp
+    (`k_approach * distance + 0.3`), and the stop-and-reverse triggers on
+    reaching the block end. Tuning knobs (`lookahead`, `cusp_goal`,
+    `k_approach`, `v_stop`, ...) are constructor kwargs.
+- Bundled assets: `samples/urdf/tank_ray.urdf` (primitive-only 10-wheel
+  tank) + `samples/data/tank_sweep_signed.csv` (reference sweep for that
+  URDF + `tank_10w_skid_belt` + the demo's `TankTuning` overrides).
+- New sample `samples/path_follow_demo.py` (#13): tank follows a
+  wall-detour path closed-loop; PASS = final error < 3 m. Verified:
+  32.2 s sim, err 1.49 m PASS (CPU). A forward–reverse–forward cusp run
+  on the real tank also passes (modes DRV+1 → BRAKE_TRANS → DRV-1 →
+  BRAKE_TRANS → DRV+1 → DONE, lateral deviation 0.00 m).
+- Docs: new `docs/path-following.md` (pipeline, measurement CLI, tuning
+  table, path requirements); `api-reference.md` §11; index + samples
+  README rows. 19 new pure-Python tests (sweep inversion recovery on a
+  known-linear synthetic table, CSV round-trip, grid-hole/zero-level
+  validation, closed-loop unicycle straight/L-shape/diagonal-cusp/
+  straight-cusp scenarios) — 144 total pass.
+
+---
+
 ## [1.1.10] — 2026-07-06
 
 ### Changed — CHANGELOG glossary tables translated to English
