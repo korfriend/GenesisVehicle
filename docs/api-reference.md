@@ -846,3 +846,16 @@ Same pattern works for `SteeringStrategy.per_wheel_steer`,
 
 These are last-resort fallbacks. URDF + `WheelConfig` overrides take
 precedence per [`concepts.md`](concepts.md#4-urdf-is-the-default-source-explicit-api-overrides-are-the-final-truth).
+
+## 11. `control` — path following (v1.1.11)
+
+Full guide: [`path-following.md`](path-following.md). Numpy-only (no
+Genesis/torch needed at control time).
+
+| Symbol | Import | What it is |
+|---|---|---|
+| `PathFollower(path, sweep, **tuning)` | `from genesis_vehicle import PathFollower` | path (waypoints + signed speeds) → per-step `(throttle, steer, brake)`; `sweep` is a `SweepTable` or a CSV path; cusps (speed-sign flips) handled as stop-and-reverse. `last_mode` ∈ `INIT/DRV±1/STOP/BRAKE_TRANS/DONE` |
+| `SweepTable` | `from genesis_vehicle import SweepTable` | measured (v, throttle, steer, pitch, roll) → (a, ω_z) grid; `.load(csv)` / `.save(csv)`; inverse lookups `throttle_for(v, a, pitch, roll)` / `steer_for(v, ω, pitch, roll)` |
+| `extract_state(vehicle, env_idx=0)` | `from genesis_vehicle.control import extract_state` | Genesis entity / `Vehicle` wrapper → state dict for `PathFollower.step` |
+| `extract_state_from_arrays(pos, quat_wxyz, vel)` | `from genesis_vehicle.control import extract_state_from_arrays` | same, from raw arrays (simulator-agnostic) |
+| `sweep_measure` CLI | `python -m genesis_vehicle.control.sweep_measure` | measure the sweep CSV for a (URDF, preset, config) triple; `--gpu` recommended (~500-env L3 batch) |

@@ -1,0 +1,280 @@
+<?xml version="1.0"?>
+<!--
+  Tank URDF v3 — Wheel + Belt Constraint
+  ==========================================
+  좌·우 측 각각 sprocket(1) + road wheels(3) + idler(1) = 5 wheel
+  총 10 wheel.
+
+  각 wheel 트리:
+    base_link → {wheel}_susp (prismatic, 수직) → {wheel} (cylinder)
+  (실제 트랙 차량은 모든 wheel 이 belt 로 묶여 일체로 회전 — wheel 별 회전 자유도는
+   physical 의미가 없어 URDF 에서도 제거. wheel ω 는 코드의 self.omega 가 직접 관리.)
+
+  Belt constraint는 env code에서 매 step 같은 측 wheel들의 angular velocity 를
+  sprocket 에 동기화하는 방식으로 구현 (URDF에는 표현 X).
+
+  Brake = sprocket 명령 속도 0 + belt constraint → 모든 wheel 정지 →
+          ground friction이 차체 감속 (별도 damping force 불필요).
+
+  Wheel 위치 (한 측 5개):
+    sprocket  x = +3.0   (앞)
+    road_1    x = +1.5
+    road_2    x =  0.0
+    road_3    x = -1.5
+    idler     x = -3.0   (뒤)
+
+  Y position: ±1.42 (track 좌우 분리 2.84m)
+-->
+<robot name="tank_belt_v3">
+
+  <!-- ===================== CHASSIS ===================== -->
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0 0 0.7" rpy="0 0 0"/>
+      <mass value="50000.0"/>
+      <inertia ixx="60000.0" iyy="264000.0" izz="316000.0" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.85" rpy="0 0 0"/>
+      <geometry>
+        <box size="7.9 3.66 0.9"/>
+      </geometry>
+      <material name="dark_green">
+        <color rgba="0.2 0.35 0.15 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 1.55" rpy="0 0 0"/>
+      <geometry>
+        <box size="8.0 3.8 2.5"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ===== LEFT SIDE: 5 wheels (sprocket, 3 roads, idler) ===== -->
+
+  <!-- L_SPROCKET (x = +3.0) -->
+  <joint name="l_sprocket_susp" type="prismatic">
+    <parent link="base_link"/>
+    <child link="l_sprocket"/>
+    <origin xyz="3.0 1.42 0.0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="2.0" effort="1000000000" velocity="10.0"/>
+  </joint>
+  <link name="l_sprocket">
+    <inertial><origin xyz="0 0 0"/><mass value="500.0"/>
+      <inertia ixx="29.5" iyy="24.8" izz="29.5" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.4" length="0.64"/></geometry>
+      <material name="wheel_gray"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+  </link>
+
+  <!-- L_ROAD1 (x = +1.5) -->
+  <joint name="l_road1_susp" type="prismatic">
+    <parent link="base_link"/><child link="l_road1"/>
+    <origin xyz="1.5 1.42 0.0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="2.0" effort="1000000000" velocity="10.0"/>
+  </joint>
+  <link name="l_road1">
+    <inertial><origin xyz="0 0 0"/><mass value="500.0"/>
+      <inertia ixx="29.5" iyy="24.8" izz="29.5" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.4" length="0.64"/></geometry>
+      <material name="wheel_gray"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+  </link>
+
+  <!-- L_ROAD2 (x = 0.0) -->
+  <joint name="l_road2_susp" type="prismatic">
+    <parent link="base_link"/><child link="l_road2"/>
+    <origin xyz="0.0 1.42 0.0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="2.0" effort="1000000000" velocity="10.0"/>
+  </joint>
+  <link name="l_road2">
+    <inertial><origin xyz="0 0 0"/><mass value="500.0"/>
+      <inertia ixx="29.5" iyy="24.8" izz="29.5" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.4" length="0.64"/></geometry>
+      <material name="wheel_gray"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+  </link>
+
+  <!-- L_ROAD3 (x = -1.5) -->
+  <joint name="l_road3_susp" type="prismatic">
+    <parent link="base_link"/><child link="l_road3"/>
+    <origin xyz="-1.5 1.42 0.0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="2.0" effort="1000000000" velocity="10.0"/>
+  </joint>
+  <link name="l_road3">
+    <inertial><origin xyz="0 0 0"/><mass value="500.0"/>
+      <inertia ixx="29.5" iyy="24.8" izz="29.5" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.4" length="0.64"/></geometry>
+      <material name="wheel_gray"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+  </link>
+
+  <!-- L_IDLER (x = -3.0) -->
+  <joint name="l_idler_susp" type="prismatic">
+    <parent link="base_link"/><child link="l_idler"/>
+    <origin xyz="-3.0 1.42 0.0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="2.0" effort="1000000000" velocity="10.0"/>
+  </joint>
+  <link name="l_idler">
+    <inertial><origin xyz="0 0 0"/><mass value="500.0"/>
+      <inertia ixx="29.5" iyy="24.8" izz="29.5" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.4" length="0.64"/></geometry>
+      <material name="wheel_gray"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+  </link>
+
+  <!-- ===== RIGHT SIDE: 5 wheels ===== -->
+
+  <!-- R_SPROCKET (x = +3.0, y = -1.42) -->
+  <joint name="r_sprocket_susp" type="prismatic">
+    <parent link="base_link"/><child link="r_sprocket"/>
+    <origin xyz="3.0 -1.42 0.0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="2.0" effort="1000000000" velocity="10.0"/>
+  </joint>
+  <link name="r_sprocket">
+    <inertial><origin xyz="0 0 0"/><mass value="500.0"/>
+      <inertia ixx="29.5" iyy="24.8" izz="29.5" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.4" length="0.64"/></geometry>
+      <material name="wheel_gray"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+  </link>
+
+  <!-- R_ROAD1 -->
+  <joint name="r_road1_susp" type="prismatic">
+    <parent link="base_link"/><child link="r_road1"/>
+    <origin xyz="1.5 -1.42 0.0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="2.0" effort="1000000000" velocity="10.0"/>
+  </joint>
+  <link name="r_road1">
+    <inertial><origin xyz="0 0 0"/><mass value="500.0"/>
+      <inertia ixx="29.5" iyy="24.8" izz="29.5" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.4" length="0.64"/></geometry>
+      <material name="wheel_gray"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+  </link>
+
+  <!-- R_ROAD2 -->
+  <joint name="r_road2_susp" type="prismatic">
+    <parent link="base_link"/><child link="r_road2"/>
+    <origin xyz="0.0 -1.42 0.0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="2.0" effort="1000000000" velocity="10.0"/>
+  </joint>
+  <link name="r_road2">
+    <inertial><origin xyz="0 0 0"/><mass value="500.0"/>
+      <inertia ixx="29.5" iyy="24.8" izz="29.5" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.4" length="0.64"/></geometry>
+      <material name="wheel_gray"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+  </link>
+
+  <!-- R_ROAD3 -->
+  <joint name="r_road3_susp" type="prismatic">
+    <parent link="base_link"/><child link="r_road3"/>
+    <origin xyz="-1.5 -1.42 0.0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="2.0" effort="1000000000" velocity="10.0"/>
+  </joint>
+  <link name="r_road3">
+    <inertial><origin xyz="0 0 0"/><mass value="500.0"/>
+      <inertia ixx="29.5" iyy="24.8" izz="29.5" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.4" length="0.64"/></geometry>
+      <material name="wheel_gray"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+  </link>
+
+  <!-- R_IDLER -->
+  <joint name="r_idler_susp" type="prismatic">
+    <parent link="base_link"/><child link="r_idler"/>
+    <origin xyz="-3.0 -1.42 0.0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="2.0" effort="1000000000" velocity="10.0"/>
+  </joint>
+  <link name="r_idler">
+    <inertial><origin xyz="0 0 0"/><mass value="500.0"/>
+      <inertia ixx="29.5" iyy="24.8" izz="29.5" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.4" length="0.64"/></geometry>
+      <material name="wheel_gray"><color rgba="0.15 0.15 0.15 1.0"/></material>
+    </visual>
+  </link>
+
+  <!-- ===================== TURRET ===================== -->
+  <joint name="turret_yaw_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="turret_link"/>
+    <origin xyz="0 0 1.3" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <dynamics damping="500.0" friction="100.0"/>
+  </joint>
+  <link name="turret_link">
+    <inertial>
+      <origin xyz="0 0 0.45" rpy="0 0 0"/>
+      <mass value="3000.0"/>
+      <inertia ixx="2500.0" iyy="3000.0" izz="3500.0" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.45" rpy="0 0 0"/>
+      <geometry>
+        <box size="3.6 2.4 0.9"/>
+      </geometry>
+      <material name="dark_gray2">
+        <color rgba="0.18 0.18 0.18 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- ===================== BARREL ===================== -->
+  <joint name="barrel_pitch_joint" type="revolute">
+    <parent link="turret_link"/>
+    <child link="barrel_link"/>
+    <origin xyz="1.6 0 0.45" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.3" upper="0.3" effort="100000" velocity="2.0"/>
+    <dynamics damping="200.0" friction="50.0"/>
+  </joint>
+  <link name="barrel_link">
+    <inertial>
+      <origin xyz="1.5 0 0" rpy="0 0 0"/>
+      <mass value="200.0"/>
+      <inertia ixx="1.0" iyy="170.0" izz="170.0" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <origin xyz="1.5 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.14" length="3.0"/>
+      </geometry>
+      <material name="barrel_dark">
+        <color rgba="0.1 0.1 0.1 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+</robot>

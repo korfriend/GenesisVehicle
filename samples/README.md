@@ -1,8 +1,10 @@
 # `genesis_vehicle/samples/`
 
 A set of minimal, self-contained sample scripts that exercise the SDK's core
-API surface. They depend only on the SDK itself and the bundled
-`urdf/car_4w.urdf` — no external mesh files, no umbrella-level helpers.
+API surface. They depend only on the SDK itself and the bundled assets
+(`urdf/car_4w.urdf`, `urdf/tank_ray.urdf`, `data/tank_sweep_signed.csv` —
+all primitive-geometry / plain CSV) — no external mesh files, no
+umbrella-level helpers.
 
 | # | Script | Demonstrates | viewer |
 |---|---|---|---|
@@ -18,6 +20,7 @@ API surface. They depend only on the SDK itself and the bundled
 | 10 | [`l2l3_minimal.py`](l2l3_minimal.py) | **Shortest L2 × L3 program (~90 lines).** K interacting vehicles share one world (collide — L2) × N parallel scenarios (L3), advanced by one `MultiVehiclePhysics(scene, vehicles, n_envs=N)`. Demonstrates per-(scenario, vehicle) control: the lead car brakes in scenario 0 only and diverges from the rolling copies. The clean reference for "how do I use L2 × L3" before reading the full `city_traffic_ego` demo. `--k`, `--n_envs`, `--cpu`. | ✗ headless |
 | 11 | [`dual_scene_terrain.py`](dual_scene_terrain.py) | **`VehicleScene` unified API + wheel-raycast dual/single scene modes.** Drives a car over a heightfield terrain with the high-level `VehicleScene` (no manual `gs.init`/`build`/`step`). `--compare` times `dual_scene` (default; terrain raycast in a separate static-BVH scene) vs `single_scene` (classic one scene); `--n-envs N` shows the dual_scene win growing with L3 batch size (the static BVH is shared across envs). `--horizontal-scale`, `--cpu`. | ✗ headless |
 | 12 | [`obstacles_and_ramp.py`](obstacles_and_ramp.py) | **The encapsulated obstacle API + parameter-behavior matrix.** Builds a course entirely with `VehicleScene` — `add_ground_plane`, `add_static` (a wheel-raycast platform/block, with the `collision_morph`/`wheel_raycast_morph` split), and `add_dynamic` (a collide-only box the car pushes; a `wheel_raycast=True` ramp the wheels sense). Prints the body registry (each body's main/raycast entities — `docs/api-reference.md` §0.2 made concrete), then drives through and reports. `--mode single_scene`, `--cpu`. | ✗ headless |
+| 13 | [`path_follow_demo.py`](path_follow_demo.py) | **Closed-loop path following (`genesis_vehicle.control`).** The bundled 10-wheel tank follows a waypoint path around a central wall: `PathFollower` inverts the bundled reference sweep table (`data/tank_sweep_signed.csv`) each step into (throttle, steer, brake). PASS = final position within 3 m of the goal. The end-to-end reference for [`docs/path-following.md`](../docs/path-following.md). | ✓ `--viewer` |
 
 The three perf benchmarks (5, 7, 8) are intentionally headless — camera
 rendering adds per-step overhead that distorts the throughput numbers
@@ -43,12 +46,23 @@ For an **external** renderer (UE / Unity), keep the run headless and read wheel
 poses from `wheel_visual_transforms()` / `visual_parts_transforms()` (closed-form,
 ~µs) — no engine FK needed.
 
-## Bundled asset
+## Bundled assets
 
 - [`urdf/car_4w.urdf`](urdf/car_4w.urdf) — 1.2-ton 4-wheel RWD sedan,
   primitive geometry only (no mesh files), follows project URDF
   conventions (steer axis `(0, 0, -1)`, FL/FR/RL/RR wheel order,
   chassis collision box bottom above wheel ray origin).
+- [`urdf/tank_ray.urdf`](urdf/tank_ray.urdf) — 10-wheel skid-steer tank
+  (primitive geometry, turret + barrel joints), the reference vehicle of
+  `path_follow_demo`.
+- [`data/tank_sweep_signed.csv`](data/tank_sweep_signed.csv) — reference
+  sweep table for `tank_ray.urdf` + `tank_10w_skid_belt` +
+  [`tank_tuning.py`](tank_tuning.py) overrides at dt 0.025 × substeps 10
+  (the SDK-recommended timing), measured with the body-frame-corrected CLI
+  (see [`docs/path-following.md`](../docs/path-following.md); re-measure
+  if any of the four changes — URDF / preset / overrides / dt).
+- [`tank_tuning.py`](tank_tuning.py) — those overrides, importable
+  (`TankTuning`) and directly usable as `sweep_measure --config`.
 
 ## Running
 
