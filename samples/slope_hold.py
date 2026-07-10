@@ -125,7 +125,7 @@ def main():
             up=(0.0, 0.0, 1.0), fov=50, near=0.1, far=200.0, GUI=False,
         )
 
-    # VisualJointSync (Genesis wheel animation) is auto-managed by VehicleScene at
+    # Wheel visuals (Genesis wheel animation) are auto-managed by VehicleScene at
     # build() — on iff the main scene is rendered (show_viewer / a Genesis camera,
     # e.g. the --viewer cv2 HUD's camera or the --native viewer).
     vs.build()

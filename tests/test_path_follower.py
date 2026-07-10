@@ -56,17 +56,74 @@ def test_backward_waypoint_yaw_flipped():
     assert abs(abs(f.yaws[0]) - math.pi) < 1e-9
 
 
+# --- Explicit per-waypoint yaw (optional 5th element) ---------------------------
+
+def test_explicit_yaw_used_verbatim_no_flip():
+    # Backward waypoints with an explicit yaw: used as-is (no +pi flip).
+    f = PathFollower([(0, 0, 0, -1.0, 0.3), (10, 0, 0, -1.0, 0.3)],
+                     make_table())
+    assert f.yaws[0] == pytest.approx(0.3)
+
+
+def test_explicit_yaw_none_falls_back_to_tangential():
+    f = PathFollower([(0, 0, 0, 2.0, None), (0, 10, 0, 2.0, None)],
+                     make_table())
+    assert f.yaws[0] == pytest.approx(math.pi / 2)     # tangential +Y
+
+
+def test_explicit_yaw_normalized_and_mixed_tuples():
+    # 4-tuples and 5-tuples mix; yaw outside [-pi, pi) is normalized.
+    f = PathFollower([(0, 0, 0, 2.0, 2 * math.pi + 0.5), (10, 0, 0, 2.0)],
+                     make_table())
+    assert f.yaws[0] == pytest.approx(0.5)
+
+
+def test_explicit_yaw_at_cusp_wins_block_end_yaw():
+    fwd = _densify([(0.0, 0.0, 0.0, 1.5), (10.0, 0.0, 0.0, 1.5)])
+    bwd = _densify([(10.0, 0.0, 0.0, -1.5), (5.0, 0.0, 0.0, -1.5)])
+    path = fwd + bwd
+    cusp_idx = len(fwd)                      # first waypoint of the bwd leg
+    p = list(path[cusp_idx]); path[cusp_idx] = (p[0], p[1], p[2], p[3], -0.25)
+    f = PathFollower(path, make_table())
+    assert f.blocks[0][1] == cusp_idx
+    assert f._block_end_yaw[0] == pytest.approx(-0.25)
+
+
+def test_bad_waypoint_length_raises():
+    with pytest.raises(ValueError, match="length 3"):
+        PathFollower([(0, 0, 0), (10, 0, 0)], make_table())
+
+
+def test_explicit_yaw_straight_reverse_closed_loop():
+    # Same scenario as test_cusp_straight_line_reverse, but the backward
+    # leg pins the chassis heading east (yaw=0) EXPLICITLY instead of
+    # relying on the tangential+flip default — must behave identically.
+    fwd = _densify([(0.0, 0.0, 0.0, 2.0), (10.0, 0.0, 0.0, 2.0)])
+    bwd = [(x, y, z, s, 0.0) for (x, y, z, s) in
+           _densify([(10.0, 0.0, 0.0, -1.0), (5.0, 0.0, 0.0, -1.0)])]
+    fwd2 = _densify([(5.0, 0.0, 0.0, 2.0), (15.0, 0.0, 0.0, 2.0)])
+    f = PathFollower(fwd + bwd + fwd2, make_table())
+    x, y, v, modes, done = _run_unicycle(f, 0.0, 0.0, 0.0, max_steps=12000)
+    assert done
+    assert {"DRV+1", "DRV-1", "BRAKE_TRANS"} <= modes
+    assert abs(y) < 1.0
+    assert abs(x - 15.0) < f.arrival_goal + 0.5
+
+
 # --- Closed loop over a matched kinematic unicycle ------------------------------
 
-def _densify(corners_speeds, spacing=0.5):
+def _densify(corners, spacing=0.5):
+    """(x, y, z, target_speed) corners -> densified waypoint list — the
+    same corner format as the demo's ``densify`` (z interpolated; the
+    follower ignores it)."""
     path = []
-    for (x0, y0, s0), (x1, y1, _s1) in zip(corners_speeds[:-1], corners_speeds[1:]):
+    for (x0, y0, z0, s0), (x1, y1, z1, _s1) in zip(corners[:-1], corners[1:]):
         n = max(2, int(math.hypot(x1 - x0, y1 - y0) / spacing))
         for k in range(n):
             t = k / n
-            path.append((x0 + t * (x1 - x0), y0 + t * (y1 - y0), 0.0, s0))
-    cx, cy, cs = corners_speeds[-1]
-    path.append((cx, cy, 0.0, cs))
+            path.append((x0 + t * (x1 - x0), y0 + t * (y1 - y0),
+                         z0 + t * (z1 - z0), s0))
+    path.append(corners[-1])
     return path
 
 
@@ -92,7 +149,7 @@ def _run_unicycle(follower, x, y, yaw, dt=0.05, max_steps=4000):
 
 
 def test_follows_straight_path_to_done():
-    path = _densify([(0.0, 0.0, 2.0), (20.0, 0.0, 2.0)])
+    path = _densify([(0.0, 0.0, 0.0, 2.0), (20.0, 0.0, 0.0, 2.0)])
     f = PathFollower(path, make_table())
     x, y, v, modes, done = _run_unicycle(f, 0.0, 0.0, 0.0)
     assert done, "never reached DONE"
@@ -102,7 +159,7 @@ def test_follows_straight_path_to_done():
 
 
 def test_follows_l_shaped_path():
-    path = _densify([(0.0, 0.0, 2.0), (12.0, 0.0, 2.0), (12.0, 12.0, 2.0)])
+    path = _densify([(0.0, 0.0, 0.0, 2.0), (12.0, 0.0, 0.0, 2.0), (12.0, 12.0, 0.0, 2.0)])
     f = PathFollower(path, make_table())
     x, y, v, modes, done = _run_unicycle(f, 0.0, 0.0, 0.0)
     assert done
@@ -113,8 +170,8 @@ def test_cusp_stops_then_reverses():
     # Forward to x=10, then back up diagonally to (6, -4). The goal sits
     # 4 m off the forward leg, so DONE (proximity to the FINAL waypoint)
     # cannot trigger while still driving the forward leg.
-    fwd = _densify([(0.0, 0.0, 1.5), (10.0, 0.0, 1.5)])
-    bwd = _densify([(10.0, 0.0, -1.5), (6.0, -4.0, -1.5)])
+    fwd = _densify([(0.0, 0.0, 0.0, 1.5), (10.0, 0.0, 0.0, 1.5)])
+    bwd = _densify([(10.0, 0.0, 0.0, -1.5), (6.0, -4.0, 0.0, -1.5)])
     f = PathFollower(fwd + bwd, make_table())
     x, y, v, modes, done = _run_unicycle(f, 0.0, 0.0, 0.0, max_steps=8000)
     assert "BRAKE_TRANS" in modes, "cusp transition never triggered"
@@ -127,9 +184,9 @@ def test_cusp_straight_line_reverse():
     # The original deliverable's verified scenario: forward east, reverse
     # west along the SAME line (chassis faces east throughout), forward
     # again. Regression for the backward-yaw flip fix.
-    fwd = _densify([(0.0, 0.0, 2.0), (10.0, 0.0, 2.0)])
-    bwd = _densify([(10.0, 0.0, -1.0), (5.0, 0.0, -1.0)])
-    fwd2 = _densify([(5.0, 0.0, 2.0), (15.0, 0.0, 2.0)])
+    fwd = _densify([(0.0, 0.0, 0.0, 2.0), (10.0, 0.0, 0.0, 2.0)])
+    bwd = _densify([(10.0, 0.0, 0.0, -1.0), (5.0, 0.0, 0.0, -1.0)])
+    fwd2 = _densify([(5.0, 0.0, 0.0, 2.0), (15.0, 0.0, 0.0, 2.0)])
     f = PathFollower(fwd + bwd + fwd2, make_table())
     x, y, v, modes, done = _run_unicycle(f, 0.0, 0.0, 0.0, max_steps=12000)
     assert done
@@ -139,7 +196,7 @@ def test_cusp_straight_line_reverse():
 
 
 def test_done_immediately_when_at_goal():
-    path = _densify([(0.0, 0.0, 2.0), (10.0, 0.0, 2.0)])
+    path = _densify([(0.0, 0.0, 0.0, 2.0), (10.0, 0.0, 0.0, 2.0)])
     f = PathFollower(path, make_table())
     thr, steer, brake = f.step((10.0, 0.0), 0.0, 0.0, 0.0, 0.0)
     assert f.last_mode == "DONE"
@@ -147,7 +204,7 @@ def test_done_immediately_when_at_goal():
 
 
 def test_param_overrides_respected():
-    path = _densify([(0.0, 0.0, 2.0), (10.0, 0.0, 2.0)])
+    path = _densify([(0.0, 0.0, 0.0, 2.0), (10.0, 0.0, 0.0, 2.0)])
     f = PathFollower(path, make_table(), lookahead=2.0, arrival_goal=3.0,
                      steer_cap=0.25)
     assert f.lookahead == 2.0

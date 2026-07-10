@@ -72,3 +72,15 @@ def test_susp_offset_clamped():
     # very close hit → large positive offset clamped to +0.19
     off = _susp_visual_offset(torch.tensor([0.05], dtype=torch.float64), 0.4, 0.1)
     assert abs(float(off[0]) - 0.19) < 1e-7
+
+
+def test_susp_offset_negative_distance_is_overcompression_not_air():
+    # v1.1.16 high-cast rays: a NEGATIVE distance means the ground is above
+    # the wheel attachment point (deep over-compression) — a VALID reading.
+    # It must produce the clamped compression offset, NOT the air pose
+    # (-l_susp): the old d <= 1e-6 air test misclassified it.
+    off = _susp_visual_offset(torch.tensor([-0.3], dtype=torch.float64), 0.4, 0.1)
+    assert abs(float(off[0]) - 0.19) < 1e-7      # clamped up, not -l_susp
+    # exact 0.0 (unpopulated sensor) is still air:
+    off0 = _susp_visual_offset(torch.tensor([0.0], dtype=torch.float64), 0.4, 0.1)
+    assert abs(float(off0[0]) - (-0.1)) < 1e-7

@@ -109,12 +109,12 @@ overrides) and runs a single batched compute per kind:
   call with K link indices applies forces to all K base links.
 - **Sensor reads**: K small `sensor.read()` calls in a Python loop
   (one raycaster per vehicle — unavoidable per-vehicle I/O).
-- **Visual writes** (only when `enable_visual_joint_sync=True`): since
+- **Visual writes** (only when `enable_wheel_joint_internal_sync=True`): since
   v1.0.15 the K same-kind writers collapse into **one** solver-level
   `set_dofs_position` over concatenated global dof indices
   (`KindVisualBatch` — one engine reset + FK pass for ALL K entities;
   measured 30 tanks: visual-write cost 12.4 → 3.4 ms/step). The per-entity
-  `VisualJointSync.step()` loop (v0.7.16: one call per entity) remains as
+  `WheelJointInternalSync.step()` loop (v0.7.16: one call per entity) remains as
   the layout-mismatch fallback. For headless / external rendering leave it
   off (closed-form `wheel_visual_transforms`, ~µs).
 

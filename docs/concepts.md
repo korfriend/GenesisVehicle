@@ -39,7 +39,13 @@ batching and perf samples (`road_loop`, `l2l3_minimal`, `perf_*`,
 
 Every simulation step, for every wheel:
 
-1. **Raycast** — distance `d` from the chassis-local wheel point straight down.
+1. **Raycast** — distance `d` from the chassis-local wheel point straight
+   down. (Internally the ray is HIGH-CAST from `RAY_UP_OFFSET` above the
+   point and corrected back, so a chassis that bottoms out past its wheels
+   still measures the ground — `d` can then go **negative** = ground above
+   the attachment point = maximum compression, which is what lets the
+   suspension recover a hard landing instead of locking into a "buried"
+   rest state. See [`physics-contracts.md`](physics-contracts.md#78-high-cast-rays-and-over-compression-v1116).)
 2. **Suspension** — compression `c = max(rest_d - d, 0)`, then a per-wheel
    asymmetric damper produces normal force `N`. See
    [`physics-contracts.md`](physics-contracts.md#72-normal-force-is-non-negative-air-mask-wheels-contribute-nothing)

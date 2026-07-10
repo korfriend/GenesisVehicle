@@ -133,7 +133,7 @@ def main():
         n_envs_per_row=per_row,
         center_envs_at_origin=True,
     )
-    # VisualJointSync is auto-managed by VehicleScene (on when a viewer/camera exists).
+    # Wheel visuals are auto-managed by VehicleScene (on when a viewer/camera exists).
     device = veh.get_pos().device
 
     DT = cfg.recommended_dt

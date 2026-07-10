@@ -34,8 +34,10 @@ flowchart LR
 from genesis_vehicle import PathFollower
 from genesis_vehicle.control import extract_state
 
-# (x, y, z, target_speed): z ignored; speed sign = direction
+# (x, y, z, target_speed[, yaw]): z ignored; speed sign = direction
 # (+forward / -backward); a sign flip = cusp (auto stop-and-reverse).
+# Optional 5th element = desired chassis yaw (rad, world +X = 0, CCW
+# positive); omit or None -> tangential default.
 path = [
     (30.0,   0.0, 0.0, +2.0),
     (10.0,  -8.0, 0.0, +2.0),
@@ -222,7 +224,19 @@ low-speed brake.
 
 - ≥ 2 waypoints; adjacent spacing 0.3–1 m recommended (densify long
   straights — see the demo's `build_path`).
-- Waypoint yaw is derived from the next waypoint; nothing to specify.
+- **Waypoint heading (yaw)**: by default derived from the direction to the
+  next waypoint (+π-flipped on backward waypoints) — nothing to specify.
+  For maneuvers where that default is wrong (typically reversing: "back up
+  while facing THERE"), give an explicit yaw as an optional 5th tuple
+  element — radians, **world +X is ψ = 0, CCW about +Z positive** (the
+  same convention `extract_state` returns) — and it is used VERBATIM as
+  the desired chassis heading (no backward flip; the heading loop, and
+  through it the sweep steer inversion, tracks it). `None` / a 4-tuple
+  falls back to the tangential default; 4- and 5-tuples can be mixed.
+  An explicit yaw on a cusp waypoint also defines the arrival heading for
+  the approach. Keep it drivable: a nonholonomic vehicle only moves along
+  its chassis axis, so yaw far from the travel (or travel+π) direction
+  cannot be tracked.
 - Backward driving = negative `target_speed`; `0` marks an explicit stop
   point and inherits the running direction (does not split a block).
 - DONE = within `arrival_goal` of the FINAL waypoint while driving the
@@ -235,5 +249,10 @@ low-speed brake.
 
 - [`samples/path_follow_demo.py`](../samples/path_follow_demo.py) — bundled
   end-to-end demo (tank + reference sweep + wall detour).
+- [`samples/path_follow_osc_demo.py`](../samples/path_follow_osc_demo.py) —
+  the same controller ON THE CLIENT SIDE of the OSC server wire (state in
+  via TargetBulk with UE-frame decode + window-FD velocity, commands out
+  via `/Genesis/Vehicle/Control`) — the reference for putting trajectory
+  following into a game client.
 - [`backends.md`](backends.md) — why `--gpu` for the measurement.
 - [`api-reference.md`](api-reference.md) §11 — `control` API surface.

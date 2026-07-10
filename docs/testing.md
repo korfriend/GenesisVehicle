@@ -43,7 +43,7 @@ python -m genesis_vehicle.tests._check_import
 
 Imports every symbol from the top-level package and prints the version +
 the lazy-import names. Confirms that the eager surface loads without Genesis
-and that the lazy names (`VehiclePhysics`, `VisualJointSync`, `WheelRayPattern`,
+and that the lazy names (`VehiclePhysics`, `WheelRayPattern`,
 ...) are properly registered.
 
 ## Module map

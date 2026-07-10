@@ -357,7 +357,7 @@ class Vehicle:
 
     def wheel_visual_transforms(self, frame: str = "world"):
         """Closed-form per-wheel visual poses ``(pos, quat)`` — ``(n_envs, n_wheels,
-        3)`` / ``(…, 4)``. VisualJointSync-independent (works headless)."""
+        3)`` / ``(…, 4)``. WheelJointInternalSync-independent (works headless)."""
         if self.physics is not None:
             return self.physics.wheel_visual_transforms(frame)
         return self._scene._mvp.wheel_visual_transforms(frame)[self._slot]
@@ -419,6 +419,7 @@ class VehicleScene:
         view: Optional[str] = None,
         show_viewer: bool = False,
         solver: str = "batched",
+        wheel_render_mode: str = "auto",
         init_genesis: bool = True,
     ) -> None:
         # Back-compat aliases for the pre-rename names.
@@ -459,6 +460,18 @@ class VehicleScene:
         if solver not in ("per_vehicle", "batched"):
             raise ValueError(f"solver must be 'per_vehicle' or 'batched', got {solver!r}")
         self.solver = solver
+        # How wheel visuals reach the Genesis renderer when the scene renders:
+        #   "auto"       — instanced solver-free rendering when supported
+        #                  (n_envs == 1, wheel meshes harvestable), else
+        #                  WheelJointInternalSync (the pre-1.1.17 mechanism)
+        #   "instanced"  — force the instanced path (raises when unsupported)
+        #   "internal_sync" — force WheelJointInternalSync
+        # Headless runs render nothing either way (both stay off).
+        if wheel_render_mode not in ("auto", "instanced", "internal_sync"):
+            raise ValueError("wheel_render_mode must be 'auto', 'instanced', "
+                             f"or 'internal_sync', got {wheel_render_mode!r}")
+        self.wheel_render_mode = wheel_render_mode
+        self._wheel_renderer = None      # InstancedWheelRenderer when active
         self._mvp = None        # MultiVehiclePhysics, in batched mode
         # Kind grouping is lazy + dirty-tracked: add_vehicle / mark_config_dirty
         # bump _config_version; _ensure_grouped re-groups only when it differs from
@@ -661,7 +674,8 @@ class VehicleScene:
         it with ``cam.set_pose(...)``. Works in every ``view`` mode (it is how the
         ``"cv2"`` mode renders, and you can also add cameras alongside ``"native"``).
         The caller never touches the underlying scene. Adding any camera also
-        auto-enables the wheels' VisualJointSync at build, so rendered wheels
+        auto-enables wheel visuals at build (v1.1.17: the solver-free
+        instanced renderer; legacy joint-sync only as fallback), so rendered wheels
         animate."""
         self._require_not_built()
         cam = self._main_scene.add_camera(res=res, pos=pos, lookat=lookat, up=up,
@@ -867,6 +881,52 @@ class VehicleScene:
             _kw["n_envs_per_row"] = n_envs_per_row
         if center_envs_at_origin is not None:
             _kw["center_envs_at_origin"] = center_envs_at_origin
+        # ---- wheel visual mode decision (v1.1.17) — BEFORE the main build:
+        # the instanced path hides the URDF wheel vgeoms (renderer skips
+        # geoms with an empty active_envs_idx), which must be set before the
+        # visualizer creates its nodes at build.
+        renders_pre = self.show_viewer or bool(self._cameras)
+        self._use_instanced_wheels = False
+        self._instanced_wheel_meshes = {}       # vehicle -> per-wheel trimeshes
+        if renders_pre and self._vehicles and self.wheel_render_mode in ("auto", "instanced"):
+            if self.n_envs != 1:
+                if self.wheel_render_mode == "instanced":
+                    raise ValueError(
+                        "wheel_render_mode='instanced' supports n_envs == 1 only "
+                        "(multi-env wheel visuals still use WheelJointInternalSync)")
+            else:
+                from .visual import InstancedWheelRenderer
+                harvested = {}
+                for veh in self._vehicles:
+                    meshes = InstancedWheelRenderer.harvest_wheel_meshes(
+                        veh.entity_main, veh.cfg.wheels)
+                    if meshes is None:
+                        harvested = None
+                        break
+                    harvested[veh] = meshes
+                if harvested is not None:
+                    self._use_instanced_wheels = True
+                    self._instanced_wheel_meshes = harvested
+                elif self.wheel_render_mode == "instanced":
+                    raise ValueError(
+                        "wheel_render_mode='instanced': could not harvest wheel "
+                        "visual meshes from the URDF wheel links")
+                else:
+                    _logger.warning(
+                        "wheel_render_mode='auto': wheel visual meshes not "
+                        "harvestable — falling back to WheelJointInternalSync.")
+        if self._use_instanced_wheels:
+            import numpy as _np
+            none_active = _np.array([], dtype=_np.int64)
+            for veh in self._vehicles:
+                for w in veh.cfg.wheels:
+                    try:
+                        link = veh.entity_main.get_link(w.name)
+                    except Exception:
+                        continue
+                    for vg in getattr(link, "vgeoms", None) or []:
+                        vg.active_envs_idx = none_active   # renderer skips it
+
         if self._dual_scene:
             self._raycast_scene.build(n_envs=self.n_envs, **_kw)
             # Populate the raycast sensors once so the static BVH is built and
@@ -878,7 +938,7 @@ class VehicleScene:
             self._raycast_scene.step(update_visualizer=False)
         self._main_scene.build(n_envs=self.n_envs, **_kw)   # viewer (if any) starts LAST
 
-        # VisualJointSync drives the URDF wheel VISUAL joints through the engine
+        # WheelJointInternalSync drives the URDF wheel VISUAL joints through the engine
         # each step so GENESIS's own renderer shows wheels spinning/steering. It is
         # useful ONLY when the main scene is actually rendered by Genesis — a native
         # viewer or a Genesis camera — so VehicleScene auto-manages it here (it is
@@ -892,6 +952,10 @@ class VehicleScene:
             _logger.warning(
                 "Rendering is enabled (viewer/camera) but no GPU was detected — "
                 "Genesis falls back to software (CPU) rendering, which is slow.")
+        # Instanced wheel rendering replaces WheelJointInternalSync (v1.1.17): keep
+        # the joint-sync path OFF so wheel visuals cannot touch the solver.
+        if self._use_instanced_wheels:
+            renders = False        # only gates enable_wheel_joint_internal_sync below
         if self.solver == "batched":
             # Group same-kind vehicles (lazy/dirty) and give each kind one shared
             # cfg so MultiVehiclePhysics batches them. dual_scene → step() injects
@@ -900,15 +964,35 @@ class VehicleScene:
             if self._vehicles:
                 self._ensure_grouped()
                 for veh in self._vehicles:
-                    veh._group_cfg.enable_visual_joint_sync = renders
+                    veh._group_cfg.enable_wheel_joint_internal_sync = renders
                 self._build_mvp()
             # veh.physics stays None in batched mode; the shared solver is vs.physics.
         else:
             for veh in self._vehicles:
-                veh.cfg.enable_visual_joint_sync = renders   # auto-managed (see above)
+                veh.cfg.enable_wheel_joint_internal_sync = renders   # auto-managed (see above)
                 sensor = None if self._dual_scene else veh.sensor
                 veh.physics = VehiclePhysics(
                     self._main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
+
+        # Wire the instanced wheel renderer now that physics exists: one unit
+        # per KIND in batched mode (ONE closed-form call per kind per step —
+        # per-vehicle calls would recompute the whole kind, O(K^2)), one per
+        # vehicle in per_vehicle mode.
+        if self._use_instanced_wheels:
+            from .visual import InstancedWheelRenderer
+            r = InstancedWheelRenderer(self._main_scene)
+            if self.solver == "batched" and self._mvp is not None:
+                veh_by_entity = {id(v.entity_main): v for v in self._vehicles}
+                for kind in self._mvp.kinds:
+                    veh0 = veh_by_entity[id(kind.entities[0])]
+                    r.add_unit(self._instanced_wheel_meshes[veh0],
+                               kind.wheel_visual_transforms, K=kind.K)
+            else:
+                for veh in self._vehicles:
+                    r.add_unit(self._instanced_wheel_meshes[veh],
+                               veh.physics.wheel_visual_transforms, K=1)
+            self._wheel_renderer = r
+            self._instanced_wheel_meshes = {}     # handed over; free the refs
 
         # Apply any per-obstacle mass overrides now that entities are built.
         for entity, mass in self._pending_mass:
@@ -1023,6 +1107,10 @@ class VehicleScene:
             for veh in self._vehicles:
                 veh.physics.step(veh._inputs, distances=dists[veh])
         self._main_scene.step()
+        if self._wheel_renderer is not None:
+            # Solver-free wheel visuals: stream the closed-form wheel poses
+            # into the instanced render nodes (renderer-only; v1.1.17).
+            self._wheel_renderer.update()
 
     def reset(self) -> None:
         """Reset per-vehicle physics state and re-sync proxies. (Full scene
@@ -1067,6 +1155,16 @@ class VehicleScene:
             n_envs=self.n_envs)
 
     # ---- accessors ----
+    @property
+    def scene(self):
+        """The underlying main ``gs.Scene`` — the escape hatch for Genesis
+        APIs the wrapper does not re-export (e.g. ``draw_debug_line`` /
+        ``draw_debug_spheres`` overlays after ``build()``). Read-only
+        access; entity registration should still go through the
+        ``add_*`` methods so bodies participate in wheel-raycast/proxy
+        bookkeeping."""
+        return self._main_scene
+
     @property
     def vehicles(self) -> list:
         return list(self._vehicles)

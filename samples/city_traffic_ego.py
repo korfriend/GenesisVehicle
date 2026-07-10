@@ -239,7 +239,7 @@ def main():
     cfg_ego     = EGO_KIND[2](ego_urdf, stability="control")
     cfg_traffic = [tk[2](traffic_urdfs[i], stability="control")
                    for i, tk in enumerate(TRAFFIC_KINDS)]
-    # VisualJointSync is auto-managed by VehicleScene (on when a viewer/camera exists).
+    # Wheel visuals are auto-managed by VehicleScene (on when a viewer/camera exists).
 
     vehicles = []                # list[Vehicle]
     target_lanes = []            # parallel list: target Y per vehicle for lane-keeping

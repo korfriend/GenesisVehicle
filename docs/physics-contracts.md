@@ -89,7 +89,7 @@ from above = right turn — matches `+steer`. Using `(0, 0, 1)` instead makes
 +joint_angle = CCW = left turn, which is **opposite-handed** to the SDK's
 user-facing convention.
 
-`VisualJointSync` does compensate either way (`visual_cmd = -phys * sign`), so
+`WheelJointInternalSync` does compensate either way (`visual_cmd = -phys * sign`), so
 existing URDFs with `(0, 0, 1)` still render correctly. The recommendation
 is only for NEW URDFs: declaring `(0, 0, -1)` keeps URDF joint values and
 user-facing steer values in the same sign domain, which makes URDF-side
@@ -98,7 +98,7 @@ inspection / debugging less surprising.
 Examples in this repo:
 - `HJW/urdf/car_raywheel.urdf` — `(0, 0, -1)` ✓ (matches recommendation)
 - `GeneVehicle_Truck6w/urdf/truck_6w.urdf` — `(0, 0, -1)` ✓ (fixed in v0.5.4)
-- `JMK/URDF/test_v1_raywheel.urdf` — `(0, 0, 1)` (external author; SDK handles via VisualJointSync sign flip)
+- `JMK/URDF/test_v1_raywheel.urdf` — `(0, 0, 1)` (external author; SDK handles via WheelJointInternalSync sign flip)
 
 ## 7.5 Coupling order
 
@@ -141,3 +141,42 @@ driven-wheel launch slip — untouched (`quickstart` launch is preserved). The
 chassis force, so a custom `TireModel` or parameter-fit sees a force that may
 be reduced from its raw output near rolling. Implementation: inline in
 `core.py` step (D); cf. `brake_torque_signed` (§7.1).
+
+## 7.8 High-cast rays and over-compression (v1.1.16)
+
+Wheel rays start `RAY_UP_OFFSET` (default 1.0 m) ABOVE the wheel
+attachment point and the read layer (`read_distances`) subtracts the
+offset from hits, so every consumer still sees attachment-relative
+distances. Contract points:
+
+- A ray MISS keeps its sentinel value (>= 19.9); the offset is NOT
+  subtracted from misses.
+- A hit may therefore report a **negative** distance: the ground is above
+  the attachment point (the chassis has sunk past its wheels). That is a
+  VALID reading — compression maxes out and `N` pushes the vehicle back
+  up. Do not "sanitize" negative distances back to air.
+- Why: with origins AT the attachment points, a hard landing could sink
+  the origins below the ground; the rays then missed, the air mask killed
+  `N`, and the vehicle rested on its chassis collision box forever (a
+  stable buried equilibrium — the v1.1.16 field report).
+- Vehicles are never raycast targets (`use_visual_raycasting` defaults
+  to False), so the elevated origin cannot self-hit in either raycast
+  mode. Keep overhead raycast terrain (tunnel ceilings) more than
+  `RAY_UP_OFFSET` above the wheel attachment points.
+
+Related: `WheelJointInternalSync` is intended to be cosmetic but is not
+perfectly physics-neutral (the control path's PD applies real joint
+forces; the set path teleports wheel mass). Its suspension targets are
+stroke-clamped and slew-rate-limited (`_SUSP_VIS_MAX_RATE`), bounding
+the measured disturbance to < 1 cm extra compression on hard landings
+(was 2-3 cm unclamped — enough to flip a marginal landing into the
+buried state before the high-cast fix removed that failure mode).
+
+Since v1.1.17 `VehicleScene` no longer uses VJS by default: rendered
+scenes with `n_envs == 1` draw wheels via `InstancedWheelRenderer` —
+closed-form poses streamed into instanced render nodes (Genesis's
+external render-node channel — the debug-draw machinery — NOT the rigid
+solver), verified physics-identical to headless to 1e-6 m at a slight
+pose-streaming cost (~2–3 ms/step at 30 vehicles, CPU)
+(`wheel_render_mode="internal_sync"` restores the old behavior; multi-env
+and raw-`VehiclePhysics` use still fall back to VJS).

@@ -382,6 +382,12 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
         if hasattr(cfg.drivetrain, 't_brake_max'):
             cfg.drivetrain.t_brake_max = b_val
             print(f" [Genesis] Override maxBrake = {b_val} Nm on preset drivetrain.")
+    # Override the drive wheel-omega cap (top-speed limiter) if specified
+    if 'omegaMaxDrive' in mapping or 'OmegaMaxDrive' in mapping:
+        o_val = float(mapping.get('omegaMaxDrive', mapping.get('OmegaMaxDrive', 100.0)))
+        if hasattr(cfg.drivetrain, 'omega_max_drive'):
+            cfg.drivetrain.omega_max_drive = o_val
+            print(f" [Genesis] Override omegaMaxDrive = {o_val} rad/s on preset drivetrain.")
 
     # Resolve wheel friction coefficients from URDF, falling back to chassis material friction (t_fric) or defaults
     for w in cfg.wheels:
@@ -418,7 +424,9 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
                         if val > 0: w.mass = val
                     if 'inertia' in override or 'Inertia' in override:
                         val = float(override.get('inertia', override.get('Inertia', -1.0)))
-                        if val > 0: w.inertia = val
+                        # WheelConfig's spin-inertia field is `i_wheel` —
+                        # `w.inertia` was a dead attribute (silent no-op).
+                        if val > 0: w.i_wheel = val
 
                     # Suspension properties
                     if 'stiffness' in override or 'Stiffness' in override:
@@ -496,7 +504,7 @@ def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
     (L2 path — one entity per vehicle (per-entity). proxy/sensor/VehiclePhysics
     are created in vs.build(), so the caller fills controllers after build.)
 
-    VisualJointSync (driving the visual wheel joints) is auto-managed by
+    WheelJointInternalSync (driving the visual wheel joints) is auto-managed by
     VehicleScene.build() — ON only when the main scene is rendered by Genesis
     (show_viewer). The server is drawn by an external renderer (UE) and
     captures via wheel_visual_transforms (closed-form), so it stays OFF when
@@ -512,7 +520,7 @@ def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
     t_color = (1.0, 0.3, 0.3, 0.5)   # debug color (semi-transparent red)
 
     # Build the vehicle config (single source shared with the L3 path).
-    # enable_visual_joint_sync is set automatically by vs.build() based on
+    # enable_wheel_joint_internal_sync is set automatically by vs.build() based on
     # rendering, so it is not touched here.
     cfg = build_cfg(urdf_path, mapping, t_fric, target_id=target_id)
 
