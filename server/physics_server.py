@@ -601,6 +601,22 @@ def main():
     print(f" [DEBUG] Total rigid geoms after build: {vs.rigid_solver.n_geoms}")
     print(f" [DEBUG] Total rigid links after build: {vs.rigid_solver.n_links}")
 
+    # Viewer: frame the fleet instead of Genesis's default near-origin camera
+    # (which typically spawns INSIDE a vehicle). Bird's-eye at the spawn
+    # centroid; the user can still orbit freely afterwards. (v1.1.20)
+    if vs.viewer is not None and vehicles:
+        try:
+            import numpy as _np
+            centers = _np.stack([v.get_pos()[0].cpu().numpy()
+                                 for v in vehicles.values()])
+            c = centers.mean(axis=0)
+            span = max(10.0, float(_np.ptp(centers[:, :2]).max()) * 1.2)
+            vs.viewer.set_camera_pose(
+                pos=_np.array([c[0], c[1] - span - 10.0, 0.6 * span + 8.0]),
+                lookat=_np.array([c[0], c[1], 0.0]))
+        except Exception as e:
+            print(f" [Genesis] viewer camera framing skipped: {e}")
+
     # Populate the controllers dict the OSC / state-capture code reads with the
     # Vehicle HANDLES (solver-agnostic — veh.wheel_visual_transforms / veh.resolved
     # work in both per_vehicle and batched modes), and print the resolved table.
@@ -749,6 +765,39 @@ def main():
 
             steps_to_run = 0
             recv = osc.get_received_data() or {}
+
+        # Client-sent debug overlays (/Genesis/Debug/Polyline|Spheres) — draw
+        # once, then reframe the viewer to cover them: the overlay usually IS
+        # the course, and spawn-only framing sits too close. v1.1.20.
+        _overlay_pts = []
+        for pl in osc.pop_debug_polylines():
+            try:
+                pts = pl['points']
+                for a, b in zip(pts[:-1], pts[1:]):
+                    vs.scene.draw_debug_line(a, b, radius=pl['radius'],
+                                             color=pl['color'])
+                _overlay_pts += pts
+                print(f" [Genesis] Debug polyline drawn ({len(pts)} points)")
+            except Exception as e:
+                print(f" [Genesis] Debug polyline draw failed: {e}")
+        for sp in osc.pop_debug_spheres():
+            try:
+                vs.scene.draw_debug_spheres(sp['points'], radius=sp['radius'],
+                                            color=sp['color'])
+                _overlay_pts += sp['points']
+                print(f" [Genesis] Debug spheres drawn ({len(sp['points'])})")
+            except Exception as e:
+                print(f" [Genesis] Debug spheres draw failed: {e}")
+        if _overlay_pts and vs.viewer is not None:
+            try:
+                _p = np.asarray(_overlay_pts, dtype=np.float32)
+                c = _p.mean(axis=0)
+                span = max(10.0, float(np.ptp(_p[:, 0])), float(np.ptp(_p[:, 1])))
+                vs.viewer.set_camera_pose(
+                    pos=np.array([c[0], c[1] - 0.5 * span - 5.0, span + 10.0]),
+                    lookat=np.array([c[0], c[1], 0.0]))
+            except Exception as e:
+                print(f" [Genesis] viewer reframe skipped: {e}")
 
         if recv:
             cmd = recv.get('command')
@@ -1008,9 +1057,12 @@ def main():
             alpha = accumulator / SIM_DT
             alpha = float(np.clip(alpha, 0.0, 0.9999))
             interpolated = lerp_state(prev_state, curr_state, alpha)
-            
-            # Bulk-send the final interpolated state
+
+            # Bulk-send the final interpolated state (sim-time stamp first —
+            # prev_state is at step_count-1, curr at step_count; the lerp sits
+            # alpha of the way between them). v1.1.20.
             if interpolated['targets']:
+                osc.send_sim_time((step_count - 1 + alpha) * SIM_DT)
                 osc.send_target_states_bulk(interpolated['targets'])
             if interpolated['dynamic_obstacles']:
                 osc.send_dynamic_states_bulk(interpolated['dynamic_obstacles'])
@@ -1020,6 +1072,7 @@ def main():
                 target_states_to_send = []
                 for tid, target_data in curr_state['targets'].items():
                     target_states_to_send.append((tid, target_data[0], target_data[1], target_data[2]))
+                osc.send_sim_time(step_count * SIM_DT)
                 osc.send_target_states_bulk(target_states_to_send)
                 
             if dynamic_obstacles:

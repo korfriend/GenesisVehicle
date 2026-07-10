@@ -10,6 +10,88 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.20] — 2026-07-10
+
+### Fixed — native-viewer wheel streaming; server viewer framing; client path overlay
+
+| abbr | meaning |
+|---|---|
+| node-swap | replacing the render mesh node per update (both render paths re-diff it) |
+| in-place | writing primitive poses on the existing node (camera/jit path streams it) |
+
+Field report on ``path_follow_osc_demo --viewer``: wheels frozen at spawn,
+camera inside the vehicle, path invisible. All three fixed:
+
+- **Wheels frozen in the NATIVE viewer (all rendered-vehicle scenes, not
+  just the OSC demo)**: Genesis's classic viewer renderer uploads a
+  primitive's instance-pose buffer only ONCE when the mesh enters the GL
+  context — in-place ``primitive.poses`` writes are never re-uploaded
+  there (the camera/jit path rebuilds per render, which is why mp4
+  recordings streamed fine and masked this). Final fix:
+  ``InstancedWheelRenderer.update`` now streams poses through the
+  engine's OWN per-frame instance-buffer queue
+  (``context.jit.update_buffer`` — the same mechanism Genesis uses for
+  link-frame instance poses, flushed by the render thread on its next
+  pass), identical for the native viewer and offscreen cameras: no node
+  churn, plain opaque depth-tested nodes. Two interim approaches were
+  tried and REJECTED during viewer testing: node-recreation per step
+  (shadow-state churn → brightness flicker) and marker nodes (markers
+  render with overlay semantics — no depth write — so wheels looked
+  translucent with wheels-behind-wheels showing through; the user's
+  "depth-test flicker" diagnosis). Verified in the viewer run end-to-end
+  (PASS, and faster than the node-swap interim: 32.7 s vs 35.7 s wall);
+  physics stays bit-identical. Samples using cv2-HUD ``--viewer``
+  (camera-based) were never affected; every ``show_viewer``/native path
+  was. Cost re-measured after buf-id caching: rendering-on adds
+  +2.7 ms/step at 30 tanks over headless (18.1 -> 20.8; the retired
+  joint-sync mechanism added +4.2) and ~0.1 ms at demo scale.
+- **Server viewer camera spawned inside the vehicle**: both server modes
+  now frame the fleet after build — bird's-eye at the spawn centroid,
+  span-scaled (``viewer.set_camera_pose``); orbit freely afterwards.
+- **Client path invisible in the server viewer**: new debug-overlay wire
+  message ``/Genesis/Debug/Polyline`` —
+  ``[r, g, b, a, radius, x0, y0, z0, x1, y1, z1, ...]`` in Genesis
+  metres; the server draws consecutive-point segments once built (both
+  modes; any number of messages). ``path_follow_osc_demo`` sends its
+  planned path (forward cyan) right after init.
+- ``VehicleScene.build`` now logs which wheel-visual path was chosen
+  (``instanced renderer`` / ``internal_sync fallback``) — the silence
+  made this diagnosis slower than it should have been.
+- Viewer-feedback follow-ups (same day): node-swap is now
+  DOUBLE-BUFFERED (add the new node under an alternating name, THEN
+  remove the old one — a frame landing between the two mutations
+  briefly renders both copies at identical poses instead of neither,
+  killing the wheel flicker); new `/Genesis/Debug/Spheres` wire
+  message (same format as Polyline, one sphere per point) so the
+  trajectory client can show waypoint/goal markers; and the server
+  viewer REFRAMES to cover the received overlays (the overlay usually
+  IS the course — spawn-only framing sat too close), with a more
+  top-down elevation. `path_follow_osc_demo` sends waypoint
+  spheres (every 3rd, cyan) and a red goal marker after init.
+- **Slow-motion control bug (exposed by the full viewer run)**: with
+  the viewer on, the server can run slower than real time; the
+  client's velocity estimate was WALL-clock-based, so it under-read
+  speed, the KICK over-throttled, and the vehicle overshot the course
+  in sim terms (FAIL err 157 m). Fix: new additive wire message
+  `/Genesis/State/SimTime [t]` — both server modes stamp each
+  TargetBulk with its SIMULATION time (interpolation-fractional:
+  `(step_count - 1 + alpha) * dt`), and the demo client
+  finite-differences in that time base (wall-clock fallback when the
+  server predates the stamp). Control is now immune to slow motion
+  and to interpolated/duplicate sends.
+- Server viewer camera calls were failing SILENTLY (framing looked
+  unchanged): ``viewer.set_camera_pose`` rejects tuples (ndarray
+  required), and numpy 2.0 removed the ``ndarray.ptp()`` method — both
+  the spawn framing and the overlay reframe hit these and were skipped.
+  Fixed (ndarray args, ``np.ptp()``); the viewer now jumps to a
+  course-wide top-down overview as soon as the path overlay arrives.
+  Demo overlay colors made fully opaque (translucent overlays under the
+  vehicle join the depth-sorted blend pass and can shimmer).
+- Verified: OSC demo headless PASS (err 1.47 m) with polyline + both
+  sphere batches acknowledged by the server; 151 tests pass.
+
+---
+
 ## [1.1.19] — 2026-07-10
 
 ### Changed — renamed: `VisualJointSync` → `WheelJointInternalSync` (+ related parameters)

@@ -329,6 +329,20 @@ def run_l3(args):
 
     vehicle_builder.print_resolved_table("L3-shared", veh.resolved)
 
+    # Viewer: frame the fleet spawn area (Genesis's default camera sits near
+    # the origin — typically inside a vehicle). v1.1.20.
+    if vs.viewer is not None and target_dict:
+        try:
+            _c = np.array([target_dict[t].get('pos', [0, 0, 2])
+                           for t in tids], dtype=np.float32)
+            c = _c.mean(axis=0)
+            span = max(10.0, float(np.ptp(_c[:, :2]).max()) * 1.2)
+            vs.viewer.set_camera_pose(
+                pos=np.array([c[0], c[1] - span - 10.0, 0.6 * span + 8.0]),
+                lookat=np.array([c[0], c[1], 0.0]))
+        except Exception as e:
+            print(f" [Genesis] viewer camera framing skipped: {e}")
+
     # Per-env initial poses
     init_pos = np.array([target_dict[tid].get('pos', [0, 0, 2]) for tid in tids], dtype=np.float32)
     init_quat = np.array([target_dict[tid].get('quat', [1, 0, 0, 0]) for tid in tids], dtype=np.float32)
@@ -458,6 +472,38 @@ def run_l3(args):
             continue
 
         recv = osc.get_received_data() or {}
+
+        # Client-sent debug overlays — draw once, then reframe the viewer to
+        # cover them (the overlay usually IS the course). v1.1.20.
+        _overlay_pts = []
+        for pl in osc.pop_debug_polylines():
+            try:
+                pts = pl['points']
+                for a, b in zip(pts[:-1], pts[1:]):
+                    vs.scene.draw_debug_line(a, b, radius=pl['radius'],
+                                             color=pl['color'])
+                _overlay_pts += pts
+                print(f" [Genesis] [L3] Debug polyline drawn ({len(pts)} points)")
+            except Exception as e:
+                print(f" [Genesis] [L3] Debug polyline draw failed: {e}")
+        for sp in osc.pop_debug_spheres():
+            try:
+                vs.scene.draw_debug_spheres(sp['points'], radius=sp['radius'],
+                                            color=sp['color'])
+                _overlay_pts += sp['points']
+                print(f" [Genesis] [L3] Debug spheres drawn ({len(sp['points'])})")
+            except Exception as e:
+                print(f" [Genesis] [L3] Debug spheres draw failed: {e}")
+        if _overlay_pts and vs.viewer is not None:
+            try:
+                _p = np.asarray(_overlay_pts, dtype=np.float32)
+                c = _p.mean(axis=0)
+                span = max(10.0, float(np.ptp(_p[:, 0])), float(np.ptp(_p[:, 1])))
+                vs.viewer.set_camera_pose(
+                    pos=np.array([c[0], c[1] - 0.5 * span - 5.0, span + 10.0]),
+                    lookat=np.array([c[0], c[1], 0.0]))
+            except Exception as e:
+                print(f" [Genesis] [L3] viewer reframe skipped: {e}")
 
         if recv:
             cmd = recv.get('command')
@@ -630,6 +676,8 @@ def run_l3(args):
         alpha = float(np.clip(accumulator / SIM_DT, 0.0, 0.9999))
         interpolated = lerp_state(prev_state, curr_state, alpha)
         if interpolated['targets']:
+            # Sim-time stamp first (see osc_manager.send_sim_time). v1.1.20.
+            osc.send_sim_time((step_count - 1 + alpha) * SIM_DT)
             osc.send_target_states_bulk(interpolated['targets'])
         if interpolated['dynamic_obstacles']:
             osc.send_dynamic_states_bulk(interpolated['dynamic_obstacles'])
