@@ -60,7 +60,7 @@ from .core import (
 from ._pipeline import compute_wheel_step
 from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import read_distances
-from .visual import VisualJointSync
+from .visual import WheelJointInternalSync
 
 
 def _quat_rotate(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
@@ -142,16 +142,16 @@ class MultiVehicleKindPhysics:
             base_idx_list, dtype=torch.long, device=self.dev,
         )
 
-        # Replace the proto's VisualJointSync with K per-entity VisualJointSync objects,
+        # Replace the proto's WheelJointInternalSync with K per-entity WheelJointInternalSync objects,
         # each one bound to its own entity and built for the actual Genesis
         # n_envs. Compute output gets sliced (N, n_wheels) per entity for
         # each visual.step(). (See the [VISUAL] block at the bottom of step().)
         self._proto.visual = None
-        self.visuals: list[VisualJointSync] = []
+        self.visuals: list[WheelJointInternalSync] = []
         self._visual_batch = None
-        if self._proto.resolved.enable_visual_joint_sync:
+        if self._proto.resolved.enable_wheel_joint_internal_sync:
             for ent in entities:
-                self.visuals.append(VisualJointSync(
+                self.visuals.append(WheelJointInternalSync(
                     entity=ent, resolved=self._proto.resolved,
                     n_envs=n_envs, device=self.dev, dtype=self.fdt,
                 ))
@@ -181,6 +181,16 @@ class MultiVehicleKindPhysics:
 
     def reset(self, vehicle_ids=None) -> None:
         self._proto.reset(vehicle_ids)
+        # proto.visual is None in kind mode — clear the per-vehicle visual
+        # syncs (and the batched writer) explicitly: spin accumulators AND
+        # the v1.1.16 susp slew state (a stale slew origin would inject a
+        # transient PD force on the first post-reset steps).
+        for vis in getattr(self, "visuals", None) or []:
+            if vis is not None:
+                vis.reset_visual_state()
+        vb = getattr(self, "_visual_batch", None)
+        if vb is not None:
+            vb.reset_visual_state()
 
     # ------------------------------------------------------------------
     # Batched I/O — replaces the per-entity reads/writes in VehiclePhysics.step
@@ -363,7 +373,7 @@ class MultiVehicleKindPhysics:
         p._prev_init = True
         p._stepped_once = True
 
-        # [VISUAL] — K same-kind VisualJointSync writers. Since v1.0.15 they are
+        # [VISUAL] — K same-kind WheelJointInternalSync writers. Since v1.0.15 they are
         # batched into ONE solver-level set_dofs_position across all K entities
         # (KindVisualBatch — identical layouts by construction, so the K
         # per-entity calls, each triggering its own solver reset + FK pass,
@@ -398,7 +408,7 @@ class MultiVehicleKindPhysics:
         the multi-vehicle analogue of ``VehiclePhysics.wheel_visual_transforms``.
 
         Returns ``(pos, quat)`` shaped ``(n_envs, K, n_wheels, 3)`` and
-        ``(n_envs, K, n_wheels, 4)`` (env-major). VisualJointSync-independent;
+        ``(n_envs, K, n_wheels, 4)`` (env-major). WheelJointInternalSync-independent;
         steer + suspension + spin baked in (spin honors ``visual_spin_enabled``).
         ``frame="local"`` is relative to each vehicle's chassis, ``"world"``
         absolute."""
@@ -710,7 +720,7 @@ class MultiVehiclePhysics:
         """Closed-form wheel visual poses for every vehicle, in the caller's flat
         order. Returns a list (length ``n_vehicles``) of ``(pos, quat)`` tuples,
         each ``(n_envs, n_wheels, 3)`` / ``(n_envs, n_wheels, 4)``. Per-vehicle
-        because kinds may differ in wheel count. VisualJointSync-independent."""
+        because kinds may differ in wheel count. WheelJointInternalSync-independent."""
         kind_out = [k.wheel_visual_transforms(frame) for k in self.kinds]   # (N,K,n,·)
         out = [None] * self.n_vehicles
         for flat_i, kind_idx, slot_idx in self._flat_to_kind:

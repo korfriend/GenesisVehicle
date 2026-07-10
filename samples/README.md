@@ -20,7 +20,9 @@ umbrella-level helpers.
 | 10 | [`l2l3_minimal.py`](l2l3_minimal.py) | **Shortest L2 × L3 program (~90 lines).** K interacting vehicles share one world (collide — L2) × N parallel scenarios (L3), advanced by one `MultiVehiclePhysics(scene, vehicles, n_envs=N)`. Demonstrates per-(scenario, vehicle) control: the lead car brakes in scenario 0 only and diverges from the rolling copies. The clean reference for "how do I use L2 × L3" before reading the full `city_traffic_ego` demo. `--k`, `--n_envs`, `--cpu`. | ✗ headless |
 | 11 | [`dual_scene_terrain.py`](dual_scene_terrain.py) | **`VehicleScene` unified API + wheel-raycast dual/single scene modes.** Drives a car over a heightfield terrain with the high-level `VehicleScene` (no manual `gs.init`/`build`/`step`). `--compare` times `dual_scene` (default; terrain raycast in a separate static-BVH scene) vs `single_scene` (classic one scene); `--n-envs N` shows the dual_scene win growing with L3 batch size (the static BVH is shared across envs). `--horizontal-scale`, `--cpu`. | ✗ headless |
 | 12 | [`obstacles_and_ramp.py`](obstacles_and_ramp.py) | **The encapsulated obstacle API + parameter-behavior matrix.** Builds a course entirely with `VehicleScene` — `add_ground_plane`, `add_static` (a wheel-raycast platform/block, with the `collision_morph`/`wheel_raycast_morph` split), and `add_dynamic` (a collide-only box the car pushes; a `wheel_raycast=True` ramp the wheels sense). Prints the body registry (each body's main/raycast entities — `docs/api-reference.md` §0.2 made concrete), then drives through and reports. `--mode single_scene`, `--cpu`. | ✗ headless |
-| 13 | [`path_follow_demo.py`](path_follow_demo.py) | **Closed-loop path following (`genesis_vehicle.control`).** The bundled 10-wheel tank follows a waypoint path around a central wall: `PathFollower` inverts the bundled reference sweep table (`data/tank_sweep_signed.csv`) each step into (throttle, steer, brake). PASS = final position within 3 m of the goal. The end-to-end reference for [`docs/path-following.md`](../docs/path-following.md). | ✓ `--viewer` |
+| 13 | [`path_follow_demo.py`](path_follow_demo.py) | **Closed-loop path following (`genesis_vehicle.control`).** The bundled 10-wheel tank follows a waypoint path around a central wall: `PathFollower` inverts the bundled reference sweep table (`data/tank_sweep_signed.csv`) each step into (throttle, steer, brake). PASS = final position within 3 m of the goal. The end-to-end reference for [`docs/path-following.md`](../docs/path-following.md). `--mp4 [PATH]` records the run headless (bird's-eye camera + HUD; needs opencv-python). | ✓ `--viewer` / `--mp4` |
+| 14 | [`path_follow_osc_demo.py`](path_follow_osc_demo.py) | **Trajectory following THROUGH the OSC server** — the physics runs in a separate `genesis_vehicle.server` process (as for UE/Unity) and this script plays the game-client role: TargetBulk state in (UE wire frame → Genesis, window-FD velocity), `PathFollower` on the client side, `(steer, throttle, brake)` back over `/Genesis/Vehicle/Control`. Server-side tuning is matched to the bundled sweep table via the `Vehicle/Init` json (`omegaMaxDrive`, `maxBrake`, `wheelOverrides`). PASS = final position within 3 m of the goal. `--viewer` opens the SERVER's Genesis viewer; closing that window ends the server and the client shuts down with it. | ✓ `--viewer` (server-side) |
+| 15 | [`path_follow_reverse_demo.py`](path_follow_reverse_demo.py) | **Reverse maneuver with explicit waypoint yaw (v1.1.14 5-tuples).** "Back into a parking bay": drive past the bay, cusp (auto stop-and-reverse), then back along a bezier arc whose waypoints carry the PLANNED chassis heading (`(x, y, z, speed, yaw)`) so the tank arrives facing bay-north, front-out. PASS = within 2 m of the bay AND within 0.4 rad of the arrival heading. Waypoint markers + polyline always drawn (forward cyan / reverse orange); `--mp4 [PATH]` records the run headless. | ✓ `--viewer` / `--mp4` |
 
 The three perf benchmarks (5, 7, 8) are intentionally headless — camera
 rendering adds per-step overhead that distorts the throughput numbers
@@ -28,23 +30,26 @@ they're trying to measure. The visual equivalents are in their
 respective docstring pointers (multi_env_render for L3, road_loop for
 L2 with `--solver multi_batched`, city_traffic_ego for L2 × L3).
 
-### Wheel animation (`VisualJointSync`) is auto-managed by `VehicleScene`
+### Wheel animation is auto-managed by `VehicleScene`
 
-Driving the URDF wheel visual joints through the engine each step (so the
-**Genesis viewer / a Genesis camera** shows wheels spinning/steering) costs
-~ms/step and is only worth paying when Genesis actually renders. `VehicleScene`
-turns it on **automatically at `build()`** when the main scene is rendered —
-i.e. `view="native"` **or** a camera was added (`vs.add_camera(...)`).
-It is **not** a user-facing knob; the samples no longer set it:
+When the main scene renders (native viewer or any camera), `VehicleScene`
+draws the wheels via the solver-free **instanced renderer** (v1.1.17):
+closed-form `wheel_visual_transforms` poses are streamed into instanced
+render nodes each step. The wheels are **NOT updated through the Genesis
+rigid solver** — the nodes live in Genesis's external render channel (the
+same machinery as the debug-draw overlays) — so physics is identical to a
+headless run; the only cost is the pose streaming itself (a slight
+per-step overhead, ~2–3 ms at 30 vehicles on CPU). Headless runs draw
+nothing and pay nothing. Whenever a viewer or camera is present, wheel
+visuals are always active — there is no off switch.
+It is not a user-facing knob (`VehicleScene(wheel_render_mode=...)`
+exists only to force the legacy joint-sync fallback, which is also used
+automatically for `n_envs > 1`).
 
-- `--viewer` (cv2 HUD) adds a Genesis camera → animation on for the HUD frames.
-- `--native` opens the Genesis viewer (`show_viewer=True`) → animation on.
-- **headless (default)** → no viewer, no camera → off, so the `[timing]` ms/step
-  reflects pure physics (faster, undistorted).
-
-For an **external** renderer (UE / Unity), keep the run headless and read wheel
-poses from `wheel_visual_transforms()` / `visual_parts_transforms()` (closed-form,
-~µs) — no engine FK needed.
+For an **external** renderer (UE / Unity), keep the run headless and read
+wheel poses from `wheel_visual_transforms()` /
+`visual_parts_transforms()` (closed-form, ~µs) — the same data source
+the instanced renderer uses.
 
 ## Bundled assets
 

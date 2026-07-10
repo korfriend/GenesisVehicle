@@ -178,8 +178,8 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
                 ctrl = controllers[tid]
                 # [VISUAL] SDK closed-form wheel pose: steer + suspension + spin
                 # baked into pos/quat, computed WITHOUT driving Genesis joints
-                # (works even with VisualJointSync off). Replaces the get_link read,
-                # which required VisualJointSync on and returned a rest pose otherwise.
+                # (works even with WheelJointInternalSync off). Replaces the get_link read,
+                # which required WheelJointInternalSync on and returned a rest pose otherwise.
                 # The quat already includes spin → send w_angle=0 (UE uses the
                 # quat directly; no separate spin to re-apply).
                 if hasattr(ctrl, 'wheel_visual_transforms'):
@@ -541,7 +541,7 @@ def main():
                 ue_friction=ue_friction,
                 ue_restitution=ue_restitution,
                 vis_mode=args.vis_mode,
-                # VisualJointSync is auto-managed by VehicleScene.build() (on iff
+                # WheelJointInternalSync is auto-managed by VehicleScene.build() (on iff
                 # the main scene is rendered); headless uses closed-form
                 # wheel_visual_transforms, so no per-step engine FK is paid.
             )

@@ -159,7 +159,6 @@ _GENESIS_LAZY = {
     "read_distances": ("genesis_vehicle.raycast", "read_distances"),
     "get_link_transforms": ("genesis_vehicle.kinematics", "get_link_transforms"),
     "LinkTransforms": ("genesis_vehicle.kinematics", "LinkTransforms"),
-    "VisualJointSync": ("genesis_vehicle.visual", "VisualJointSync"),
     "VisualPartsTransforms": ("genesis_vehicle.core", "VisualPartsTransforms"),
     "add_vehicle": ("genesis_vehicle.scene_helpers", "add_vehicle"),
     "make_wheel_raycaster": ("genesis_vehicle.scene_helpers", "make_wheel_raycaster"),
@@ -200,8 +199,10 @@ __all__ = [
     "add_vehicle", "make_wheel_raycaster",
     # Unified high-level API (lazy) — VehicleScene is the center of the SDK
     "VehicleScene", "Vehicle", "StaticBody", "DynamicBody", "Camera",
-    # Visual joint sync for the Genesis viewer (lazy)
-    "VisualJointSync",
+    # (WheelJointInternalSync was removed from the public API in v1.1.18 — wheel
+    # visuals are auto-managed by VehicleScene via the solver-free
+    # InstancedWheelRenderer; the legacy joint-sync path survives only as
+    # an internal fallback, genesis_vehicle.visual.WheelJointInternalSync.)
     # Config
     "VehicleConfig", "WheelConfig", "ChassisConfig", "ResolvedConfig", "ConfigError",
     "resolve",

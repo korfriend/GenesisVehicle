@@ -111,6 +111,50 @@ def have_cv2() -> bool:
     return cv2 is not None
 
 
+class Mp4Recorder:
+    """Minimal mp4 writer for the ``--mp4`` option of visual samples.
+
+    Feed it frames from a Genesis camera (``cam.render()[0]`` — RGB, tensor
+    or ndarray, optionally batched); it converts, overlays the given HUD
+    text lines, and writes mp4v. Requires opencv-python — raised lazily
+    with an actionable message if missing (cv2 is NOT a base SDK
+    dependency; only ``--mp4`` needs it).
+
+        rec = Mp4Recorder("out.mp4", fps=20, res=(1280, 720))
+        ...
+        rec.add(cam.render()[0], lines=[f"t={t:.1f}s"])
+        ...
+        rec.close()
+    """
+
+    def __init__(self, path: str, fps: float, res: tuple = (1280, 720)):
+        if cv2 is None:
+            raise RuntimeError(
+                "--mp4 needs opencv-python (pip install opencv-python)")
+        self.path = path
+        self.res = tuple(res)
+        self.n = 0
+        self._writer = cv2.VideoWriter(
+            path, cv2.VideoWriter_fourcc(*"mp4v"), float(fps), self.res)
+
+    def add(self, rgb, lines: tuple = ()) -> None:
+        frame = rgb.cpu().numpy() if hasattr(rgb, "cpu") else np.asarray(rgb)
+        if frame.ndim == 4:                     # batched render -> env 0
+            frame = frame[0]
+        frame = cv2.cvtColor(frame.astype(np.uint8).copy(), cv2.COLOR_RGB2BGR)
+        y = 40
+        for ln in lines:
+            cv2.putText(frame, ln, (20, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (0, 255, 255), 2)
+            y += 30
+        self._writer.write(frame)
+        self.n += 1
+
+    def close(self) -> None:
+        self._writer.release()
+        print(f"[mp4] {self.n} frames -> {self.path}")
+
+
 # ----------------------------------------------------------------------
 # Native Genesis viewer helpers (the ``--native`` option of the visual samples)
 # ----------------------------------------------------------------------

@@ -5,7 +5,7 @@ End-to-end demo of ``genesis_vehicle.control``: the bundled 10-wheel tank
 driven each step by :class:`PathFollower` inverting the bundled reference
 sweep table (``data/tank_sweep_signed.csv``).
 
-    python -m genesis_vehicle.samples.path_follow_demo [--viewer] [--gpu]
+    python -m genesis_vehicle.samples.path_follow_demo [--viewer] [--gpu] [--mp4 [PATH]]
 
 PASS criterion: final position within 3 m of the goal waypoint.
 
@@ -39,24 +39,41 @@ CSV = os.path.join(_HERE, "data", "tank_sweep_signed.csv")
 from genesis_vehicle.samples.tank_tuning import TankTuning
 
 
-def build_path():
-    """Corner waypoints around the south side of the wall, densified to
-    0.5 m spacing (the follower wants 0.3-1 m between waypoints)."""
-    corners = [(30.0, 0.0), (10.0, -8.0), (-10.0, -8.0), (-30.0, 0.0)]
+def densify(corners, spacing=0.5):
+    """(x, y, z, target_speed) corner waypoints -> full waypoint list at
+    ~``spacing`` m intervals (the follower wants 0.3-1 m spacing). Each
+    segment inherits its START corner's speed; z is interpolated (the
+    follower ignores it — kept for format symmetry)."""
     path = []
-    for (x0, y0), (x1, y1) in zip(corners[:-1], corners[1:]):
-        n = max(2, int(math.hypot(x1 - x0, y1 - y0) / 0.5))
+    for (x0, y0, z0, s0), (x1, y1, z1, _s1) in zip(corners[:-1], corners[1:]):
+        n = max(2, int(math.hypot(x1 - x0, y1 - y0) / spacing))
         for k in range(n):
             t = k / n
-            path.append((x0 + t * (x1 - x0), y0 + t * (y1 - y0), 0.0, +2.0))
-    path.append((corners[-1][0], corners[-1][1], 0.0, +2.0))
+            path.append((x0 + t * (x1 - x0), y0 + t * (y1 - y0),
+                         z0 + t * (z1 - z0), s0))
+    path.append(corners[-1])
     return path
+
+
+def build_path():
+    """Corners around the south side of the wall, +2 m/s throughout."""
+    return densify([
+        (30.0,   0.0, 0.0, +2.0),
+        (10.0,  -8.0, 0.0, +2.0),
+        (-10.0, -8.0, 0.0, +2.0),
+        (-30.0,  0.0, 0.0, +2.0),
+    ])
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--viewer", action="store_true", help="show the Genesis viewer")
     ap.add_argument("--gpu", action="store_true", help="GPU physics backend")
+    ap.add_argument("--mp4", nargs="?", const="path_follow_demo.mp4",
+                    default=None, metavar="PATH",
+                    help="record the run to an mp4 (bird's-eye camera; works "
+                         "headless; needs opencv-python). Default file: "
+                         "path_follow_demo.mp4")
     args = ap.parse_args()
 
     import torch
@@ -73,6 +90,11 @@ def main():
     vs = VehicleScene(
         dt=DT, substeps=10, n_envs=1, raycast_mode="dual_scene",
         show_viewer=args.viewer,
+        # Bird's-eye start pose framing the whole course (the default viewer
+        # camera spawns at the origin — inside the wall/tank).
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -45.0, 32.0), camera_lookat=(0.0, -4.0, 0.0),
+            camera_fov=50) if args.viewer else None,
         rigid_options=gs.options.RigidOptions(dt=DT, enable_collision=True),
         vis_options=gs.options.VisOptions(shadow=False),
     )
@@ -90,14 +112,28 @@ def main():
     goal_xy = (path[-1][0], path[-1][1])
     print(f"path: {len(path)} waypoints, start={start_xy} goal={goal_xy}")
 
-    if args.viewer:     # waypoint markers are viewer-only decoration
-        for i, wp in enumerate(path[::3]):
-            vs.add_dynamic(
-                gs.morphs.Sphere(radius=0.18, pos=(wp[0], wp[1], 0.4),
-                                 fixed=True, collision=False),
-                physics=False, wheel_raycast=False,
-                surface=gs.surfaces.Default(color=(0.2, 0.7, 1.0, 0.9)),
-                name=f"wp_{i}")
+    # Waypoint markers + goal — always present (non-physics fixed visuals;
+    # negligible cost headless, visible in viewer/video runs).
+    for i, wp in enumerate(path[::3]):
+        vs.add_dynamic(
+            gs.morphs.Sphere(radius=0.18, pos=(wp[0], wp[1], 0.4),
+                             fixed=True, collision=False),
+            physics=False, wheel_raycast=False,
+            surface=gs.surfaces.Default(color=(0.2, 0.7, 1.0, 0.9)),
+            name=f"wp_{i}")
+    vs.add_dynamic(   # goal marker
+        gs.morphs.Sphere(radius=0.6, pos=(goal_xy[0], goal_xy[1], 0.9),
+                         fixed=True, collision=False),
+        physics=False, wheel_raycast=False,
+        surface=gs.surfaces.Default(color=(1.0, 0.2, 0.2, 1.0)),
+        name="goal")
+
+    cam = None
+    if args.mp4:        # offscreen camera, same bird's-eye pose as the viewer
+        cam = vs.add_camera(res=(1280, 720), pos=(0.0, -45.0, 32.0),
+                            lookat=(0.0, -4.0, 0.0), up=(0, 0, 1), fov=50,
+                            near=0.1, far=250.0, GUI=False,
+                            debug=True)   # render marker overlays (path polyline) too
 
     tank = vs.add_vehicle(URDF, tank_10w_skid_belt,
                           pos=(start_xy[0], start_xy[1], 2.0),
@@ -107,6 +143,20 @@ def main():
     # called (the resolved config is baked at build time).
     TankTuning.apply_config(tank.cfg)
     vs.build()
+
+    # Waypoint-connecting polyline (debug overlay — needs a built scene,
+    # hence after build). Forward segments cyan, backward segments orange
+    # (color keyed on the segment's speed sign, so cusp paths read at a
+    # glance). Drawn unconditionally; guarded in case a headless Genesis
+    # build has no visualizer context for debug draws.
+    try:
+        for a, b in zip(path[:-1], path[1:]):
+            fwd_seg = a[3] >= 0
+            vs.scene.draw_debug_line(
+                (a[0], a[1], 0.35), (b[0], b[1], 0.35), radius=0.03,
+                color=(0.2, 0.7, 1.0, 0.8) if fwd_seg else (1.0, 0.6, 0.1, 0.8))
+    except Exception as e:
+        print(f"[note] path polyline skipped (no visualizer context): {e}")
     # Post-build overrides go on the RESOLVED config; tank.resolved works in
     # both solver modes (tank.physics is None under the batched solver).
     TankTuning.apply_resolved(tank.resolved)
@@ -133,6 +183,12 @@ def main():
 
     follower = PathFollower(path, CSV)
 
+    recorder = None
+    REC_EVERY = 2                       # record every 2nd step -> 20 fps
+    if args.mp4:
+        from genesis_vehicle.samples import _hud
+        recorder = _hud.Mp4Recorder(args.mp4, fps=1.0 / (REC_EVERY * DT))
+
     for _ in range(int(0.6 / DT)):     # settle on the ground under brake
         tank.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
         vs.step()
@@ -150,12 +206,20 @@ def main():
             break
         tank.set_inputs(throttle=thr, brake=brk, steer=steer)
         vs.step()
+        if recorder is not None and step % REC_EVERY == 0:
+            recorder.add(cam.render()[0], lines=(
+                f"t={step * DT:6.2f}s  [{follower.last_mode}]",
+                f"pos=({st['pos_xy'][0]:+6.1f},{st['pos_xy'][1]:+6.1f})  "
+                f"v={st['v_long']:+5.2f}  thr={thr:+5.2f} str={steer:+5.2f}",
+            ))
         if step % int(2.0 / DT) == 0:
             print(f"  t={step * DT:5.1f}s  pos=({st['pos_xy'][0]:+6.1f},"
                   f"{st['pos_xy'][1]:+6.1f})  v={st['v_long']:+5.2f}"
                   f"  thr={thr:+5.2f} str={steer:+5.2f}  [{follower.last_mode}]",
                   flush=True)
 
+    if recorder is not None:
+        recorder.close()
     final_pos = tank.get_pos()[0].cpu().numpy()
     err = math.hypot(final_pos[0] - goal_xy[0], final_pos[1] - goal_xy[1])
     print(f"\nFINAL pos=({final_pos[0]:+.2f}, {final_pos[1]:+.2f}) "

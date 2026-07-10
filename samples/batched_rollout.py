@@ -129,7 +129,7 @@ def main():
         print(f"  viewer grid: {per_row} × {n_rows} cells, spacing {args.grid_spacing} m")
     else:
         vs.build()
-    # VisualJointSync is auto-managed by VehicleScene (on when a viewer/camera exists).
+    # Wheel visuals are auto-managed by VehicleScene (on when a viewer/camera exists).
     device = veh.get_pos().device
 
     print(f"\n[shapes after build (n_envs={args.n_envs})]")

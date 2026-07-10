@@ -5,7 +5,7 @@ Landing page. Pick the document that matches what you're doing.
 | If you want to... | Start here |
 |---|---|
 | Run something in 1 minute | [`quickstart.md`](quickstart.md) |
-| See all 13 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
+| See all 15 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
 | Build a mental model before reading code | [`concepts.md`](concepts.md) |
 | Choose the high-level (`VehicleScene`) vs low-level (`VehiclePhysics`) API | [`concepts.md`](concepts.md#start-here-the-two-api-layers) |
 | Pick the right batching axis (L1 / L2 / L3) for your workflow | [`batching.md`](batching.md) |
@@ -70,7 +70,7 @@ The right-hand column is where the full story lives.
 | Stability profiles | maps a use-case profile (`"control"` / `"raw"` / `"research"`) to the right stability-hook stack | `stability_hooks_for_profile` | [`stability-profiles.md`](stability-profiles.md) |
 | OSC physics server | runs the SDK as a standalone physics process for an external engine (UE / Unity), L2 and L3 modes | `python -m genesis_vehicle.server` | [`server.md`](server.md) |
 | Server benchmark | official server perf matrix (mock UE client, tanks × terrain × mode × backend) | `python -m genesis_vehicle.server.benchmark` | [`server.md`](server.md) §2.1 |
-| Samples | 13 runnable, self-contained examples with bundled assets | `python -m genesis_vehicle.samples.<name>` | [`../samples/README.md`](../samples/README.md) |
+| Samples | 15 runnable, self-contained examples with bundled assets | `python -m genesis_vehicle.samples.<name>` | [`../samples/README.md`](../samples/README.md) |
 
 **Model preparation & scene assembly**
 
@@ -86,7 +86,7 @@ The right-hand column is where the full story lives.
 |---|---|---|---|
 | Per-link transforms | batched world pose of every link (telemetry, attachments, external animation) | `get_link_transforms`, `LinkTransforms` | [`api-reference.md`](api-reference.md) §7 |
 | Render feed | closed-form wheel / visual-part poses (~µs, no engine FK) for an external renderer; what the OSC server streams | `wheel_visual_transforms()`, `VisualPartsTransforms` | [`api-reference.md`](api-reference.md) §7, [`server.md`](server.md) |
-| Viewer joint sync | drives URDF visual joints (spin/steer/suspension) in the Genesis viewer; auto-managed by `VehicleScene` at `build()` | `VisualJointSync` | [`../samples/README.md`](../samples/README.md) |
+| Viewer wheel visuals | instanced wheel rendering in the Genesis viewer/cameras — auto-managed by `VehicleScene` at `build()`; always on when rendering. Wheels are NOT driven through the rigid solver (external render nodes, closed-form poses) — physics-identical to headless, slight pose-streaming cost (~2–3 ms @ 30 vehicles) | `VehicleScene(wheel_render_mode=...)` | [`../samples/README.md`](../samples/README.md) |
 
 ## Version
 

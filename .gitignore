@@ -45,3 +45,4 @@ outputs/
 *.png
 *.npy
 *.ckpt
+tmp*.urdf

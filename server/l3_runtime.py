@@ -121,7 +121,7 @@ class L3State:
 
         Reads all N vehicles with 2 body pos/quat reads + 1 SDK closed-form
         wheel_visual_transforms call. Wheel pos/quat is the visual pose with
-        steer+suspension+spin all applied (regardless of VisualJointSync
+        steer+suspension+spin all applied (regardless of WheelJointInternalSync
         on/off). Spin is included in the quat, so w_angle=0."""
         # [GPU-mode serving architecture v1.1.3] Only pure physics on GPU,
         # capture math on CPU: the 5 raw reads (pos/quat/steer/dist/spin) +
@@ -310,7 +310,7 @@ def run_l3(args):
     t_fric = first_info.get('friction', ue_friction)
     temp_urdf = vehicle_builder.strip_wheel_collisions(urdf_path)
     cfg = vehicle_builder.build_cfg(urdf_path, mapping, t_fric, target_id="L3-shared")
-    # VisualJointSync is auto-managed by VehicleScene.build() (on iff the main
+    # WheelJointInternalSync is auto-managed by VehicleScene.build() (on iff the main
     # scene is rendered — show_viewer); headless reads wheel poses closed-form via
     # wheel_visual_transforms, so no per-step engine FK is paid.
     veh = vs.add_vehicle(

@@ -23,7 +23,10 @@ Per-step pipeline (within the active block):
     3. v_target from that waypoint; if the block end is inside the
        lookahead window and a cusp follows, taper |v_target| with the
        remaining distance (decelerate into the cusp)
-    4. heading_err = 0.7 * yaw_err + 0.3 * position_err
+    4. heading_err = 0.7 * yaw_err + 0.3 * position_err — the reference
+       yaw per waypoint is its EXPLICIT yaw when given (optional 5th
+       tuple element, world +X = 0, CCW positive), else the tangential
+       direction (+pi-flipped on backward waypoints)
     5. P control: a_target = k_v * (v_target - v_long),
                   omega_target = k_w * heading_err
     6. sweep inverse: throttle = table^-1(v, a_target, pitch, roll),
@@ -95,11 +98,24 @@ class PathFollower:
     """Pursuit-style follower over a (x, y, z, target_speed) path.
 
     Args:
-        path: list of ``(x, y, z, target_speed)``. ``z`` is ignored (the
-            vehicle drives on whatever ground the sim provides).
+        path: list of ``(x, y, z, target_speed)`` or
+            ``(x, y, z, target_speed, yaw)``. ``z`` is ignored (the vehicle
+            drives on whatever ground the sim provides).
             ``target_speed`` is m/s — positive = forward, negative =
             backward; a sign flip along the path is a cusp (gear change)
             and triggers an automatic decelerate-stop-reverse.
+            ``yaw`` (optional 5th element, radians; world +X is 0, CCW
+            about +Z positive — the same convention ``extract_state``
+            returns) is the DESIRED CHASSIS HEADING at that waypoint,
+            used VERBATIM (no backward flip) — give it where the tangential
+            default is not what you want, e.g. to control which way the
+            chassis faces during a reverse maneuver. ``None`` (or a
+            4-tuple) falls back to the tangential direction toward the
+            next waypoint, +pi-flipped on backward waypoints.
+            Note the heading must stay drivable for a nonholonomic
+            vehicle: it can only move along its chassis axis, so an
+            explicit yaw far from the travel (or travel+pi) direction
+            cannot be tracked.
             Adjacent waypoints should be ~0.3–1 m apart (densify long
             straight segments) for accurate projection/lookahead.
         sweep: a :class:`SweepTable`, or a path to its CSV.
@@ -127,7 +143,23 @@ class PathFollower:
         if isinstance(sweep, (str, os.PathLike)):
             sweep = SweepTable.load(sweep)
         self.sweep = sweep
-        self.path = [tuple(p) for p in path]
+        # Normalize waypoints to (x, y, z, speed) + optional explicit yaw.
+        self.path = []
+        self.wp_yaws = []            # per-waypoint explicit yaw or None
+        for p in path:
+            p = tuple(p)
+            if len(p) == 4:
+                wy = None
+            elif len(p) == 5:
+                wy = p[4]
+                if wy is not None:
+                    wy = (float(wy) + math.pi) % (2 * math.pi) - math.pi
+            else:
+                raise ValueError(
+                    "waypoints must be (x, y, z, target_speed) or "
+                    f"(x, y, z, target_speed, yaw); got length {len(p)}")
+            self.path.append((float(p[0]), float(p[1]), float(p[2]), float(p[3])))
+            self.wp_yaws.append(wy)
         self.n = len(self.path)
         self.lookahead = lookahead
         self.arrival_goal = arrival_goal
@@ -168,22 +200,33 @@ class PathFollower:
         # was a plain normalization — a no-op — so backward chassis yaw was
         # off by pi; masked on collinear reversing where the position-error
         # term vanishes.)
+        # An EXPLICIT per-waypoint yaw (5th tuple element) wins verbatim —
+        # no backward flip, it already IS the desired chassis heading.
         self.yaws = [0.0] * self.n
         self._block_end_yaw = []
         for (bs, be, sgn) in self.blocks:
             prev = None
             for i in range(bs, be):
-                dx = self.path[i + 1][0] - self.path[i][0]
-                dy = self.path[i + 1][1] - self.path[i][1]
-                if dx * dx + dy * dy < 1e-12:
-                    yaw = prev if prev is not None else 0.0
+                if self.wp_yaws[i] is not None:
+                    yaw = self.wp_yaws[i]
                 else:
-                    yaw = math.atan2(dy, dx)
-                    if sgn < 0:
-                        yaw = (yaw % (2 * math.pi)) - math.pi   # +pi flip
+                    dx = self.path[i + 1][0] - self.path[i][0]
+                    dy = self.path[i + 1][1] - self.path[i][1]
+                    if dx * dx + dy * dy < 1e-12:
+                        yaw = prev if prev is not None else 0.0
+                    else:
+                        yaw = math.atan2(dy, dx)
+                        if sgn < 0:
+                            yaw = (yaw % (2 * math.pi)) - math.pi   # +pi flip
                 self.yaws[i] = yaw
                 prev = yaw
-            self._block_end_yaw.append(prev if prev is not None else 0.0)
+            # Arrival heading at the block end: an explicit yaw on the
+            # boundary waypoint wins; otherwise continue the last in-block
+            # direction.
+            if self.wp_yaws[be] is not None:
+                self._block_end_yaw.append(self.wp_yaws[be])
+            else:
+                self._block_end_yaw.append(prev if prev is not None else 0.0)
         self.yaws[self.n - 1] = self._block_end_yaw[-1]
 
         self.block_i = 0

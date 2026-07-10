@@ -1,6 +1,6 @@
 """Equivalence guards for the v1.0.15 batching of audit items #9/#10.
 
-#10 ``KindVisualBatch``: K same-kind VisualJointSync writers collapse into ONE
+#10 ``KindVisualBatch``: K same-kind WheelJointInternalSync writers collapse into ONE
 solver-level ``set_dofs_position`` (one solver entry + FK instead of K). This
 test pins the batched writer to the per-entity loop: identical joint dof
 positions for every entity.
@@ -37,15 +37,16 @@ def cpu_genesis():
 
 
 def test_kind_visual_batch_matches_per_entity_loop(cpu_genesis):
-    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False,
+                      wheel_render_mode="internal_sync")  # this test targets VJS itself
     vs.add_ground_plane()
     for i in range(2):
         vs.add_vehicle(URDF, car_4w_rwd_ackermann, pos=(5.0 * i, 0.0, 1.0))
-    # Force the renders path headless so VisualJointSync (and its batch) build.
+    # Force the renders path headless so WheelJointInternalSync (and its batch) build.
     vs.show_viewer = True
     vs.build()
     kind = vs.physics.kinds[0]
-    assert kind.visuals, "VisualJointSync not built — renders hack failed"
+    assert kind.visuals, "WheelJointInternalSync not built — renders hack failed"
     assert kind._visual_batch is not None
 
     N, K = kind.n_envs, kind.K
@@ -76,7 +77,8 @@ def test_kind_visual_batch_matches_per_entity_loop(cpu_genesis):
 
 
 def test_multi_kind_step_batches_io_and_drives(cpu_genesis):
-    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False,
+                      wheel_render_mode="internal_sync")  # this test targets VJS itself
     vs.add_ground_plane()
     # Two distinct cfg OBJECTS on the same URDF → two kinds by identity.
     cfg_a = car_4w_rwd_ackermann(URDF, n_envs=1)

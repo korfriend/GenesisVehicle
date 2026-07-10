@@ -44,7 +44,9 @@ class VehicleScene:
                  sim_options=None, rigid_options=None, vis_options=None,
                  viewer_options=None,
                  view=None,                         # None headless | "native" | "cv2"
-                 show_viewer=False, init_genesis=True)
+                 show_viewer=False,
+                 wheel_render_mode="auto",          # "auto" | "instanced" | "internal_sync"
+                 init_genesis=True)
 
     # --- registration (before build) ---
     def add_vehicle(urdf_path, preset=None, *, pos=(0,0,1), quat=None,
@@ -137,6 +139,7 @@ targets (`add_dynamic`).
 | `viewer_options` | `None` | native-viewer config — `gs.options.ViewerOptions(camera_pos, camera_lookat, camera_fov, res, max_FPS, refresh_rate, …)`. Main scene only (the raycast scene is never shown). Needs `view="native"` to actually open a window |
 | `view` | `None` | `None` headless / `"native"` (Genesis viewer) / `"cv2"` (render cameras for a cv2 HUD) |
 | `show_viewer` | `False` | back-compat alias for `view="native"` |
+| `wheel_render_mode` | `"auto"` | how wheel visuals reach the Genesis renderer when the scene renders. Whenever a viewer/camera is present, wheel visuals are ALWAYS active (there is no off switch — headless runs simply have nothing to render). `"auto"` (default) uses the **instanced renderer** (v1.1.17) when supported (`n_envs == 1`): wheel poses are computed closed-form and drawn through Genesis's external render-node channel (the same machinery as the debug-draw overlays) — **the wheels are NOT updated through the Genesis rigid solver**, so physics is bit-identical to a headless run; expect only a slight per-step cost for the pose streaming (~2–3 ms at 30 vehicles, CPU). `"instanced"` forces that path (raises when unsupported); `"internal_sync"` forces the legacy `WheelJointInternalSync` fallback (drives solver joints — small physical side effects, clamped since v1.1.16), which is also what `n_envs > 1` rendered scenes fall back to automatically |
 | `init_genesis` | `True` | auto-init the (cpu-default) physics backend if not already up; set `False` to manage `gs.init` yourself. **The backend itself is chosen by `VehicleScene.init_backend()`, not here** |
 
 > **Physics backend** is set by the classmethod `VehicleScene.init_backend("cpu" \| "gpu")` (process-global, once, default **cpu**) BEFORE any scene — not a constructor arg. The renderer is separate (always GPU). See "Backends" above.
@@ -322,7 +325,7 @@ vehicle (a fresh cfg per vehicle splits K vehicles into K kinds × 1 and
 the batching never engages — measured 10 tanks: SDK compute 33.8 vs
 2.8 ms/step). Since v1.0.15 multi-kind steps also batch the solver I/O
 across kinds (one combined state read + one force/torque apply pair)
-and same-kind VisualJointSync writers collapse into one solver call
+and same-kind WheelJointInternalSync writers collapse into one solver call
 (``KindVisualBatch`` — 30 tanks with visuals: 23.3 → 14.2 ms/step);
 bounded by Genesis's per-entity ``scene.step()`` cost. For RL/MPPI
 throughput use ``n_envs > 1`` instead (L3 batching — see
@@ -411,7 +414,7 @@ class VehicleConfig:
     chassis: ChassisConfig = field(default_factory=ChassisConfig)
     stability_hooks: list[StabilityHook] = field(default_factory=list)
     recommended_dt: float = 0.025    # 40 Hz SDK default (v1.0.19); `dt` is a deprecated alias
-    enable_visual_joint_sync: bool = False   # auto-managed by VehicleScene.build() (not a user knob)
+    enable_wheel_joint_internal_sync: bool = False   # auto-managed by VehicleScene.build() (not a user knob)
     susp_visual_clamp: float | None = None   # v0.7.14: None=per-wheel rest_stroke
 
     @classmethod
@@ -626,15 +629,15 @@ the quaternion/position conventions.
 
 > **For wheel VISUAL pose, prefer `wheel_visual_transforms` (below), not
 > `link_transforms`.** `link_transforms` reads the engine's link state, which
-> reflects steering/suspension/spin only when VisualJointSync is ON (it drives those
-> joints). Called with VisualJointSync off, it returns the rest pose and emits a
+> reflects steering/suspension/spin only when WheelJointInternalSync is ON (it drives those
+> joints). Called with WheelJointInternalSync off, it returns the rest pose and emits a
 > one-time warning.
 
 ### 7.6 Wheel visual pose for external renderers (`wheel_visual_transforms`, v0.7.7)
 
 Closed-form per-wheel VISUAL transform — steer + suspension + spin applied —
 computed **without driving Genesis joints**, so it works whether or not
-VisualJointSync is enabled. This is the intended feed for an external renderer
+WheelJointInternalSync is enabled. This is the intended feed for an external renderer
 (Unreal / Unity): the SDK owns the steer-sign / spin-axis / suspension
 conventions, so the client just places the wheel.
 
@@ -669,7 +672,7 @@ closed-form omits spin too, matching the viewer).
 ### 7.7 One-call visual-parts feed (`visual_parts_transforms`, v0.7.8; renamed v0.7.10)
 
 The high-level convenience for an external renderer: chassis **and** wheels in
-one call, VisualJointSync-independent. (Named `render_transforms` in v0.7.8–0.7.9;
+one call, WheelJointInternalSync-independent. (Named `render_transforms` in v0.7.8–0.7.9;
 renamed to `visual_parts_transforms` in v0.7.10.)
 
 ```python
@@ -686,10 +689,10 @@ class VisualPartsTransforms:
 ```
 
 The chassis is the real **dynamics** pose (`get_pos/get_quat`, always world —
-the physical truth, unaffected by VisualJointSync). The wheels are the closed-form
+the physical truth, unaffected by WheelJointInternalSync). The wheels are the closed-form
 visual pose (`wheel_visual_transforms`). `frame` applies to the wheels:
 `"world"` absolute, `"local"` relative to the chassis. This is the recommended
-one-stop feed for a UE / Unity bridge — no `get_link`, no VisualJointSync.
+one-stop feed for a UE / Unity bridge — no `get_link`, no WheelJointInternalSync.
 
 **Multi-vehicle (L2 / L2×L3):** `MultiVehiclePhysics` exposes the same two
 methods — `wheel_visual_transforms(frame)` returns a **list** (length
@@ -698,14 +701,14 @@ and `visual_parts_transforms(frame)` a list of `VisualPartsTransforms`
 (per-vehicle, since kinds may differ in wheel count). Verified identical to a
 single `VehiclePhysics` at K=1 (Δ = 0).
 
-> **Naming:** the viewer-side wheel-joint driver class is **`VisualJointSync`**
+> **Naming:** the legacy viewer-side wheel-joint driver (internal since v1.1.18) is **`WheelJointInternalSync`** (formerly `VisualJointSync`, renamed v1.1.19)
 > (renamed from `VisualSync` in v0.7.8; the old alias was removed in v0.7.9).
 > The name is explicit on purpose — it drives the **wheel** visual joints
 > (spin/steer/suspension) for the **Genesis viewer** only; it never moves the
 > chassis and does not affect physics. External renderers don't need it at
 > all — use `visual_parts_transforms` / `wheel_visual_transforms`.
 
-> **Auto-managed by `VehicleScene` (v0.9.18):** `enable_visual_joint_sync` is
+> **Auto-managed by `VehicleScene` (v0.9.18):** `enable_wheel_joint_internal_sync` is
 > **not a user-facing knob**. `VehicleScene.build()` sets it automatically — ON iff
 > the main scene is rendered by Genesis (`view="native"` **or** a camera was added
 > with `vs.add_camera(...)`), OFF otherwise (headless /
@@ -713,12 +716,12 @@ single `VehiclePhysics` at K=1 (Δ = 0).
 > through v0.7.13). When driving the low-level `VehiclePhysics` directly you may
 > still set it on the config yourself.
 
-> **Perf advisory (v0.7.10):** when `VisualJointSync` is active
-> (`enable_visual_joint_sync=True`) it logs a one-time-per-process
+> **Perf advisory (v0.7.10):** when `WheelJointInternalSync` is active
+> (`enable_wheel_joint_internal_sync=True`) it logs a one-time-per-process
 > `[genesis_vehicle] PERF:` warning to stderr — it drives the URDF wheel joints
 > through the engine's articulated-body forward kinematics every step and is
 > only needed for the **Genesis viewer**. For an external renderer or any
-> headless run, set `enable_visual_joint_sync=False` and read wheel poses from
+> headless run, set `enable_wheel_joint_internal_sync=False` and read wheel poses from
 > `visual_parts_transforms` / `wheel_visual_transforms` (closed-form, ~µs).
 > Silence the warning with `GENESIS_VEHICLE_QUIET=1`.
 >
@@ -854,7 +857,7 @@ Genesis/torch needed at control time).
 
 | Symbol | Import | What it is |
 |---|---|---|
-| `PathFollower(path, sweep, **tuning)` | `from genesis_vehicle import PathFollower` | path (waypoints + signed speeds) → per-step `(throttle, steer, brake)`; `sweep` is a `SweepTable` or a CSV path; cusps (speed-sign flips) handled as stop-and-reverse. `last_mode` ∈ `INIT/DRV±1/STOP/BRAKE_TRANS/DONE` |
+| `PathFollower(path, sweep, **tuning)` | `from genesis_vehicle import PathFollower` | path `(x, y, z, speed[, yaw])` → per-step `(throttle, steer, brake)`; the optional per-waypoint `yaw` (rad, world +X = 0, CCW+) pins the desired chassis heading verbatim, else tangential default; `sweep` is a `SweepTable` or a CSV path; cusps (speed-sign flips) handled as stop-and-reverse. `last_mode` ∈ `INIT/DRV±1/STOP/BRAKE_TRANS/DONE` |
 | `SweepTable` | `from genesis_vehicle import SweepTable` | measured (v, throttle, steer, pitch, roll) → (a, ω_z) grid; `.load(csv)` / `.save(csv)`; inverse lookups `throttle_for(v, a, pitch, roll)` / `steer_for(v, ω, pitch, roll)` |
 | `extract_state(vehicle, env_idx=0)` | `from genesis_vehicle.control import extract_state` | Genesis entity / `Vehicle` wrapper → state dict for `PathFollower.step` |
 | `extract_state_from_arrays(pos, quat_wxyz, vel)` | `from genesis_vehicle.control import extract_state_from_arrays` | same, from raw arrays (simulator-agnostic) |

@@ -10,6 +10,294 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.19] — 2026-07-10
+
+### Changed — renamed: `VisualJointSync` → `WheelJointInternalSync` (+ related parameters)
+
+- The legacy joint-sync mechanism is renamed to say what it IS: an
+  internal wheel-joint synchronizer that goes through the solver — not a
+  pure "visual" layer (the misnomer is what made the drop-impact field
+  report so confusing). Renames, applied repo-wide (code, docs, comments;
+  historical CHANGELOG entries keep the old class name):
+  - class `visual.VisualJointSync` → `visual.WheelJointInternalSync`
+    (a "(formerly VisualJointSync)" note stays on the class docstring and
+    the api-reference naming note for traceability);
+  - config field `enable_visual_joint_sync` →
+    `enable_wheel_joint_internal_sync` (`VehicleConfig` +
+    `ResolvedConfig`; internal/legacy — auto-managed by `VehicleScene`).
+    No compatibility alias: a repo-wide search found zero external users
+    of the old field, and the class itself left the public API in 1.1.18;
+  - `VehicleScene(wheel_render_mode=...)` value `"joint_sync"` →
+    `"internal_sync"` (introduced unreleased in 1.1.17, renamed before
+    first release; the 1.1.17/1.1.18 entries below were updated to the
+    final string so readers can copy-paste).
+- 151 tests pass; rendered-path smoke re-verified.
+- Docs pass for `wheel_render_mode` across `api-reference.md` (ctor
+  signature + parameter table), `pipeline-and-hooks.md` step [6],
+  `samples/README.md`, `index.md`, and `physics-contracts.md` §7.8 —
+  stating explicitly: whenever a viewer/camera is present wheel visuals
+  are ALWAYS active (no off switch; headless pays nothing); the wheels
+  are **NOT updated through the Genesis rigid solver** but drawn via
+  Genesis's external render-node channel (the debug-draw machinery) with
+  closed-form poses; the only cost is the pose streaming itself (a
+  slight per-step overhead, ~2–3 ms at 30 vehicles on CPU) with physics
+  bit-identical to headless.
+
+---
+
+## [1.1.18] — 2026-07-10
+
+### Removed — `VisualJointSync` dropped from the public API
+
+- `VisualJointSync` is no longer exported from `genesis_vehicle` (removed
+  from the lazy-export table and `__all__`). Rationale: since v1.1.17 the
+  instanced solver-free renderer is the default wheel-visual mechanism and
+  is physics-identical to headless; the joint-sync path survives ONLY as
+  an internal fallback (`genesis_vehicle.visual.VisualJointSync` — used
+  automatically for `n_envs > 1` rendered scenes and the raw
+  `VehiclePhysics` path, or forced via
+  `VehicleScene(wheel_render_mode="internal_sync")`). Users never need to
+  name the class.
+- `VehicleConfig.enable_visual_joint_sync` stays (it wires the internal
+  fallback) but is documented as internal/legacy — `VehicleScene` manages
+  wheel visuals itself.
+- Docs/comments sweep: `index.md` Built-in utilities row is now "Viewer
+  wheel visuals" (entry point `VehicleScene(wheel_render_mode=...)`),
+  `samples/README.md`'s wheel-animation section rewritten for the
+  instanced renderer, `api-reference.md` naming note marks the class
+  internal, sample comments no longer name it, `testing.md` lazy-name
+  list updated, `tests/_check_import.py` updated. 151 tests pass.
+
+---
+
+## [1.1.17] — 2026-07-10
+
+### Changed — wheel visuals: solver-free instanced rendering replaces VisualJointSync as the default
+
+| abbr | meaning |
+|---|---|
+| VJS | VisualJointSync — the pre-1.1.17 wheel-visual mechanism (drives solver joints) |
+| instanced | one pyrender mesh node per (kind, wheel index) carrying K instance poses, streamed per step |
+
+- New `InstancedWheelRenderer` (visual.py): when a `VehicleScene` renders
+  (viewer or camera) and `n_envs == 1`, wheel visuals are now drawn by
+  streaming the closed-form `wheel_visual_transforms` poses into instanced
+  pyrender nodes — the same data source external renderers (UE) use. The
+  path touches the RENDERER only (no joint writes, no solver FK, no PD),
+  so wheel visuals cannot perturb physics BY CONSTRUCTION. The URDF
+  wheel-link vgeoms are hidden (`active_envs_idx` set empty — the Genesis
+  renderer then skips them) and re-baked into per-wheel trimeshes with
+  their local offsets, so the vehicles look unchanged; nodes are plain
+  external nodes (`is_marker=False`), rendered by every camera without
+  `debug=True`.
+- New `VehicleScene(wheel_render_mode=...)`: `"auto"` (default — instanced
+  when supported, else VJS), `"instanced"` (forced; raises when
+  unsupported), `"internal_sync"` (the old behavior). `n_envs > 1` and
+  non-harvestable wheel URDFs still fall back to VJS automatically. Raw
+  `VehiclePhysics` users are unaffected (VJS unchanged there).
+- Measured (30 tanks, CPU, 450-step steered drive, same-day baselines):
+  headless 20.9 ms/step; **instanced 23.3 ms/step with final positions
+  IDENTICAL to headless to 1e-6 m** ("on or off, same physics" — the goal
+  of this line of work); VJS 25.2 ms/step with a 9.3 cm final-position
+  deviation (the post-1.1.16 residual of its PD micro-forces). I.e. the
+  instanced path is now both faster than VJS AND physics-pure.
+- Rendered output verified: real URDF wheel meshes visible from ordinary
+  offscreen cameras; `path_follow_demo --mp4` PASS unchanged (err 1.49 m).
+  `tests/test_kind_visual_batch.py` pins `wheel_render_mode="internal_sync"`
+  (it tests VJS itself). VJS is retained for multi-env viewing, the raw
+  API path, and as an explicit opt-in; its 1.1.16 clamps stay in place.
+
+---
+
+## [1.1.16] — 2026-07-09
+
+### Fixed — hard-landing "buried" lock-in (high-cast rays) + VisualJointSync physics disturbance bounded
+
+| abbr | meaning |
+|---|---|
+| VJS | VisualJointSync — viewer-only wheel visual joint driver |
+| high-cast | wheel rays start `RAY_UP_OFFSET` above the attachment point; read layer subtracts it back |
+| min_d | minimum mean wheel-ray distance (≈ remaining suspension travel) during a drop |
+
+Triggered by a field report: two tanks dropped from z=6.4/6.5 m —
+one landed normally, the other ended with its chassis on the ground and
+"wheels buried", and toggling VJS flipped the outcome.
+
+- **Root cause 1 (the buried state, VJS-independent): ray-miss lock-in.**
+  With ray origins AT the wheel attachment points, a hard landing that
+  bottoms out the suspension can sink the chassis far enough that the
+  origins go BELOW the ground; the rays then miss, the air mask kills
+  `N`, and the vehicle rests on its chassis collision box forever — a
+  stable equilibrium (reproduced: 6.4 m and 6.5 m drops ended at
+  chassis z = −0.30 with rays reading the 20 m miss sentinel, with or
+  without VJS). **Fix: high-cast rays** — `WheelRayPattern` starts each
+  ray `RAY_UP_OFFSET` (1.0 m) above the attachment point and
+  `read_distances` subtracts the offset from hits (misses keep their
+  sentinel), so a bottomed-out chassis still measures the ground; the
+  distance goes small/NEGATIVE (a valid over-compression reading, NOT
+  air), compression maxes out, and `N` recovers the vehicle. Safe in
+  both raycast modes: vehicles are never raycast targets
+  (`use_visual_raycasting` defaults False) so the elevated origin cannot
+  self-hit. After the fix all drop heights (2.5/4.5/6.4/6.5 m × VJS
+  on/off) settle standing at z = 0.393. Normal-regime physics is
+  unchanged (same ray line, offset subtracted — the path demos reproduce
+  identical results, so existing sweep tables stay valid).
+- **Root cause 2 (the VJS sensitivity): the "cosmetic" suspension visual
+  is not physics-neutral.** The control path (URDF susp joints with
+  dynamics — the tank) drives a PD with kp=1e7 that applies REAL joint
+  forces; at the air→ground transition its target jumped by up to the
+  full stroke, injecting an impulse into the chassis (measured: VJS On
+  compressed 2–3 cm deeper at 2.5–4.5 m drops — enough to flip a
+  marginal landing into the buried state, which is exactly what the team
+  observed at 6.4 vs 6.5 m). **Fix: suspension visual targets are now
+  stroke-clamped and slew-rate-limited** (`_SUSP_VIS_MAX_RATE` = 2 m/s)
+  in BOTH writer paths and in the batched `KindVisualBatch` (shared
+  `_susp_visual_target` helper); measured disturbance drops to ~0.9 cm.
+  The air test also no longer misclassifies negative (over-compressed)
+  distances (`d <= 1e-6` → miss-or-exact-zero), in the writers and in
+  the closed-form `_susp_visual_offset` mirror.
+- Docs: `concepts.md` pipeline step 1 and new `physics-contracts.md`
+  §7.8 (high-cast contract: miss sentinel preserved, negative distance =
+  valid over-compression, tunnel-ceiling caveat; VJS neutrality bounds);
+  `visual.py` header no longer claims "no force feedback".
+- Team-facing guidance: UE serving should stay headless (VJS is
+  viewer-only; UE reads `wheel_visual_transforms`), but with this fix
+  drop-spawns land correctly with the viewer on as well — 151 tests
+  pass, path demos PASS unchanged.
+- `--mp4` cameras on the path demos now pass `debug=True`: Genesis
+  offscreen cameras skip marker/debug-draw nodes unless the camera is a
+  debug camera (`rasterizer.py: skip_markers = not camera.debug`), so the
+  waypoint polyline was silently missing from every recording (viewer
+  runs were unaffected). Found during the solver-free wheel-rendering
+  spike (below); reverse-demo recording re-verified with the polyline
+  visible.
+- Spike result (recorded here, no SDK change): wheels CAN be rendered
+  with ZERO solver contact via a pyrender instanced debug-mesh node —
+  one node carrying K×n_wheels poses, updated per step from the
+  closed-form `wheel_visual_transforms` (`primitive.poses` is a
+  streaming setter, `GL_STREAM_DRAW`). Measured at 30 tanks: ~0 ms/step
+  added and bit-pure physics, vs VisualJointSync's +0.2 ms and ~9 cm /
+  135 m trajectory drift (post-clamp residual), and vs +26 ms for
+  solver-entity detached wheels (`set_base_links_pos/quat` is the
+  bottleneck). A future VJS replacement should take the instanced
+  debug-mesh route (needs: real wheel meshes instead of primitives,
+  hiding the URDF wheel visuals, native-viewer path validation).
+- Physics-review follow-ups (no CRITICAL findings; core sign/semantics,
+  first-step guard, miss sentinel, and all distance-consumer paths
+  verified clean): `reset_visual_state()` added to `VisualJointSync` /
+  `KindVisualBatch` and wired into `VehiclePhysics.reset` AND
+  `MultiVehicleKindPhysics.reset` (which previously reset no visual
+  state at all) — a stale slew origin would otherwise inject a transient
+  PD force on the first post-reset steps; new regression test pins
+  "negative distance = clamped over-compression, exact 0.0 = air" in
+  `_susp_visual_offset`. Known pre-existing gap left as-is and
+  documented here: `VehicleScene.reset()` in batched-solver mode calls
+  no physics-level reset (`veh.physics` is None; nothing invokes the
+  kind-level reset) — to be wired in a follow-up.
+
+---
+
+## [1.1.15] — 2026-07-09
+
+### Added — OSC trajectory-client sample; server json gains `omegaMaxDrive`; wheel-inertia override fixed
+
+| abbr | meaning |
+|---|---|
+| FD | finite difference (velocity from consecutive positions) |
+| window FD | FD over a ~0.3 s ring of packets instead of adjacent pairs |
+
+- **New sample #14 `path_follow_osc_demo.py`** — trajectory following
+  THROUGH the OSC server: physics in a separate `genesis_vehicle.server`
+  process, this script as the game client (receive
+  `/Genesis/Vehicle/TargetBulk`, run `PathFollower`, send
+  `/Genesis/Vehicle/Control`). Verified: L-path PASS, err 1.46 m in
+  30.2 s wall. The client-side reference for UE-style integration,
+  including the wire details that bit during bring-up:
+  - TargetBulk is UE-frame — decode `pos_g = (Px/100, -Py/100, Pz/100)`,
+    `quat_g(wxyz) = (Qw, -Qx, Qy, -Qz)`.
+  - There is no velocity channel, and per-packet FD is unusable (the send
+    cadence is not 1:1 with sim steps — catch-up bursts and repeated/
+    interpolated states make adjacent deltas alternate between ~0 and a
+    full step, which bang-bangs the speed loop through the KICK). Use a
+    ~0.3 s **window FD**; the sample also pins `--max-catchup-steps 1`.
+  - Server-built tuning is matched to the bundled sweep table via the
+    `Vehicle/Init` json (`maxBrake`, `omegaMaxDrive`, `wheelOverrides`
+    with a `"susp"` substring match) — without the omega cap the
+    server-default tank tops out ~9 m/s, far outside the table grid
+    (±4 m/s), and the follower loses it at the first corner.
+- **Server**: `Vehicle/Init` json now accepts `omegaMaxDrive` (drive
+  wheel-omega cap = top-speed limiter, → `drivetrain.omega_max_drive`);
+  `wheelOverrides[].inertia` now actually applies — it wrote to a dead
+  `w.inertia` attribute (silent no-op) instead of `WheelConfig.i_wheel`.
+  NB for the UE plugin: both are json-payload keys, no OSC address
+  changes.
+- `path_follow_demo --viewer`: bird's-eye default camera
+  (`viewer_options` camera at (0, -45, 32) framing the whole course) —
+  the Genesis default spawned at the origin, inside the wall/tank.
+- `path_follow_osc_demo` gains `--viewer`: opens the SERVER process's
+  Genesis viewer (drops `--headless`), and the client polls the server
+  process each control tick — closing the viewer window ends the server
+  and the client shuts down with it (verified by killing the server
+  mid-run: client exits immediately, no orphan processes; the normal
+  headless path still PASSes, err 1.49 m).
+- **`--mp4 [PATH]` recording** on the path demos (#13, #15): records the
+  run to an mp4 headless — offscreen camera at the viewer's bird's-eye
+  pose, 20 fps (every 2nd step), HUD overlay (t / pos / v / mode). Shared
+  `Mp4Recorder` added to `samples/_hud.py`; opencv-python is required
+  only when `--mp4` is used (lazy, actionable error otherwise). Waypoint
+  markers + path polyline are now ALWAYS drawn (viewer, video, and
+  headless runs alike — the debug-line overlay works headless too;
+  guarded with a printed note just in case). Verified: #13 638 frames
+  PASS, #15 310 frames PASS; headless regression PASS for both.
+- **New sample #15 `path_follow_reverse_demo.py`** — the runnable showcase
+  for the 1.1.14 explicit-waypoint-yaw feature: "back into a parking bay"
+  (drive past the bay, cusp, reverse along a bezier arc whose 5-tuple
+  waypoints carry the planned chassis heading; arrival heading = bay-north).
+  Verified: PASS in 15.4 s — pos_err 1.49 m (< 2), yaw_err 0.34 rad
+  (< 0.4). `--viewer` draws the forward leg cyan / reverse leg orange.
+
+---
+
+## [1.1.14] — 2026-07-09
+
+### Added — optional per-waypoint yaw for path following (reverse-maneuver headings)
+
+| abbr | meaning |
+|---|---|
+| ψ | chassis yaw; world +X is ψ = 0, CCW about +Z positive |
+
+- `PathFollower` waypoints may now carry an explicit desired chassis
+  heading as an optional 5th tuple element:
+  `(x, y, z, target_speed, yaw)`. Convention: radians, world +X = 0, CCW
+  positive — identical to what `extract_state` returns. Motivated by
+  reverse maneuvers, where "which way should the chassis FACE while
+  backing" is a planning input, not something derivable from positions.
+- Semantics: an explicit yaw is used VERBATIM as the reference heading
+  (no backward +π flip — it already IS the chassis heading); the heading
+  loop, and through it the sweep steer inversion, tracks it. `None` or a
+  4-tuple falls back to the previous behavior (tangential direction,
+  flipped on backward waypoints); 4- and 5-tuples mix freely. An explicit
+  yaw on a cusp waypoint also defines the block's arrival heading
+  (`_block_end_yaw`). Values are normalized to [-π, π); wrong tuple
+  lengths raise.
+- Docs: path format updated in `path-following.md` (quick start + §3 with
+  the ψ convention and a nonholonomic-drivability note) and the
+  api-reference §11 row. 6 new tests (verbatim no-flip, None fallback,
+  normalization/mixing, cusp arrival heading, length validation, and a
+  closed-loop straight-reverse with pinned yaw) — 150 total pass.
+- **`VehicleScene.scene`** — new read-only property exposing the main
+  ``gs.Scene`` as the escape hatch for Genesis APIs the wrapper does not
+  re-export (debug-draw overlays etc.); registration still goes through
+  the ``add_*`` methods.
+- Demo/tests polish: corner helpers unified to the waypoint format
+  (`(x, y, z, speed)` corners in both the demo's `densify` and the tests'
+  `_densify` — z interpolated, previously the test corners were a
+  z-less local shorthand); `--viewer` now draws the waypoint-connecting
+  polyline via `scene.draw_debug_line` (forward segments cyan, backward
+  orange, keyed on the segment speed sign) plus a red goal marker.
+
+---
+
 ## [1.1.13] — 2026-07-08
 
 ### Changed — path-following stack moved to the recommended dt (0.025 × 10); demo override bug found and fixed

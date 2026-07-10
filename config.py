@@ -115,8 +115,10 @@ class VehicleConfig:
     # ~µs) instead, which works regardless of this flag. Set True ONLY when you
     # actually open the Genesis viewer (`gs.Scene(show_viewer=True)` or a sample
     # `--viewer`). Leaving it on headless is a silent ~ms/step perf trap (it is
-    # the dominant SDK cost at scale). See VisualJointSync / docs/server.md.
-    enable_visual_joint_sync: bool = False
+    # the dominant SDK cost at scale). Internal/legacy since v1.1.18 —
+    # VehicleScene manages wheel visuals itself (instanced renderer);
+    # this flag only drives the joint-sync fallback. See docs/server.md.
+    enable_wheel_joint_internal_sync: bool = False
 
     # Visual suspension joint mode:
     #   "auto"       — per-joint decision based on URDF <dynamics> presence (legacy default)
@@ -136,7 +138,7 @@ class VehicleConfig:
     visual_spin_enabled: bool = True
 
     # Visual suspension-offset clamp (metres). Bounds how far the wheel mesh may
-    # visually travel from rest in wheel_visual_transforms / VisualJointSync — a
+    # visually travel from rest in wheel_visual_transforms / WheelJointInternalSync — a
     # safety bound against raycast spikes, NOT a physics limit.
     #   None  -> auto: per-wheel = that wheel's rest_stroke (min 0.02 m). Scales
     #            with the vehicle, so large-travel rigs aren't muted.
@@ -239,7 +241,7 @@ class ResolvedConfig:
     tire: Any
     stability_hooks: list[Any]
     recommended_dt: float
-    enable_visual_joint_sync: bool
+    enable_wheel_joint_internal_sync: bool
     urdf: Any   # URDFParsedConfig — used by visual layer for joint axis-sign lookup
     visual_susp_mode: str = "auto"
     visual_spin_enabled: bool = True
@@ -344,7 +346,7 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
         tire=config.tire,
         stability_hooks=list(config.stability_hooks),
         recommended_dt=config.recommended_dt,
-        enable_visual_joint_sync=config.enable_visual_joint_sync,
+        enable_wheel_joint_internal_sync=config.enable_wheel_joint_internal_sync,
         urdf=parsed,
         visual_susp_mode=config.visual_susp_mode,
         visual_spin_enabled=config.visual_spin_enabled,

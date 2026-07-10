@@ -1,6 +1,6 @@
 """Wheel visual-joint sync layer (for the Genesis viewer).
 
-`VisualJointSync` drives the URDF **wheel** spin / steer / suspension joints
+`WheelJointInternalSync` drives the URDF **wheel** spin / steer / suspension joints
 (via ``set_dofs_position`` — kinematic, no force) so that the **Genesis
 viewer** shows wheels rotating, steered, and ground-following. Scope and
 non-scope, important:
@@ -26,6 +26,7 @@ from __future__ import annotations
 import math
 from typing import Any, Optional
 
+import numpy as np
 import torch
 
 
@@ -33,7 +34,39 @@ import torch
 _SUSP_VIS_KP = 1.0e7
 _SUSP_VIS_KV = 1.0e5
 
-# One-time-per-process perf advisory when VisualJointSync is active.
+# Visual-suspension slew-rate limit (m/s): the susp visual TARGET may move at
+# most this fast. The control path's PD (kp above) applies REAL joint forces,
+# and the set path teleports wheel-link mass — an instantaneous air<->ground
+# target jump therefore injects a force impulse into the chassis (field
+# report: VJS On added ~2-3 cm extra compression on hard drop landings,
+# enough to flip a marginal landing into the buried state). Slew-limiting
+# the target bounds that impulse while staying far faster than any visual
+# need. (v1.1.16)
+_SUSP_VIS_MAX_RATE = 2.0
+
+
+def _susp_visual_target(d, mesh_radius, l_susp, clamp, prev, dt):
+    """Shared susp visual-joint target for both writer paths and the batched
+    writer: ``mesh_radius - d``; ray MISS (>= 19.9) or exact-zero
+    (unpopulated sensor) -> fully extended ``-l_susp``; clamped to the
+    stroke bound; slew-rate-limited against ``prev`` (pass None to skip).
+
+    NB a NEGATIVE ``d`` is a valid deep-over-compression reading under the
+    high-cast ray scheme (raycast.RAY_UP_OFFSET), NOT air — the old
+    ``d <= 1e-6`` air test would have misclassified it."""
+    air = (d >= 19.9) | (d == 0.0)
+    jp = mesh_radius - d
+    jp = torch.where(air, torch.full_like(jp, -l_susp), jp)
+    if clamp is not None:
+        jp = torch.maximum(-clamp, torch.minimum(clamp, jp))
+    else:
+        jp = torch.clamp(jp, -l_susp, l_susp)
+    if prev is not None and dt > 0.0:
+        max_step = _SUSP_VIS_MAX_RATE * dt
+        jp = prev + torch.clamp(jp - prev, -max_step, max_step)
+    return jp
+
+# One-time-per-process perf advisory when WheelJointInternalSync is active.
 _PERF_WARNED = False
 
 
@@ -46,23 +79,31 @@ def _warn_perf_once() -> None:
     if os.environ.get("GENESIS_VEHICLE_QUIET"):
         return
     print(
-        "[genesis_vehicle] PERF: VisualJointSync is ENABLED — it drives the URDF "
+        "[genesis_vehicle] PERF: WheelJointInternalSync is ENABLED — it drives the URDF "
         "wheel visual joints through the engine's articulated-body forward "
         "kinematics every step (one collider/constraint reset + FK pass per "
         "entity; batched into a single set_dofs_position in v0.7.16, ~0.85 ms/step "
         "per vehicle on CPU). It is only needed for the Genesis viewer. For an "
         "external renderer (UE / Unity), or any headless run, set "
-        "enable_visual_joint_sync=False and read wheel poses from "
+        "enable_wheel_joint_internal_sync=False and read wheel poses from "
         "VehiclePhysics.visual_parts_transforms() / wheel_visual_transforms() "
         "(closed-form, ~µs). Silence with GENESIS_VEHICLE_QUIET=1.",
         file=sys.stderr, flush=True,
     )
 
 
-class VisualJointSync:
-    """Drives a vehicle's URDF WHEEL visual joints (spin, steer, suspension) to
+class WheelJointInternalSync:
+    """(Formerly ``VisualJointSync``; renamed in v1.1.19 — it is an
+    internal joint-sync mechanism, not a pure visual one.)
+
+    Drives a vehicle's URDF WHEEL visual joints (spin, steer, suspension) to
     match physics state, for the Genesis viewer. Wheels only — never the
-    chassis. Cosmetic (no force feedback). External renderers should use
+    chassis. INTENDED to be cosmetic, but not perfectly physics-neutral:
+    the set path teleports wheel-link mass and the control path's PD
+    (kp=_SUSP_VIS_KP) applies real joint forces — both targets are therefore
+    stroke-clamped and slew-rate-limited (_SUSP_VIS_MAX_RATE) so the residual
+    disturbance stays negligible (measured < 1 cm extra compression on hard
+    drop landings; was ~2-3 cm unclamped). External renderers should use
     ``VehiclePhysics.wheel_visual_transforms`` instead (viewer-independent).
 
     Emits a one-time-per-process performance advisory on construction (it is the
@@ -180,7 +221,7 @@ class VisualJointSync:
         # set_dofs_position, and EACH solver call triggers a full collider reset
         # + constraint reset + forward-kinematics pass over every link & geom.
         # Issuing 3 separate calls per step therefore pays for 3 FK passes; we
-        # combine them into ONE call (one FK pass) — the dominant VisualJointSync
+        # combine them into ONE call (one FK pass) — the dominant WheelJointInternalSync
         # cost at n=1. control_dofs_position (PD, heavy wheels) uses a different
         # API and stays separate. The position tensors are concatenated in the
         # SAME order the dof indices are gathered here.
@@ -196,6 +237,26 @@ class VisualJointSync:
 
         # Visual-state accumulators.
         self.wheel_visual_angle = torch.zeros(n_envs, self.n_wheels, device=device, dtype=dtype)
+        # Slew-rate state for the susp visual targets (see _SUSP_VIS_MAX_RATE).
+        self._susp_set_prev: Optional[torch.Tensor] = None
+        self._susp_ctrl_prev: Optional[torch.Tensor] = None
+
+    def reset_visual_state(self, env_ids=None) -> None:
+        """Clear the accumulators after a physics/scene reset. Dropping the
+        slew state makes the next susp target SNAP instead of slewing from
+        the stale pre-reset value (which, on the control path, would inject
+        a real transient joint force right after the reset)."""
+        if env_ids is None:
+            self.wheel_visual_angle.zero_()
+            self._susp_set_prev = None
+            self._susp_ctrl_prev = None
+        else:
+            self.wheel_visual_angle[env_ids] = 0.0
+            # Per-env slew snap: forget only those rows.
+            if self._susp_set_prev is not None:
+                self._susp_set_prev = None
+            if self._susp_ctrl_prev is not None:
+                self._susp_ctrl_prev = None
 
     def step(
         self,
@@ -230,12 +291,10 @@ class VisualJointSync:
         susp_joint_pos = None
         if self._susp_set_dofs:
             d = distances[:, self._susp_set_idx]
-            air = (d <= 1e-6) | (d >= 19.9)
-            jp = self.wheel_mesh_radius - d
-            jp = torch.where(air, torch.full_like(jp, -self.l_susp), jp)
-            if self._susp_set_clamp is not None:
-                jp = torch.maximum(
-                    -self._susp_set_clamp, torch.minimum(self._susp_set_clamp, jp))
+            jp = _susp_visual_target(d, self.wheel_mesh_radius, self.l_susp,
+                                     self._susp_set_clamp,
+                                     self._susp_set_prev, dt)
+            self._susp_set_prev = jp
             susp_joint_pos = jp
             parts.append(jp)
 
@@ -265,20 +324,22 @@ class VisualJointSync:
         # could only ride UP from rest, never extend DOWN to reach the ground.
         if self._susp_ctrl_dofs:
             d = distances[:, self._susp_ctrl_idx]
-            air = (d <= 1e-6) | (d >= 19.9)
-            joint_pos = self.wheel_mesh_radius - d
-            joint_pos = torch.where(
-                air, torch.full_like(joint_pos, -self.l_susp), joint_pos,
-            )
+            # PD path applies REAL joint forces (kp=_SUSP_VIS_KP) — the
+            # target is stroke-clamped and slew-rate-limited so an air<->
+            # ground jump cannot inject a large impulse into the chassis.
+            joint_pos = _susp_visual_target(d, self.wheel_mesh_radius,
+                                            self.l_susp, None,
+                                            self._susp_ctrl_prev, dt)
+            self._susp_ctrl_prev = joint_pos
             self.entity.control_dofs_position(
                 joint_pos, dofs_idx_local=self._susp_ctrl_dofs,
             )
 
 
 class KindVisualBatch:
-    """Batched writer for K same-kind ``VisualJointSync`` objects (v1.0.15).
+    """Batched writer for K same-kind ``WheelJointInternalSync`` objects (v1.0.15).
 
-    Each ``VisualJointSync.step`` issues its own ``set_dofs_position`` (plus
+    Each ``WheelJointInternalSync.step`` issues its own ``set_dofs_position`` (plus
     the susp velocity-zero and, for heavy wheels, ``control_dofs_position``) —
     and every solver entry pays a collider/constraint reset + FK pass. K
     same-kind vehicles therefore paid K× that cost per step (the reason the
@@ -287,15 +348,15 @@ class KindVisualBatch:
     into ONE solver-level ``set_dofs_position`` over the concatenated GLOBAL
     dof indices (``entity._dof_start + local``) — one solver entry, one FK.
 
-    Math is identical to ``VisualJointSync.step``, just computed on
+    Math is identical to ``WheelJointInternalSync.step``, just computed on
     ``(n_envs, K, n)`` slabs instead of K ``(n_envs, n)`` slices. The spin
     accumulator lives here in batched form. Construction raises if the K
     layouts differ (caller falls back to the per-entity loop).
     """
 
-    def __init__(self, visuals: "list[VisualJointSync]"):
+    def __init__(self, visuals: "list[WheelJointInternalSync]"):
         if not visuals:
-            raise ValueError("KindVisualBatch needs at least one VisualJointSync")
+            raise ValueError("KindVisualBatch needs at least one WheelJointInternalSync")
         v0 = visuals[0]
         for v in visuals[1:]:
             if (v._batch_set_dofs != v0._batch_set_dofs
@@ -328,6 +389,19 @@ class KindVisualBatch:
         # Batched spin accumulator (replaces the K per-visual accumulators).
         self._angle = torch.zeros(self.n_envs, self.K, v0.n_wheels,
                                   device=v0.device, dtype=v0.dtype)
+        # Batched slew-rate state for the susp visual targets.
+        self._susp_set_prev = None
+        self._susp_ctrl_prev = None
+
+    def reset_visual_state(self, env_ids=None) -> None:
+        """Mirror of ``WheelJointInternalSync.reset_visual_state`` for the batched
+        writer (spin accumulator + slew snap)."""
+        if env_ids is None:
+            self._angle.zero_()
+        else:
+            self._angle[env_ids] = 0.0
+        self._susp_set_prev = None
+        self._susp_ctrl_prev = None
 
     def step(self, steer_NK: torch.Tensor, dist_NK: torch.Tensor,
              omega_NK: torch.Tensor, dt: float) -> None:
@@ -350,12 +424,11 @@ class KindVisualBatch:
         susp_written = False
         if v0._susp_set_dofs:
             d = dist_NK[:, :, v0._susp_set_idx]
-            air = (d <= 1e-6) | (d >= 19.9)
-            jp = v0.wheel_mesh_radius - d
-            jp = torch.where(air, torch.full_like(jp, -v0.l_susp), jp)
-            if v0._susp_set_clamp is not None:
-                c = v0._susp_set_clamp.unsqueeze(0)
-                jp = torch.maximum(-c, torch.minimum(c, jp))
+            clamp = (v0._susp_set_clamp.unsqueeze(0)
+                     if v0._susp_set_clamp is not None else None)
+            jp = _susp_visual_target(d, v0.wheel_mesh_radius, v0.l_susp,
+                                     clamp, self._susp_set_prev, dt)
+            self._susp_set_prev = jp
             parts.append(jp)
             susp_written = True
 
@@ -373,8 +446,132 @@ class KindVisualBatch:
 
         if self._susp_ctrl_g is not None:
             d = dist_NK[:, :, v0._susp_ctrl_idx]
-            air = (d <= 1e-6) | (d >= 19.9)
-            jp = v0.wheel_mesh_radius - d
-            jp = torch.where(air, torch.full_like(jp, -v0.l_susp), jp)
+            jp = _susp_visual_target(d, v0.wheel_mesh_radius, v0.l_susp,
+                                     None, self._susp_ctrl_prev, dt)
+            self._susp_ctrl_prev = jp
             self.solver.control_dofs_position(
                 jp.reshape(N, -1), self._susp_ctrl_g)
+
+
+
+# ----------------------------------------------------------------------
+# Instanced (solver-free) wheel rendering — v1.1.17
+# ----------------------------------------------------------------------
+
+def _pose_mats(pos: np.ndarray, quat_wxyz: np.ndarray) -> np.ndarray:
+    """(N, 3) positions + (N, 4) wxyz quats -> (N, 4, 4) transforms."""
+    w = quat_wxyz[:, 0]; x = quat_wxyz[:, 1]
+    y = quat_wxyz[:, 2]; z = quat_wxyz[:, 3]
+    T = np.zeros((pos.shape[0], 4, 4), dtype=np.float32)
+    T[:, 0, 0] = 1 - 2 * (y * y + z * z)
+    T[:, 0, 1] = 2 * (x * y - w * z)
+    T[:, 0, 2] = 2 * (x * z + w * y)
+    T[:, 1, 0] = 2 * (x * y + w * z)
+    T[:, 1, 1] = 1 - 2 * (x * x + z * z)
+    T[:, 1, 2] = 2 * (y * z - w * x)
+    T[:, 2, 0] = 2 * (x * z - w * y)
+    T[:, 2, 1] = 2 * (y * z + w * x)
+    T[:, 2, 2] = 1 - 2 * (x * x + y * y)
+    T[:, :3, 3] = pos
+    T[:, 3, 3] = 1.0
+    return T
+
+
+class InstancedWheelRenderer:
+    """Solver-free wheel visuals (v1.1.17) — VehicleScene's default when the
+    scene renders (wheel_render_mode="auto", n_envs == 1).
+
+    One instanced pyrender node per (vehicle kind, wheel index); instance
+    poses are streamed each step from the closed-form
+    ``wheel_visual_transforms`` (steer + suspension + spin baked). The path
+    touches the RENDERER only — no joint writes, no solver FK, no PD — so
+    wheel visuals cannot perturb physics BY CONSTRUCTION (WheelJointInternalSync,
+    the previous mechanism, drives solver joints and measurably can; it
+    remains available via ``wheel_render_mode="internal_sync"`` and is still
+    used automatically for ``n_envs > 1``).
+
+    The URDF wheel-link visual geoms are hidden by the caller (their
+    ``active_envs_idx`` set empty) and re-baked here into per-wheel
+    trimeshes (vgeom local offsets applied), so the instanced copies look
+    identical to what the URDF wheels would have shown. Nodes are plain
+    external nodes (``is_marker=False``): every camera renders them without
+    needing ``debug=True``. Node creation is lazy (first ``update()``);
+    pose writes hold the viewer lock."""
+
+    def __init__(self, gs_scene: Any):
+        self._gs_scene = gs_scene
+        self._units: list[dict] = []
+
+    # -- harvesting ----------------------------------------------------------
+
+    @staticmethod
+    def harvest_wheel_meshes(entity: Any, wheels: Any) -> Optional[list]:
+        """Per-wheel trimesh in the WHEEL-LINK frame (vgeom local offsets
+        baked in). Returns None when any wheel link cannot be resolved or
+        has no visual geometry — the caller then falls back to
+        WheelJointInternalSync."""
+        import trimesh as _tm
+        out = []
+        for w in wheels:
+            name = getattr(w, "name", None)
+            link = None
+            if name:
+                try:
+                    link = entity.get_link(name)
+                except Exception:
+                    link = None
+            vgs = list(getattr(link, "vgeoms", None) or [])
+            if not vgs:
+                return None
+            parts = []
+            for vg in vgs:
+                try:
+                    tm = vg.get_trimesh().copy()
+                except Exception:
+                    return None
+                lp = np.asarray(vg.init_pos, dtype=np.float64).reshape(1, 3)
+                lq = np.asarray(vg.init_quat, dtype=np.float64).reshape(1, 4)
+                tm.apply_transform(_pose_mats(lp, lq)[0].astype(np.float64))
+                parts.append(tm)
+            out.append(_tm.util.concatenate(parts) if len(parts) > 1 else parts[0])
+        return out
+
+    # -- units ---------------------------------------------------------------
+
+    def add_unit(self, meshes: list, provider: Any, K: int) -> None:
+        """Register one vehicle kind: ``meshes`` = per-wheel trimeshes (from
+        :meth:`harvest_wheel_meshes`), ``provider(frame)`` returning the
+        closed-form ``(pos, quat)`` shaped ``(n_envs, K, n, 3/4)`` (kind
+        physics) or ``(n_envs, n, 3/4)`` (single VehiclePhysics, K == 1)."""
+        self._units.append(dict(meshes=meshes, provider=provider,
+                                K=int(K), n=len(meshes), nodes=None))
+
+    # -- per-step update -------------------------------------------------------
+
+    def update(self) -> None:
+        if not self._units:
+            return
+        vis = getattr(self._gs_scene, "_visualizer", None)
+        if vis is None:
+            return
+        from genesis.ext import pyrender
+        with vis.viewer_lock:
+            for u in self._units:
+                p, q = u["provider"]("world")
+                K, n = u["K"], u["n"]
+                pos = p.detach().cpu().numpy().reshape(K, n, 3)
+                quat = q.detach().cpu().numpy().reshape(K, n, 4)
+                if u["nodes"] is None:
+                    nodes = []
+                    for i, mesh in enumerate(u["meshes"]):
+                        node = pyrender.Mesh.from_trimesh(
+                            mesh, name=f"gv_wheel_{id(u)}_{i}",
+                            poses=_pose_mats(pos[:, i], quat[:, i]),
+                            smooth=False, is_marker=False)
+                        vis.context.add_external_node(node)
+                        nodes.append(node)
+                    u["nodes"] = nodes
+                else:
+                    for i, node in enumerate(u["nodes"]):
+                        node.primitives[0].poses = _pose_mats(pos[:, i],
+                                                              quat[:, i])
