@@ -366,6 +366,9 @@ After build, the server also emits topology once:
 |---|---|---|
 | `/Genesis/Vehicle/Control` | `frameId:i, [id:i, steer:f, throttle:f, brake:f, aux1:f, aux2:f] × K` | per-vehicle inputs (6 fields/vehicle). `steer/throttle/brake` in `[-1,1]`/`[0,1]` |
 | `/Genesis/Control` | command string (`stop`, `reset`) | lifecycle |
+| `/Genesis/State/SimTime` | `t:f` | SIM time (s) of the TargetBulk that follows (interpolation-fractional). Lets clients finite-difference velocity in the sim's own time base — immune to server slow motion and lerped sends |
+| `/Genesis/Debug/Spheres` | `r,g,b,a, radius, (x,y,z) x N` | debug overlay: one sphere marker per point (waypoints/goals); receiving any overlay also reframes the server viewer to cover it |
+| `/Genesis/Debug/Polyline` | `r,g,b,a, radius, (x,y,z) x N` | debug overlay: draws the polyline in the server viewer (Genesis metres; e.g. a trajectory client's planned path — see sample #14) |
 | `/Genesis/Vehicle/TargetControl/Transform` | `id:i, Px,Py,Pz, Qx,Qy,Qz,Qw` | teleport (pos+quat) |
 | `…/TargetControl/Position` · `…/Rotation` | per-component teleport |
 | `…/TargetControl/AddLocalOffset` · `AddWorldOffset` | `id:i, dx,dy,dz` | relative move |

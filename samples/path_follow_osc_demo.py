@@ -24,8 +24,9 @@ Wire-frame conversions (see ``docs/server.md``): TargetBulk positions are
 UE centimetres with Y flipped — ``pos_g = (Px/100, -Py/100, Pz/100)`` —
 and quaternions are UE XYZW with ``(x, z)`` negated —
 ``quat_g(wxyz) = (Qw, -Qx, Qy, -Qz)``. The client has no velocity channel,
-so ``v_long`` comes from finite-differencing consecutive positions
-(40 Hz server ticks make that clean enough for the follower).
+so ``v_long`` comes from finite-differencing positions over a ~0.3 s
+window in the server's SIM time base (/Genesis/State/SimTime) —
+immune to slow motion and interpolated sends.
 
 PASS criterion: final position within 3 m of the goal waypoint.
 
@@ -85,11 +86,19 @@ class StateReceiver:
         self.pos = None          # (x, y, z) Genesis metres
         self.quat = None         # (w, x, y, z) Genesis
         self.t = None            # arrival wall time
+        self.sim_t = None        # server SIM time of the latest pose (v1.1.20)
+        self._pending_sim_t = None
 
         disp = Dispatcher()
         disp.map("/Genesis/Vehicle/TargetBulk", self._on_bulk)
+        disp.map("/Genesis/State/SimTime", self._on_sim_time)
         self._osc = ThreadingOSCUDPServer(("127.0.0.1", SEND_PORT), disp)
         threading.Thread(target=self._osc.serve_forever, daemon=True).start()
+
+    def _on_sim_time(self, address, *args):
+        # Sent immediately BEFORE the TargetBulk it describes.
+        if args:
+            self._pending_sim_t = float(args[0])
 
     def _on_bulk(self, address, *args):
         # Per target: ID, Px,Py,Pz, Qx,Qy,Qz,Qw, numWheels, wheels(8 each)...
@@ -107,11 +116,12 @@ class StateReceiver:
                 self.pos = (px / 100.0, -py / 100.0, pz / 100.0)
                 self.quat = (qw, -qx, qy, -qz)          # UE xyzw -> Genesis wxyz
                 self.t = time.perf_counter()
+                self.sim_t = self._pending_sim_t
                 self.seq += 1
 
     def latest(self):
         with self.lock:
-            return self.seq, self.pos, self.quat, self.t
+            return self.seq, self.pos, self.quat, self.t, self.sim_t
 
     def shutdown(self):
         self._osc.shutdown()
@@ -200,6 +210,24 @@ def main():
             init_done.wait(timeout=1.0)
         print("server initialized; driving...")
 
+        # Draw the planned path in the SERVER's viewer (debug overlay wire,
+        # v1.1.20): [r, g, b, a, radius, x0, y0, z0, ...] — Genesis metres.
+        # Segments colored by direction: forward cyan (this demo is
+        # forward-only; a reverse block would be sent as a second orange
+        # polyline).
+        cli.send_message(
+            "/Genesis/Debug/Polyline",
+            [0.2, 0.7, 1.0, 1.0, 0.05] +
+            [c for wp in path for c in (wp[0], wp[1], 0.35)])
+        # Waypoint sphere markers (every 3rd) + a red goal marker.
+        cli.send_message(
+            "/Genesis/Debug/Spheres",
+            [0.2, 0.7, 1.0, 1.0, 0.15] +
+            [c for wp in path[::3] for c in (wp[0], wp[1], 0.4)])
+        cli.send_message(
+            "/Genesis/Debug/Spheres",
+            [1.0, 0.2, 0.2, 1.0, 0.5, goal_xy[0], goal_xy[1], 0.7])
+
         # --- Client-side control loop: one command per received state -------
         frame = 0
         last_seq = 0
@@ -215,22 +243,26 @@ def main():
                 server_gone = True
                 print("\n[server exited — shutting down with it]")
                 break
-            seq, pos, quat, t_pkt = receiver.latest()
+            seq, pos, quat, t_pkt, sim_t = receiver.latest()
             if seq == last_seq or pos is None:
                 time.sleep(0.002)
                 continue
             last_seq = seq
-            # Velocity by finite difference over a ~0.3 s WINDOW of packets.
-            # Per-packet FD is unusable on this wire: the server's send
-            # cadence is not 1:1 with sim steps (catch-up bursts, repeated/
-            # interpolated states), so consecutive deltas alternate between
-            # ~0 and a full step. A window spanning many packets averages
-            # that jitter out.
-            hist.append((t_pkt, pos))
-            while hist and t_pkt - hist[0][0] > 0.3:
+            # Velocity by finite difference over a ~0.3 s WINDOW of packets,
+            # in the server's SIMULATION time base (/Genesis/State/SimTime,
+            # v1.1.20). Two reasons wall-clock FD fails here: (a) the send
+            # cadence is not 1:1 with sim steps (catch-up bursts,
+            # interpolated states) so per-packet deltas jitter; (b) under
+            # load (e.g. viewer on) the server runs in SLOW MOTION — wall
+            # deltas then under-read velocity, the follower over-throttles,
+            # and the vehicle overshoots in sim terms. Falls back to wall
+            # time if the server predates the SimTime stamp.
+            tb = sim_t if sim_t is not None else t_pkt
+            hist.append((tb, pos))
+            while hist and tb - hist[0][0] > 0.3:
                 hist.popleft()
             t_old, p_old = hist[0]
-            span = t_pkt - t_old
+            span = tb - t_old
             if span > 0.1:
                 vel = tuple((p - q) / span for p, q in zip(pos, p_old))
 
@@ -250,7 +282,7 @@ def main():
                       f"thr={thr:+5.2f} str={steer:+5.2f} idx={follower.current_idx} "
                       f"[{follower.last_mode}]", flush=True)
 
-        _, pos, _, _ = receiver.latest()
+        _, pos, _, _, _ = receiver.latest()
         if server_gone:
             ok = False
             print("aborted by server shutdown (no PASS/FAIL verdict)")

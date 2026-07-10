@@ -498,7 +498,16 @@ class InstancedWheelRenderer:
     needing ``debug=True``. Node creation is lazy (first ``update()``);
     pose writes hold the viewer lock."""
 
-    def __init__(self, gs_scene: Any):
+    def __init__(self, gs_scene: Any, node_swap: bool = False):
+        # (node_swap is accepted for call-site compatibility but no longer
+        # used: v1.1.20 final streams poses through the engine's own
+        # per-frame buffer-update queue — context.jit.update_buffer — the
+        # SAME mechanism Genesis uses to stream link-frame instance poses,
+        # consumed by BOTH the native viewer and offscreen cameras on the
+        # render thread. Earlier attempts: in-place poses writes froze in
+        # the viewer (classic renderer uploads the instance buffer only
+        # once), and node-recreation caused shadow-state flicker / marker
+        # translucency.)
         self._gs_scene = gs_scene
         self._units: list[dict] = []
 
@@ -549,12 +558,22 @@ class InstancedWheelRenderer:
     # -- per-step update -------------------------------------------------------
 
     def update(self) -> None:
+        """Stream the current closed-form wheel poses into the render nodes.
+
+        Uses the engine's OWN per-frame instance-buffer update queue
+        (``context.jit.update_buffer`` — the mechanism Genesis streams
+        link-frame instance poses with): set ``primitive.poses`` for
+        anything that (re)binds, and queue a model-buffer refresh that the
+        render thread flushes on its next pass. Works identically for the
+        native viewer and offscreen cameras; no node churn, no marker
+        semantics, normal opaque depth-tested rendering."""
         if not self._units:
             return
         vis = getattr(self._gs_scene, "_visualizer", None)
         if vis is None:
             return
         from genesis.ext import pyrender
+        ctx = vis.context
         with vis.viewer_lock:
             for u in self._units:
                 p, q = u["provider"]("world")
@@ -564,14 +583,25 @@ class InstancedWheelRenderer:
                 if u["nodes"] is None:
                     nodes = []
                     for i, mesh in enumerate(u["meshes"]):
-                        node = pyrender.Mesh.from_trimesh(
-                            mesh, name=f"gv_wheel_{id(u)}_{i}",
+                        name = f"gv_wheel_{id(u)}_{i}"
+                        obj = pyrender.Mesh.from_trimesh(
+                            mesh, name=name,
                             poses=_pose_mats(pos[:, i], quat[:, i]),
                             smooth=False, is_marker=False)
-                        vis.context.add_external_node(node)
-                        nodes.append(node)
+                        ctx.add_external_node(obj)
+                        nodes.append(ctx.external_nodes[name])   # pyrender Node
                     u["nodes"] = nodes
                 else:
+                    buf_ids = u.get("buf_ids")
+                    if buf_ids is None or any(b < 0 for b in buf_ids):
+                        # Buffers bind lazily at the first render; re-lookup
+                        # until every node has a valid id, then cache.
+                        buf_ids = [ctx._scene.get_buffer_id(nd, "model")
+                                   for nd in u["nodes"]]
+                        u["buf_ids"] = buf_ids
                     for i, node in enumerate(u["nodes"]):
-                        node.primitives[0].poses = _pose_mats(pos[:, i],
-                                                              quat[:, i])
+                        T = _pose_mats(pos[:, i], quat[:, i])
+                        node.mesh.primitives[0].poses = T
+                        if buf_ids[i] >= 0:
+                            ctx.jit.update_buffer(
+                                buf_ids[i], T.transpose((0, 2, 1)))

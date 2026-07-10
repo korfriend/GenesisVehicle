@@ -139,6 +139,14 @@ class OSCManager:
         
         self.dispatcher.map("/Genesis/Sync/Reset", self._handle_sync_reset)
         self.dispatcher.map("/Genesis/Sync/Reset/", self._handle_sync_reset)
+
+        # Debug overlay: client-provided polyline / sphere markers (e.g. a
+        # trajectory client's planned path + waypoints) drawn in the server's
+        # viewer. v1.1.20.
+        self.dispatcher.map("/Genesis/Debug/Polyline", self._handle_debug_polyline)
+        self.dispatcher.map("/Genesis/Debug/Polyline/", self._handle_debug_polyline)
+        self.dispatcher.map("/Genesis/Debug/Spheres", self._handle_debug_spheres)
+        self.dispatcher.map("/Genesis/Debug/Spheres/", self._handle_debug_spheres)
         
         self.dispatcher.map("/Genesis/Vehicle/FetchMetadata", self._handle_fetch_metadata)
         
@@ -522,6 +530,83 @@ class OSCManager:
                 print(f" [OSC] URDF Mapping JSON: {mapping}")
         except Exception as e:
             print(f" [OSC] Error parsing URDF Mapping JSON: {e}")
+
+    def _handle_debug_polyline(self, address, *args):
+        """Handles /Genesis/Debug/Polyline (v1.1.20).
+
+        Format: [r, g, b, a, radius, x0, y0, z0, x1, y1, z1, ...]
+        Points are GENESIS coordinates (metres), like /Init/Target. Each
+        message is one polyline; the server draws consecutive-point segments
+        as a debug overlay in its viewer once the scene is built. Send any
+        number of messages (e.g. one per direction block, different colors).
+        """
+        if len(args) < 11:      # rgba + radius + at least 2 points
+            return
+        try:
+            color = tuple(float(a) for a in args[0:4])
+            radius = float(args[4])
+            flat = [float(a) for a in args[5:]]
+        except (TypeError, ValueError):
+            return
+        pts = [tuple(flat[i:i + 3]) for i in range(0, len(flat) - 2, 3)]
+        if len(pts) < 2:
+            return
+        self.received_data.setdefault('debug_polylines', []).append(
+            {'color': color, 'radius': radius, 'points': pts})
+        if self.verbose:
+            print(f" [Genesis] Debug polyline received: {len(pts)} points")
+
+    def _handle_debug_spheres(self, address, *args):
+        """Handles /Genesis/Debug/Spheres (v1.1.20).
+
+        Format: [r, g, b, a, radius, x0, y0, z0, x1, y1, z1, ...]
+        Same conventions as /Genesis/Debug/Polyline, but each point becomes
+        a sphere marker (waypoints, goals, ...)."""
+        if len(args) < 8:       # rgba + radius + at least 1 point
+            return
+        try:
+            color = tuple(float(a) for a in args[0:4])
+            radius = float(args[4])
+            flat = [float(a) for a in args[5:]]
+        except (TypeError, ValueError):
+            return
+        pts = [tuple(flat[i:i + 3]) for i in range(0, len(flat) - 2, 3)]
+        if not pts:
+            return
+        self.received_data.setdefault('debug_spheres', []).append(
+            {'color': color, 'radius': radius, 'points': pts})
+        if self.verbose:
+            print(f" [Genesis] Debug spheres received: {len(pts)} points")
+
+    def pop_debug_polylines(self):
+        """Return-and-clear pending debug polylines (drawn by the server loop)."""
+        pls = self.received_data.get('debug_polylines') or []
+        if pls:
+            self.received_data['debug_polylines'] = []
+        return pls
+
+    def pop_debug_spheres(self):
+        """Return-and-clear pending debug sphere batches."""
+        sps = self.received_data.get('debug_spheres') or []
+        if sps:
+            self.received_data['debug_spheres'] = []
+        return sps
+
+    def send_sim_time(self, sim_t: float) -> None:
+        """Send /Genesis/State/SimTime [t] — the SIMULATION time (seconds)
+        the next TargetBulk corresponds to (interpolation-fractional).
+
+        Why (v1.1.20): under load the server runs SLOWER than real time
+        (slow motion), so a client estimating velocity from wall-clock
+        deltas under-reads and over-throttles. Stamping the stream with sim
+        time lets clients finite-difference in the simulation's own time
+        base, immune to slow motion and interpolated/duplicate sends. Sent
+        BEFORE the TargetBulk it describes; additive — clients that don't
+        subscribe are unaffected."""
+        try:
+            self.client_cpp.send_message("/Genesis/State/SimTime", [float(sim_t)])
+        except Exception:
+            pass
 
     def _handle_urdf_control(self, address, *args):
         """

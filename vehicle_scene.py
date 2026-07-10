@@ -980,7 +980,11 @@ class VehicleScene:
         # vehicle in per_vehicle mode.
         if self._use_instanced_wheels:
             from .visual import InstancedWheelRenderer
-            r = InstancedWheelRenderer(self._main_scene)
+            # Node-swap is needed only for the NATIVE viewer (its classic
+            # renderer never re-uploads in-place poses writes); camera-only
+            # scenes keep the cheap in-place update.
+            r = InstancedWheelRenderer(self._main_scene,
+                                       node_swap=self.show_viewer)
             if self.solver == "batched" and self._mvp is not None:
                 veh_by_entity = {id(v.entity_main): v for v in self._vehicles}
                 for kind in self._mvp.kinds:
@@ -993,6 +997,11 @@ class VehicleScene:
                                veh.physics.wheel_visual_transforms, K=1)
             self._wheel_renderer = r
             self._instanced_wheel_meshes = {}     # handed over; free the refs
+            print(f"[genesis_vehicle] wheel visuals: instanced renderer "
+                  f"({len(r._units)} kind(s); solver-free)")
+        elif renders_pre and self._vehicles:
+            print("[genesis_vehicle] wheel visuals: internal_sync "
+                  "(WheelJointInternalSync fallback)")
 
         # Apply any per-obstacle mass overrides now that entities are built.
         for entity, mass in self._pending_mass:
