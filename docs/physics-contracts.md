@@ -180,3 +180,26 @@ solver), verified physics-identical to headless to 1e-6 m at a slight
 pose-streaming cost (~2–3 ms/step at 30 vehicles, CPU)
 (`wheel_render_mode="internal_sync"` restores the old behavior; multi-env
 and raw-`VehiclePhysics` use still fall back to VJS).
+
+
+## 7.9 URDF contracts for ray-wheels (auto-corrected since v1.1.22)
+
+Ray-wheel physics makes three demands on a vehicle URDF. Every
+SDK-authored vehicle satisfies them; an arbitrary URDF (e.g. one exported
+for a normal rigid-body sim) usually does not, so
+`VehicleScene.add_vehicle` runs `genesis_vehicle.urdf_prep` on it by
+default (`prepare_urdf=True`), writing a corrected temp copy next to the
+original — the original file is never modified, and a URDF that already
+complies is used as-is (no copy).
+
+| contract | why | auto-correction |
+|---|---|---|
+| **Wheels must not collide** | ground contact IS the raycast + suspension force model; a colliding wheel is a SECOND support that fights it (vehicle jitters in place, or rides on its colliders while the suspension pushes several times its weight) | wheel colliders are removed. A collider that is the wheel's ONLY geometry is first promoted to a `<visual>`, so the wheel still RENDERS — the instanced wheel renderer draws visual geoms, and physics never touches them |
+| **The suspension attach point IS the wheel centre** | the ray is cast down from `WheelConfig.position` (= the prismatic joint origin) and `rest_d = radius + rest_stroke` measures from there | a chain that hangs the wheel off a carrier (`body --susp--> carrier --spin(z=+h)--> wheel`) puts the attach `h` below the wheel centre — the hull then settles `h` too high with the wheels visibly floating (measured on an M1A2 model: h = 0.433 m). The spin-joint offset is folded into the suspension origin, leaving every link's rest pose unchanged |
+| **Moving links need a valid inertial** | links with no `<inertial>` have zero mass AND inertia; Genesis warns ("mass and inertia of moving bodies must be larger than mjMINVAL"), falls back to its legacy URDF parser, and the articulated chain goes degenerate — the hull stops responding to force properly | a small inertial is injected where one is missing |
+
+Wheel RENDERING is independent of all of this: the instanced renderer
+harvests the wheel link's visual geoms (falling back to its colliders, and
+finally to a cylinder synthesized from `radius`) and draws them at the
+closed-form ray-wheel pose. The wheel link's own solver pose is never used
+— its visuals are hidden and its body only contributes mass.

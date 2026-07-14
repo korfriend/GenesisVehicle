@@ -52,11 +52,16 @@ class VehicleScene:
     def add_vehicle(urdf_path, preset=None, *, pos=(0,0,1), quat=None,
                     material=None, surface=None, vis_mode=None,
                     stability="control", name=None, raycaster_max_range=20.0,
-                    cfg=None, morph=None) -> Vehicle
+                    cfg=None, morph=None, prepare_urdf=True) -> Vehicle
     #   preset (fn→cfg) OR a pre-built cfg=; and a morph= the VehicleScene
     #   builds into an entity internally (custom material/surface, e.g. the L3
     #   server) OR built from urdf_path. urdf_path always gives the wheel
     #   positions.
+    #   prepare_urdf=True (default, v1.1.22): make the URDF ray-wheel ready
+    #   first — wheel colliders become render-only, a suspension attach point
+    #   off the wheel centre is corrected, missing <inertial>s injected. The
+    #   original file is never modified; a compliant URDF is used as-is.
+    #   See physics-contracts.md §7.9 / genesis_vehicle.urdf_prep.
     def add_static(*, morph=None, wheel_raycast_morph=None, collision_morph=None,
                    collision=True, material=None, surface=None, vis_mode=None,
                    name=None) -> StaticBody
@@ -444,6 +449,8 @@ estimate_spin_inertia_from_genesis(
     spin_axis_local: tuple[float, float, float] | None = None,
 ) -> float
 ```
+
+**`prepare_vehicle_urdf(urdf_path, **flags) -> str`** (`from genesis_vehicle.urdf_prep import ...`, v1.1.22) — make an arbitrary URDF ray-wheel ready: wheel colliders become render-only (promoted to `<visual>` when that is the wheel's only geometry), a suspension attach point that sits off the wheel centre is corrected, and links missing an `<inertial>` get one. Returns the ORIGINAL path when the file already complies; never modifies it otherwise (temp copy). `VehicleScene.add_vehicle` calls it by default (`prepare_urdf=True`) — see physics-contracts.md §7.9.
 
 `parse_urdf()` is a **convention-based helper** that discovers wheels by
 walking the URDF joint tree:

@@ -10,6 +10,58 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.22] — 2026-07-11
+
+### Added — `urdf_prep`: arbitrary URDFs are made ray-wheel ready automatically
+
+Driving an externally authored M1A2 model (14 wheels, 40 t) surfaced three
+URDF contracts the SDK had only ever met by construction. All three are now
+auto-corrected by `VehicleScene.add_vehicle` (`prepare_urdf=True` by
+default; the original file is never modified, and a compliant URDF — every
+SDK vehicle — is used as-is with no temp copy):
+
+- **Wheel colliders -> render-only.** Ground contact IS the raycast +
+  suspension model; a colliding wheel is a second, fighting support. The
+  M1A2 sat on its wheel colliders while the suspension pushed with 4x its
+  weight, jittering in place instead of driving. Colliders are stripped —
+  and a collider that is the wheel's ONLY geometry is first promoted to a
+  `<visual>`, so the wheel still renders (the instanced renderer draws
+  visuals; physics never touches them).
+- **Suspension attach point moved onto the wheel centre.** The M1A2 chains
+  `body --susp(z=0)--> carrier --spin(z=+0.433)--> wheel`, so the ray
+  origin sat 0.433 m BELOW the wheel: the hull settled that much too high
+  and the wheels visibly floated. The spin-joint offset is folded into the
+  suspension origin (link rest poses unchanged). NB `VehicleScene`
+  re-parses the URDF for the ray pattern, so this must be fixed in the FILE
+  — a config-level override does not reach the rays.
+- **Missing inertials injected.** The M1A2's 14 carrier links declare no
+  `<inertial>` at all (zero mass and inertia) — Genesis falls back to its
+  legacy URDF parser and the articulated chain goes degenerate: a 5 MN push
+  moved the 40-t hull as if it weighed ~900 t.
+
+Also: `InstancedWheelRenderer.harvest_wheel_meshes` now falls back
+visual -> collision -> cylinder-from-`radius`, so a wheel with no visual (or
+no geometry at all) still shows up. New `docs/physics-contracts.md` §7.9
+documents all three contracts and what rendering does/does not depend on;
+`api-reference.md` §4 gains the helper. 5 new pure-XML tests (compliant
+URDFs untouched, offender corrected, collider-only wheel promoted, original
+file preserved, opt-out flags) — 155 pass.
+
+---
+
+## [1.1.21] — 2026-07-11
+
+### Docs — OSC velocity-estimation guidance added to the path-following guide
+
+- New paragraph in the quick-start section of `docs/path-following.md`:
+  driving the follower over the OSC server requires finite-differencing
+  velocity in the server SIM time base (`/Genesis/State/SimTime`, ~0.3 s
+  window) — wall-clock FD under-reads under server slow motion and blows
+  the course (the measured 1.1.20 failure); sample #14 is the reference
+  implementation. Docs-only; no code changes.
+
+---
+
 ## [1.1.20] — 2026-07-10
 
 ### Fixed — native-viewer wheel streaming; server viewer framing; client path overlay

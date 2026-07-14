@@ -515,10 +515,18 @@ class InstancedWheelRenderer:
 
     @staticmethod
     def harvest_wheel_meshes(entity: Any, wheels: Any) -> Optional[list]:
-        """Per-wheel trimesh in the WHEEL-LINK frame (vgeom local offsets
-        baked in). Returns None when any wheel link cannot be resolved or
-        has no visual geometry — the caller then falls back to
-        WheelJointInternalSync."""
+        """Per-wheel trimesh in the WHEEL-LINK frame (local geom offsets baked
+        in). Source order per wheel (v1.1.22):
+
+        1. the link's VISUAL geoms — the normal case;
+        2. its COLLISION geoms, when the wheel was authored with a collider
+           and no visual (``urdf_prep`` promotes those to visuals, so this is
+           only a safety net for callers that skipped the prep);
+        3. a cylinder synthesized from the wheel's ``radius`` — last resort,
+           so a wheel with NO geometry at all still shows up.
+
+        Returns None only if the wheel links cannot be resolved at all, in
+        which case the caller falls back to WheelJointInternalSync."""
         import trimesh as _tm
         out = []
         for w in wheels:
@@ -529,18 +537,28 @@ class InstancedWheelRenderer:
                     link = entity.get_link(name)
                 except Exception:
                     link = None
-            vgs = list(getattr(link, "vgeoms", None) or [])
-            if not vgs:
+            if link is None:
                 return None
+            geoms = list(getattr(link, "vgeoms", None) or [])
+            if not geoms:
+                geoms = list(getattr(link, "geoms", None) or [])   # colliders
             parts = []
-            for vg in vgs:
+            for g in geoms:
                 try:
-                    tm = vg.get_trimesh().copy()
+                    tm = g.get_trimesh().copy()
                 except Exception:
-                    return None
-                lp = np.asarray(vg.init_pos, dtype=np.float64).reshape(1, 3)
-                lq = np.asarray(vg.init_quat, dtype=np.float64).reshape(1, 4)
+                    continue
+                lp = np.asarray(g.init_pos, dtype=np.float64).reshape(1, 3)
+                lq = np.asarray(g.init_quat, dtype=np.float64).reshape(1, 4)
                 tm.apply_transform(_pose_mats(lp, lq)[0].astype(np.float64))
+                parts.append(tm)
+            if not parts:
+                r = float(getattr(w, "radius", None) or 0.35)
+                width = max(0.08, 0.4 * r)
+                tm = _tm.creation.cylinder(radius=r, height=width, sections=24)
+                # cylinder axis is +z; a wheel spins about the chassis +y axis
+                tm.apply_transform(_tm.transformations.rotation_matrix(
+                    math.pi / 2.0, (1, 0, 0)))
                 parts.append(tm)
             out.append(_tm.util.concatenate(parts) if len(parts) > 1 else parts[0])
         return out
