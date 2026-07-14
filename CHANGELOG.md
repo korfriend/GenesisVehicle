@@ -10,6 +10,23 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.23] — 2026-07-11
+
+### Changed — URDF prep is mandatory; samples render shadows by default
+
+- `VehicleScene.add_vehicle` no longer takes `prepare_urdf`: the URDF is
+  ALWAYS made ray-wheel ready (1.1.22's three corrections). It was never a
+  meaningful knob — the prepared file feeds the entity, the `parse_urdf`
+  call AND the ray pattern, and those must agree; opting out could only
+  produce a vehicle whose rays disagree with its geometry. Per-correction
+  flags still exist on `urdf_prep.prepare_vehicle_urdf` for tooling.
+- Shadows are ON in every sample/demo viewer (Genesis's own
+  `VisOptions(shadow=True)` default): `path_follow_demo`,
+  `path_follow_reverse_demo` and the KDU interactive demo had explicitly
+  disabled them.
+
+---
+
 ## [1.1.22] — 2026-07-11
 
 ### Added — `urdf_prep`: arbitrary URDFs are made ray-wheel ready automatically

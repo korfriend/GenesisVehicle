@@ -775,7 +775,6 @@ class VehicleScene:
         raycaster_max_range: float = 20.0,
         cfg: Any = None,
         morph: Any = None,
-        prepare_urdf: bool = True,
     ) -> Vehicle:
         """Register a vehicle. VehicleScene builds the rigid entity in the main
         scene and, in dual_scene mode, the kinematic proxy + wheel sensor in the
@@ -787,21 +786,21 @@ class VehicleScene:
         it be built from ``urdf_path``. ``urdf_path`` always gives the wheel
         positions.
 
-        ``prepare_urdf`` (default True, v1.1.22): make the URDF ray-wheel ready
-        first — wheel colliders become render-only, a suspension attach point
-        that sits off the wheel centre is corrected, and links missing an
-        ``<inertial>`` get one. The original file is never modified, and a URDF
-        that already satisfies the contracts (every SDK-authored vehicle) is
-        used as-is. See :mod:`genesis_vehicle.urdf_prep`. Pass ``False`` to
-        take the file exactly as authored (e.g. when you prepared it yourself).
-        NB the prepared path is used for the entity, the parse AND the ray
-        pattern — they must agree.
+        The URDF is ALWAYS made ray-wheel ready first (v1.1.22; not optional
+        since v1.1.23) — wheel colliders become render-only, a suspension
+        attach point that sits off the wheel centre is corrected, and links
+        missing an ``<inertial>`` get one. The original file is never
+        modified, and a URDF that already satisfies the contracts (every
+        SDK-authored vehicle) is used as-is with no copy. See
+        :mod:`genesis_vehicle.urdf_prep` and ``docs/physics-contracts.md``
+        §7.9. The prepared path is used for the entity, the parse AND the ray
+        pattern — they must agree, which is why this is not a knob.
         """
         self._require_not_built()
         if cfg is None and preset is None:
             raise ValueError("add_vehicle: pass preset=<fn> or cfg=<VehicleConfig>.")
         name = name or f"vehicle_{len(self._vehicles)}"
-        if prepare_urdf and morph is None:
+        if morph is None:
             from .urdf_prep import prepare_vehicle_urdf
             urdf_path = prepare_vehicle_urdf(urdf_path)
         user_cfg = cfg
