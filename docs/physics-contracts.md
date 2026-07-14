@@ -187,8 +187,9 @@ and raw-`VehiclePhysics` use still fall back to VJS).
 Ray-wheel physics makes three demands on a vehicle URDF. Every
 SDK-authored vehicle satisfies them; an arbitrary URDF (e.g. one exported
 for a normal rigid-body sim) usually does not, so
-`VehicleScene.add_vehicle` runs `genesis_vehicle.urdf_prep` on it by
-default (`prepare_urdf=True`), writing a corrected temp copy next to the
+`VehicleScene.add_vehicle` ALWAYS runs `genesis_vehicle.urdf_prep` on
+it (not a knob — the prepared file feeds the entity, the parse AND the
+ray pattern, which must agree), writing a corrected temp copy next to the
 original — the original file is never modified, and a URDF that already
 complies is used as-is (no copy).
 

@@ -96,7 +96,7 @@ def main():
             camera_pos=(0.0, -45.0, 32.0), camera_lookat=(0.0, -4.0, 0.0),
             camera_fov=50) if args.viewer else None,
         rigid_options=gs.options.RigidOptions(dt=DT, enable_collision=True),
-        vis_options=gs.options.VisOptions(shadow=False),
+        vis_options=gs.options.VisOptions(shadow=True),
     )
     vs.add_ground_plane(friction=1.0)
 

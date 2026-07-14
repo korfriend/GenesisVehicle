@@ -52,15 +52,15 @@ class VehicleScene:
     def add_vehicle(urdf_path, preset=None, *, pos=(0,0,1), quat=None,
                     material=None, surface=None, vis_mode=None,
                     stability="control", name=None, raycaster_max_range=20.0,
-                    cfg=None, morph=None, prepare_urdf=True) -> Vehicle
+                    cfg=None, morph=None) -> Vehicle
     #   preset (fn→cfg) OR a pre-built cfg=; and a morph= the VehicleScene
     #   builds into an entity internally (custom material/surface, e.g. the L3
     #   server) OR built from urdf_path. urdf_path always gives the wheel
     #   positions.
-    #   prepare_urdf=True (default, v1.1.22): make the URDF ray-wheel ready
-    #   first — wheel colliders become render-only, a suspension attach point
-    #   off the wheel centre is corrected, missing <inertial>s injected. The
-    #   original file is never modified; a compliant URDF is used as-is.
+    #   The URDF is ALWAYS made ray-wheel ready first (not a knob, v1.1.23):
+    #   wheel colliders become render-only, a suspension attach point off the
+    #   wheel centre is corrected, missing <inertial>s injected. The original
+    #   file is never modified; a compliant URDF is used as-is (no copy).
     #   See physics-contracts.md §7.9 / genesis_vehicle.urdf_prep.
     def add_static(*, morph=None, wheel_raycast_morph=None, collision_morph=None,
                    collision=True, material=None, surface=None, vis_mode=None,
