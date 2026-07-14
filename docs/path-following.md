@@ -61,6 +61,21 @@ Outside Genesis (UE / Unity / replay), build the state dict with
 `extract_state_from_arrays(pos_xyz, quat_wxyz, vel_xyz)` — the controller
 itself is numpy-only and simulator-agnostic.
 
+**Driving over the OSC server (velocity estimation).** The state stream
+(`/Genesis/Vehicle/TargetBulk`) carries pos + quat but NO velocity, so a
+server-side client must finite-difference positions — and it must do so
+in the server's **simulation time base**, not wall-clock: every
+TargetBulk is preceded by `/Genesis/State/SimTime [t]` (the sim time the
+state corresponds to, interpolation-fractional). FD over a ~0.3 s window
+of `(sim_t, pos)` pairs is robust to the wire's realities — the send
+cadence is not 1:1 with sim steps (catch-up bursts, lerped/duplicate
+sends), and under load (e.g. the server viewer on) the server runs in
+SLOW MOTION, where wall-clock FD under-reads speed, the KICK
+over-throttles, and the vehicle overshoots the course in sim terms
+(measured: a 157 m miss that sim-time FD turns back into a normal PASS).
+Sample #14 (`path_follow_osc_demo.py`) is the reference implementation,
+including the UE-frame decode (`docs/server.md` §4).
+
 Runnable end-to-end demo (bundled tank + reference sweep, PASS = final
 error < 3 m):
 
