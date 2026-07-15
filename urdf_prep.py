@@ -1,4 +1,4 @@
-"""Make an arbitrary vehicle URDF ray-wheel ready (v1.1.22).
+"""Make an arbitrary vehicle URDF ray-wheel ready (v1.1.22; severity split in 1.1.24).
 
 The ray-wheel model has three URDF contracts (``docs/physics-contracts.md``).
 The SDK's own vehicles satisfy them by construction; a URDF authored for a
@@ -28,6 +28,15 @@ leaves the original untouched:
    (mass = inertia = 0) make the articulated chain degenerate: Genesis
    falls back to its legacy URDF parser and the hull stops responding to
    forces properly. A small inertial is injected where one is missing.
+
+The three are NOT equally severe, and are reported differently. (1) and (2)
+are convention gaps, not defects: a wheel collider is mandatory in a normal
+rigid-body sim, and a prismatic joint's origin may sit anywhere along its own
+axis (a gauge freedom — the child chain compensates, so the kinematics are
+identical). Such a file is valid; it just isn't what the ray-wheel model
+reads out of it. Both are logged informationally. (3) is a genuine defect in
+any engine, and the fix invents a mass the author never chose — it raises a
+``logging.WARNING`` naming the links, so it gets fixed at the source.
 
 Idempotent and cheap: if the URDF already satisfies all three contracts
 (every SDK-authored vehicle does), the original path is returned unchanged
@@ -120,7 +129,8 @@ def prepare_vehicle_urdf(
     root = tree.getroot()
     wheel_links = _wheel_link_names(root)
 
-    promoted = removed = inertials = shifted = 0
+    promoted = removed = shifted = 0
+    no_inertial: list[str] = []
 
     # (1) wheels render, but never collide
     if strip_wheel_colliders:
@@ -175,9 +185,9 @@ def prepare_vehicle_urdf(
                 "ixx": str(_FALLBACK_INERTIA), "ixy": "0", "ixz": "0",
                 "iyy": str(_FALLBACK_INERTIA), "iyz": "0",
                 "izz": str(_FALLBACK_INERTIA)})
-            inertials += 1
+            no_inertial.append(link.get("name") or "?")
 
-    if not (removed or shifted or inertials):
+    if not (removed or shifted or no_inertial):
         return urdf_path                       # already ray-wheel ready
 
     urdf_dir = os.path.dirname(os.path.abspath(urdf_path))
@@ -186,15 +196,30 @@ def prepare_vehicle_urdf(
     tree.write(tmp)
     _TEMP_FILES.append(tmp)
 
+    name = os.path.basename(urdf_path)
     if not quiet:
+        # (1) and (2) are convention gaps, not URDF defects: the file is legal
+        # for a normal rigid-body simulator, it just doesn't match what the
+        # ray-wheel model reads out of it. Informational.
         parts = []
         if removed:
             parts.append(f"{removed} wheel collider(s) -> render-only"
                          + (f" ({promoted} promoted to <visual>)" if promoted else ""))
         if shifted:
             parts.append(f"{shifted} suspension origin(s) moved onto the wheel centre")
-        if inertials:
-            parts.append(f"{inertials} missing inertial(s) injected")
-        print(f"[genesis_vehicle] urdf prep ({os.path.basename(urdf_path)}): "
-              + "; ".join(parts))
+        if parts:
+            print(f"[genesis_vehicle] urdf prep ({name}): " + "; ".join(parts))
+
+        # (3) is a real defect in ANY engine — a zero-mass moving link makes the
+        # articulated chain degenerate. Injecting a placeholder mass keeps the
+        # sim running, but the URDF must be fixed at the source: warn loudly.
+        if no_inertial:
+            shown = ", ".join(no_inertial[:4])
+            more = f" +{len(no_inertial) - 4} more" if len(no_inertial) > 4 else ""
+            _logger.warning(
+                "%s: %d link(s) declare no <inertial> (%s%s) - injecting a "
+                "placeholder mass=%.1fkg, I=%.2f. A zero-mass moving link makes "
+                "the articulated chain degenerate; fix the URDF at the source.",
+                name, len(no_inertial), shown, more,
+                _FALLBACK_MASS, _FALLBACK_INERTIA)
     return tmp

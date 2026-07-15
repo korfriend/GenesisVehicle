@@ -18,6 +18,7 @@ Landing page. Pick the document that matches what you're doing.
 | Understand WHERE in the simulation step your hook runs | [`pipeline-and-hooks.md`](pipeline-and-hooks.md) |
 | Pick a stability profile (or understand why it matters for MPPI / Real2Sim) | [`stability-profiles.md`](stability-profiles.md) |
 | Verify what the SDK promises about brake sign / N clamp / `i_wheel` truth / steering convention | [`physics-contracts.md`](physics-contracts.md) |
+| Author a URDF the ray-wheel model accepts (no wheel colliders, suspension origin = wheel centre, every link inertial) | [`physics-contracts.md` §7.9](physics-contracts.md#79-urdf-contracts-for-ray-wheels-auto-corrected-since-v1122) |
 | See what's tested and where things live | [`testing.md`](testing.md) |
 | Track what changed between versions | [`../CHANGELOG.md`](../CHANGELOG.md) |
 
@@ -77,6 +78,7 @@ The right-hand column is where the full story lives.
 | Utility | What it does | Entry point | Details |
 |---|---|---|---|
 | URDF parsing | discovers wheels/axle order, steer-axis sign, and per-wheel geometry from any URDF; the default source of `WheelConfig` | `parse_urdf`, `estimate_spin_inertia_from_genesis` | [`api-reference.md`](api-reference.md) §4 |
+| URDF auto-repair | makes an arbitrary URDF ray-wheel ready: wheel colliders become render-only, a suspension origin sitting off the wheel centre is folded back onto it, missing `<inertial>`s injected. Runs automatically inside `add_vehicle` and the OSC server; the original file is never modified | `prepare_vehicle_urdf` | [`physics-contracts.md` §7.9](physics-contracts.md#79-urdf-contracts-for-ray-wheels-auto-corrected-since-v1122) |
 | Scene helpers | one-call vehicle + wheel-raycaster insertion for a raw `gs.Scene` (the low-level path; prefer `VehicleScene`) | `add_vehicle`, `make_wheel_raycaster` | [`api-reference.md`](api-reference.md) §0/§9 |
 | Raycast helpers | wheel ray pattern definition and shape-normalized sensor reads (`(n_envs, N_WHEELS)` both for 1 and N envs) | `WheelRayPattern`, `read_distances` | [`tire-and-contact.md`](tire-and-contact.md) |
 

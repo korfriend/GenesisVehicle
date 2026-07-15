@@ -10,6 +10,53 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.24] — 2026-07-15
+
+### Fixed — the OSC server bypassed URDF prep (vehicles floated in UE)
+
+| abbr | meaning |
+|---|---|
+| URDF | Unified Robot Description Format (the vehicle model file) |
+| OSC  | Open Sound Control (the UE/Unity wire protocol) |
+| UE   | Unreal Engine (the external client) |
+
+1.1.22/1.1.23 made `VehicleScene.add_vehicle` prepare the URDF, but the
+server built its own `gs.morphs.URDF` and therefore hit the
+`if morph is None` guard — it passed the ORIGINAL, unprepared path to
+`add_vehicle`, whose `parse_urdf` is what places the wheel rays. A URDF that
+hangs its wheels off a carrier link (`body --susp--> carrier --spin(z=+h)-->
+wheel`) then cast its rays `h` below the wheel centres, and the hull settled
+`h` too high — the M1A2 floated 0.433 m in UE even though the same vehicle
+was correct in every in-process sample.
+
+- `server/vehicle_builder.py` and `server/l3_runtime.py` now call
+  `prepare_vehicle_urdf()` ONCE and feed that single prepared path to the
+  morph, `build_cfg()` and `add_vehicle()`, so the entity, the config and
+  the ray pattern all come from the same file. (This replaces the older
+  `strip_wheel_collisions()` helper, which only handled contract 1.)
+- `VehicleScene.add_vehicle` warns when it is given `morph=...` together
+  with an unprepared `urdf_path` — the mismatch that caused this bug can no
+  longer happen silently.
+- Verified through the server path: settled chassis z = −0.008 m (was
+  +0.400 m); path-following OSC sample passes with 1.48 m final error.
+
+### Changed — missing `<inertial>` is now a warning, not a log line
+
+`prepare_vehicle_urdf` corrects three URDF issues, but they are not equally
+severe, and lumping them into one informational line hid the one that
+matters:
+
+- Wheel colliders removed, and suspension origins folded onto the wheel
+  centre, stay **informational**. Neither is a URDF defect — the file is
+  legal for a normal rigid-body simulator (a prismatic joint's origin along
+  its own axis is a gauge freedom); it simply does not match what the
+  ray-wheel model reads out of it.
+- A link with no `<inertial>` is a **real defect in any engine** (a
+  zero-mass moving link makes the articulated chain degenerate), and the fix
+  injects a placeholder mass the author never chose. It now raises a
+  `logging.WARNING` naming the offending links and telling the author to fix
+  the URDF at the source.
+
 ## [1.1.23] — 2026-07-11
 
 ### Changed — URDF prep is mandatory; samples render shadows by default

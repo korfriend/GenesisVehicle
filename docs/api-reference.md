@@ -450,7 +450,7 @@ estimate_spin_inertia_from_genesis(
 ) -> float
 ```
 
-**`prepare_vehicle_urdf(urdf_path, **flags) -> str`** (`from genesis_vehicle.urdf_prep import ...`, v1.1.22) — make an arbitrary URDF ray-wheel ready: wheel colliders become render-only (promoted to `<visual>` when that is the wheel's only geometry), a suspension attach point that sits off the wheel centre is corrected, and links missing an `<inertial>` get one. Returns the ORIGINAL path when the file already complies; never modifies it otherwise (temp copy). `VehicleScene.add_vehicle` calls it by default (`prepare_urdf=True`) — see physics-contracts.md §7.9.
+**`prepare_vehicle_urdf(urdf_path, **flags) -> str`** (`from genesis_vehicle.urdf_prep import ...`, v1.1.22) — make an arbitrary URDF ray-wheel ready: wheel colliders become render-only (promoted to `<visual>` when that is the wheel's only geometry), a suspension attach point that sits off the wheel centre is corrected, and links missing an `<inertial>` get one. Returns the ORIGINAL path when the file already complies; never modifies it otherwise (temp copy). `VehicleScene.add_vehicle` ALWAYS calls it (not a knob, since v1.1.23), and so does the OSC server (v1.1.24); call it yourself only when you build a `morph=` by hand, and build that morph from the path it returns. The first two corrections are logged informationally (the source URDF is legal, it just doesn't match the ray-wheel reading); a missing `<inertial>` is a real defect and raises a `logging.WARNING`. See physics-contracts.md §7.9.
 
 `parse_urdf()` is a **convention-based helper** that discovers wheels by
 walking the URDF joint tree:

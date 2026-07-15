@@ -308,13 +308,19 @@ def run_l3(args):
     # distance injection) at build.
     first_info = target_dict[tids[0]]
     t_fric = first_info.get('friction', ue_friction)
-    temp_urdf = vehicle_builder.strip_wheel_collisions(urdf_path)
-    cfg = vehicle_builder.build_cfg(urdf_path, mapping, t_fric, target_id="L3-shared")
+    # ONE prepared URDF feeds the morph, the cfg AND the ray pattern (v1.1.24).
+    # They must agree: add_vehicle parses the path it is given to place the
+    # wheel rays, so passing the ORIGINAL path with a corrected morph made the
+    # rays disagree with the geometry (an M1A2-style URDF, whose suspension
+    # attach sits below the wheel centre, then floated in UE).
+    from genesis_vehicle.urdf_prep import prepare_vehicle_urdf
+    temp_urdf = prepare_vehicle_urdf(urdf_path)
+    cfg = vehicle_builder.build_cfg(temp_urdf, mapping, t_fric, target_id="L3-shared")
     # WheelJointInternalSync is auto-managed by VehicleScene.build() (on iff the main
     # scene is rendered — show_viewer); headless reads wheel poses closed-form via
     # wheel_visual_transforms, so no per-step engine FK is paid.
     veh = vs.add_vehicle(
-        urdf_path, cfg=cfg,
+        temp_urdf, cfg=cfg,
         morph=gs.morphs.URDF(file=temp_urdf, pos=first_info.get('pos', [0, 0, 2]),
                              quat=first_info.get('quat', [1, 0, 0, 0]), fixed=False, align=False),
         material=gs.materials.Rigid(friction=t_fric, coup_restitution=0.0, sdf_cell_size=10000.0),

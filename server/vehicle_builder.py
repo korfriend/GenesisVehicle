@@ -515,20 +515,30 @@ def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
     t_fric = target_info.get('friction', ue_friction)
     t_rest = 0.0  # forced to 0 to suppress chassis bouncing
 
-    temp_path = strip_wheel_collisions(urdf_path)
+    # ONE prepared URDF feeds the morph, the cfg AND the ray pattern (v1.1.24 —
+    # see urdf_prep). They must agree: add_vehicle parses the path it is given
+    # to place the wheel rays, so handing it the ORIGINAL path together with a
+    # corrected morph made the rays disagree with the geometry (a URDF whose
+    # suspension attach sits below the wheel centre — an M1A2 export — then
+    # floated in UE). prepare_vehicle_urdf supersedes the old
+    # strip_wheel_collisions: it strips the wheel colliders (promoting a
+    # collider-only wheel to a <visual> so it still renders), moves the
+    # suspension attach onto the wheel centre, and injects missing inertials.
+    from genesis_vehicle.urdf_prep import prepare_vehicle_urdf
+    temp_path = prepare_vehicle_urdf(urdf_path)
     target_morph = gs.morphs.URDF(file=temp_path, pos=t_pos, quat=t_quat, fixed=False, align=False)
     t_color = (1.0, 0.3, 0.3, 0.5)   # debug color (semi-transparent red)
 
     # Build the vehicle config (single source shared with the L3 path).
     # enable_wheel_joint_internal_sync is set automatically by vs.build() based on
     # rendering, so it is not touched here.
-    cfg = build_cfg(urdf_path, mapping, t_fric, target_id=target_id)
+    cfg = build_cfg(temp_path, mapping, t_fric, target_id=target_id)
 
     # VehicleScene builds the entity into the main scene + creates
     # raycaster/proxy/VehiclePhysics in vs.build(). The caller never touches
     # a scene directly.
     veh = vs.add_vehicle(
-        urdf_path, cfg=cfg, morph=target_morph,
+        temp_path, cfg=cfg, morph=target_morph,
         material=gs.materials.Rigid(friction=t_fric, coup_restitution=t_rest, sdf_cell_size=10000.0),
         surface=gs.surfaces.Rough(color=t_color), vis_mode=vis_mode,
         name=f"target_{target_id}")

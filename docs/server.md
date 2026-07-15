@@ -356,6 +356,20 @@ bridge converts on its side before sending).
 | 6 | `/Init/Done` | — | client → server (ends `wait_for_initialization`) |
 | 7 | `/Genesis/Init/Pacing` | `dt:f` | server → client (confirms physics period) |
 
+The `urdfPath` of step 3 goes through `prepare_vehicle_urdf()` (since
+v1.1.24 — both server modes), which writes a ray-wheel-ready temp copy next
+to the original and feeds that single path to the morph, the config and the
+wheel-ray pattern. A URDF authored for a normal rigid-body sim usually
+violates one of the three ray-wheel contracts; the most visible one is a
+suspension joint origin that sits below the wheel centre, which makes the
+vehicle **float** in UE by exactly that offset (before v1.1.24 the server
+skipped the prep and did exactly this — an M1A2 hovered 0.433 m). The
+original file is never modified, and a compliant URDF is used as-is. See
+[physics-contracts.md §7.9](physics-contracts.md#79-urdf-contracts-for-ray-wheels-auto-corrected-since-v1122)
+for the contracts and what gets corrected. If a vehicle still floats or
+sinks in the client, check the server's startup log for the `urdf prep` line
+and for a `WARNING` about links missing an `<inertial>`.
+
 After build, the server also emits topology once:
 `/Genesis/Vehicle/JointList`, `/Genesis/Vehicle/LinkList`,
 `/Genesis/Vehicle/WheelNamesList` (arrays of strings).
