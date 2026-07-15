@@ -249,7 +249,7 @@ Detailed docs live under [`docs/`](docs/):
 | [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default) |
 | [`docs/pipeline-and-hooks.md`](docs/pipeline-and-hooks.md) | Hook insertion points in the 5-step pipeline |
 | [`docs/stability-profiles.md`](docs/stability-profiles.md) | `control` / `raw` / `research` profiles + the "one rule" for MPPI / Real2Sim |
-| [`docs/physics-contracts.md`](docs/physics-contracts.md) | Brake sign, non-negative N, `i_wheel` truth policy, steering / coupling order |
+| [`docs/physics-contracts.md`](docs/physics-contracts.md) | Brake sign, non-negative N, `i_wheel` truth policy, steering / coupling order, URDF contracts (§7.9) |
 | [`docs/testing.md`](docs/testing.md) | Test inventory + module map |
 
 ## Repository Layout

@@ -800,9 +800,27 @@ class VehicleScene:
         if cfg is None and preset is None:
             raise ValueError("add_vehicle: pass preset=<fn> or cfg=<VehicleConfig>.")
         name = name or f"vehicle_{len(self._vehicles)}"
+        from .urdf_prep import prepare_vehicle_urdf
         if morph is None:
-            from .urdf_prep import prepare_vehicle_urdf
             urdf_path = prepare_vehicle_urdf(urdf_path)
+        else:
+            # A caller-supplied morph carries its OWN file. ``urdf_path`` still
+            # decides where the wheel rays go (it is what gets parsed), so the
+            # two must describe the same vehicle — a corrected morph paired with
+            # an unprepared urdf_path silently puts the rays in the wrong place
+            # (the v1.1.24 field report: an M1A2 whose suspension attach sits
+            # below the wheel centre floated in UE, because the server passed
+            # the original path with a stripped morph). Warn if the given path
+            # is not already ray-wheel ready — the caller should prepare it once
+            # and pass the SAME file to both.
+            if prepare_vehicle_urdf(urdf_path, quiet=True) != urdf_path:
+                _logger.warning(
+                    "add_vehicle(morph=...) got an unprepared urdf_path (%s): the "
+                    "wheel rays are placed from THIS file, so it must be the same "
+                    "(prepared) URDF the morph was built from. Run "
+                    "genesis_vehicle.urdf_prep.prepare_vehicle_urdf() once and pass "
+                    "its result as both urdf_path and the morph's file.",
+                    os.path.basename(urdf_path))
         user_cfg = cfg
         if cfg is None:
             cfg = preset(urdf_path, stability=stability)

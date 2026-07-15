@@ -199,6 +199,24 @@ complies is used as-is (no copy).
 | **The suspension attach point IS the wheel centre** | the ray is cast down from `WheelConfig.position` (= the prismatic joint origin) and `rest_d = radius + rest_stroke` measures from there | a chain that hangs the wheel off a carrier (`body --susp--> carrier --spin(z=+h)--> wheel`) puts the attach `h` below the wheel centre — the hull then settles `h` too high with the wheels visibly floating (measured on an M1A2 model: h = 0.433 m). The spin-joint offset is folded into the suspension origin, leaving every link's rest pose unchanged |
 | **Moving links need a valid inertial** | links with no `<inertial>` have zero mass AND inertia; Genesis warns ("mass and inertia of moving bodies must be larger than mjMINVAL"), falls back to its legacy URDF parser, and the articulated chain goes degenerate — the hull stops responding to force properly | a small inertial is injected where one is missing |
 
+The OSC server builds its own morph, so it prepares the URDF itself and
+hands the SAME prepared path to `build_cfg()` and `add_vehicle()` (fixed in
+v1.1.24 — before that the server passed the original path and its vehicles
+floated). If you supply `morph=...` to `add_vehicle` yourself, prepare the
+file first and build the morph from the prepared path; `add_vehicle` warns
+when the two disagree.
+
+**These three are not equally severe, and the SDK reports them differently.**
+Contracts 1 and 2 are *convention gaps*, not URDF defects: a wheel collider
+is mandatory in a normal rigid-body sim, and a prismatic joint's origin may
+sit anywhere along its own axis (a gauge freedom — the child chain
+compensates, so the kinematics are identical). Such a file is perfectly
+valid; it just does not match what the ray-wheel model reads out of it. Both
+corrections are therefore reported as an informational line. A link with no
+`<inertial>`, by contrast, is a **genuine defect in any engine**, and the fix
+injects a placeholder mass the author never chose — so it raises a
+`logging.WARNING` naming the offending links. Fix that one at the source.
+
 Wheel RENDERING is independent of all of this: the instanced renderer
 harvests the wheel link's visual geoms (falling back to its colliders, and
 finally to a cylinder synthesized from `radius`) and draws them at the
