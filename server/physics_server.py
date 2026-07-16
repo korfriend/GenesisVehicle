@@ -348,8 +348,9 @@ def main():
     parser.add_argument("--override_dt", type=float, default=None,
                         help="Override simulation time step (dt) in seconds, ignoring the dt "
                              "the client sends (e.g. 0.025 for 40Hz — the recommended budget: "
-                             "verified physics-identical to 0.02 at substeps=2, +25%% step "
-                             "budget, ~-20%% total CPU; see CHANGELOG 1.0.17)")
+                             "verified physics-identical to 0.02 (measured at the pre-1.1.25 "
+                             "default --substeps 2), +25%% step budget, ~-20%% total CPU; "
+                             "see CHANGELOG 1.0.17)")
     parser.add_argument("--no-target-collision", action="store_true", help="Disable collision between target entities")
     parser.add_argument("--road-raycast-only", action="store_true",
                         help="Load complex road/terrain meshes ([Complex]) as VISUAL raycast "
@@ -397,6 +398,25 @@ def main():
                              "duration avg/p95, dt budget, estimated speed "
                              "ratio, time since last switch). Off by default; "
                              "the server benchmark enables it.")
+    parser.add_argument("--substeps", type=int, default=4,
+                        help="Genesis internal substeps per dt (default: 4). The "
+                             "internal step is dt/substeps; a stiff suspension "
+                             "spring needs a small internal step or it rings. "
+                             "Lower this (e.g. 1) only to reproduce coarse-step "
+                             "instability; raise it for stiffer models. Cost is "
+                             "usually negligible at n_envs=1 (step time is "
+                             "dominated by raycast + per-step overhead, not the "
+                             "internal integration).")
+    parser.add_argument("--follow-cam", type=str, default="none",
+                        choices=["none", "side", "chase"],
+                        help="Make the viewer camera track a target (the viewer's "
+                             "own follow_entity — jitter-free, smoothed) instead "
+                             "of the one-shot bird's-eye framing. 'side' views it "
+                             "from -Y (good for watching the wheels); 'chase' "
+                             "from behind (-X). World-fixed offset. Ignored when "
+                             "headless. See --follow-target.")
+    parser.add_argument("--follow-target", type=int, default=0,
+                        help="Target id the --follow-cam camera tracks (default: 0).")
     args = parser.parse_args()
 
     if args.single_scene and args.road_raycast_only:
@@ -484,10 +504,21 @@ def main():
     # All geometry is registered via vs.add_* (no raw scene access); build() /
     # step() and sim reads/tweaks route through vs accessors. Genesis is already
     # initialized above, so init_genesis=False.
+    # --follow-cam: the ViewerOptions camera_pos doubles as the follow OFFSET
+    # for viewer.follow_entity after build (Genesis adds it to the followed
+    # entity's position on every viewer update).
+    _follow_offsets = {"side": ((0.0, -7.0, 1.8), (0.0, 0.0, 0.6)),
+                       "chase": ((-9.0, 0.0, 4.0), (0.0, 0.0, 0.6))}
+    _viewer_opts = None
+    if not args.headless and args.follow_cam in _follow_offsets:
+        _off, _look = _follow_offsets[args.follow_cam]
+        _viewer_opts = gs.options.ViewerOptions(camera_pos=_off, camera_lookat=_look)
+
     vs = VehicleScene(
         n_envs=1, dt=ue_dt,
         raycast_mode="single_scene" if args.single_scene else "dual_scene",
-        gravity=(0, 0, ue_gravity), substeps=2, show_viewer=not args.headless,
+        gravity=(0, 0, ue_gravity), substeps=args.substeps, show_viewer=not args.headless,
+        viewer_options=_viewer_opts,
         init_genesis=False,
         rigid_options=gs.options.RigidOptions(
             enable_self_collision=False,
@@ -601,21 +632,43 @@ def main():
     print(f" [DEBUG] Total rigid geoms after build: {vs.rigid_solver.n_geoms}")
     print(f" [DEBUG] Total rigid links after build: {vs.rigid_solver.n_links}")
 
-    # Viewer: frame the fleet instead of Genesis's default near-origin camera
-    # (which typically spawns INSIDE a vehicle). Bird's-eye at the spawn
-    # centroid; the user can still orbit freely afterwards. (v1.1.20)
+    # Viewer camera. --follow-cam: register the viewer's own follow_entity —
+    # NOT a per-loop set_camera_pose. The viewer draws on its own thread, so a
+    # camera set from the serve loop is one physics step behind the vehicle
+    # for part of every frame, and that offset flickers at the draw rate: the
+    # vehicle "trembles" on screen even when the physics is steady (the
+    # terrain_drive sample documented exactly this). follow_entity updates the
+    # camera inside viewer.update(), atomically with the pose push. (v1.1.25)
+    # Otherwise: one-shot bird's-eye framing at the spawn centroid instead of
+    # Genesis's default near-origin camera (which typically spawns INSIDE a
+    # vehicle); the user can still orbit freely afterwards. (v1.1.20)
+    _follow_cam_fallback = False
     if vs.viewer is not None and vehicles:
-        try:
-            import numpy as _np
-            centers = _np.stack([v.get_pos()[0].cpu().numpy()
-                                 for v in vehicles.values()])
-            c = centers.mean(axis=0)
-            span = max(10.0, float(_np.ptp(centers[:, :2]).max()) * 1.2)
-            vs.viewer.set_camera_pose(
-                pos=_np.array([c[0], c[1] - span - 10.0, 0.6 * span + 8.0]),
-                lookat=_np.array([c[0], c[1], 0.0]))
-        except Exception as e:
-            print(f" [Genesis] viewer camera framing skipped: {e}")
+        _fveh = vehicles.get(args.follow_target) if args.follow_cam != "none" else None
+        if _fveh is not None:
+            try:
+                vs.viewer.follow_entity(_fveh.entity_main, smoothing=0.9)
+                print(f" [Genesis] viewer follow-cam ({args.follow_cam}) on target "
+                      f"{args.follow_target} (viewer-side follow_entity)")
+            except Exception as e:
+                _follow_cam_fallback = True   # older Genesis: per-loop follow below
+                print(f" [Genesis] viewer follow_entity unavailable ({e}) — "
+                      f"falling back to per-loop camera (may show draw-lag jitter)")
+        else:
+            if args.follow_cam != "none":
+                print(f" [Genesis] --follow-cam target {args.follow_target} not "
+                      f"found — using bird's-eye framing")
+            try:
+                import numpy as _np
+                centers = _np.stack([v.get_pos()[0].cpu().numpy()
+                                     for v in vehicles.values()])
+                c = centers.mean(axis=0)
+                span = max(10.0, float(_np.ptp(centers[:, :2]).max()) * 1.2)
+                vs.viewer.set_camera_pose(
+                    pos=_np.array([c[0], c[1] - span - 10.0, 0.6 * span + 8.0]),
+                    lookat=_np.array([c[0], c[1], 0.0]))
+            except Exception as e:
+                print(f" [Genesis] viewer camera framing skipped: {e}")
 
     # Populate the controllers dict the OSC / state-capture code reads with the
     # Vehicle HANDLES (solver-agnostic — veh.wheel_visual_transforms / veh.resolved
@@ -740,6 +793,8 @@ def main():
     # =========================================================================
     last_physics_time = time.perf_counter()
     last_real_time = time.perf_counter()
+    _follow_sm = None       # smoothed follow-cam position (see the follow block below)
+    _follow_dir = None      # smoothed follow-cam heading unit vector (x, y)
 
     while True:
         loop_start = time.perf_counter()
@@ -1033,7 +1088,39 @@ def main():
             catchup_steps += 1
             step_count += 1
 
-
+        # FALLBACK follow camera — only for Genesis versions whose viewer has no
+        # follow_entity (the primary path, registered after build). Per-loop
+        # set_camera_pose lags the vehicle by up to one physics step within each
+        # drawn frame, so it tolerates the draw-lag jitter follow_entity
+        # eliminates. Body-relative with smoothed position AND heading, so the
+        # camera does not additionally shake with a vibrating body. (v1.1.25)
+        if _follow_cam_fallback and vs.viewer is not None and vehicles:
+            veh = vehicles.get(args.follow_target)
+            if veh is not None:
+                try:
+                    import numpy as _np
+                    p = veh.get_pos()[0].cpu().numpy()
+                    q = veh.get_quat()[0].cpu().numpy()   # (w, x, y, z)
+                    yaw = _np.arctan2(2.0 * (q[0] * q[3] + q[1] * q[2]),
+                                      1.0 - 2.0 * (q[2] ** 2 + q[3] ** 2))
+                    d = _np.array([_np.cos(yaw), _np.sin(yaw)])
+                    if _follow_sm is None:
+                        _follow_sm, _follow_dir = p.copy(), d.copy()
+                    _follow_sm += 0.05 * (p - _follow_sm)
+                    _follow_dir += 0.05 * (d - _follow_dir)
+                    ps = _follow_sm
+                    n = float(_np.linalg.norm(_follow_dir))
+                    ds = _follow_dir / n if n > 1e-6 else _np.array([1.0, 0.0])
+                    fwd = _np.array([ds[0], ds[1], 0.0])
+                    left = _np.array([-ds[1], ds[0], 0.0])
+                    if args.follow_cam == "side":
+                        cam = ps + (-left) * 7.0 + _np.array([0, 0, 1.8])
+                    else:  # chase
+                        cam = ps - fwd * 9.0 + _np.array([0, 0, 4.0])
+                    vs.viewer.set_camera_pose(
+                        pos=cam, lookat=ps + _np.array([0, 0, 0.6]))
+                except Exception as e:
+                    print(f" [Genesis] follow-cam update skipped: {e}")
 
 
 

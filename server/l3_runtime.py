@@ -275,7 +275,8 @@ def run_l3(args):
     # already initialized above via VehicleScene.init_backend, so init_genesis=False.
     vs = VehicleScene(
         n_envs=n_envs, dt=ue_dt,
-        raycast_mode="dual_scene", gravity=(0, 0, ue_gravity), substeps=2,
+        raycast_mode="dual_scene", gravity=(0, 0, ue_gravity),
+        substeps=getattr(args, "substeps", 4),
         rigid_options=_rigid_opts, show_viewer=not args.headless,
         init_genesis=False,
     )

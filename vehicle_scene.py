@@ -472,6 +472,7 @@ class VehicleScene:
                              f"or 'internal_sync', got {wheel_render_mode!r}")
         self.wheel_render_mode = wheel_render_mode
         self._wheel_renderer = None      # InstancedWheelRenderer when active
+        self._viewer_atomic_wheels = False   # wheel buffers stream inside viewer.update (set at build)
         self._mvp = None        # MultiVehiclePhysics, in batched mode
         # Kind grouping is lazy + dirty-tracked: add_vehicle / mark_config_dirty
         # bump _config_version; _ensure_grouped re-groups only when it differs from
@@ -1034,6 +1035,24 @@ class VehicleScene:
             print("[genesis_vehicle] wheel visuals: internal_sync "
                   "(WheelJointInternalSync fallback)")
 
+        # Native viewer: make the per-frame render state atomic. Stock Genesis
+        # sets the follow camera OUTSIDE the render lock and the node poses
+        # inside it, so the async draw thread can pair a fresh camera with last
+        # step's body pose — the followed vehicle "trembles" fore/aft at speed.
+        # The patched viewer.update commits wheel buffers (_gv_pre_draw), the
+        # follow camera and the node poses in ONE lock hold. (v1.1.25)
+        self._viewer_atomic_wheels = False
+        if self.viewer is not None:
+            from .visual import patch_viewer_atomic_update
+            if patch_viewer_atomic_update(self.viewer):
+                if self._wheel_renderer is not None:
+                    self.viewer._gv_pre_draw = self._wheel_renderer.update
+                    self._viewer_atomic_wheels = True
+            else:
+                print("[genesis_vehicle] WARN: viewer internals unrecognized - "
+                      "atomic camera/pose update patch skipped (a followed "
+                      "vehicle may show slight draw-lag tremble)")
+
         # Apply any per-obstacle mass overrides now that entities are built.
         for entity, mass in self._pending_mass:
             entity.set_mass(mass)
@@ -1146,11 +1165,22 @@ class VehicleScene:
         else:
             for veh in self._vehicles:
                 veh.physics.step(veh._inputs, distances=dists[veh])
-        self._main_scene.step()
         if self._wheel_renderer is not None:
-            # Solver-free wheel visuals: stream the closed-form wheel poses
-            # into the instanced render nodes (renderer-only; v1.1.17).
-            self._wheel_renderer.update()
+            # Solver-free wheel visuals (v1.1.17): the closed-form wheel poses
+            # must reach the renderer in the SAME frame as the chassis pose,
+            # or the async viewer thread draws a mixed state and the vehicle
+            # appears to tremble (v1.1.25). With the atomic viewer patch the
+            # buffers stream inside viewer.update()'s render-lock hold
+            # (_gv_pre_draw, together with the follow camera and node poses);
+            # without a viewer (offscreen cameras render synchronously) or if
+            # the patch declined, stream them between the physics step and the
+            # visualizer update — the best non-atomic ordering.
+            self._main_scene.step(update_visualizer=False)
+            if not self._viewer_atomic_wheels:
+                self._wheel_renderer.update()
+            self._main_scene.visualizer.update(force=False, auto=True)
+        else:
+            self._main_scene.step()
 
     def reset(self) -> None:
         """Reset per-vehicle physics state and re-sync proxies. (Full scene

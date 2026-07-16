@@ -623,3 +623,74 @@ class InstancedWheelRenderer:
                         if buf_ids[i] >= 0:
                             ctx.jit.update_buffer(
                                 buf_ids[i], T.transpose((0, 2, 1)))
+
+
+def patch_viewer_atomic_update(viewer) -> bool:
+    """Rebind viewer.update so the follow camera, any queued wheel-instance
+    buffers (viewer._gv_pre_draw) and the rigid node poses reach the
+    renderer inside ONE render-lock hold.
+
+    Genesis (verified against 1.2.0) updates the follow camera OUTSIDE the
+    render lock and the node poses INSIDE it. The interactive viewer draws on
+    its own thread under that same (re-entrant) lock, so it can slip a frame
+    between the two updates and pair a fresh camera with LAST steps body
+    pose. At speed that one-step offset flickers at the draw rate: the
+    followed vehicle "trembles" fore/aft on screen while the wheels and the
+    terrain look steady (each is self-consistent) and the physics is clean.
+    The same window let the wheel-instance buffers (streamed by
+    VehicleScene.step) race the body pose in the opposite direction.
+
+    Returns False (and changes nothing) if the viewer internals do not match
+    the expected layout, e.g. a future Genesis restructuring — callers fall
+    back to the non-atomic ordering, which only ever produces the cosmetic
+    flicker this patch removes.
+    """
+    import threading as _threading
+    import time as _time
+    import types as _types
+
+    import genesis as _gs
+
+    for attr in ("_pyrender_viewer", "lock", "context", "update_following",
+                 "_followed_entity", "_last_refresh_time", "_refresh_rate",
+                 "_realtime_pacer", "is_alive"):
+        if not hasattr(viewer, attr):
+            return False
+    if not hasattr(viewer._pyrender_viewer, "update_on_sim_step"):
+        return False
+
+    def _update(self, auto_refresh=None, force=False):
+        if not self.is_alive():
+            _gs.raise_exception("Viewer closed.")
+
+        self._pyrender_viewer.update_on_sim_step()
+
+        with self.lock:
+            # Everything the next drawn frame reads is committed in ONE hold:
+            # wheel-instance buffers, the follow camera, then the node poses.
+            pre_draw = getattr(self, "_gv_pre_draw", None)
+            if pre_draw is not None:
+                pre_draw()
+            if self._followed_entity is not None:
+                self.update_following()      # re-enters the RLock via set_camera_pose
+            self.context.update(force)
+
+            if auto_refresh is None:
+                viewer_thread = (self._pyrender_viewer._thread
+                                 or _threading.main_thread())
+                auto_refresh = viewer_thread == _threading.current_thread()
+            if auto_refresh and not self._pyrender_viewer.run_in_thread:
+                now = _time.perf_counter()
+                if (self._last_refresh_time is None
+                        or now - self._last_refresh_time >= 1.0 / self._refresh_rate):
+                    self._last_refresh_time = now
+                    self._pyrender_viewer.refresh()
+
+        # Real-time pacing stays OUTSIDE the lock (it can sleep most of the
+        # frame; holding the render lock through it would starve the drawer).
+        realtime_pacer = self._realtime_pacer
+        if realtime_pacer is not None:
+            realtime_pacer.sleep()
+
+    viewer.update = _types.MethodType(_update, viewer)
+    return True

@@ -38,10 +38,13 @@ VehiclePhysics.step(inputs)
 [4] CouplingStrategy.apply(omega, meta)              # post-loop, pre-force-apply
 [5] solver.apply_links_external_force/torque (chassis)
 [6] wheel visuals (rendered scenes only): VehicleScene streams closed-form
-    wheel poses into instanced render nodes AFTER scene.step — NOT via the
-    rigid solver (WheelJointInternalSync, the legacy solver-joint fallback,
-    runs here instead for n_envs > 1 / wheel_render_mode="internal_sync";
-    ext. renderers use visual_parts_transforms)
+    wheel poses into instanced render nodes AFTER the physics advance — NOT
+    via the rigid solver; with the native viewer the stream happens inside
+    viewer.update()'s render-lock hold, atomic with the camera + node poses
+    (v1.1.25; physics-contracts.md §7.8). WheelJointInternalSync, the legacy
+    solver-joint fallback, runs here instead for n_envs > 1 /
+    wheel_render_mode="internal_sync"; ext. renderers use
+    visual_parts_transforms.
 ```
 
 ## Hook slots
