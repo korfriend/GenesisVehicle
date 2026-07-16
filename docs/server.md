@@ -58,11 +58,25 @@ python -m genesis_vehicle.server --recv_port 7001 --send_port 7002 --send_port_o
 # dt: the client-sent dt wins; the server fallback default is 0.025 (40 Hz,
 # v1.0.17). To force 40 Hz regardless of what the client sends:
 python -m genesis_vehicle.server --override_dt 0.025
-# Rationale: verified physics-identical to 0.02 at substeps=2 on bumpy terrain
-# (cruise/z-oscillation/yaw within noise), while the per-step budget grows
-# 20 → 25 ms (+25 %) and total CPU drops ~20 % (40 loops/s instead of 50).
+# Rationale: verified physics-identical to 0.02 on bumpy terrain
+# (cruise/z-oscillation/yaw within noise; measured at the pre-v1.1.25 default
+# substeps=2), while the per-step budget grows 20 → 25 ms (+25 %) and total
+# CPU drops ~20 % (40 loops/s instead of 50).
 python -m genesis_vehicle.server --override_dt 0.01  # 100 Hz physics (finer)
 python -m genesis_vehicle.server --no-floor --vis_mode visual -v
+
+# internal substeps (v1.1.25; default 4, both modes): internal step = dt/substeps.
+# A stiff suspension spring rings at a coarse internal step; the cost of more
+# substeps is usually negligible at n_envs=1 (raycast + per-step overhead
+# dominate). Lower it only to reproduce coarse-step instability.
+python -m genesis_vehicle.server --substeps 1        # coarse: rings stiff springs
+python -m genesis_vehicle.server --substeps 10       # extra-fine internal step
+
+# viewer follow camera (v1.1.25): track one target with the viewer's own
+# follow_entity (jitter-free, smoothed; world-fixed offset) instead of the
+# one-shot bird's-eye framing. 'side' views from -Y (wheel watching),
+# 'chase' from behind (-X). Ignored when --headless.
+python -m genesis_vehicle.server --follow-cam side --follow-target 0
 
 # pacing: ADAPTIVE catch-up is the default (v1.0.20). The server monitors
 # steps/loop: sustained overload (window avg ≥ 1.5) drops the cap to 1 —

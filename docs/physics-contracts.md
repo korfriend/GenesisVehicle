@@ -181,6 +181,13 @@ pose-streaming cost (~2–3 ms/step at 30 vehicles, CPU)
 (`wheel_render_mode="internal_sync"` restores the old behavior; multi-env
 and raw-`VehiclePhysics` use still fall back to VJS).
 
+Since v1.1.25 the native viewer additionally commits the wheel buffers, the
+`follow_entity` camera and the rigid node poses in ONE render-lock hold
+(`visual.patch_viewer_atomic_update`, applied automatically at `build()`).
+Before that, the async draw thread could pair state from adjacent steps and
+a followed vehicle appeared to "tremble" fore/aft at speed — a pure draw
+artifact; physics was never affected (see CHANGELOG 1.1.25).
+
 
 ## 7.9 URDF contracts for ray-wheels (auto-corrected since v1.1.22)
 

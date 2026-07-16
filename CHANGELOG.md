@@ -10,6 +10,71 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.25] — 2026-07-15
+
+### Fixed — native-viewer vehicle "tremble": draw-thread races (two of them)
+
+The interactive viewer draws on its own thread under the render lock, so
+anything committed in a DIFFERENT lock hold than the rigid node poses can be
+drawn one physics step apart from them — a one-step offset (~15 cm at 7 m/s)
+that flickers at the draw rate. Physics is clean; cv2/offscreen cameras never
+show it (they render synchronously after the full step). Reported on
+`terrain_drive`. Two such races existed:
+
+1. **Wheel buffers vs body.** `VehicleScene.step()` streamed the instanced
+   wheel buffers AFTER `scene.step()`, whose internal visualizer update had
+   already signalled the draw — a frame could show the chassis at step N with
+   wheels at N-1 (the whole vehicle appears to tremble).
+2. **Follow camera vs body.** Stock Genesis `Viewer.update()` sets the
+   `follow_entity` camera OUTSIDE the render lock and the node poses INSIDE
+   it — a frame could pair the fresh camera with last step's body pose. With
+   race 1 fixed this became visible in isolation: wheels and terrain steady,
+   ONLY the body trembling fore/aft.
+
+Fix: `visual.patch_viewer_atomic_update(viewer)` (applied automatically at
+`build()` when the native viewer is on) rebinds `viewer.update` so the wheel
+buffers (`viewer._gv_pre_draw`), the follow camera and the node poses are all
+committed in ONE render-lock hold; real-time pacing stays outside the lock.
+`VehicleScene.step()` runs `scene.step(update_visualizer=False)` and updates
+the visualizer after the wheel stream when the patch is not active (offscreen
+cameras, or unrecognized future viewer internals — the patch verifies the
+expected layout and declines gracefully with a warning). Headless scenes keep
+the old single-call path. Physics is untouched in every mode.
+
+### Added — OSC server `--substeps` and a `--follow-cam` viewer follow
+
+| abbr | meaning |
+|---|---|
+| OSC | Open Sound Control (the UE/Unity wire protocol) |
+| UE  | Unreal Engine (the external client) |
+
+- `--substeps N` sets the server's internal substep count, which was hard-coded
+  to 2. The internal physics step is `dt / substeps`; a stiff suspension spring
+  needs a small internal step or it rings. Lower it (e.g. 1) to reproduce
+  coarse-step instability, raise it for stiffer models. Honoured in both
+  per-entity (L2) and multi-env (L3) modes. **The default is now 4, up from the
+  old hard-coded 2** — the extra integration is stable for stiffer models and
+  measured negligible at n_envs=1 (step time is dominated by raycast + per-step
+  overhead, not the internal solver). Large fleets (tens of contact-heavy
+  vehicles) should measure, since substep cost can scale with contacts there.
+- `--follow-cam {side,chase}` (with `--follow-target ID`) makes the viewer
+  camera track a vehicle instead of the one-shot bird's-eye framing. `side`
+  views it from -Y (good for watching the wheels); `chase` from behind (-X);
+  world-fixed offset, smoothed. Implemented with the viewer's own
+  `follow_entity`, NOT a per-loop `set_camera_pose`: the viewer draws on its
+  own thread, so a camera set from the serve loop lags the vehicle by up to
+  one physics step within each drawn frame, and that offset flickers at the
+  draw rate — the vehicle "trembles" on screen even when the physics is
+  steady (the `terrain_drive` sample hit and documented exactly this;
+  `follow_entity` updates the camera inside `viewer.update()`, atomically
+  with the pose push). A per-loop smoothed camera remains only as a fallback
+  for Genesis versions without `follow_entity`. Ignored when headless.
+
+`--follow-cam` defaults to `none` (prior behaviour). Motivated by
+`Team_Issue_Test/wheel_vibration_test.py`, an issue repro that drives one URDF
+through both the in-process SDK and the server and needs the two to run at the
+same substep count with a matching, jitter-free side view.
+
 ## [1.1.24] — 2026-07-15
 
 ### Fixed — the OSC server bypassed URDF prep (vehicles floated in UE)

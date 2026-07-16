@@ -46,6 +46,16 @@ It is not a user-facing knob (`VehicleScene(wheel_render_mode=...)`
 exists only to force the legacy joint-sync fallback, which is also used
 automatically for `n_envs > 1`).
 
+**Native-viewer camera follow:** use the viewer's own
+`vs.viewer.follow_entity(veh.entity_main)` (see
+[`terrain_drive.py`](terrain_drive.py) for the pattern incl. a fallback for
+older Genesis), NOT a per-step `set_camera_pose` from the drive loop — the
+viewer draws on its own thread, and a camera set after `vs.step()` returns
+lags the vehicle within each drawn frame, which reads as the vehicle
+"trembling". Since v1.1.25 `VehicleScene.build()` additionally makes the
+follow camera, wheel buffers and node poses commit atomically per frame
+(physics-contracts.md §7.8).
+
 For an **external** renderer (UE / Unity), keep the run headless and read
 wheel poses from `wheel_visual_transforms()` /
 `visual_parts_transforms()` (closed-form, ~µs) — the same data source
