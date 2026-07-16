@@ -15,7 +15,7 @@ from genesis_vehicle import (
     car_4w_fwd_ackermann,
     car_4w_rwd_ackermann,
     stability_hooks_for_profile,
-    tank_10w_skid_belt,
+    tank_skid_belt,
 )
 from genesis_vehicle.config import ConfigError
 
@@ -112,13 +112,13 @@ def test_preset_car_raw_profile_has_no_hooks():
 
 
 def test_preset_tank_default_includes_static_friction_lock():
-    cfg = tank_10w_skid_belt(KDU_URDF)
+    cfg = tank_skid_belt(KDU_URDF)
     types = [type(h).__name__ for h in cfg.stability_hooks]
     assert "StaticFrictionLock" in types
 
 
 def test_preset_tank_raw_profile_has_no_hooks():
-    cfg = tank_10w_skid_belt(KDU_URDF, stability="raw")
+    cfg = tank_skid_belt(KDU_URDF, stability="raw")
     assert cfg.stability_hooks == []
 
 

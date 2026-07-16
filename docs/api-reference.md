@@ -757,7 +757,7 @@ def car_4w_awd_ackermann(
 def truck_6w_partial_ackermann(
     urdf_path: str, n_envs: int = 1, *, stability: str = "control",
 ) -> VehicleConfig
-def tank_10w_skid_belt(
+def tank_skid_belt(
     urdf_path: str, n_envs: int = 1, *, stability: str = "control",
 ) -> VehicleConfig
 
@@ -772,7 +772,7 @@ stability_hooks_for_profile(
 | `car_4w_rwd_ackermann(urdf_path)` | 4 wheels | Ackermann front | RWD | Independent |
 | `car_4w_awd_ackermann(urdf_path)` | 4 wheels | Ackermann front | AWD | Independent |
 | `truck_6w_partial_ackermann(urdf_path)` | 6 wheels | Ackermann on axle 0 | Drive on mid + rear axles | Independent |
-| `tank_10w_skid_belt(urdf_path)` | 10 wheels | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
+| `tank_skid_belt(urdf_path)` | any wheel count (10w KDU / 14w M1A2 validated) | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
 
 Tune by editing the returned config (`cfg.dt = ...`, replace a strategy,
 override `cfg.stability_hooks`) before passing it to `VehiclePhysics`.

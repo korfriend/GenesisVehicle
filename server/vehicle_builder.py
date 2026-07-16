@@ -87,14 +87,28 @@ def apply_monkey_patches(rigid_solver):
 def is_wheel_match_fuzzy(override_wheel_name, wheel_config):
     """
     Checks if an override wheel name matches a WheelConfig object,
-    supporting exact matches and position-based abbreviation fuzzy matches.
+    supporting a match-all wildcard, exact matches, position-based
+    abbreviation fuzzy matches, and substring matches against EVERY name the
+    URDF joint tree gives the wheel (wheel link, spin joint, suspension
+    joint, steer joint) — the parse already knows the full chain, so any of
+    its names should address the wheel. (v1.1.26: wildcard + susp/steer
+    joint names; before, only the spin joint and the wheel link were
+    checked, so e.g. "susp" matched a tank whose SPIN joints carry the word
+    but not one where only the SUSPENSION joints do.)
     """
     o_name = override_wheel_name.lower()
+
+    # 0. Wildcard: apply to every wheel.
+    if o_name in ("*", "all"):
+        return True
+
     w_spin = wheel_config.spin_joint_name.lower() if wheel_config.spin_joint_name else ""
     w_node_name = wheel_config.name.lower() if wheel_config.name else ""
+    w_susp = wheel_config.susp_joint_name.lower() if wheel_config.susp_joint_name else ""
+    w_steer = wheel_config.steer_joint_name.lower() if wheel_config.steer_joint_name else ""
 
     # 1. Exact matches
-    if o_name == w_spin or o_name == w_node_name:
+    if o_name in (w_spin, w_node_name, w_susp, w_steer) and o_name:
         return True
 
     # 2. Extract and compare positions
@@ -112,13 +126,15 @@ def is_wheel_match_fuzzy(override_wheel_name, wheel_config):
 
     o_pos = get_pos(o_name)
     if o_pos:
-        # Check if either the spin joint name or node name matches this position
-        if get_pos(w_spin) == o_pos or get_pos(w_node_name) == o_pos:
+        # Any of the wheel's chain names carrying this position matches.
+        if any(get_pos(n) == o_pos for n in (w_spin, w_node_name, w_susp, w_steer) if n):
             return True
 
-    # 3. Substring matching fallback
-    if o_name and (o_name in w_spin or w_spin in o_name or o_name in w_node_name or w_node_name in o_name):
-        return True
+    # 3. Substring matching fallback — against every chain name.
+    if o_name:
+        for n in (w_spin, w_node_name, w_susp, w_steer):
+            if n and (o_name in n or n in o_name):
+                return True
 
     return False
 
@@ -185,11 +201,17 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
     is_skid = (drive_type_val == 2)
     is_truck = (drive_type_val == 1)
 
-    # If SkidSteer with 10 wheels, use tank preset
-    if is_skid and len(wheels) == 10:
-        print(f" [Genesis] [Preset] Loading tank_10w_skid_belt preset for Vehicle {target_id}")
-        from genesis_vehicle.presets import tank_10w_skid_belt
-        cfg = tank_10w_skid_belt(urdf_path, n_envs=1)
+    # SkidSteer -> tank preset for ANY wheel count. The preset discovers the
+    # wheels from the URDF (SkidSteer/PerSide/SameSideBelt are count-generic);
+    # gating it on exactly 10 wheels sent every other tracked vehicle (e.g. a
+    # 14-wheel M1A2) into the generic mapping branch below, where an empty
+    # drivingJoints list means ZERO drive weights and NoSteer — a vehicle that
+    # creeps at cm/s and ignores steering. (v1.1.26)
+    if is_skid:
+        print(f" [Genesis] [Preset] Loading tank_skid_belt preset for Vehicle "
+              f"{target_id} (skid-steer, {len(wheels)} wheels)")
+        from genesis_vehicle.presets import tank_skid_belt
+        cfg = tank_skid_belt(urdf_path, n_envs=1)
     # If Truck with 6 wheels, use truck preset
     elif is_truck and len(wheels) == 6:
         print(f" [Genesis] [Preset] Loading truck_6w_partial_ackermann preset for Vehicle {target_id}")
@@ -225,10 +247,19 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
                 if w.axle_index not in steered_axles:
                     steered_axles.append(w.axle_index)
 
-        # Normalize drive weights
+        # Normalize drive weights. An empty/unmatched drivingJoints list would
+        # otherwise leave EVERY weight at zero — a silently dead drivetrain
+        # (the vehicle just creeps from residual motion). Fall back to
+        # all-wheel drive and say so. (v1.1.26)
         sw = sum(drive_weights)
         if sw > 0:
             drive_weights = [x / sw for x in drive_weights]
+        else:
+            print(f" [Genesis] [WARN] Vehicle {target_id}: no drivingJoints "
+                  f"matched any wheel spin joint - falling back to ALL-wheel "
+                  f"drive (send mapping drivingJoints, or use a preset "
+                  f"driveType, to control this)")
+            drive_weights = [1.0 / len(wheels)] * len(wheels)
 
         # 3. Dynamic Strategy Build
         t_drive = float(mapping.get('maxTorque', mapping.get('MaxTorque', 5000.0)))
@@ -413,8 +444,10 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
             override_w_name = override.get('wheelName', override.get('WheelName', ''))
             if not override_w_name:
                 continue
+            n_matched = 0
             for w in cfg.wheels:
                 if is_wheel_match_fuzzy(override_w_name, w):
+                    n_matched += 1
                     # Wheel physical dimensions
                     if 'radius' in override or 'Radius' in override:
                         val = float(override.get('radius', override.get('Radius', -1.0)))
@@ -463,6 +496,17 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
                         w.ey = float(override.get('peY', override.get('PeY', 0.4)))
 
                     print(f"   - Applied overrides to wheel: {override_w_name} (matched to URDF link: {w.name})")
+
+            if n_matched == 0:
+                # A silently skipped override is how a plant ends up diverging
+                # from the sweep table that was measured for it (v1.1.26).
+                wheel_names = ", ".join((w.name or "?") for w in cfg.wheels[:4])
+                print(f" [Genesis] [WARN] wheelOverrides entry '{override_w_name}' "
+                      f"matched NO wheel (URDF wheels: {wheel_names}"
+                      f"{', ...' if len(cfg.wheels) > 4 else ''}) - the override "
+                      f"was IGNORED. Use '*' for all wheels, or a name matched "
+                      f"exact/position/substring against the wheel link / spin / "
+                      f"suspension / steer joint names.")
 
     _cfg_cache[_key] = cfg
     return cfg

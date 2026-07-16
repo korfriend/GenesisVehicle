@@ -43,7 +43,7 @@ from genesis_vehicle import (
     PacejkaAnisotropic, CoulombIsotropic,
     # presets
     car_4w_rwd_ackermann, car_4w_awd_ackermann,
-    truck_6w_partial_ackermann, tank_10w_skid_belt,
+    truck_6w_partial_ackermann, tank_skid_belt,
     # utilities
     WheelRayPattern, parse_urdf, stability_hooks_for_profile,
     # path following (docs/path-following.md)

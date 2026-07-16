@@ -13,7 +13,7 @@ The bundled sweep CSV was measured for EXACTLY this (URDF, preset,
 override) triple — the ``TankTuning`` constants below reproduce the
 overrides it was measured with. Change any of the three and you must
 re-measure: ``python -m genesis_vehicle.control.sweep_measure --urdf ...
---preset tank_10w_skid_belt --config your_overrides.py --output new.csv``.
+--preset tank_skid_belt --config your_overrides.py --output new.csv``.
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def main():
 
     import torch
     import genesis as gs
-    from genesis_vehicle import VehicleScene, tank_10w_skid_belt, PathFollower
+    from genesis_vehicle import VehicleScene, tank_skid_belt, PathFollower
     from genesis_vehicle.control import extract_state
 
     VehicleScene.init_backend("gpu" if args.gpu else "cpu")
@@ -135,7 +135,7 @@ def main():
                             near=0.1, far=250.0, GUI=False,
                             debug=True)   # render marker overlays (path polyline) too
 
-    tank = vs.add_vehicle(URDF, tank_10w_skid_belt,
+    tank = vs.add_vehicle(URDF, tank_skid_belt,
                           pos=(start_xy[0], start_xy[1], 2.0),
                           material=gs.materials.Rigid(friction=1.0), name="tank")
     # cfg overrides BEFORE build — with the default batched solver, cfg

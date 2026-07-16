@@ -88,7 +88,7 @@ def main():
 
     import torch
     import genesis as gs
-    from genesis_vehicle import VehicleScene, tank_10w_skid_belt, PathFollower
+    from genesis_vehicle import VehicleScene, tank_skid_belt, PathFollower
     from genesis_vehicle.control import extract_state
 
     VehicleScene.init_backend("gpu" if args.gpu else "cpu")
@@ -132,7 +132,7 @@ def main():
                             near=0.1, far=200.0, GUI=False,
                             debug=True)   # render marker overlays (path polyline) too
 
-    tank = vs.add_vehicle(URDF, tank_10w_skid_belt, pos=(0.0, 0.0, 2.0),
+    tank = vs.add_vehicle(URDF, tank_skid_belt, pos=(0.0, 0.0, 2.0),
                           material=gs.materials.Rigid(friction=1.0), name="tank")
     TankTuning.apply_config(tank.cfg)   # BEFORE build (batched solver bakes cfg)
     vs.build()

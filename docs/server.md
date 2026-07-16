@@ -124,7 +124,7 @@ python -m genesis_vehicle.server.benchmark --urdf /path/to/tank.urdf
 Per configuration it launches the server subprocess (`--headless
 --road-raycast-only`, CPU default, dt = 0.025), performs the full OSC
 handshake (`/Genesis/Init/Physics` → `/Genesis/Vehicle/Init` (SkidSteer
-mapping → `tank_10w_skid_belt`) → K `/Init/Target`s → 88 `/Init/Obstacle`s
+mapping → `tank_skid_belt`) → K `/Init/Target`s → 88 `/Init/Obstacle`s
 (complex) → `/Init/Done`), streams `/Genesis/Vehicle/Control` driving inputs
 at ~30 Hz, averages the server's `[STATS]` lines (first dropped as warm-up),
 then sends `stop`. The summary table reports ms/step, steps/loop, Loop Avg,
@@ -431,20 +431,29 @@ and PascalCase both accepted):
 
 | Key | Type | Meaning |
 |---|---|---|
-| `driveType` | int | 0 Ackermann, 1 Truck, 2 SkidSteer, 3 Manual — selects a preset for 4w/6w/10w |
+| `driveType` | int | 0 Ackermann (needs 4 wheels), 1 Truck (needs 6), 2 SkidSteer (**any wheel count**, v1.1.26 — loads `tank_skid_belt` for every tracked vehicle), 3 Manual. A non-matching count falls through to the `drivingJoints`/`steeringJoints` mapping path |
 | `drivingJoints` / `steeringJoints` | `[{jointName}]` | which joints propel / steer (Manual path) |
 | `drivetrainStrategy` | int | 0 AWD, 1 RWD, 2 FWD, 3 PerSide |
 | `couplingStrategy` | int | 0 Independent, 1 SameSideBelt |
 | `maxTorque` / `maxBrake` | float | drive / brake torque (N·m) |
 | `steerScale` *(= `maxSteerRad`)* | float | max steer angle (rad) at \|steer\|=1. **UE serializes `SteerScale`; the server also accepts `maxSteerRad`.** Should stay within the URDF steer joint `<limit>` |
 | `brakeBiasFrontRatio` | float | front brake fraction (rest to rear) |
-| `wheelOverrides` | `[{wheelName, radius, mass, stiffness, muLong, pbX, …}]` | per-wheel physical / Pacejka overrides (fuzzy name match) |
+| `wheelOverrides` | `[{wheelName, radius, mass, stiffness, muLong, pbX, …}]` | per-wheel physical / Pacejka overrides. `wheelName` matches exact/position/substring against ANY name in the wheel's URDF joint chain (wheel link, spin, suspension, steer joint); `"*"` / `"all"` = every wheel (v1.1.26). An entry that matches nothing is skipped **with a warning** naming the URDF's wheel links |
 
 > **Steering note:** `steerScale` is the **center (bicycle) angle**; with
 > Ackermann the inner wheel turns *more*. If a client expects "max angle =
 > exact wheel angle," account for the Ackermann inner/outer spread. Keep
 > `steerScale` ≤ the URDF steer joint limit or the physics angle will
 > exceed what the visual joint can show.
+
+> **Silent-failure guards (v1.1.26):** a mapping whose `drivingJoints` match
+> no wheel spin joint used to build a DEAD drivetrain (all-zero drive
+> weights — the vehicle creeps at cm/s); it now falls back to all-wheel
+> drive with a warning. Likewise an unmatched `wheelOverrides` entry used to
+> be skipped silently (the plant then quietly diverges from any sweep table
+> measured for it); it now warns. If a vehicle barely moves or rides on
+> obviously wrong suspension, check the server startup log for these
+> `[WARN]` lines and compare the resolved wheel-settings table it prints.
 
 ---
 

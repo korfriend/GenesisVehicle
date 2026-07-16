@@ -16,7 +16,7 @@ tanks this script (default matrix now includes 200 and 400):
    opt in),
 2. acts as the UE client over OSC loopback: sends ``/Genesis/Init/Physics``
    (dt = 0.025), ``/Genesis/Vehicle/Init`` (tank URDF + SkidSteer mapping →
-   ``tank_10w_skid_belt``), K ``/Init/Target``s, the 88 convex-hull
+   ``tank_skid_belt``), K ``/Init/Target``s, the 88 convex-hull
    ``/Init/Obstacle``s (complex only), ``/Init/Done``,
 3. streams ``/Genesis/Vehicle/Control`` driving inputs at ~30 Hz,
 4. collects the server's ``[MODE]`` / ``[PROFILE]`` / ``[STATS]`` lines,
