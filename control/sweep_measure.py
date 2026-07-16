@@ -4,7 +4,7 @@ CLI::
 
     python -m genesis_vehicle.control.sweep_measure \\
         --urdf my_vehicle.urdf \\
-        --preset tank_10w_skid_belt \\
+        --preset tank_skid_belt \\
         --config my_overrides.py \\
         --output my_vehicle_sweep.csv [--gpu] [--quick]
 
@@ -128,22 +128,33 @@ def _load_config_module(config_path):
 
 def build_scene(n_envs, urdf_path, preset_fn, config_mod,
                 dt=DEFAULT_DT, substeps=DEFAULT_SUBSTEPS):
-    import genesis as gs
-    from genesis_vehicle import VehiclePhysics, add_vehicle
+    """Build a VehicleScene (dual_scene raycast) for the sweep. (v1.1.26)
 
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=dt, substeps=substeps),
-        show_viewer=False,
-    )
-    scene.add_entity(gs.morphs.Plane())
-    vehicle, sensor, cfg = add_vehicle(scene, urdf_path, preset_fn, pos=(0, 0, 0.5))
+    This tool used a raw ``gs.Scene`` + the low-level ``add_vehicle`` before,
+    i.e. single_scene raycast — the wheel rays hit the MAIN scene's rigid
+    geoms. Two failure modes for an arbitrary URDF, both producing a table of
+    pure ballistic noise: (a) the raw file was never urdf-prepped, so wheel
+    COLLIDERS fight the suspension as a double support; (b) the v1.1.16
+    high-cast ray (start = attach + 1 m) begins INSIDE a tall hull and hits
+    the vehicle's OWN roof — a constant self-hit that rides along with the
+    vehicle (measured on a 27 t M1A2: d frozen at -0.405 m on all 14 wheels,
+    N = 317 kN each, z = +16 m / vz = +56 m/s within the settle). VehicleScene
+    preps the URDF automatically, and in dual_scene the rays only see the
+    RAYCAST scene's static mirrors — self-hits are impossible.
+    """
+    from genesis_vehicle import VehicleScene
+
+    vs = VehicleScene(n_envs=n_envs, dt=dt, substeps=substeps,
+                      solver="per_vehicle", show_viewer=False)
+    vs.add_ground_plane(friction=1.0)
+    veh = vs.add_vehicle(urdf_path, preset_fn, pos=(0.0, 0.0, 0.5))
     if config_mod is not None and hasattr(config_mod, "apply_config"):
-        config_mod.apply_config(cfg)
-    scene.build(n_envs=n_envs)
-    physics = VehiclePhysics(scene, vehicle, sensor, cfg, n_envs=n_envs)
+        config_mod.apply_config(veh.cfg)
+    vs.build()
+    physics = veh.physics
     if config_mod is not None and hasattr(config_mod, "apply_runtime_config"):
         config_mod.apply_runtime_config(physics)
-    return scene, vehicle, sensor, cfg, physics
+    return vs, veh, physics
 
 
 def _wheel_radii_tensor(physics, device):
@@ -170,71 +181,68 @@ def set_per_env_gravity(scene, pitch_deg, roll_deg, device):
     scene.sim.set_gravity(torch.tensor(g_vecs, device=device))
 
 
-def set_initial_velocity(vehicle, physics, v_init, wheel_radii, device):
+def set_initial_velocity(veh, physics, v_init, wheel_radii, device):
     import torch
     import genesis as gs
+    entity = veh.entity_main
     n_envs = len(v_init)
     v_t = torch.tensor(v_init, device=device, dtype=gs.tc_float)
-    dofs_vel = torch.zeros(n_envs, vehicle.n_dofs, device=device, dtype=gs.tc_float)
+    dofs_vel = torch.zeros(n_envs, entity.n_dofs, device=device, dtype=gs.tc_float)
     dofs_vel[:, 0] = v_t
-    vehicle.set_dofs_velocity(dofs_vel)
+    entity.set_dofs_velocity(dofs_vel)
     # Spin the wheels consistently with the chassis speed (per-wheel resolved
     # radius — no hard-coded tire radius).
     physics.omega[:, :] = v_t.unsqueeze(-1) / wheel_radii.unsqueeze(0)
 
 
-def _v_long(vehicle):
+def _v_long(veh):
     """Body-longitudinal speed: world velocity projected through yaw — the
     SAME definition PathFollower's state extraction consumes, so the table
     is produced and consumed in one frame."""
     import torch
-    vel = vehicle.get_vel()                    # (n_envs, 3) world
-    q = vehicle.get_quat()                     # (n_envs, 4) wxyz
+    vel = veh.get_vel()                        # (n_envs, 3) world
+    q = veh.get_quat()                         # (n_envs, 4) wxyz
     w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
     yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
     return vel[:, 0] * torch.cos(yaw) + vel[:, 1] * torch.sin(yaw)
 
 
-def measure_one_chunk(scene, vehicle, physics, wheel_radii,
+def measure_one_chunk(vs, veh, physics, wheel_radii,
                       v_init, throttle, steer, pitch_deg, roll_deg, device,
                       dt=DEFAULT_DT):
     import torch
     import genesis as gs
-    from genesis_vehicle import VehicleInputs
 
     n_ground_settle = int(T_GROUND_SETTLE / dt)
     n_settle = int(T_SETTLE / dt)
     n_measure = int(T_MEASURE / dt)
 
     n_envs = len(v_init)
-    set_per_env_gravity(scene, pitch_deg, roll_deg, device)
+    set_per_env_gravity(vs.scene, pitch_deg, roll_deg, device)
 
-    inputs_zero = VehicleInputs(
-        throttle=torch.zeros(n_envs, device=device, dtype=gs.tc_float),
-        brake=torch.zeros(n_envs, device=device, dtype=gs.tc_float),
-        steer=torch.zeros(n_envs, device=device, dtype=gs.tc_float),
-    )
+    zeros = torch.zeros(n_envs, device=device, dtype=gs.tc_float)
+    veh.set_inputs(throttle=zeros, brake=zeros, steer=zeros)
     for _ in range(n_ground_settle):
-        physics.step(inputs_zero); scene.step()
+        vs.step()
 
-    set_initial_velocity(vehicle, physics, v_init, wheel_radii, device)
+    set_initial_velocity(veh, physics, v_init, wheel_radii, device)
 
-    inputs = VehicleInputs(
+    veh.set_inputs(
         throttle=torch.tensor(throttle, device=device, dtype=gs.tc_float),
-        brake=torch.zeros(n_envs, device=device, dtype=gs.tc_float),
+        brake=zeros,
         steer=torch.tensor(steer, device=device, dtype=gs.tc_float),
     )
     for _ in range(n_settle):
-        physics.step(inputs); scene.step()
+        vs.step()
 
     # Velocity (+quat) only at the window's start/end; omega_z as a running
     # sum — no per-step history stacking.
-    v_long_start = _v_long(vehicle)
+    v_long_start = _v_long(veh)
     omega_z_sum = torch.zeros(n_envs, device=device, dtype=gs.tc_float)
     for _ in range(n_measure):
-        physics.step(inputs); scene.step()
-        omega_z_sum += vehicle.get_ang()[:, 2]
-    v_long_end = _v_long(vehicle)
+        vs.step()
+        omega_z_sum += veh.get_ang()[:, 2]
+    v_long_end = _v_long(veh)
 
     a_measured = ((v_long_end - v_long_start) / (n_measure * dt)).cpu().numpy()
     omega_z_measured = (omega_z_sum / n_measure).cpu().numpy()
@@ -261,7 +269,7 @@ def run_sweep(urdf_path, preset_fn, config_mod, n_envs,
         return np.concatenate([a, np.repeat(a[-1:], n_padded - n_total, axis=0)])
     v_p, t_p, s_p, p_p, r_p = (_pad(a) for a in (v_arr, t_arr, s_arr, p_arr, r_arr))
 
-    scene, vehicle, sensor, cfg, physics = build_scene(
+    vs, veh, physics = build_scene(
         n_envs, urdf_path, preset_fn, config_mod, dt=dt, substeps=substeps)
     wheel_radii = _wheel_radii_tensor(physics, device)
 
@@ -272,11 +280,11 @@ def run_sweep(urdf_path, preset_fn, config_mod, n_envs,
         log(f"\n  [chunk {ci + 1}/{n_chunks}] {lo}..{min(hi, n_total)}  "
             f"(n_envs={n_envs})", flush=True)
         if ci > 0:
-            scene.reset()      # poses/velocities back to build time
+            vs.scene.reset()   # main-scene poses/velocities back to build time
             physics.reset()    # wheel omega, slip state, first-step guard
         t0 = time.perf_counter()
         out = measure_one_chunk(
-            scene, vehicle, physics, wheel_radii,
+            vs, veh, physics, wheel_radii,
             v_p[lo:hi], t_p[lo:hi], s_p[lo:hi], p_p[lo:hi], r_p[lo:hi], device,
             dt=dt)
         log(f"    elapsed: {time.perf_counter() - t0:.1f}s", flush=True)
@@ -291,7 +299,7 @@ def main(argv=None):
         description="Measure a sweep table (see genesis_vehicle/docs/path-following.md)")
     ap.add_argument("--urdf", required=True, help="vehicle URDF path")
     ap.add_argument("--preset", required=True,
-                    help="genesis_vehicle preset name (e.g. tank_10w_skid_belt, "
+                    help="genesis_vehicle preset name (e.g. tank_skid_belt, "
                          "car_4w_rwd_ackermann)")
     ap.add_argument("--config", default=None,
                     help="optional Python override file defining "

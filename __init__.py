@@ -23,7 +23,7 @@ A single import gives you everything:
         brake_torque_signed, suspension_normal_force,
         # Presets
         car_4w_rwd_ackermann, car_4w_awd_ackermann,
-        truck_6w_partial_ackermann, tank_10w_skid_belt,
+        truck_6w_partial_ackermann, tank_skid_belt,
     )
 
 Lazy imports: modules that touch the Genesis C extension (core, raycast,
@@ -142,7 +142,7 @@ from .presets import (
     car_4w_fwd_ackermann,
     car_4w_awd_ackermann,
     truck_6w_partial_ackermann,
-    tank_10w_skid_belt,
+    tank_skid_belt,
     stability_hooks_for_profile,
 )
 from .control import PathFollower, SweepTable
@@ -228,7 +228,7 @@ __all__ = [
     "TireModel", "PacejkaAnisotropic", "CoulombIsotropic",
     # Presets
     "car_4w_rwd_ackermann", "car_4w_fwd_ackermann", "car_4w_awd_ackermann",
-    "truck_6w_partial_ackermann", "tank_10w_skid_belt",
+    "truck_6w_partial_ackermann", "tank_skid_belt",
     "stability_hooks_for_profile",
     # Control utilities (path following; state extractors live in .control)
     "PathFollower", "SweepTable",

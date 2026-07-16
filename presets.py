@@ -281,13 +281,19 @@ def _kdu_wheel_overrides() -> dict[str, WheelConfig]:
     return {n: WheelConfig(**common) for n in names}
 
 
-def tank_10w_skid_belt(
+def tank_skid_belt(
     urdf_path: str,
     n_envs: int = 1,
     *,
     stability: str = "control",
 ) -> VehicleConfig:
-    """10-wheel skid-steer tank with same-side belt coupling. Matches KDU reference.
+    """Skid-steer tank with same-side belt coupling (any wheel count).
+
+    Wheel-count-generic: ``VehicleConfig.from_urdf`` discovers the wheels, and
+    ``SkidSteer`` / ``PerSide`` / ``SameSideBelt`` scale to however many the
+    URDF has (validated on the 10-wheel KDU reference and a 14-wheel M1A2).
+    The suspension/tire tuning constants derive from the KDU reference.
+    (Named ``tank_10w_skid_belt`` before v1.1.26.)
 
     Uses ``visual_susp_mode="control"`` because the tank's wheels are heavy
     (500 kg each) and a kinematic set_dofs_position cannot prevent them from

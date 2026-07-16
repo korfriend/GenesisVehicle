@@ -10,6 +10,78 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.26] — 2026-07-16
+
+### Fixed — OSC server: skid-steer vehicles with ≠10 wheels got a DEAD drivetrain
+
+| abbr | meaning |
+|---|---|
+| OSC | Open Sound Control (the UE/Unity wire protocol) |
+| UE  | Unreal Engine (the external client) |
+
+`driveType 2` (skid steer) only loaded the tank preset when the URDF had
+EXACTLY 10 wheels. Every other tracked vehicle — e.g. a 14-wheel M1A2 —
+fell into the generic mapping branch, where an empty `drivingJoints` list
+produced all-zero drive weights and `NoSteer`: zero drive torque, steering
+ignored. The vehicle only crept at cm/s from residual motion. Field impact
+(team report 2026-07-16): a UE waypoint test where the tank "moves at
+5 cm/sec and won't follow waypoints" — and a sweep table (CSV) measured
+against that dead plant came out as pure noise (`omega_z ≈ -0.5 rad/s at
+every steer value, including 0`), which then made the client-side follower
+command nonsense steering.
+
+- The skid-steer branch now loads the tank preset for ANY wheel count
+  (`SkidSteer`/`PerSide`/`SameSideBelt` are wheel-count-generic; the preset
+  discovers wheels from the URDF).
+- The generic mapping branch no longer accepts an all-zero drive-weight
+  vector silently: it falls back to all-wheel drive and prints a warning
+  naming the cause (no `drivingJoints` matched any wheel spin joint).
+- `wheelOverrides` matching now uses the WHOLE URDF joint chain the parse
+  already knows — wheel link, spin, SUSPENSION and steer joint names (it
+  only checked spin + wheel link before, so `"wheelName": "susp"` matched
+  the reference tank, whose spin joints carry the word, but nothing in an
+  M1A2, where only the suspension joints do — and the override was skipped
+  SILENTLY, so its mass-derived suspension never applied and the 27 t hull
+  bounced on the default spring). `"*"` / `"all"` is a new wildcard for
+  every wheel, and an entry that still matches nothing prints a warning
+  naming the URDF's actual wheel links.
+- Verified end-to-end on the reported scenario (14-wheel tank, the team's
+  9 waypoints incl. a doubling-back reverse leg, start heading +y):
+  PASS twice, final error 1.48/1.50 m in ~50 s — with a valid sweep table.
+  Sweep tables measured against a pre-1.1.26 server plant must be
+  REGENERATED; they encode the dead drivetrain, not the vehicle.
+
+### Fixed — sweep_measure: raw-scene build let the wheel rays hit the vehicle itself
+
+`genesis_vehicle.control.sweep_measure` built a raw `gs.Scene` + the
+low-level `add_vehicle` (single_scene raycast, no URDF prep). For an
+arbitrary URDF that combination measures a BALLISTIC vehicle, not a driving
+one: (a) un-prepped wheel colliders fight the suspension as a double
+support, and (b) the v1.1.16 high-cast ray (start = attach + 1 m) begins
+inside a tall hull and hits the vehicle's OWN roof — a self-hit that rides
+along with the vehicle. Measured on a 27 t M1A2: distance frozen at
+-0.405 m on all 14 wheels, N = 317 kN each, the hull at z = +16 m climbing
+at 56 m/s during the "ground settle" — and the sweep CSV came out as pure
+noise (e.g. `a = +18 m/s^2`, `omega_z = -0.57 rad/s at steer 0`).
+
+The tool now builds a `VehicleScene` (dual_scene raycast, `per_vehicle`
+solver): the URDF is auto-prepped and the rays only see the raycast scene's
+static mirrors, so self-hits are impossible. Methodology (settle → v_init
+teleport → 0.3 s hold → 2 s window; per-env slope gravity; chunk reuse via
+scene reset) is unchanged. Verified: the same combo that measured
+`a = -0.92` / ballistic garbage now measures `a = +1.01, omega_z = 0.0001`
+at (v=0, thr=+1, steer=0), matching an independent in-process probe.
+
+### Changed — BREAKING: preset `tank_10w_skid_belt` renamed to `tank_skid_belt`
+
+The preset was always wheel-count-generic (`from_urdf` discovers the wheels;
+`SkidSteer`/`PerSide`/`SameSideBelt` scale to any count) — and now that the
+server applies it to any skid-steer vehicle, the "10w" in the name actively
+misled (it is validated on the 10-wheel KDU reference and a 14-wheel M1A2).
+The old name is REMOVED, not aliased: update imports to
+`from genesis_vehicle import tank_skid_belt`. All docs, samples, tests and
+the server updated.
+
 ## [1.1.25] — 2026-07-15
 
 ### Fixed — native-viewer vehicle "tremble": draw-thread races (two of them)

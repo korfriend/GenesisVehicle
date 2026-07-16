@@ -7,7 +7,7 @@ TankTuning`) and as a sweep-measurement config file (module-level
 
     python -m genesis_vehicle.control.sweep_measure \\
         --urdf genesis_vehicle/samples/urdf/tank_ray.urdf \\
-        --preset tank_10w_skid_belt \\
+        --preset tank_skid_belt \\
         --config genesis_vehicle/samples/tank_tuning.py \\
         --output tank_sweep.csv --gpu
 

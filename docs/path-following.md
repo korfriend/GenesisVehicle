@@ -88,12 +88,12 @@ python -m genesis_vehicle.samples.path_follow_demo [--viewer]
 ```bash
 python -m genesis_vehicle.control.sweep_measure \
     --urdf my_vehicle.urdf \
-    --preset tank_10w_skid_belt \
+    --preset tank_skid_belt \
     --config my_overrides.py \
     --output my_vehicle_sweep.csv --gpu
 ```
 
-- `--preset`: any SDK preset name (`tank_10w_skid_belt`,
+- `--preset`: any SDK preset name (`tank_skid_belt`,
   `car_4w_rwd_ackermann`, ...).
 - `--config` (optional): Python file defining `apply_config(cfg)` (before
   `build`) and/or `apply_runtime_config(physics)` (after) — the same

@@ -71,7 +71,7 @@ the instanced renderer uses.
   (primitive geometry, turret + barrel joints), the reference vehicle of
   `path_follow_demo`.
 - [`data/tank_sweep_signed.csv`](data/tank_sweep_signed.csv) — reference
-  sweep table for `tank_ray.urdf` + `tank_10w_skid_belt` +
+  sweep table for `tank_ray.urdf` + `tank_skid_belt` +
   [`tank_tuning.py`](tank_tuning.py) overrides at dt 0.025 × substeps 10
   (the SDK-recommended timing), measured with the body-frame-corrected CLI
   (see [`docs/path-following.md`](../docs/path-following.md); re-measure
