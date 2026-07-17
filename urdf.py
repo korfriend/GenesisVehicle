@@ -1,7 +1,7 @@
 """URDF parsing for ray-wheel vehicles.
 
-Generalises KDU/physics.py:parse_tank_urdf to support both KDU's `*_susp`
-naming and HJW's `*_suspension_joint` naming. Returns a URDFParsedConfig
+Supports both the `*_susp` and `*_suspension_joint` suspension-joint
+naming conventions. Returns a URDFParsedConfig
 with per-wheel WheelConfig entries (URDF-derivable fields filled, others None).
 """
 
@@ -30,8 +30,8 @@ class URDFParsedConfig:
     # to flip the visual command so users see the requested rotation in the viewer.
     steer_axis_signs: dict[str, int] = field(default_factory=dict)
     # Whether each suspension prismatic joint has non-zero stiffness/damping in the URDF.
-    # If non-zero, visual sync should use control_dofs_position (KDU pattern); otherwise
-    # set_dofs_position is preferred (HJW pattern).
+    # If non-zero, visual sync should use control_dofs_position; otherwise
+    # set_dofs_position is preferred.
     susp_has_dynamics: dict[str, bool] = field(default_factory=dict)
 
 
@@ -84,7 +84,7 @@ def parse_urdf(urdf_path: str) -> URDFParsedConfig:
         )
 
         # Wheel name = the actual wheel link name when found by chain walk;
-        # fall back to stripping the susp-joint suffix (KDU pattern where the
+        # fall back to stripping the susp-joint suffix (for URDFs where the
         # two coincide).
         wheel_name = wheel_link_name if wheel_link_name is not None else _strip_susp_suffix(susp_name)
 

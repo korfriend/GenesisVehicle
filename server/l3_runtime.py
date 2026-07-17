@@ -312,7 +312,7 @@ def run_l3(args):
     # ONE prepared URDF feeds the morph, the cfg AND the ray pattern (v1.1.24).
     # They must agree: add_vehicle parses the path it is given to place the
     # wheel rays, so passing the ORIGINAL path with a corrected morph made the
-    # rays disagree with the geometry (an M1A2-style URDF, whose suspension
+    # rays disagree with the geometry (e.g. a URDF whose suspension
     # attach sits below the wheel centre, then floated in UE).
     from genesis_vehicle.urdf_prep import prepare_vehicle_urdf
     temp_urdf = prepare_vehicle_urdf(urdf_path)

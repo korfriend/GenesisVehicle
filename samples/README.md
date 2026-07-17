@@ -109,7 +109,7 @@ python -m genesis_vehicle.samples.obstacles_and_ramp --mode single_scene --cpu
 
 The perf benchmarks are headless (no viewer, no `cv2`, no `pynput`). The chase-cam
 HUD / keyboard-driven demos live one level up at the umbrella project
-(`GeneVehicle_*/demo_drive.py`) and are not bundled with the SDK on
+(the per-vehicle `demo_drive.py` scripts) and are not bundled with the SDK on
 purpose — they have opencv-python + pynput dependencies and are more
 demo than reference. Use these `samples/` scripts as the reference for
 what the SDK looks like from a caller's perspective.

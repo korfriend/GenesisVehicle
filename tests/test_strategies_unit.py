@@ -37,8 +37,8 @@ class _FakeWheelMeta:
     right_idx: torch.Tensor
 
 
-def _hjw_meta() -> _FakeWheelMeta:
-    """4-wheel meta matching HJW positions (FL, FR, RL, RR)."""
+def _car_meta() -> _FakeWheelMeta:
+    """4-wheel meta matching the reference-car positions (FL, FR, RL, RR)."""
     positions = torch.tensor([
         [1.38, 0.80, 0.34],
         [1.38, -0.80, 0.34],
@@ -59,7 +59,7 @@ def _hjw_meta() -> _FakeWheelMeta:
     )
 
 
-def _kdu_meta() -> _FakeWheelMeta:
+def _tank_meta() -> _FakeWheelMeta:
     """10-wheel tank meta (5 left, 5 right, 5 axles)."""
     pos = []
     for x in (3.0, 1.5, 0.0, -1.5, -3.0):
@@ -88,7 +88,7 @@ def _kdu_meta() -> _FakeWheelMeta:
 
 
 def test_ackermann_zero_steer_returns_zero():
-    meta = _hjw_meta()
+    meta = _car_meta()
     strat = Ackermann(max_steer_rad=0.7, front_axle=0)
     inp = AckermannInputs(throttle=0.0, brake=0.0, steer=0.0)
     out = strat.per_wheel_steer(inp, n_envs=2, wheel_meta=meta,
@@ -100,7 +100,7 @@ def test_ackermann_zero_steer_returns_zero():
 def test_ackermann_right_turn_inner_outer_signs():
     """For ISO +steer (right turn), both front wheels turn positive (right).
     Inner wheel (FR, y < 0) should turn MORE than outer (FL, y > 0)."""
-    meta = _hjw_meta()
+    meta = _car_meta()
     strat = Ackermann(max_steer_rad=0.7, front_axle=0)
     inp = AckermannInputs(throttle=0.0, brake=0.0, steer=0.3)
     out = strat.per_wheel_steer(inp, n_envs=1, wheel_meta=meta,
@@ -119,7 +119,7 @@ def test_ackermann_right_turn_inner_outer_signs():
 def test_ackermann_left_turn_signs_inverted():
     """For ISO -steer (left turn), both front wheels turn negative; LEFT wheel
     is now the inner (larger magnitude)."""
-    meta = _hjw_meta()
+    meta = _car_meta()
     strat = Ackermann(max_steer_rad=0.7, front_axle=0)
     inp = AckermannInputs(throttle=0.0, brake=0.0, steer=-0.3)
     out = strat.per_wheel_steer(inp, n_envs=1, wheel_meta=meta,
@@ -134,8 +134,8 @@ def test_ackermann_left_turn_signs_inverted():
 
 def test_ackermann_geometry_inferred_from_positions():
     """When wheelbase / track_width are None, derive them from the wheel positions.
-    HJW: WB = 1.38 - (-1.35) = 2.73, TW = 1.6."""
-    meta = _hjw_meta()
+    reference car: WB = 1.38 - (-1.35) = 2.73, TW = 1.6."""
+    meta = _car_meta()
     strat = Ackermann(max_steer_rad=0.7, front_axle=0)
     wb, tw = strat._resolve_geometry(meta)
     assert wb == pytest.approx(2.73)
@@ -148,7 +148,7 @@ def test_ackermann_geometry_inferred_from_positions():
 
 
 def test_skidsteer_returns_zero_angles():
-    meta = _kdu_meta()
+    meta = _tank_meta()
     strat = SkidSteer()
     inp = SkidSteerInputs(throttle=1.0, brake=0.0, steer_diff=1.0)
     out = strat.per_wheel_steer(inp, n_envs=3, wheel_meta=meta,
@@ -180,7 +180,7 @@ def test_skidsteer_validate_rejects_steer_joint():
 
 
 def test_same_side_belt_averages_each_side_per_env():
-    meta = _kdu_meta()
+    meta = _tank_meta()
     coupling = SameSideBelt()
     omega = torch.zeros(2, 10, dtype=torch.float32)
     # env 0: left = 1..5, right = 10..50
@@ -200,7 +200,7 @@ def test_same_side_belt_averages_each_side_per_env():
 
 
 def test_independent_coupling_passes_through():
-    meta = _hjw_meta()
+    meta = _car_meta()
     omega = torch.randn(2, 4)
     out = Independent().apply(omega, meta)
     assert torch.equal(out, omega)
@@ -212,13 +212,13 @@ def test_independent_coupling_passes_through():
 
 
 def test_rwd_drives_only_rear_axle():
-    meta = _hjw_meta()
+    meta = _car_meta()
     drv = RWD(t_drive_max=1000.0, t_brake_max=2500.0, driven_axles=(1,),
               brake_bias=[0.30, 0.30, 0.20, 0.20])
     inp = AckermannInputs(throttle=1.0, brake=0.5, steer=0.0)
     omega = torch.zeros(1, 4)
     Td, Tb = drv.distribute_torque(inp, omega, meta, device="cpu", dtype=torch.float32)
-    # Front drive == 0 (HJW invariant)
+    # Front drive == 0 (RWD invariant)
     assert float(Td[0, 0]) == pytest.approx(0.0)
     assert float(Td[0, 1]) == pytest.approx(0.0)
     # Rear drive = 1000 / 2 each
@@ -237,7 +237,7 @@ def test_rwd_drives_only_rear_axle():
 def test_perside_iso_right_turn_left_faster():
     """ISO 8855: +steer_diff = right turn, so LEFT side commands MORE torque
     than RIGHT side."""
-    meta = _kdu_meta()
+    meta = _tank_meta()
     drv = PerSide(
         t_drive_max=10_000.0, t_brake_max=10_000.0,
         steer_gain=1.0, omega_max_drive=100.0,
@@ -256,7 +256,7 @@ def test_perside_iso_right_turn_left_faster():
 
 
 def test_perside_throttle_gear_cap_scales():
-    meta = _kdu_meta()
+    meta = _tank_meta()
     drv = PerSide(
         t_drive_max=10_000.0, t_brake_max=10_000.0,
         steer_gain=1.0, omega_max_drive=100.0,

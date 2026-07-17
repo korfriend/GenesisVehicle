@@ -29,14 +29,14 @@ from genesis_vehicle.strategies import (
 from genesis_vehicle.tire_models import PacejkaAnisotropic
 
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-HJW_URDF = os.path.join(REPO_ROOT, "HJW", "urdf", "car_raywheel.urdf")
-KDU_URDF = os.path.join(REPO_ROOT, "KDU", "tank_ray.urdf")
+_DATA = os.path.join(os.path.dirname(__file__), "data")
+CAR_URDF = os.path.join(_DATA, "car_ref.urdf")
+TANK_URDF = os.path.join(_DATA, "tank_ref.urdf")
 
 
-def _hjw_basic_config(**kwargs) -> VehicleConfig:
+def _car_basic_config(**kwargs) -> VehicleConfig:
     return VehicleConfig.from_urdf(
-        HJW_URDF,
+        CAR_URDF,
         steering=Ackermann(max_steer_rad=0.7, front_axle=0),
         drivetrain=RWD(t_drive_max=1000.0, t_brake_max=2500.0, driven_axles=(1,)),
         coupling=Independent(),
@@ -46,7 +46,7 @@ def _hjw_basic_config(**kwargs) -> VehicleConfig:
 
 
 def test_from_urdf_populates_wheels():
-    cfg = _hjw_basic_config()
+    cfg = _car_basic_config()
     assert len(cfg.wheels) == 4
     names = {w.name for w in cfg.wheels}
     assert names == {
@@ -56,7 +56,7 @@ def test_from_urdf_populates_wheels():
 
 
 def test_resolve_fills_defaults_for_missing_fields():
-    cfg = _hjw_basic_config()
+    cfg = _car_basic_config()
     resolved = resolve(cfg)
     assert len(resolved.wheels) == 4
     for w in resolved.wheels:
@@ -74,7 +74,7 @@ def test_per_wheel_override_wins_over_urdf():
     overrides = {
         "front_left_wheel": WheelConfig(k_susp=12345.0, mu_long=0.42),
     }
-    cfg = _hjw_basic_config(wheel_overrides=overrides)
+    cfg = _car_basic_config(wheel_overrides=overrides)
     resolved = resolve(cfg)
     by_name = {w.name: w for w in resolved.wheels}
     assert by_name["front_left_wheel"].k_susp == pytest.approx(12345.0)
@@ -84,19 +84,19 @@ def test_per_wheel_override_wins_over_urdf():
 
 
 def test_chassis_mass_from_urdf_when_not_supplied():
-    cfg = _hjw_basic_config()
+    cfg = _car_basic_config()
     assert cfg.chassis.mass == pytest.approx(2200.0)
 
 
 def test_chassis_mass_user_override_wins():
-    cfg = _hjw_basic_config(chassis=ChassisConfig(mass=9999.0))
+    cfg = _car_basic_config(chassis=ChassisConfig(mass=9999.0))
     resolved = resolve(cfg)
     assert resolved.chassis.mass == pytest.approx(9999.0)
 
 
 def test_skidsteer_strategy_validate_passes_for_tank():
     cfg = VehicleConfig.from_urdf(
-        KDU_URDF,
+        TANK_URDF,
         steering=SkidSteer(),
         drivetrain=PerSide(t_drive_max=30000.0, t_brake_max=30000.0),
         coupling=SameSideBelt(),
@@ -107,9 +107,9 @@ def test_skidsteer_strategy_validate_passes_for_tank():
 
 
 def test_skidsteer_strategy_validate_fails_for_car():
-    # HJW car has front steer joints — SkidSteer must reject it.
+    # The reference car has front steer joints — SkidSteer must reject it.
     cfg = VehicleConfig.from_urdf(
-        HJW_URDF,
+        CAR_URDF,
         steering=SkidSteer(),
         drivetrain=PerSide(t_drive_max=1000.0, t_brake_max=2500.0),
         coupling=SameSideBelt(),
@@ -121,7 +121,7 @@ def test_skidsteer_strategy_validate_fails_for_car():
 
 def test_resolve_preserves_stability_hooks_and_dt():
     hooks = [LowSpeedRegularizer()]
-    cfg = _hjw_basic_config(stability_hooks=hooks, recommended_dt=0.01)
+    cfg = _car_basic_config(stability_hooks=hooks, recommended_dt=0.01)
     resolved = resolve(cfg)
     assert resolved.recommended_dt == pytest.approx(0.01)
     assert len(resolved.stability_hooks) == 1
@@ -134,12 +134,12 @@ def test_user_explicit_i_wheel_wins_over_urdf():
     overrides = {
         "front_left_wheel": WheelConfig(i_wheel=42.0),
     }
-    cfg = _hjw_basic_config(wheel_overrides=overrides)
+    cfg = _car_basic_config(wheel_overrides=overrides)
     resolved = resolve(cfg)
     by_name = {w.name: w for w in resolved.wheels}
     # User-set wheel keeps 42.0
     assert by_name["front_left_wheel"].i_wheel == pytest.approx(42.0)
-    # Other wheels fall back to the URDF-derived value (HJW iyy = 2.348).
+    # Other wheels fall back to the URDF-derived value (iyy = 2.348).
     assert by_name["rear_right_wheel"].i_wheel == pytest.approx(2.348)
 
 
@@ -148,11 +148,11 @@ def test_user_explicit_radius_wins_over_urdf():
     overrides = {
         "front_left_wheel": WheelConfig(radius=0.50),
     }
-    cfg = _hjw_basic_config(wheel_overrides=overrides)
+    cfg = _car_basic_config(wheel_overrides=overrides)
     resolved = resolve(cfg)
     by_name = {w.name: w for w in resolved.wheels}
     assert by_name["front_left_wheel"].radius == pytest.approx(0.50)
-    # HJW URDF wheel mesh has no cylinder element -> URDF radius = None ->
+    # The car URDF wheel mesh has no cylinder element -> URDF radius = None ->
     # default fallback. Other wheels fall back to the module default.
     other = by_name["rear_right_wheel"].radius
     assert other is not None

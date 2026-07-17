@@ -10,7 +10,7 @@ Kinds = the 3 cars (FWD / RWD / AWD): they hold the loop and are stable at
 it in the 16-vehicle tight loop the step destabilizes and ~9/16 vehicles explode
 to z=thousands, independent of solver (batched/per_vehicle) and substeps (30/50),
 so it isn't a tuning knob. The truck drives fine on its own in
-``GeneVehicle_Truck6w/demo_drive.py`` (single vehicle, substeps=50).
+the standalone truck demo (single vehicle, substeps=50).
 
 Vehicle identification (shape + color)
 --------------------------------------
@@ -316,7 +316,7 @@ def main():
     # ~9/16 vehicles explode to z=thousands — and that is independent of solver
     # (batched/per_vehicle) and substeps (30/50), so it is not a tuning knob, it's
     # the heavy truck breaking the shared scene. The truck drives fine on its own
-    # in GeneVehicle_Truck6w/demo_drive.py (single vehicle, substeps=50). Cars are
+    # in the standalone truck demo (single vehicle, substeps=50). Cars are
     # stable at substeps=10 and all hold the loop.
     kinds = [k for k in KINDS if k[0] != "Truck"]
     SUBSTEPS = 10

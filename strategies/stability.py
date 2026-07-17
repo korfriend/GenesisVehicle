@@ -60,7 +60,7 @@ class RollingResistance(StabilityHook):
 
 
 class LowSpeedRegularizer(StabilityHook):
-    """HJW low-speed regularizer.
+    """Low-speed regularizer.
 
     PRE_LOOP: compute a (n_envs,) ``moving`` factor in [0, 1] from chassis
       linear/angular speed. When ``disable_when_control_active`` and the user

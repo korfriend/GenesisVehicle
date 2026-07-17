@@ -8,7 +8,9 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-78 pure-Python tests; no Genesis runtime required. Runs in ~3s on CPU.
+155 pure-Python tests; no Genesis runtime required. Runs in ~30s on CPU. The
+reference URDFs the parsing tests read live in `tests/data/` (self-contained
+since v1.1.27).
 
 GPU integration is exercised by user-side demo scripts in your downstream
 project — the SDK's own test suite stays pure-Python so it can run in any
@@ -22,7 +24,7 @@ CI without GPU.
 | Stability profile semantics | `test_version_and_profile.py` | `control` / `raw` / `research` materialize the right hook lists; tank-vs-car difference; unknown profile raises |
 | Preset profile integration | `test_version_and_profile.py` | `car_4w_rwd_ackermann(stability="raw")` etc. produce expected hook lists |
 | Config resolve | `test_config_resolve.py` | URDF default + user override + module default merge; user-explicit `i_wheel` / `radius` wins over URDF |
-| URDF parsing (HJW + KDU naming) | `test_urdf_parse.py` | wheel discovery, side detection, axle clustering, chain walk for HJW's deep tree |
+| URDF parsing (both susp-joint naming conventions) | `test_urdf_parse.py` | wheel discovery, side detection, axle clustering, chain walk for deep joint trees |
 | Ackermann sign + inner/outer | `test_strategies_unit.py` | `+steer` → both wheels positive, FR > FL |
 | SkidSteer sign (left faster on +steer) | `test_strategies_unit.py` | `test_perside_iso_right_turn_left_faster` |
 | SameSideBelt averages each side | `test_strategies_unit.py` | |

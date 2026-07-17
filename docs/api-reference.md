@@ -772,7 +772,7 @@ stability_hooks_for_profile(
 | `car_4w_rwd_ackermann(urdf_path)` | 4 wheels | Ackermann front | RWD | Independent |
 | `car_4w_awd_ackermann(urdf_path)` | 4 wheels | Ackermann front | AWD | Independent |
 | `truck_6w_partial_ackermann(urdf_path)` | 6 wheels | Ackermann on axle 0 | Drive on mid + rear axles | Independent |
-| `tank_skid_belt(urdf_path)` | any wheel count (10w KDU / 14w M1A2 validated) | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
+| `tank_skid_belt(urdf_path)` | any wheel count (validated on 10- and 14-wheel tracked vehicles) | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
 
 Tune by editing the returned config (`cfg.dt = ...`, replace a strategy,
 override `cfg.stability_hooks`) before passing it to `VehiclePhysics`.
@@ -843,7 +843,7 @@ Same pattern works for `SteeringStrategy.per_wheel_steer`,
 | Constant | Value | Notes |
 |---|---|---|
 | `DEFAULT_K_SUSP` | 70_000 N/m | spring stiffness |
-| `DEFAULT_C_COMPRESSION` | 14_000 N·s/m | compression damping (HJW direction) |
+| `DEFAULT_C_COMPRESSION` | 14_000 N·s/m | compression damping |
 | `DEFAULT_C_EXTENSION` | 4_000 N·s/m | rebound damping |
 | `DEFAULT_REST_STROKE` | 0.10 m | suspension rest length |
 | `DEFAULT_MU` | 1.0 | friction (long & lat) |

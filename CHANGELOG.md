@@ -10,6 +10,33 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.1.27] — 2026-07-17
+
+### Changed — internal codenames removed from public surfaces
+
+Author/sandbox codenames (the pre-SDK variant initials) and external vehicle
+model names no longer appear in the SDK's docs, sample docstrings, preset
+docstrings or code comments — they carried no information a reader of the
+public repo could use ("reference car" / "reference tank" / "a 14-wheel
+tracked vehicle" say the same thing without the internal context). Purely
+internal helper names in `presets.py` were renamed to match
+(`_car_brake_bias`, `_car_wheel_overrides`, `_tank_wheel_overrides`). The
+retired `tank_10w_skid_belt` name is likewise no longer mentioned outside
+this changelog's history.
+
+One behavioral change: `server/benchmark.py` and `server/benchmark_collision.py`
+now default their tank URDF to the SDK's **bundled** `samples/urdf/tank_ray.urdf`
+instead of a sibling repo checkout — the benchmarks are self-contained now
+(`--urdf` still overrides). Two stray temp URDFs left in `samples/urdf/` by a
+killed process were removed.
+
+`tests/` is now SELF-CONTAINED: the two reference URDFs the parsing/config
+tests exercise are vendored as `tests/data/car_ref.urdf` and
+`tests/data/tank_ref.urdf` (they were read from sibling sandbox checkouts by
+path before — a clone of this repo alone could not run them), and test/helper
+names were neutralised to match. This changelog's history entries were also
+reworded to the same neutral vocabulary.
+
 ## [1.1.26] — 2026-07-16
 
 ### Fixed — OSC server: skid-steer vehicles with ≠10 wheels got a DEAD drivetrain
@@ -20,7 +47,7 @@ running version the first time it is instantiated in a process.
 | UE  | Unreal Engine (the external client) |
 
 `driveType 2` (skid steer) only loaded the tank preset when the URDF had
-EXACTLY 10 wheels. Every other tracked vehicle — e.g. a 14-wheel M1A2 —
+EXACTLY 10 wheels. Every other tracked vehicle — e.g. a 14-wheel tank —
 fell into the generic mapping branch, where an empty `drivingJoints` list
 produced all-zero drive weights and `NoSteer`: zero drive torque, steering
 ignored. The vehicle only crept at cm/s from residual motion. Field impact
@@ -40,7 +67,7 @@ command nonsense steering.
   already knows — wheel link, spin, SUSPENSION and steer joint names (it
   only checked spin + wheel link before, so `"wheelName": "susp"` matched
   the reference tank, whose spin joints carry the word, but nothing in an
-  M1A2, where only the suspension joints do — and the override was skipped
+  vehicle where only the suspension joints do — and the override was skipped
   SILENTLY, so its mass-derived suspension never applied and the 27 t hull
   bounced on the default spring). `"*"` / `"all"` is a new wildcard for
   every wheel, and an entry that still matches nothing prints a warning
@@ -59,7 +86,7 @@ arbitrary URDF that combination measures a BALLISTIC vehicle, not a driving
 one: (a) un-prepped wheel colliders fight the suspension as a double
 support, and (b) the v1.1.16 high-cast ray (start = attach + 1 m) begins
 inside a tall hull and hits the vehicle's OWN roof — a self-hit that rides
-along with the vehicle. Measured on a 27 t M1A2: distance frozen at
+along with the vehicle. Measured on a 27 t tracked vehicle: distance frozen at
 -0.405 m on all 14 wheels, N = 317 kN each, the hull at z = +16 m climbing
 at 56 m/s during the "ground settle" — and the sweep CSV came out as pure
 noise (e.g. `a = +18 m/s^2`, `omega_z = -0.57 rad/s at steer 0`).
@@ -77,7 +104,7 @@ at (v=0, thr=+1, steer=0), matching an independent in-process probe.
 The preset was always wheel-count-generic (`from_urdf` discovers the wheels;
 `SkidSteer`/`PerSide`/`SameSideBelt` scale to any count) — and now that the
 server applies it to any skid-steer vehicle, the "10w" in the name actively
-misled (it is validated on the 10-wheel KDU reference and a 14-wheel M1A2).
+misled (it is validated on 10- and 14-wheel tracked vehicles).
 The old name is REMOVED, not aliased: update imports to
 `from genesis_vehicle import tank_skid_belt`. All docs, samples, tests and
 the server updated.
@@ -163,7 +190,7 @@ server built its own `gs.morphs.URDF` and therefore hit the
 `add_vehicle`, whose `parse_urdf` is what places the wheel rays. A URDF that
 hangs its wheels off a carrier link (`body --susp--> carrier --spin(z=+h)-->
 wheel`) then cast its rays `h` below the wheel centres, and the hull settled
-`h` too high — the M1A2 floated 0.433 m in UE even though the same vehicle
+`h` too high — the vehicle floated 0.433 m in UE even though the same model
 was correct in every in-process sample.
 
 - `server/vehicle_builder.py` and `server/l3_runtime.py` now call
@@ -206,7 +233,7 @@ matters:
   flags still exist on `urdf_prep.prepare_vehicle_urdf` for tooling.
 - Shadows are ON in every sample/demo viewer (Genesis's own
   `VisOptions(shadow=True)` default): `path_follow_demo`,
-  `path_follow_reverse_demo` and the KDU interactive demo had explicitly
+  `path_follow_reverse_demo` and the legacy tank interactive demo had explicitly
   disabled them.
 
 ---
@@ -215,7 +242,7 @@ matters:
 
 ### Added — `urdf_prep`: arbitrary URDFs are made ray-wheel ready automatically
 
-Driving an externally authored M1A2 model (14 wheels, 40 t) surfaced three
+Driving an externally authored 14-wheel tank model surfaced three
 URDF contracts the SDK had only ever met by construction. All three are now
 auto-corrected by `VehicleScene.add_vehicle` (`prepare_urdf=True` by
 default; the original file is never modified, and a compliant URDF — every
@@ -223,19 +250,19 @@ SDK vehicle — is used as-is with no temp copy):
 
 - **Wheel colliders -> render-only.** Ground contact IS the raycast +
   suspension model; a colliding wheel is a second, fighting support. The
-  M1A2 sat on its wheel colliders while the suspension pushed with 4x its
+  vehicle sat on its wheel colliders while the suspension pushed with 4x its
   weight, jittering in place instead of driving. Colliders are stripped —
   and a collider that is the wheel's ONLY geometry is first promoted to a
   `<visual>`, so the wheel still renders (the instanced renderer draws
   visuals; physics never touches them).
-- **Suspension attach point moved onto the wheel centre.** The M1A2 chains
+- **Suspension attach point moved onto the wheel centre.** The model chains
   `body --susp(z=0)--> carrier --spin(z=+0.433)--> wheel`, so the ray
   origin sat 0.433 m BELOW the wheel: the hull settled that much too high
   and the wheels visibly floated. The spin-joint offset is folded into the
   suspension origin (link rest poses unchanged). NB `VehicleScene`
   re-parses the URDF for the ray pattern, so this must be fixed in the FILE
   — a config-level override does not reach the rays.
-- **Missing inertials injected.** The M1A2's 14 carrier links declare no
+- **Missing inertials injected.** The model's 14 carrier links declare no
   `<inertial>` at all (zero mass and inertia) — Genesis falls back to its
   legacy URDF parser and the articulated chain goes degenerate: a 5 MN push
   moved the 40-t hull as if it weighed ~900 t.
@@ -785,7 +812,7 @@ revision of the measurement pipeline (CLI, CSV schema, grid unchanged):
     `k_approach`, `v_stop`, ...) are constructor kwargs.
 - Bundled assets: `samples/urdf/tank_ray.urdf` (primitive-only 10-wheel
   tank) + `samples/data/tank_sweep_signed.csv` (reference sweep for that
-  URDF + `tank_10w_skid_belt` + the demo's `TankTuning` overrides).
+  URDF + the tank preset + the demo's `TankTuning` overrides).
 - New sample `samples/path_follow_demo.py` (#13): tank follows a
   wall-detour path closed-loop; PASS = final error < 3 m. Verified:
   32.2 s sim, err 1.49 m PASS (CPU). A forward–reverse–forward cusp run
@@ -1195,7 +1222,7 @@ revision of the measurement pipeline (CLI, CSV schema, grid unchanged):
   now default to 40 Hz too, so the whole SDK speaks one default.
   - `VehicleConfig.recommended_dt` default `1/48 → 0.025`.
   - All five presets: car/awd/truck `1/48 → 0.025`; **tank `0.005 → 0.025`**
-    (the 200 Hz recommendation was KDU-legacy conservatism — the server has
+    (the 200 Hz recommendation was legacy-variant conservatism — the server has
     been running tanks at dt 0.02–0.025 / ss2 = internal 10–12.5 ms
     throughout the perf campaign, and the 1.0.17 bumpy-terrain A/B showed
     cruise/z-oscillation/yaw within noise; samples use ss10 → internal
@@ -1398,8 +1425,8 @@ reality across the whole tree:
   `perf_l2_l3_combined` — the perf sweeps thread `--gpu` through their
   `--internal` subprocesses). NB: `--cpu` flags are gone; the perf tables in
   `docs/batching.md` were GPU-measured, so pass `--gpu` to reproduce them.
-- **GeneVehicle_\* demos**: `demo_drive.py` (HJW / JMK / KDU / Truck6w) and
-  KDU `demo_interactive.py` likewise default to `gs.cpu` with `--gpu`.
+- **Legacy vehicle demos**: `demo_drive.py` (all four legacy variants) and
+  the tank `demo_interactive.py` likewise default to `gs.cpu` with `--gpu`.
 - Bare `torch.cuda.synchronize()` timing calls are now guarded
   (`torch.cuda.is_available()` / backend flag) so everything runs on
   CUDA-less machines.
@@ -1748,7 +1775,7 @@ Full audit of the SDK + server for unbatched per-item loops, with dispositions
 
 - **The visual wheel radius (`0.32 m`) did not match the physics radius
   (`0.358 m`)** that `car_4w_rwd_ackermann`'s wheel overrides impose
-  (`_hjw_wheel_overrides`, matching the HJW/golden_JMK reference URDF). The
+  (the car wheel-override table, matching the reference car URDF). The
   raycast suspension rests the chassis for a `0.358 m` wheel, so the smaller
   `0.32 m` visual cylinder was drawn ~38 mm above the contact point — the
   wheels visibly **floated** over the terrain (most obvious in
@@ -1780,7 +1807,7 @@ Full audit of the SDK + server for unbatched per-item loops, with dispositions
   is **independent of solver** (batched/per_vehicle) **and substeps** (30/50),
   with deterministic per-index blow-ups, so it is not a tuning knob. road_loop is
   now the 3 car kinds (FWD/RWD/AWD): stable at `substeps=10`, ~56 ms/step, all 12
-  grounded. The truck drives fine standalone in `GeneVehicle_Truck6w` (single
+  grounded. The truck drives fine standalone in its own demo (single
   vehicle, substeps=50). (`--truck` removed.)
 - The final-pose summary now lists **every** vehicle with `z` + a `FLOWN` flag —
   the old one-per-kind summary hid the fly-aways (only the first-of-each-kind,
@@ -1888,7 +1915,7 @@ This release is the sum of phases 1–5 (0.9.22 → 0.9.39); the headlines:
   0.9.27); docs/README swept to the new API (0.9.39).
 
 Regression for the release: **96 pytest**, **all 13 SDK samples** drive headless,
-**all 4 GeneVehicle_\* demos** run (HJW's `z anchored` sub-check is a pre-existing
+**all 4 legacy vehicle demos** run (one variant's `z anchored` sub-check is a pre-existing
 Genesis-1.2.0 numeric-drift quirk, not a regression).
 
 ### Migration from 0.9.x
@@ -2234,7 +2261,7 @@ remove the `main_scene` / `raycast_scene` properties and tag 1.0.0.
   Root cause: the truck's stiff suspension + heavy-chassis/light-wheel mass
   ratio is unstable at the coarse internal dt of `substeps=10`. **Raised
   substeps 10 → 30** (measured floor with the truck in the fleet: 20 still NaNs,
-  30 is stable; the standalone `GeneVehicle_Truck6w` demo uses 50 for a single
+  30 is stable; the standalone truck demo uses 50 for a single
   truck).
 - **Default `--solver` `per_vehicle` → `multi_batched`**: batches each kind's
   compute pipeline, much faster for the 16-vehicle fleet — offsets the higher
@@ -3074,13 +3101,13 @@ returns correct per-vehicle shapes. No change to the single-vehicle API.
 ### Fixed — `wheel_visual_transforms` / `visual_parts_transforms` now correct for trucks & tanks
 
 The closed-form wheel visual pose now honors `visual_spin_enabled`: skid-steer
-/ tank presets (`tank_10w_skid_belt`) disable the wheel spin visual (cylindrical
+/ tank presets disable the wheel spin visual (cylindrical
 road wheels — spin is invisible), and the closed-form previously baked spin
 into the wheel quat anyway, disagreeing with the viewer. It now omits spin when
 disabled, matching `VisualJointSync`. Verified against `get_link` (VisualJointSync
 on) across all bundled vehicle classes: 4-wheel car ≈ 3.5 mm / 0.04°, 6-wheel
 truck (`truck_6w_partial_ackermann`, front-axle steer) ≈ 3.5 mm / 0.04°,
-10-wheel skid-steer tank (`tank_10w_skid_belt`) ≈ 0.6 mm / 0°. Trucks already
+10-wheel skid-steer tank preset ≈ 0.6 mm / 0°. Trucks already
 worked (same conventional axes as cars); tanks needed the spin-flag fix. No API
 change.
 
@@ -3203,9 +3230,9 @@ intentionally left as text.
 
 ### Removed — docs/migration.md
 
-Dropped the legacy HJW/JMK/KDU → SDK migration guide (no longer needed).
+Dropped the legacy-variant → SDK migration guide (no longer needed).
 Removed its links from docs/index.md and README.md; the one cross-reference
-in physics-contracts.md (KDU steer-sign flip) is now stated inline.
+in physics-contracts.md (legacy steer-sign flip) is now stated inline.
 
 ---
 
@@ -3406,8 +3433,8 @@ at launch (the RWD front-tire-slip report). The clamp binds **only near
 rolling** (where `omega_nofric − omega_target` is small), so it kills the
 oscillation while leaving the high-slip saturated regime — driven-wheel launch
 slip — untouched. Verified: `quickstart` launch preserved (x = 12.59 m vs
-12.43 m baseline); 62/62 unit tests pass; JMK / Truck6w / KDU scenarios
-unchanged (HJW slightly slower — removes the spurious overshoot thrust, may
+12.43 m baseline); 62/62 unit tests pass; the other legacy scenarios
+unchanged (the reference car slightly slower — removes the spurious overshoot thrust, may
 want per-vehicle torque re-tune). Lets the wheel mass / inertia "band-aid"
 (inflated `i_wheel`) be reverted to realistic values without re-introducing
 the oscillation.
@@ -4855,7 +4882,7 @@ Two preset tweaks:
 The `"raw"` and `"research"` profiles get no StaticFrictionLock (consistent
 with their "no hooks" semantics).
 
-### Demo behavior — `GeneVehicle_Truck6w/demo_drive.py`
+### Demo behavior — the 6-wheel truck demo
 
 SPACE is now an **emergency brake**: it forces throttle to 0 in addition
 to setting brake = 1. Mirrors real-car panic-brake semantics (brake pedal
@@ -4878,10 +4905,10 @@ should declare steer joint axes as `<axis xyz="0 0 -1"/>` so that
 `+joint_angle` and `+steer` (user-facing ISO 8855) share the same sign
 domain. The SDK's `VisualSync` still compensates for either axis convention
 via `visual_cmd = -phys * sign`, so existing URDFs with `(0, 0, 1)` (e.g.
-JMK) keep working — the recommendation is only for new URDFs.
+one external-author URDF) keep working — the recommendation is only for new URDFs.
 
 ### Fixed in repo
-- `GeneVehicle_Truck6w/urdf/truck_6w.urdf` — steer joint axes changed from
+- the 6-wheel truck URDF — steer joint axes changed from
   `(0, 0, 1)` to `(0, 0, -1)` to match the recommendation. Visual behavior
   was already correct (v0.5.3 fix), but the URDF now follows the
   recommended convention internally.
@@ -4895,8 +4922,8 @@ JMK) keep working — the recommendation is only for new URDFs.
 `VisualSync` was driving the steer joints **opposite to the physics-side
 steering direction** for both URDF axis conventions:
 
-- URDF axis `(0, 0, 1)` (e.g. truck preset, JMK URDF) — visual wheels rotated LEFT when physics rotated RIGHT, and vice versa.
-- URDF axis `(0, 0, -1)` (HJW URDF) — same inversion.
+- URDF axis `(0, 0, 1)` (e.g. truck preset, one external URDF) — visual wheels rotated LEFT when physics rotated RIGHT, and vice versa.
+- URDF axis `(0, 0, -1)` (the reference car URDF) — same inversion.
 
 The old formula `visual_cmd = phys * sign` assumed the only conversion
 needed was the URDF axis flip captured in `sign`. It missed that the
@@ -4908,10 +4935,10 @@ axis `(0,0,1)` +joint = CCW from above). The correct formula is
 - axis `(0, 0, 1)`: `sign=+1` → `visual_cmd = -phys` → joint goes CW for +phys → right turn visual ✓
 - axis `(0, 0, -1)`: `sign=-1` → `visual_cmd = +phys` → joint goes CW for +phys → right turn visual ✓
 
-Demos affected: HJW (4-wheel car, axis -1) and Truck6w (axis +1). The
-4-wheel HJW demo never had the wheel direction verified visually; the
+Demos affected: the 4-wheel car (axis -1) and the truck (axis +1). The
+4-wheel car demo never had the wheel direction verified visually; the
 truck demo just hit it (front wheels turned left when the truck arced
-right). KDU (skid-steer, no steer joints) and JMK demos are unaffected.
+right). The tank (skid-steer, no steer joints) and the external-author demo are unaffected.
 
 ---
 
@@ -4936,7 +4963,7 @@ the regularizer:
 2. Set `omega_pull_factor = 1`, `omega_pull_target = v_long / radius = 0`
    → forced `omega` back to 0 every step.
 
-Combined: any preset vehicle (`car_4w_rwd_ackermann`, `tank_10w_skid_belt`,
+Combined: any preset vehicle (`car_4w_rwd_ackermann`, the tank preset,
 `truck_6w_partial_ackermann`, …) issuing `throttle > 0` at rest would
 spin its wheels for one step and then have `omega` snapped back to 0.
 **Vehicle stuck at rest indefinitely.** Discovered while running the
@@ -4944,7 +4971,7 @@ spin its wheels for one step and then have `omega` snapped back to 0.
 
 ### Reverted — `disable_when_control_active=True` is back in `"control"` profile
 
-This restores the original HJW behavior: the regularizer is off when the
+This restores the original reference-car behavior: the regularizer is off when the
 user is actively throttling or braking. The vehicle can accelerate from
 rest as expected. The regularizer still fires when the chassis is at
 rest with no input (suppressing drift jitter), which is its original
@@ -4979,7 +5006,7 @@ flipped (`False` → `True`).
 
 The Python `for i in range(n_wheels)` loop inside `VehiclePhysics.step()` is gone. All per-wheel work — suspension N, wheel-frame fwd/lat transforms, slip, tire force, stability hooks, omega update, force accumulation — is now a single batched tensor op set operating on `(n_envs, n_wheels)` tensors.
 
-Measured on the KDU 10-wheel tank interactive demo:
+Measured on the 10-wheel tank interactive demo:
 - Before (v0.4.4): physics ≈ 50 ms / step (chase-cam interactive, `--profile` mode)
 - 250+ CUDA kernel launches per step (10 wheels × ~25 ops per wheel)
 - At `n_envs=1`, launch overhead (~10-30 µs each) dominated the actual GPU work, costing 5-10 ms in pure dispatch overhead alone.
@@ -5017,12 +5044,12 @@ External hooks / tire models with the v0.4.x per-wheel API will break — update
 ## [0.4.4] — 2026-05-18
 
 ### Performance
-- **Tank chase-cam fps fix** — interactive demo on the KDU tank ran at ~15 fps vs ~25 fps for the original `KDU/example_interactive.py`. Two contributions:
-  - `VisualSync` was syncing wheel spin angle (`set_dofs_position` for the 10 continuous spin joints) every step. The original KDU intentionally skipped this since the cylinder primitive wheels are rotationally symmetric and a spinning visual is invisible.
+- **Tank chase-cam fps fix** — interactive demo on the reference tank ran at ~15 fps vs ~25 fps for the original legacy script. Two contributions:
+  - `VisualSync` was syncing wheel spin angle (`set_dofs_position` for the 10 continuous spin joints) every step. The original legacy variant intentionally skipped this since the cylinder primitive wheels are rotationally symmetric and a spinning visual is invisible.
   - The chassis `up_world` reference tensor was being re-allocated every step inside `VehiclePhysics.step()` instead of being cached at init time.
 
 ### Added
-- `VehicleConfig.visual_spin_enabled: bool = True` (also on `ResolvedConfig`). Set `False` to skip the per-step spin-angle `set_dofs_position` call. Saves ~3-5 ms / step in interactive mode (one fewer Genesis call). Cars keep the default `True` so mesh wheels visibly roll; tanks (`tank_10w_skid_belt` preset) now default to `False`.
+- `VehicleConfig.visual_spin_enabled: bool = True` (also on `ResolvedConfig`). Set `False` to skip the per-step spin-angle `set_dofs_position` call. Saves ~3-5 ms / step in interactive mode (one fewer Genesis call). Cars keep the default `True` so mesh wheels visibly roll; tanks (the tank preset) now default to `False`.
 
 ### Changed
 - `VehiclePhysics.__init__` caches `_up_world` once instead of re-creating it each `step()`.
@@ -5033,20 +5060,20 @@ External hooks / tire models with the v0.4.x per-wheel API will break — update
 ## [0.4.3] — 2026-05-18
 
 ### Fixed
-- **Heavy-wheel suspension visual fix (two-part)** — on the KDU 10-wheel tank (each wheel ≈ 500 kg):
-  - *Part 1 (free-fall)*: the wheel meshes were sinking below the ground while the chassis stayed up. `VisualSync` chose `set_dofs_position` vs `control_dofs_position` by detecting `<dynamics>` declarations in the URDF, which KDU's URDF omits entirely. With no PD control (`kp`/`kv` = 0), Genesis lets the heavy wheel free-fall between substeps and the kinematic `set_dofs_position` cannot snap it back fast enough.
-  - *Part 2 (spinning in air)*: after the PD fix above, wheels stopped falling but were spinning in air ~5 cm above ground. The `control_dofs_position` path used `target = max(0, rest_d - d)` (a non-negative compression), which can only push the wheel UP from rest, never DOWN to reach the ground. This is fine when the carrier rest position sits *above* ground level (HJW URDF: susp origin z = 0.34), but breaks when the carrier rest sits *at* base_link z (KDU URDF: susp origin z = 0). The `control_dofs_position` path now uses the same `joint_pos = mesh_radius - d` formula as the `set_dofs_position` path so the wheel mesh lands on the ground in both cases.
+- **Heavy-wheel suspension visual fix (two-part)** — on the 10-wheel reference tank (each wheel ≈ 500 kg):
+  - *Part 1 (free-fall)*: the wheel meshes were sinking below the ground while the chassis stayed up. `VisualSync` chose `set_dofs_position` vs `control_dofs_position` by detecting `<dynamics>` declarations in the URDF, which that tank's URDF omits entirely. With no PD control (`kp`/`kv` = 0), Genesis lets the heavy wheel free-fall between substeps and the kinematic `set_dofs_position` cannot snap it back fast enough.
+  - *Part 2 (spinning in air)*: after the PD fix above, wheels stopped falling but were spinning in air ~5 cm above ground. The `control_dofs_position` path used `target = max(0, rest_d - d)` (a non-negative compression), which can only push the wheel UP from rest, never DOWN to reach the ground. This is fine when the carrier rest position sits *above* ground level (reference car URDF: susp origin z = 0.34), but breaks when the carrier rest sits *at* base_link z (reference tank URDF: susp origin z = 0). The `control_dofs_position` path now uses the same `joint_pos = mesh_radius - d` formula as the `set_dofs_position` path so the wheel mesh lands on the ground in both cases.
 
 ### Added
 - `VehicleConfig.visual_susp_mode: str = "auto"` (also on `ResolvedConfig`). Three values:
-  - `"auto"` (default) — per-joint decision based on URDF `<dynamics>` presence; preserves the v0.4.2 behavior for HJW-style URDFs.
-  - `"kinematic"` — force `set_dofs_position` everywhere (light wheels, HJW-style).
-  - `"control"` — force `control_dofs_position` with PD kp=1e7 / kv=1e5 everywhere (heavy wheels, KDU-style).
+  - `"auto"` (default) — per-joint decision based on URDF `<dynamics>` presence; preserves the v0.4.2 behavior for light-wheel URDFs.
+  - `"kinematic"` — force `set_dofs_position` everywhere (light wheels).
+  - `"control"` — force `control_dofs_position` with PD kp=1e7 / kv=1e5 everywhere (heavy wheels).
   - `resolve()` validates the value and raises `ConfigError` on unknown strings.
-- `tank_10w_skid_belt` preset now sets `visual_susp_mode="control"` so the wheels stay attached on the KDU tank without the user having to know.
+- The tank preset now sets `visual_susp_mode="control"` so the wheels stay attached on the heavy-wheel reference tank without the user having to know.
 
 ### Migration
-- HJW / JMK / car presets unchanged — `"auto"` keeps their existing behavior.
+- The car presets are unchanged — `"auto"` keeps their existing behavior.
 - If you constructed a `VehicleConfig` manually for a heavy-wheel vehicle and saw the wheel-sinking bug, set `visual_susp_mode="control"` explicitly.
 
 ---
@@ -5103,7 +5130,7 @@ offering a one-liner for the common path.
 
 ### Added
 - **Stability profile** on every preset: `stability="control" | "physical" | "research"` (default `"control"`).
-  - `"control"` — RL/MPPI-friendly hooks: `RollingResistance` + `LowSpeedRegularizer(disable_when_control_active=False)` (+ `StaticFrictionLock` for tank). Default for `car_4w_rwd_ackermann`, `car_4w_awd_ackermann`, `truck_6w_partial_ackermann`, `tank_10w_skid_belt`.
+  - `"control"` — RL/MPPI-friendly hooks: `RollingResistance` + `LowSpeedRegularizer(disable_when_control_active=False)` (+ `StaticFrictionLock` for tank). Default for `car_4w_rwd_ackermann`, `car_4w_awd_ackermann`, `truck_6w_partial_ackermann` and the tank preset.
   - `"physical"` — empty hook list. Use for Real2Sim parameter identification so numerical stabilizers don't leak into fitted parameters.
   - `"research"` — empty hook list. Caller assembles hooks manually.
 - `stability_hooks_for_profile(profile, vehicle_kind)` public helper to materialize the same hook lists used by the presets.
@@ -5159,7 +5186,7 @@ Initial Phase 3 reference implementation of the genesis_vehicle SDK.
 - Tire models: `PacejkaAnisotropic`, `CoulombIsotropic`.
 - Config & merge: `WheelConfig`, `ChassisConfig`, `VehicleConfig`, `ResolvedConfig`, `resolve()`, `ConfigError`. URDF defaults + per-wheel overrides.
 - Inputs: unified `VehicleInputs` + typed (`AckermannInputs`, `SkidSteerInputs`, etc.) with `from_unified()` adapters.
-- `parse_urdf()` convention-based parser supporting HJW (`*_suspension_joint`) and KDU (`*_susp`) naming.
+- `parse_urdf()` convention-based parser supporting both `*_suspension_joint` and `*_susp` naming.
 - Visual layer (`VisualSync`) absorbing URDF axis-sign quirks.
-- Presets for four reference vehicles: `car_4w_rwd_ackermann`, `car_4w_awd_ackermann`, `truck_6w_partial_ackermann`, `tank_10w_skid_belt`.
+- Presets for four reference vehicles: `car_4w_rwd_ackermann`, `car_4w_awd_ackermann`, `truck_6w_partial_ackermann` and the tank preset.
 - Pure-Python tests for URDF parsing, config resolve, strategy math.

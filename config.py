@@ -122,9 +122,9 @@ class VehicleConfig:
 
     # Visual suspension joint mode:
     #   "auto"       — per-joint decision based on URDF <dynamics> presence (legacy default)
-    #   "kinematic"  — force set_dofs_position (HJW-style, light wheels < ~50kg)
-    #   "control"    — force control_dofs_position with high kp/kv (KDU-style, heavy wheels)
-    # Heavy wheels (e.g. KDU tank's 500 kg) need PD control or they fall under
+    #   "kinematic"  — force set_dofs_position (light wheels < ~50 kg)
+    #   "control"    — force control_dofs_position with high kp/kv (heavy wheels)
+    # Heavy wheels (e.g. a 500 kg tank wheel) need PD control or they fall under
     # gravity between substeps even though set_dofs_position is re-applied each
     # step. Tank preset opts into "control" automatically.
     visual_susp_mode: str = "auto"

@@ -78,7 +78,7 @@ seams. The full diagram lives in
 | `brake` | `[0, 1]` | positive magnitude — internally converted to a signed torque opposing wheel rotation |
 | `steer` | `[-1, +1]` | **`+steer` = right turn** |
 
-Internal sign flips (Genesis RHS, URDF `<axis 0 0 -1>`, KDU's legacy
+Internal sign flips (Genesis RHS, URDF `<axis 0 0 -1>`, a legacy variant's
 `+steer = LEFT`) are absorbed inside the strategy / visual layer. The
 user-facing API is unambiguous.
 

@@ -42,7 +42,7 @@ Run (from the workspace root, venv active):
          Viewer geometry defaults to --vis_mode visual so the ray-cast wheels
          show; pass --vis_mode collision for the chassis collision boxes.)
 
-The tank URDF defaults to ``GeneVehicle_KDU/tank_ray.urdf`` next to the SDK
+The tank URDF defaults to the SDK's bundled ``samples/urdf/tank_ray.urdf``
 repo (the workspace layout); pass ``--urdf`` explicitly elsewhere.
 """
 
@@ -75,7 +75,7 @@ _STATS_RE = re.compile(
 
 def _default_urdf() -> str:
     here = os.path.dirname(os.path.abspath(__file__))          # .../genesis_vehicle/server
-    return os.path.abspath(os.path.join(here, "..", "..", "GeneVehicle_KDU", "tank_ray.urdf"))
+    return os.path.abspath(os.path.join(here, "..", "samples", "urdf", "tank_ray.urdf"))
 
 
 def _ring_spawns(k: int, radius: float, z: float = 1.2):
