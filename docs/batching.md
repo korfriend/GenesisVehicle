@@ -294,11 +294,10 @@ This is the headline workflow the v0.5.14 release was built around.
 
 | Your scenario | Solver |
 |---|---|
-| 1 vehicle, parallel rollouts for RL / MPPI | `VehiclePhysics(n_envs=N)` (L3) |
+| 1 vehicle, parallel rollouts for RL / MPPI (any N) | `VehiclePhysics(n_envs=N)` (L3) — NOT L2: with one vehicle it has nothing to batch and only adds overhead |
 | 1 vehicle, just visualization | `VehiclePhysics` (n_envs=1) |
 | K vehicles in 1 visible scene (traffic demo, multi-kind comparison) | `MultiVehiclePhysics(scene, vehicles)` (L2) |
 | **K vehicles × N parallel scenarios** | **`MultiVehiclePhysics(scene, vehicles, n_envs=N)`** (L2 × L3) — minimal example: [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) |
-| K=1, large N | Use plain `VehiclePhysics(n_envs=N)` — L2 only adds overhead with nothing to batch |
 
 If you find yourself manually Python-looping over vehicles or envs,
 you're probably leaving one of these axes on the table — check the
