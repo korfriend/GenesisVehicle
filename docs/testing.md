@@ -10,7 +10,7 @@ python -m pytest tests/ -v
 
 155 pure-Python tests; no Genesis runtime required. Runs in ~30s on CPU. The
 reference URDFs the parsing tests read live in `tests/data/` (self-contained
-since v1.1.27).
+since v1.2.0).
 
 GPU integration is exercised by user-side demo scripts in your downstream
 project — the SDK's own test suite stays pure-Python so it can run in any
@@ -59,7 +59,7 @@ and that the lazy names (`VehiclePhysics`, `WheelRayPattern`,
 | `dynamics.py` | `brake_torque_signed`, `suspension_normal_force` — pure helpers |
 | `raycast.py` | `WheelRayPattern`, `read_distances()` |
 | `kinematics.py` | `get_link_transforms`, `LinkTransforms` — per-link transforms (world / base / parent frame) |
-| `visual.py` | `VisualJointSync` (viewer wheel-joint driver). Auto-invoked by core; flips URDF axis quirks |
+| `visual.py` | `InstancedWheelRenderer` (solver-free wheel visuals), `WheelJointInternalSync` (legacy joint-sync fallback), `patch_viewer_atomic_update` |
 | `tire_models/` | `TireModel` ABC + `PacejkaAnisotropic`, `CoulombIsotropic` |
 | `strategies/steering.py` | `SteeringStrategy` + 4 concrete |
 | `strategies/drivetrain.py` | `DrivetrainStrategy` + 4 concrete |
