@@ -250,7 +250,7 @@ class PerSide(DrivetrainStrategy):
     def _cap_torque_batched(
         omega_side: torch.Tensor, T_des: torch.Tensor, omega_max: float, T_max: float
     ) -> torch.Tensor:
-        """Batched analogue of KDU._cap_torque. omega_side / T_des shape: (n_envs,).
+        """Batched per-side torque cap. omega_side / T_des shape: (n_envs,).
         Cap drive only in the same direction as omega; opposite direction (decel)
         keeps full T_max."""
         taper_pos = torch.clamp(1.0 - torch.clamp(omega_side, min=0.0) / omega_max, min=0.0)
@@ -277,7 +277,7 @@ class PerSide(DrivetrainStrategy):
             steer = getattr(inputs, "steer")
         steer = _to_tensor(steer, n_envs, device, dtype)
 
-        # Gear cap: scale throttle before physics, mirroring KDU.
+        # Gear cap: scale throttle before physics (reference-tank tuning).
         throttle = throttle * self.throttle_gear_cap
 
         # Per-side commanded throttle. ISO: +steer = right turn -> L faster.

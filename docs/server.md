@@ -133,7 +133,7 @@ benchmark always runs the server with `--pacing-profile`) and a real-time
 verdict (steps/loop ≤ 1.05 AND Loop Avg ≤ 25 ms). Every adaptive-catchup
 trigger context is echoed per config as a `[pacing]` line (window steps/loop
 history, loop_dur avg/p95, budget, est speed). The tank URDF defaults to
-`GeneVehicle_KDU/tank_ray.urdf` next to the repo.
+the SDK's bundled `samples/urdf/tank_ray.urdf` (`--urdf` to override).
 
 Official reference results (v1.0.20, CPU, dt = 0.025, rco on, WSL2 laptop —
 re-run on your hardware for absolute numbers):
@@ -377,7 +377,7 @@ wheel-ray pattern. A URDF authored for a normal rigid-body sim usually
 violates one of the three ray-wheel contracts; the most visible one is a
 suspension joint origin that sits below the wheel centre, which makes the
 vehicle **float** in UE by exactly that offset (before v1.1.24 the server
-skipped the prep and did exactly this — an M1A2 hovered 0.433 m). The
+skipped the prep and did exactly this — a 14-wheel tank hovered 0.433 m). The
 original file is never modified, and a compliant URDF is used as-is. See
 [physics-contracts.md §7.9](physics-contracts.md#79-urdf-contracts-for-ray-wheels-auto-corrected-since-v1122)
 for the contracts and what gets corrected. If a vehicle still floats or

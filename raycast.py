@@ -1,6 +1,6 @@
 """WheelRayPattern: a single canonical Genesis RaycastPattern for ray-wheels.
 
-Replaces the per-variant copies in HJW/car_raywheel.py and KDU/physics.py.
+Replaces the legacy per-variant raycast implementations.
 Each ray starts ``RAY_UP_OFFSET`` above a chassis-local wheel position and
 points down (-z body); :func:`read_distances` subtracts the offset back out
 so consumers see attachment-relative distances (the "high-cast" scheme —

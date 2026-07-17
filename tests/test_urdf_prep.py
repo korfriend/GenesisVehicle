@@ -15,7 +15,7 @@ SDK_CAR = os.path.join(_HERE, "..", "samples", "urdf", "car_4w.urdf")
 
 
 def _offender_urdf(tmp_path, *, collider_only_wheel=False):
-    """A URDF that breaks all three ray-wheel contracts (M1A2 shape):
+    """A URDF that breaks all three ray-wheel contracts (heavy-tank export shape):
     body --susp(z=0)--> carrier(no inertial) --spin(z=+0.4)--> wheel(collider).
     """
     wheel_geom = "sphere"

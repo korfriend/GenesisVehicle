@@ -809,7 +809,7 @@ class VehicleScene:
             # decides where the wheel rays go (it is what gets parsed), so the
             # two must describe the same vehicle — a corrected morph paired with
             # an unprepared urdf_path silently puts the rays in the wrong place
-            # (the v1.1.24 field report: an M1A2 whose suspension attach sits
+            # (the v1.1.24 field report: a heavy tank whose suspension attach sits
             # below the wheel centre floated in UE, because the server passed
             # the original path with a stripped morph). Warn if the given path
             # is not already ray-wheel ready — the caller should prepare it once

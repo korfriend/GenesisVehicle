@@ -70,7 +70,7 @@ completes and after `omega` has been integrated for every wheel, but
 force applied in the same step still reflects the pre-coupling per-wheel
 F_long (because F_long was computed inside the loop using pre-coupling
 omegas). The coupled omega becomes visible to the next step. This is the
-KDU reference behavior and is documented as the SDK contract.
+reference-tank behavior and is documented as the SDK contract.
 
 ## What hooks CANNOT do
 

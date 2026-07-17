@@ -20,9 +20,9 @@ from genesis_vehicle import (
 from genesis_vehicle.config import ConfigError
 
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-HJW_URDF = os.path.join(REPO_ROOT, "HJW", "urdf", "car_raywheel.urdf")
-KDU_URDF = os.path.join(REPO_ROOT, "KDU", "tank_ray.urdf")
+_DATA = os.path.join(os.path.dirname(__file__), "data")
+CAR_URDF = os.path.join(_DATA, "car_ref.urdf")
+TANK_URDF = os.path.join(_DATA, "tank_ref.urdf")
 
 
 # ---------------------------------------------------------------------------
@@ -100,37 +100,37 @@ def test_profile_unknown_raises():
 
 
 def test_preset_car_default_profile_is_control():
-    cfg = car_4w_rwd_ackermann(HJW_URDF)
+    cfg = car_4w_rwd_ackermann(CAR_URDF)
     types = [type(h).__name__ for h in cfg.stability_hooks]
     assert "RollingResistance" in types
     assert "LowSpeedRegularizer" in types
 
 
 def test_preset_car_raw_profile_has_no_hooks():
-    cfg = car_4w_rwd_ackermann(HJW_URDF, stability="raw")
+    cfg = car_4w_rwd_ackermann(CAR_URDF, stability="raw")
     assert cfg.stability_hooks == []
 
 
 def test_preset_tank_default_includes_static_friction_lock():
-    cfg = tank_skid_belt(KDU_URDF)
+    cfg = tank_skid_belt(TANK_URDF)
     types = [type(h).__name__ for h in cfg.stability_hooks]
     assert "StaticFrictionLock" in types
 
 
 def test_preset_tank_raw_profile_has_no_hooks():
-    cfg = tank_skid_belt(KDU_URDF, stability="raw")
+    cfg = tank_skid_belt(TANK_URDF, stability="raw")
     assert cfg.stability_hooks == []
 
 
 def test_preset_car_fwd_uses_fwd_drivetrain():
     """FWD preset must wire up an FWD drivetrain (not RWD/AWD)."""
-    cfg = car_4w_fwd_ackermann(HJW_URDF)
+    cfg = car_4w_fwd_ackermann(CAR_URDF)
     assert isinstance(cfg.drivetrain, FWD), \
         f"expected FWD, got {type(cfg.drivetrain).__name__}"
 
 
 def test_preset_car_fwd_default_profile_has_hooks():
-    cfg = car_4w_fwd_ackermann(HJW_URDF)
+    cfg = car_4w_fwd_ackermann(CAR_URDF)
     types = [type(h).__name__ for h in cfg.stability_hooks]
     assert "RollingResistance" in types
     assert "LowSpeedRegularizer" in types

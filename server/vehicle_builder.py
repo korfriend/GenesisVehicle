@@ -204,7 +204,7 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
     # SkidSteer -> tank preset for ANY wheel count. The preset discovers the
     # wheels from the URDF (SkidSteer/PerSide/SameSideBelt are count-generic);
     # gating it on exactly 10 wheels sent every other tracked vehicle (e.g. a
-    # 14-wheel M1A2) into the generic mapping branch below, where an empty
+    # 14-wheel tank) into the generic mapping branch below, where an empty
     # drivingJoints list means ZERO drive weights and NoSteer — a vehicle that
     # creeps at cm/s and ignores steering. (v1.1.26)
     if is_skid:
@@ -563,7 +563,7 @@ def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
     # see urdf_prep). They must agree: add_vehicle parses the path it is given
     # to place the wheel rays, so handing it the ORIGINAL path together with a
     # corrected morph made the rays disagree with the geometry (a URDF whose
-    # suspension attach sits below the wheel centre — an M1A2 export — then
+    # suspension attach sits below the wheel centre — a common export defect — then
     # floated in UE). prepare_vehicle_urdf supersedes the old
     # strip_wheel_collisions: it strips the wheel colliders (promoting a
     # collider-only wheel to a <visual> so it still renders), moves the

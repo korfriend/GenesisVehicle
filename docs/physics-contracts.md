@@ -67,7 +67,7 @@ the estimation pipeline.
   right side (`left_cmd > right_cmd` via
   `left_cmd = throttle + steer_gain * steer`).
 
-KDU's legacy `+steer = LEFT` is **not** carried forward; skid-steer here is
+The legacy `+steer = LEFT` convention is **not** carried forward; skid-steer here is
 `+steer = right` (ISO 8855), so any code ported from a `+steer = LEFT`
 convention must flip the steer sign.
 
@@ -95,16 +95,16 @@ is only for NEW URDFs: declaring `(0, 0, -1)` keeps URDF joint values and
 user-facing steer values in the same sign domain, which makes URDF-side
 inspection / debugging less surprising.
 
-Examples in this repo:
-- `HJW/urdf/car_raywheel.urdf` — `(0, 0, -1)` ✓ (matches recommendation)
-- `GeneVehicle_Truck6w/urdf/truck_6w.urdf` — `(0, 0, -1)` ✓ (fixed in v0.5.4)
-- `JMK/URDF/test_v1_raywheel.urdf` — `(0, 0, 1)` (external author; SDK handles via WheelJointInternalSync sign flip)
+Examples surveyed:
+- the reference car URDF — `(0, 0, -1)` ✓ (matches recommendation)
+- the 6-wheel truck URDF — `(0, 0, -1)` ✓ (fixed in v0.5.4)
+- one externally authored URDF — `(0, 0, 1)` (SDK handles via WheelJointInternalSync sign flip)
 
 ## 7.5 Coupling order
 
 `CouplingStrategy.apply(omega)` runs after the per-wheel omega integration
 in the current step and before the next step. Drive torque distribution in
-the same step uses **pre-coupling** omegas (one-step lag), matching the KDU
+the same step uses **pre-coupling** omegas (one-step lag), matching the
 reference implementation. Strategies must not assume they run inside the
 per-wheel loop.
 
@@ -203,7 +203,7 @@ complies is used as-is (no copy).
 | contract | why | auto-correction |
 |---|---|---|
 | **Wheels must not collide** | ground contact IS the raycast + suspension force model; a colliding wheel is a SECOND support that fights it (vehicle jitters in place, or rides on its colliders while the suspension pushes several times its weight) | wheel colliders are removed. A collider that is the wheel's ONLY geometry is first promoted to a `<visual>`, so the wheel still RENDERS — the instanced wheel renderer draws visual geoms, and physics never touches them |
-| **The suspension attach point IS the wheel centre** | the ray is cast down from `WheelConfig.position` (= the prismatic joint origin) and `rest_d = radius + rest_stroke` measures from there | a chain that hangs the wheel off a carrier (`body --susp--> carrier --spin(z=+h)--> wheel`) puts the attach `h` below the wheel centre — the hull then settles `h` too high with the wheels visibly floating (measured on an M1A2 model: h = 0.433 m). The spin-joint offset is folded into the suspension origin, leaving every link's rest pose unchanged |
+| **The suspension attach point IS the wheel centre** | the ray is cast down from `WheelConfig.position` (= the prismatic joint origin) and `rest_d = radius + rest_stroke` measures from there | a chain that hangs the wheel off a carrier (`body --susp--> carrier --spin(z=+h)--> wheel`) puts the attach `h` below the wheel centre — the hull then settles `h` too high with the wheels visibly floating (measured on a 14-wheel tracked-vehicle model: h = 0.433 m). The spin-joint offset is folded into the suspension origin, leaving every link's rest pose unchanged |
 | **Moving links need a valid inertial** | links with no `<inertial>` have zero mass AND inertia; Genesis warns ("mass and inertia of moving bodies must be larger than mjMINVAL"), falls back to its legacy URDF parser, and the articulated chain goes degenerate — the hull stops responding to force properly | a small inertial is injected where one is missing |
 
 The OSC server builds its own morph, so it prepares the URDF itself and

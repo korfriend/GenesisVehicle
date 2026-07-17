@@ -137,7 +137,7 @@ def build_scene(n_envs, urdf_path, preset_fn, config_mod,
     COLLIDERS fight the suspension as a double support; (b) the v1.1.16
     high-cast ray (start = attach + 1 m) begins INSIDE a tall hull and hits
     the vehicle's OWN roof — a constant self-hit that rides along with the
-    vehicle (measured on a 27 t M1A2: d frozen at -0.405 m on all 14 wheels,
+    vehicle (measured on a 27 t tracked vehicle: d frozen at -0.405 m on all 14 wheels,
     N = 317 kN each, z = +16 m / vz = +56 m/s within the settle). VehicleScene
     preps the URDF automatically, and in dual_scene the rays only see the
     RAYCAST scene's static mirrors — self-hits are impossible.

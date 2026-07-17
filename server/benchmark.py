@@ -30,7 +30,7 @@ Run (from the workspace root, venv active):
     python -m genesis_vehicle.server.benchmark --modes L3 --gpu    # L3 on GPU
     python -m genesis_vehicle.server.benchmark --urdf /path/to/tank.urdf
 
-The tank URDF defaults to ``GeneVehicle_KDU/tank_ray.urdf`` next to the SDK
+The tank URDF defaults to the SDK's bundled ``samples/urdf/tank_ray.urdf``
 repo (the workspace layout); pass ``--urdf`` explicitly elsewhere.
 """
 
@@ -61,8 +61,7 @@ _CAP_RE = re.compile(r"\[cap=(\d+):([a-z0-9:]+)\]")
 
 def _default_urdf() -> str:
     here = os.path.dirname(os.path.abspath(__file__))          # .../genesis_vehicle/server
-    cand = os.path.abspath(os.path.join(here, "..", "..", "GeneVehicle_KDU", "tank_ray.urdf"))
-    return cand
+    return os.path.abspath(os.path.join(here, "..", "samples", "urdf", "tank_ray.urdf"))
 
 
 def _make_hull_obj() -> str:

@@ -17,8 +17,8 @@ non-scope, important:
   substep jitter during hard transients).
 
 Suspension visualisation: if the URDF prismatic joint declares non-zero
-dynamics (KDU pattern), we use control_dofs_position with high kp/kv;
-otherwise (HJW pattern, dynamics=0) we use set_dofs_position directly.
+dynamics, we use control_dofs_position with high kp/kv;
+otherwise (dynamics=0) we use set_dofs_position directly.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import numpy as np
 import torch
 
 
-# Defaults used when control_dofs_position path is taken (KDU-style).
+# Defaults used when the control_dofs_position path is taken.
 _SUSP_VIS_KP = 1.0e7
 _SUSP_VIS_KV = 1.0e5
 
@@ -203,7 +203,7 @@ class WheelJointInternalSync:
             torch.tensor(set_strokes, device=device, dtype=dtype).unsqueeze(0)
             if set_strokes else None)
 
-        # Set high kp/kv on control-path suspension joints (KDU pattern).
+        # Set high kp/kv on control-path suspension joints.
         if self._susp_ctrl_dofs:
             import numpy as np
             n_ctrl = len(self._susp_ctrl_dofs)
@@ -287,7 +287,7 @@ class WheelJointInternalSync:
             phys = steer_per_wheel[:, self.steer_wheel_idx]
             parts.append(-phys * self._steer_signs)
 
-        # Suspension, set_dofs_position path (HJW): joint_pos = mesh_radius - hit.
+        # Suspension, set_dofs_position path: joint_pos = mesh_radius - hit.
         susp_joint_pos = None
         if self._susp_set_dofs:
             d = distances[:, self._susp_set_idx]
@@ -320,7 +320,7 @@ class WheelJointInternalSync:
         # so the wheel mesh lands on the ground at equilibrium regardless of
         # chassis settle height. The earlier "command = compression" formula
         # was wrong for URDFs whose susp joint origin sits at the chassis z
-        # plane (KDU pattern) — `compression` is always >= 0, so the wheel
+        # plane — `compression` is always >= 0, so the wheel
         # could only ride UP from rest, never extend DOWN to reach the ground.
         if self._susp_ctrl_dofs:
             d = distances[:, self._susp_ctrl_idx]

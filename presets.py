@@ -102,17 +102,17 @@ def stability_hooks_for_profile(
 
 
 # ---------------------------------------------------------------------------
-# Cars (HJW-style 4-wheel Ackermann)
+# Cars (4-wheel Ackermann; reference-car tuning)
 # ---------------------------------------------------------------------------
 
 
-def _hjw_brake_bias() -> list[float]:
-    """Front-biased 60/40 split, equal within axle. Matches HJW BRAKE_BIAS_PER_WHEEL."""
+def _car_brake_bias() -> list[float]:
+    """Front-biased 60/40 split, equal within axle (reference-car tuning)."""
     return [0.30, 0.30, 0.20, 0.20]
 
 
-def _hjw_wheel_overrides() -> dict[str, WheelConfig]:
-    """Per-wheel suspension/tire overrides matching HJW car_raywheel.py constants."""
+def _car_wheel_overrides() -> dict[str, WheelConfig]:
+    """Per-wheel suspension/tire overrides (reference-car tuning constants)."""
     common = dict(
         rest_stroke=0.10,
         k_susp=70_000.0,
@@ -140,7 +140,7 @@ def car_4w_rwd_ackermann(
     *,
     stability: str = "control",
 ) -> VehicleConfig:
-    """4-wheel RWD car with front Ackermann steering. Matches HJW reference."""
+    """4-wheel RWD car with front Ackermann steering (reference-car tuning)."""
     return VehicleConfig.from_urdf(
         urdf_path,
         steering=Ackermann(max_steer_rad=0.7, front_axle=0),
@@ -148,11 +148,11 @@ def car_4w_rwd_ackermann(
             t_drive_max=1000.0,
             t_brake_max=2500.0,
             driven_axles=(1,),
-            brake_bias=_hjw_brake_bias(),
+            brake_bias=_car_brake_bias(),
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
-        wheel_overrides=_hjw_wheel_overrides(),
+        wheel_overrides=_car_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19)
@@ -173,11 +173,11 @@ def car_4w_fwd_ackermann(
             t_drive_max=1000.0,
             t_brake_max=2500.0,
             driven_axles=(0,),
-            brake_bias=_hjw_brake_bias(),
+            brake_bias=_car_brake_bias(),
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
-        wheel_overrides=_hjw_wheel_overrides(),
+        wheel_overrides=_car_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19)
@@ -198,11 +198,11 @@ def car_4w_awd_ackermann(
             t_drive_max=1000.0,
             t_brake_max=2500.0,
             drive_weights=[0.25, 0.25, 0.25, 0.25],
-            brake_bias=_hjw_brake_bias(),
+            brake_bias=_car_brake_bias(),
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
-        wheel_overrides=_hjw_wheel_overrides(),
+        wheel_overrides=_car_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19)
@@ -253,12 +253,12 @@ def truck_6w_partial_ackermann(
 
 
 # ---------------------------------------------------------------------------
-# Tank (KDU-style 10-wheel skid-steer)
+# Tank (skid-steer, same-side belt coupling)
 # ---------------------------------------------------------------------------
 
 
-def _kdu_wheel_overrides() -> dict[str, WheelConfig]:
-    """Per-wheel parameters matching KDU/physics.py constants. KDU uses a
+def _tank_wheel_overrides() -> dict[str, WheelConfig]:
+    """Per-wheel parameters (reference-tank tuning constants). The reference uses a
     SYMMETRIC damper (C_SUSP applied both directions), expressed here as
     c_compression == c_extension."""
     common = dict(
@@ -268,7 +268,7 @@ def _kdu_wheel_overrides() -> dict[str, WheelConfig]:
         c_extension=120_000.0,
         comp_rate_clamp=30.0,
         mu_long=0.9,
-        mu_lat=0.9 * 0.7,        # KDU LAT_SCALE = 0.7
+        mu_lat=0.9 * 0.7,        # reference LAT_SCALE = 0.7
         rolling_resistance_cr=0.05,
         pb_x=5.0, pc_x=1.6, pe_x=0.4,
         pb_y=4.0, pc_y=1.4, pe_y=0.4,
@@ -291,15 +291,14 @@ def tank_skid_belt(
 
     Wheel-count-generic: ``VehicleConfig.from_urdf`` discovers the wheels, and
     ``SkidSteer`` / ``PerSide`` / ``SameSideBelt`` scale to however many the
-    URDF has (validated on the 10-wheel KDU reference and a 14-wheel M1A2).
-    The suspension/tire tuning constants derive from the KDU reference.
-    (Named ``tank_10w_skid_belt`` before v1.1.26.)
+    URDF has (validated on 10- and 14-wheel tracked vehicles).
+    The suspension/tire tuning constants derive from the reference tank.
 
     Uses ``visual_susp_mode="control"`` because the tank's wheels are heavy
     (500 kg each) and a kinematic set_dofs_position cannot prevent them from
     falling under gravity between substeps. The control path applies a stiff
     PD (kp=1e7, kv=1e5) on each suspension prismatic joint, matching the
-    KDU reference behavior.
+    reference-tank behavior.
     """
     return VehicleConfig.from_urdf(
         urdf_path,
@@ -314,7 +313,7 @@ def tank_skid_belt(
         ),
         coupling=SameSideBelt(),
         tire=PacejkaAnisotropic(eps_v=0.5),
-        wheel_overrides=_kdu_wheel_overrides(),
+        wheel_overrides=_tank_wheel_overrides(),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="tank"),
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19; legacy 0.005 verified unnecessary)
