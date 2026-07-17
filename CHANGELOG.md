@@ -10,7 +10,13 @@ running version the first time it is instantiated in a process.
 
 ---
 
-## [1.1.27] — 2026-07-17
+## [1.2.0] — 2026-07-17
+
+Minor-version milestone (released as 1.1.27 for a few minutes, retitled):
+it consolidates the 1.1.26 BREAKING preset rename
+(`tank_10w_skid_belt` → `tank_skid_belt`) and the official-surface cleanup
+below — together they change what the public package looks like, which is
+minor-version territory, not a patch.
 
 ### Changed — internal codenames removed from public surfaces
 
