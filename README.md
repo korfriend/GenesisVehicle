@@ -197,7 +197,7 @@ Four ready-to-use `VehicleConfig` builders:
 | `car_4w_rwd_ackermann` | 4 | Ackermann front | RWD | Independent |
 | `car_4w_awd_ackermann` | 4 | Ackermann front | AWD | Independent |
 | `truck_6w_partial_ackermann` | 6 | Ackermann on axle 0 | Drive on axles 1+2 (mid + rear) | Independent |
-| `tank_skid_belt` | 10 | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
+| `tank_skid_belt` | any (validated 10 / 14) | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
 
 These cover the reference patterns the SDK was built from; copy and tweak
 for your own topology. Every preset takes a keyword-only
@@ -283,10 +283,10 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-78 pure-Python tests covering URDF parsing, config resolve, strategy math,
-dynamics primitives, version reporting, stability-profile semantics,
-multi-vehicle grouping/input routing, and the server subpackage surface.
-No Genesis runtime needed — they run on CPU in ~3 s.
+177 pure-Python tests covering URDF parsing, config resolve, suspension
+sizing, strategy math, dynamics primitives, version reporting,
+stability-profile semantics, multi-vehicle grouping/input routing, and the
+server subpackage surface. No Genesis runtime needed — they run on CPU in ~40 s.
 
 ## Releases and Versioning
 

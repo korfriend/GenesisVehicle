@@ -440,6 +440,22 @@ and PascalCase both accepted):
 | `brakeBiasFrontRatio` | float | front brake fraction (rest to rear) |
 | `wheelOverrides` | `[{wheelName, radius, mass, stiffness, muLong, pbX, …}]` | per-wheel physical / Pacejka overrides. `wheelName` matches exact/position/substring against ANY name in the wheel's URDF joint chain (wheel link, spin, suspension, steer joint); `"*"` / `"all"` = every wheel (v1.1.26). An entry that matches nothing is skipped **with a warning** naming the URDF's wheel links |
 
+### You no longer need to send suspension values (v1.2.1)
+
+`stiffness` / `compressionDamping` / `extensionDamping` were the values a client
+had to compute by hand, because standard URDF has nowhere to put a spring rate.
+The SDK now derives them from the URDF's own **sprung mass** and wheel count, so
+a client that sends nothing gets a spring matched to the vehicle it is driving.
+The full chain:
+
+```
+wheelOverrides  >  URDF <dynamics stiffness=...>  >  mass-derived
+```
+
+Send them only to deliberately depart from the mass-matched value — an override
+replaces a spring sized for that hull with a hand-picked one. Vehicles that were
+already sending them keep working unchanged.
+
 > **Steering note:** `steerScale` is the **center (bicycle) angle**; with
 > Ackermann the inner wheel turns *more*. If a client expects "max angle =
 > exact wheel angle," account for the Ackermann inner/outer spread. Keep

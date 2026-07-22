@@ -10,6 +10,175 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.2.1] — 2026-07-23
+
+Suspension sizing. A tracked vehicle reported as "far too soft vs the client
+engine, wallows badly" turned out to be running on the car-sized module default
+spring, because the tracked preset's tuning constants were keyed by another
+vehicle's wheel-link names and matched nothing. Three fixes plus two guards so
+the same class of failure reports itself instead of feeling like bad tuning.
+
+| abbr | meaning |
+|---|---|
+| sprung mass | the mass the springs carry: everything not below a suspension joint |
+| unsprung mass | carrier + wheel + anything hanging off them |
+| sag | static suspension deflection under the vehicle's own weight |
+| f_n | natural heave (vertical bounce) frequency |
+| zeta | damping ratio, `c / c_critical` |
+| pk-pk | peak-to-peak amplitude |
+
+### Fixed — `tank_skid_belt` sizes its suspension from the URDF's mass
+
+`_tank_wheel_overrides()` returned a dict keyed by the reference vehicle's ten
+wheel-link names, and `VehicleConfig.from_urdf` applies overrides by exact name
+match. Any other tracked URDF therefore matched **zero** keys and silently kept
+module defaults — `k_susp = 70,000 N/m`, sized for a 2 t car. Measured on a
+38.5 t / 14-wheel hull: 386 mm of static sag against 50 mm of travel (7.7x),
+f_n 0.8 Hz, rebound zeta 0.14; the hull settled 330 mm below its design ride
+height and heaved 272 mm pk-pk with 5.0 deg of pitch under acceleration.
+
+The preset now derives `k_susp` / `c_compression` / `c_extension` from the
+URDF's own sprung mass and keys the overrides by the URDF's own wheel names, so
+it holds its ride frequency across tracked vehicles of any mass and wheel count.
+Same hull after the fix: 50 mm sag, f_n 2.23 Hz, 4.9 mm pk-pk heave, 1.0 deg
+pitch.
+
+The derivation reproduces the literals it replaces to within 4% on the vehicle
+they came from (k 1.00e6 -> 1.044e6, c 120,000 -> 119,229), so that vehicle's
+behaviour and its measured sweep tables are unchanged. The hard-coded
+`radius=0.4` override is gone as well — the URDF's own wheel geometry is
+authoritative, and the literal silently rescaled every other tracked vehicle.
+
+`target_sag` is now a `tank_skid_belt` keyword (default 0.05 m) for callers who
+want a softer or tighter vehicle.
+
+### Added — `suspension_from_mass()`
+
+Public helper (`from genesis_vehicle import suspension_from_mass`) returning
+`(k_susp, c_compression, c_extension)` for one wheel from a sprung mass, a wheel
+count and a target sag:
+
+    k      = (m_sprung * g / n) / target_sag
+    c_crit = 2 * sqrt(k * m_sprung / n)
+
+A fixed spring rate cannot serve both a 2 t car and a 40 t tank; deriving from
+mass keeps sag — and hence ride frequency — constant across vehicle scales.
+
+### Added — `parse_urdf()` reports sprung / unsprung / total mass
+
+`URDFParsedConfig` gains `total_mass`, `sprung_mass` and `unsprung_mass`.
+Unsprung is every link at or below a suspension joint's child; sprung is the
+rest. `chassis_mass` is the **base link alone** and omits sprung children such
+as a turret or a cargo body — on the reported vehicle it read 27,134 kg against
+a true sprung mass of 38,517 kg, undersizing any spring derived from it by 42%.
+
+The OSC server's generic (mapping-path) suspension autotune now sizes against
+`sprung_mass` for the same reason. Simple car URDFs, where the two are equal,
+are unaffected.
+
+### Fixed — `parse_urdf()` reads geometry from a spin-jointless wheel
+
+A URDF that models the wheel as a single link hanging straight off the
+suspension joint (no separate `continuous` spin joint) failed the chain walk, so
+`radius` / `mass` / `i_wheel` came back `None` and fell through to module
+defaults — the wheel silently became 0.35 m and 20 kg no matter what the URDF
+declared. `parse_urdf` now falls back to the suspension joint's own child link,
+which in that topology **is** the wheel. This is what the tracked preset's
+`radius=0.4` literal had been papering over: with the parser fixed, the bundled
+reference vehicle keeps its 0.4 m wheels from its own geometry, and picks up its
+declared 500 kg / I = 29.5 kg·m² instead of the 20 kg / 1.5 kg·m² defaults.
+`WheelConfig.mass` is informational (the pipeline does not read it); `i_wheel`
+is not, so a tracked vehicle relying on the old default will spin its wheels up
+more slowly now — which is the physically correct behaviour for a 500 kg wheel.
+
+The bundled `samples/data/tank_sweep_signed.csv` was re-measured against the
+resulting plant.
+
+### Fixed — a backwards cusp hop no longer spins the path follower
+
+`PathFollower` derives a direction block's arrival heading from its last
+segment. The boundary waypoint belongs to both blocks, and nothing forces it to
+lie ahead of the previous one: a path that doubles back can put the reverse
+leg's first waypoint *behind* the forward leg's last. One real path hops 0.28 m
+backwards there, which made the forward block's arrival heading **-94.9 deg** —
+a 180 deg spin demanded at the end of a straight leg. The vehicle obeyed, left
+the path, and then the projection could no longer advance, so the cusp never
+fired and it drove forward forever. Only exactly-duplicated waypoints were
+guarded before.
+
+The block-end heading now skips trailing segments that run counter to the
+block's net travel (`_forward_end_yaw`). An explicit per-waypoint yaw still
+wins, and a genuine corner is unaffected — only a reversing tail is skipped.
+
+This was latent: the same path used to survive because the vehicle spun slowly
+enough to reach the cusp trigger first. It surfaced when the tracked preset
+started applying its tire model (below), which raised skid-steer yaw authority
+~21% and let the spin win the race.
+
+### Changed — the tracked preset's tire model now reaches every tracked vehicle
+
+A consequence of the wheel-name fix above worth calling out on its own: the
+tracked preset's Pacejka shape and rolling resistance (`pb_x` 5.0, `pb_y` 4.0,
+`rolling_resistance_cr` 0.05, `mu` 0.9 / 0.63) previously applied only to URDFs
+whose wheel links matched the reference names. Every other tracked vehicle
+silently ran on the **car** defaults (`pb_x` 10.0, `pb_y` 8.0, `cr` 0.015).
+
+They now apply to all of them, which is the intent of a tracked-vehicle preset —
+a car's tire curve on a 40 t tracked hull was never right. Handling does change:
+measured on a 38.5 t / 14-wheel vehicle, pivot yaw rate +21% (0.775 -> 0.939
+rad/s) and stopping distance -16% (0.62 -> 0.52 m). Unlike the suspension this
+is not a mass-scaled quantity, so if you had tuned around the car defaults,
+re-check that vehicle — and re-measure any sweep table taken against it.
+
+### Added — one suspension priority chain, honoured everywhere
+
+    caller / OSC override  >  URDF <dynamics stiffness=...>  >  mass-derived
+
+Standard URDF has **no spring-stiffness field** — `<joint><dynamics>` carries
+only `damping` and `friction`, and on a prismatic joint those describe the
+articulated solver, not a suspension. A `stiffness` / `spring_stiffness`
+attribute is a non-standard extension, so a **non-zero** value there is the only
+unambiguous "the author meant a suspension spring" marker. `parse_urdf()` now
+reads it (plus `damping` / `compression_damping` / `extension_damping` from the
+same tag) into the parsed `WheelConfig`, and `resolve()`'s existing
+URDF-then-default merge turns that into the chain above for free. The tracked
+preset yields per field: anything the URDF declared is left alone, anything it
+did not still gets the derived value.
+
+The rule matters because reading `damping` unconditionally is wrong: the bundled
+car URDF writes `damping="20.0"` on its **steer** joints and `stiffness="0.0"`
+on its suspension joints — "no spring here". The OSC server's mapping-path
+branch did read both at face value, so that URDF silently resolved to
+`k_susp = 0` — no suspension at all. Both paths now share `_susp_dynamics()` and
+the same rule; neither reference URDF declares a spring, so both stay on their
+derived values.
+
+### Changed — `sweep_measure` default substeps 10 -> 4
+
+The measurement tool defaulted to `--substeps 10` while both runtimes that
+consume its tables default to 4 (`VehicleScene(substeps=4)`,
+`genesis_vehicle.server --substeps 4`). dt/substeps are part of a sweep table's
+validity contract, so the out-of-the-box table was measured on a
+finer-integrated plant than the one it would be driven on. All three now agree
+at dt 0.025 x substeps 4 (internal 6.25 ms). Pass `--substeps 10` explicitly to
+reproduce an older table.
+
+### Added — two silent-failure guards
+
+- `VehicleConfig.from_urdf` warns when a `wheel_overrides` key matches no wheel,
+  naming the dropped keys and listing the URDF's actual wheel names. This is the
+  guard that would have caught the bug above on the first run; it is the same
+  class of check the server's `wheelOverrides` handler gained in v1.1.26.
+- `resolve()` warns when the resolved spring cannot hold the vehicle up — static
+  sag past 1.25x `rest_stroke`. The threshold is not 1.0x because `rest_stroke`
+  is a ray budget rather than a mechanical bump stop and the tracked preset sits
+  at ~1.0 by design.
+
+Both are `logging.WARNING` on the `genesis_vehicle` logger, consistent with the
+v1.1.24 severity split.
+
+---
+
 ## [1.2.0] — 2026-07-17
 
 Minor-version milestone (released as 1.1.27 for a few minutes, retitled):

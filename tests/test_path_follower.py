@@ -203,6 +203,45 @@ def test_done_immediately_when_at_goal():
     assert (thr, steer, brake) == (0.0, 0.0, 1.0)
 
 
+def test_block_end_yaw_ignores_a_backwards_cusp_hop():
+    """A doubling-back path can place the reverse leg's first waypoint BEHIND
+    the forward leg's last one. That trailing hop must not become the forward
+    block's arrival heading — taking it verbatim asks the vehicle to spin 180
+    degrees at the end of a straight leg, after which the projection can no
+    longer advance and the cusp never fires. (v1.2.1 regression)"""
+    corners = [(0.0, 0.0, 0.0, 2.0),
+               (0.0, 10.0, 0.0, 2.0),     # drive +y
+               (0.0, 9.7, 0.0, -2.0),     # reverse leg starts 0.3 m BEHIND
+               (0.0, 0.0, 0.0, -2.0)]
+    f = PathFollower(_densify(corners), make_table())
+    assert len(f.blocks) == 2
+    # Forward block must still arrive heading +y (+90 deg), not -90.
+    assert f._block_end_yaw[0] == pytest.approx(math.pi / 2, abs=0.05)
+
+
+def test_block_end_yaw_follows_a_genuine_turn():
+    """The guard must not flatten a real corner: an L-shaped forward leg still
+    ends heading along its last segment."""
+    corners = [(0.0, 0.0, 0.0, 2.0),
+               (10.0, 0.0, 0.0, 2.0),     # +x
+               (10.0, 8.0, 0.0, 2.0),     # then +y
+               (10.0, 7.7, 0.0, -2.0),
+               (10.0, 0.0, 0.0, -2.0)]
+    f = PathFollower(_densify(corners), make_table())
+    assert f._block_end_yaw[0] == pytest.approx(math.pi / 2, abs=0.05)
+
+
+def test_explicit_waypoint_yaw_still_wins_at_a_cusp():
+    """The guard only supplies a fallback heading — an explicit yaw on the
+    boundary waypoint still takes precedence."""
+    f = PathFollower(
+        [(0.0, 0.0, 0.0, 2.0), (0.0, 5.0, 0.0, 2.0), (0.0, 10.0, 0.0, 2.0),
+         (0.0, 9.7, 0.0, -2.0, 0.25), (0.0, 5.0, 0.0, -2.0),
+         (0.0, 0.0, 0.0, -2.0)],
+        make_table())
+    assert f._block_end_yaw[0] == pytest.approx(0.25)
+
+
 def test_param_overrides_respected():
     path = _densify([(0.0, 0.0, 0.0, 2.0), (10.0, 0.0, 0.0, 2.0)])
     f = PathFollower(path, make_table(), lookahead=2.0, arrival_goal=3.0,

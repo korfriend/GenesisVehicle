@@ -72,10 +72,17 @@ the instanced renderer uses.
   `path_follow_demo`.
 - [`data/tank_sweep_signed.csv`](data/tank_sweep_signed.csv) — reference
   sweep table for `tank_ray.urdf` + `tank_skid_belt` +
-  [`tank_tuning.py`](tank_tuning.py) overrides at dt 0.025 × substeps 10
-  (the SDK-recommended timing), measured with the body-frame-corrected CLI
+  [`tank_tuning.py`](tank_tuning.py) overrides at **dt 0.025 × substeps 4**
+  (the SDK default, shared by `VehicleScene`, `sweep_measure` and the OSC
+  server since v1.2.1 — before that the tool measured at substeps 10 while
+  `path_follow_osc_demo` drove the table through a substeps-4 server),
+  measured with the body-frame-corrected CLI
   (see [`docs/path-following.md`](../docs/path-following.md); re-measure
   if any of the four changes — URDF / preset / overrides / dt).
+  Re-measured at v1.2.1 after `tank_skid_belt` switched to mass-derived
+  suspension; at matched timing the plant barely moved (mean |Δa| 0.0013 m/s²,
+  mean |Δω_z| 0.0002 rad/s), which is the check that the derivation reproduces
+  the literals it replaced.
 - [`tank_tuning.py`](tank_tuning.py) — those overrides, importable
   (`TankTuning`) and directly usable as `sweep_measure --config`.
 

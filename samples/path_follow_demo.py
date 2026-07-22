@@ -88,7 +88,10 @@ def main():
     # in sync (dt is part of the table's validity contract).
     DT = 0.025
     vs = VehicleScene(
-        dt=DT, substeps=10, n_envs=1, raycast_mode="dual_scene",
+        # substeps 4 = the SDK default, which is also what `sweep_measure` and
+        # the OSC server default to (v1.2.1) — the sibling osc demo drives this
+        # same table through the server, so all three have to agree.
+        dt=DT, substeps=4, n_envs=1, raycast_mode="dual_scene",
         show_viewer=args.viewer,
         # Bird's-eye start pose framing the whole course (the default viewer
         # camera spawns at the origin — inside the wall/tank).

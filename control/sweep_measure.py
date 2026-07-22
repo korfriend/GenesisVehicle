@@ -55,13 +55,19 @@ import numpy as np
 
 from .sweep import SweepTable
 
-# Timing defaults = the SDK-wide recommendation (presets' recommended_dt
-# 0.025 @ substeps 10 -> internal 2.5 ms). dt/substeps are PART OF THE
-# TABLE'S VALIDITY CONTRACT: discrete effects (brake, stability hooks) are
-# baked into the measured response, so measure at the dt you will drive at
+# Timing defaults = the SDK-wide defaults, so a table measured with no flags is
+# valid for a vehicle driven with no flags: `VehicleScene(dt=0.025, substeps=4)`
+# and `genesis_vehicle.server --substeps 4` (internal step 6.25 ms). Until
+# v1.2.1 this defaulted to substeps=10 while both runtimes used 4, so the
+# out-of-the-box table was silently measured on a stiffer-integrated plant than
+# the one it would be driven on.
+#
+# dt/substeps are PART OF THE TABLE'S VALIDITY CONTRACT: discrete effects
+# (brake, stability hooks, suspension ringing) are baked into the measured
+# response, so measure at the dt AND substeps you will drive at
 # (--dt/--substeps below).
 DEFAULT_DT = 0.025
-DEFAULT_SUBSTEPS = 10
+DEFAULT_SUBSTEPS = 4
 T_GROUND_SETTLE = 0.50   # s — drop to the ground under zero input
 T_SETTLE = 0.30          # s — held inputs before the measure window
 T_MEASURE = 2.00         # s — response averaging window
@@ -322,7 +328,7 @@ def main(argv=None):
                          "WILL DRIVE AT: dt/substeps are part of the table's "
                          "validity contract")
     ap.add_argument("--substeps", type=int, default=DEFAULT_SUBSTEPS,
-                    help="solver substeps (default 10 -> internal 2.5 ms at "
+                    help="solver substeps (default 4 -> internal 6.25 ms at "
                          "dt=0.025)")
     args = ap.parse_args(argv)
 
