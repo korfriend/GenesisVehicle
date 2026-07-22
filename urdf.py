@@ -26,6 +26,14 @@ class URDFParsedConfig:
     base_link_name: str
     chassis_mass: Optional[float]
     wheels: list[WheelConfig]
+    # Total mass of every link in the URDF.
+    total_mass: Optional[float] = None
+    # Mass carried by the springs = total - everything below a suspension joint
+    # (carrier + wheel + any descendant). This is what a suspension rate must be
+    # sized against; `chassis_mass` is the BASE LINK ALONE and silently omits
+    # sprung children such as a turret or a cargo body. (v1.2.1)
+    sprung_mass: Optional[float] = None
+    unsprung_mass: Optional[float] = None
     # steer_axis_signs[name] = +1 or -1 depending on URDF <axis xyz>; used by visual layer
     # to flip the visual command so users see the requested rotation in the viewer.
     steer_axis_signs: dict[str, int] = field(default_factory=dict)
@@ -88,7 +96,14 @@ def parse_urdf(urdf_path: str) -> URDFParsedConfig:
         # two coincide).
         wheel_name = wheel_link_name if wheel_link_name is not None else _strip_susp_suffix(susp_name)
 
-        wheel_link = links_by_name.get(wheel_link_name) if wheel_link_name else None
+        # No spin joint below the suspension (a URDF that models the wheel as a
+        # single link hanging straight off the prismatic joint): the suspension's
+        # own child IS the wheel, so read its geometry/mass from there rather
+        # than falling through to module defaults. (v1.2.1 — until then such a
+        # vehicle silently got DEFAULT_RADIUS/DEFAULT_MASS and needed a
+        # hard-coded radius override to behave.)
+        geom_link_name = wheel_link_name or carrier_link_name
+        wheel_link = links_by_name.get(geom_link_name) if geom_link_name else None
         radius = _wheel_radius(wheel_link)
         mass = _link_mass(wheel_link)
         i_wheel = _wheel_inertia(wheel_link)
@@ -108,6 +123,7 @@ def parse_urdf(urdf_path: str) -> URDFParsedConfig:
             "susp_joint_name": susp_name,
             "steer_joint_name": steer_joint.get("name") if steer_joint is not None else None,
             "spin_joint_name": spin_joint.get("name") if spin_joint is not None else None,
+            "susp_dynamics": _susp_dynamics(sj),
         })
 
     axle_indices = _cluster_axles([r["position"] for r in raw], _AXLE_X_TOLERANCE)
@@ -124,12 +140,24 @@ def parse_urdf(urdf_path: str) -> URDFParsedConfig:
             susp_joint_name=r["susp_joint_name"],
             steer_joint_name=r["steer_joint_name"],
             spin_joint_name=r["spin_joint_name"],
+            # k_susp / c_compression / c_extension stay None unless the URDF
+            # declared them; resolve() then fills them from the caller's config
+            # or the module defaults, giving the priority chain
+            #   caller override > URDF <dynamics> > mass-derived / default.
+            **r["susp_dynamics"],
         ))
+
+    total_mass, sprung_mass, unsprung_mass = _mass_split(
+        links_by_name, joints_by_parent, susp_joints
+    )
 
     return URDFParsedConfig(
         base_link_name=base_link_name,
         chassis_mass=chassis_mass,
         wheels=wheels,
+        total_mass=total_mass,
+        sprung_mass=sprung_mass,
+        unsprung_mass=unsprung_mass,
         steer_axis_signs=steer_axis_signs,
         susp_has_dynamics=susp_has_dynamics,
     )
@@ -182,6 +210,48 @@ def estimate_spin_inertia_from_genesis(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _mass_split(
+    links_by_name: dict[str, ET.Element],
+    joints_by_parent: dict[str, list[ET.Element]],
+    susp_joints: list[ET.Element],
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Split the URDF's link masses into sprung / unsprung.
+
+    Unsprung = every link at or below a suspension joint's child (the carrier,
+    the wheel, and anything hanging off them). Sprung = the rest, i.e. what the
+    springs actually carry: base link PLUS its non-wheel descendants (turret,
+    cargo body, arm, ...). Sizing a spring rate against `chassis_mass` (the base
+    link alone) undercounts whenever such a child exists.
+
+    Returns (total, sprung, unsprung); all None if no link declares a mass.
+    """
+    masses = {n: _link_mass(l) for n, l in links_by_name.items()}
+    if not any(m is not None for m in masses.values()):
+        return (None, None, None)
+
+    unsprung_links: set[str] = set()
+    for sj in susp_joints:
+        child = sj.find("child")
+        if child is None:
+            continue
+        # Walk the subtree below the suspension joint. Guard against a malformed
+        # URDF with a cycle by refusing to revisit a link.
+        stack = [child.get("link")]
+        while stack:
+            link = stack.pop()
+            if link is None or link in unsprung_links:
+                continue
+            unsprung_links.add(link)
+            for j in joints_by_parent.get(link, []):
+                c = j.find("child")
+                if c is not None:
+                    stack.append(c.get("link"))
+
+    total = sum(m for m in masses.values() if m is not None)
+    unsprung = sum(m for n, m in masses.items() if m is not None and n in unsprung_links)
+    return (total, total - unsprung, unsprung)
 
 
 def _strip_susp_suffix(name: str) -> str:
@@ -262,6 +332,56 @@ def _wheel_inertia(link: Optional[ET.Element]) -> Optional[float]:
             return None
         diag.append(float(v))
     return max(diag)
+
+
+def _susp_dynamics(joint: ET.Element) -> dict[str, float]:
+    """Read ray-wheel suspension values off a suspension joint's `<dynamics>`.
+
+    Standard URDF has **no spring-stiffness field** — `<dynamics>` carries only
+    `damping` and `friction`, and on a prismatic joint those describe the
+    articulated solver, not a suspension characterization. A `stiffness` /
+    `spring_stiffness` attribute is a non-standard extension, and its presence
+    with a non-zero value is the only unambiguous signal that the author meant
+    "this is a suspension spring".
+
+    So: honour the tag **only** when it declares a non-zero stiffness, and only
+    then read its damping alongside. A bare `damping="20.0"` is ignored — the
+    reference URDFs carry exactly that on their steer joints, and one of them
+    writes `stiffness="0.0"` on the suspension joint to say "no spring here".
+
+    Returns {} when nothing should be honoured. (v1.2.1)
+    """
+    dyn = joint.find("dynamics")
+    if dyn is None:
+        return {}
+    raw = dyn.get("stiffness") or dyn.get("spring_stiffness")
+    try:
+        k = float(raw) if raw is not None else 0.0
+    except ValueError:
+        return {}
+    if k <= 0.0:
+        return {}
+
+    out: dict[str, float] = {"k_susp": k}
+
+    def _f(name: str) -> Optional[float]:
+        v = dyn.get(name)
+        try:
+            return float(v) if v is not None else None
+        except ValueError:
+            return None
+
+    sym = _f("damping")
+    if sym is not None and sym > 0.0:
+        out["c_compression"] = sym
+        out["c_extension"] = sym
+    comp = _f("compression_damping")
+    if comp is not None and comp > 0.0:
+        out["c_compression"] = comp
+    ext = _f("extension_damping")
+    if ext is not None and ext > 0.0:
+        out["c_extension"] = ext
+    return out
 
 
 def _joint_has_dynamics(joint: ET.Element) -> bool:

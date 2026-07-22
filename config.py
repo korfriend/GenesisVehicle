@@ -4,8 +4,12 @@ WheelConfig fields are all Optional; resolve() fills None values from the
 parsed URDF, then from module-level defaults.
 """
 
+import logging
+import os
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, Optional
+
+_logger = logging.getLogger("genesis_vehicle")
 
 
 class ConfigError(ValueError):
@@ -27,6 +31,48 @@ DEFAULT_COMP_RATE_CLAMP = 30.0
 DEFAULT_RADIUS = 0.35
 DEFAULT_MASS = 20.0
 DEFAULT_I_WHEEL = 1.5
+
+
+def suspension_from_mass(
+    sprung_mass: float,
+    n_wheels: int,
+    *,
+    target_sag: float = 0.05,
+    zeta_compression: float = 0.70,
+    zeta_extension: float = 0.45,
+    gravity: float = 9.81,
+) -> tuple[float, float, float]:
+    """Size a suspension from the mass it actually carries. (v1.2.1)
+
+    Returns ``(k_susp, c_compression, c_extension)`` for ONE wheel, assuming the
+    sprung mass is shared evenly::
+
+        k      = (m_sprung * g / n) / target_sag
+        c_crit = 2 * sqrt(k * m_sprung / n)
+        c_comp = zeta_compression * c_crit,  c_ext = zeta_extension * c_crit
+
+    ``sprung_mass`` must be the mass the SPRINGS carry — use
+    ``parse_urdf(...).sprung_mass``, not ``chassis_mass``: the latter is the base
+    link alone and omits sprung children (a turret, a cargo body), which
+    undersizes the spring by however much those weigh.
+
+    A fixed spring rate cannot serve both a 2 t car and a 40 t tank: at the
+    car-sized default (70 kN/m) a 40 t hull sags four times its own suspension
+    travel and wallows at 0.8 Hz. Deriving from mass keeps the sag — and hence
+    the ride frequency — constant across vehicle scales.
+    """
+    if n_wheels <= 0:
+        raise ConfigError(f"n_wheels must be positive, got {n_wheels}")
+    if sprung_mass <= 0.0:
+        raise ConfigError(f"sprung_mass must be positive, got {sprung_mass}")
+    if target_sag <= 0.0:
+        raise ConfigError(f"target_sag must be positive, got {target_sag}")
+    import math
+
+    m_share = sprung_mass / n_wheels
+    k = (m_share * gravity) / target_sag
+    c_crit = 2.0 * math.sqrt(k * m_share)
+    return (k, zeta_compression * c_crit, zeta_extension * c_crit)
 
 
 @dataclass
@@ -211,6 +257,24 @@ class VehicleConfig:
             else:
                 wheels.append(_merge_wheel(w, override))
 
+        # An override key that matches no wheel is silently dropped, which used
+        # to let a whole tuning block (spring rate, friction, Pacejka shape)
+        # disappear and leave the vehicle on generic module defaults. Say so.
+        # (v1.2.1 - same class of guard as the server's wheelOverrides warning.)
+        wheel_names = {w.name for w in parsed.wheels}
+        unmatched = [k for k in overrides if k not in wheel_names]
+        if unmatched:
+            _logger.warning(
+                "wheel_overrides: %d of %d key(s) matched no wheel in %s and "
+                "were DROPPED (%s). Those wheels keep URDF/module defaults. "
+                "This URDF's wheels are: %s",
+                len(unmatched), len(overrides), os.path.basename(urdf_path),
+                ", ".join(sorted(unmatched)[:8])
+                + (", ..." if len(unmatched) > 8 else ""),
+                ", ".join(sorted(wheel_names)[:8])
+                + (", ..." if len(wheel_names) > 8 else ""),
+            )
+
         ch = chassis if chassis is not None else ChassisConfig()
         if ch.mass is None and parsed.chassis_mass is not None:
             ch = replace(ch, mass=parsed.chassis_mass)
@@ -287,6 +351,49 @@ def _fill_defaults(w: WheelConfig) -> WheelConfig:
     return out
 
 
+def _warn_if_undersprung(
+    parsed: Any, wheels: list[WheelConfig], urdf_path: str, gravity: float = 9.81
+) -> None:
+    """Warn when the resolved springs cannot hold the vehicle up. (v1.2.1)
+
+    Static sag is ``load / k``. Once it runs past ``rest_stroke`` the vehicle
+    rests beyond its own suspension travel: ride height collapses, the wheels
+    have no droop left, and the hull wallows at a fraction of the intended
+    frequency. That is a silent failure today — nothing in the pipeline
+    complains, the vehicle just feels soft — so check it once at resolve time.
+
+    The threshold is 1.25x, not 1.0x: ``rest_stroke`` is a ray budget rather
+    than a mechanical bump stop, and the tracked preset deliberately sits at
+    ~1.0 (its belt coupling, not droop travel, keeps the wheels loaded). Past
+    ~1.25x there is no reading under which the spring is merely tight.
+    """
+    RATIO_LIMIT = 1.25
+    sprung = getattr(parsed, "sprung_mass", None)
+    if not sprung or not wheels:
+        return
+    load = sprung * gravity / len(wheels)
+    worst_ratio, worst = 0.0, None
+    for w in wheels:
+        if not w.k_susp or not w.rest_stroke:
+            continue
+        ratio = (load / w.k_susp) / w.rest_stroke
+        if ratio > worst_ratio:
+            worst_ratio, worst = ratio, w
+    if worst is None or worst_ratio <= RATIO_LIMIT:
+        return
+    sag = load / worst.k_susp
+    k_needed = load / worst.rest_stroke
+    _logger.warning(
+        "%s: suspension is undersprung - %.0f kg sprung mass over %d wheel(s) "
+        "is %.1f kN/wheel, which sags %.0f mm on k=%.0f N/m against a %.0f mm "
+        "rest_stroke (%.1fx). The vehicle will sit below its own travel and "
+        "wallow. Need k >= %.0f N/m (see suspension_from_mass()).",
+        os.path.basename(urdf_path), sprung, len(wheels), load / 1000.0,
+        sag * 1000.0, worst.k_susp, worst.rest_stroke * 1000.0, worst_ratio,
+        k_needed,
+    )
+
+
 def resolve(config: VehicleConfig) -> ResolvedConfig:
     """URDF -> user-config -> module-default merge.
 
@@ -318,6 +425,8 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
     chassis = config.chassis
     if chassis.mass is None and parsed.chassis_mass is not None:
         chassis = replace(chassis, mass=parsed.chassis_mass)
+
+    _warn_if_undersprung(parsed, merged, config.urdf_path)
 
     # Strategy validation hooks (can raise ConfigError).
     for strat in (config.steering, config.drivetrain, config.coupling):

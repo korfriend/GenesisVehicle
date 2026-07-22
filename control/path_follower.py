@@ -222,11 +222,22 @@ class PathFollower:
                 prev = yaw
             # Arrival heading at the block end: an explicit yaw on the
             # boundary waypoint wins; otherwise continue the last in-block
-            # direction.
+            # direction — but NOT a trailing segment that runs backwards.
+            #
+            # The boundary waypoint belongs to both blocks, and nothing forces
+            # it to lie ahead of the previous one: a path that doubles back can
+            # place the next block's first waypoint *behind* this block's last
+            # (a real one hops 0.28 m backwards at the cusp). Taking that hop as
+            # the arrival heading asks the vehicle to spin 180 degrees at the
+            # end of a straight leg, which it will dutifully try to do — and
+            # then the projection can no longer advance, so the cusp never
+            # triggers and the vehicle drives off forever. Walk back to the last
+            # segment that still agrees with the block's net travel. (v1.2.1)
             if self.wp_yaws[be] is not None:
                 self._block_end_yaw.append(self.wp_yaws[be])
             else:
-                self._block_end_yaw.append(prev if prev is not None else 0.0)
+                self._block_end_yaw.append(
+                    self._forward_end_yaw(bs, be, sgn, prev))
         self.yaws[self.n - 1] = self._block_end_yaw[-1]
 
         self.block_i = 0
@@ -238,6 +249,33 @@ class PathFollower:
         self.last_mode = "INIT"
 
     # -- Path geometry ---------------------------------------------------------
+
+    def _forward_end_yaw(self, bs, be, sgn, fallback):
+        """Arrival heading for block ``[bs, be]``: the heading of the last
+        segment that does not run counter to the block's net travel.
+
+        Segments are scanned from the block end backwards; one whose direction
+        opposes the straight line from ``bs`` to ``be`` by more than 90 degrees
+        is a path artifact (a boundary waypoint sitting behind its predecessor)
+        and is skipped. Backward blocks get the usual +pi chassis flip. Falls
+        back to ``fallback`` when the whole block is degenerate.
+        """
+        nx = self.path[be][0] - self.path[bs][0]
+        ny = self.path[be][1] - self.path[bs][1]
+        have_net = (nx * nx + ny * ny) > 1e-12
+
+        for i in range(be - 1, bs - 1, -1):
+            dx = self.path[i + 1][0] - self.path[i][0]
+            dy = self.path[i + 1][1] - self.path[i][1]
+            if dx * dx + dy * dy < 1e-12:
+                continue
+            if have_net and (dx * nx + dy * ny) < 0.0:
+                continue                      # runs backwards — artifact
+            yaw = math.atan2(dy, dx)
+            if sgn < 0:
+                yaw = (yaw % (2 * math.pi)) - math.pi
+            return yaw
+        return fallback if fallback is not None else 0.0
 
     def _advance(self, pos):
         """Project the position onto the nearest segment OF THE ACTIVE BLOCK

@@ -100,6 +100,7 @@ from .config import (
     VehicleConfig,
     WheelConfig,
     resolve,
+    suspension_from_mass,
 )
 from .inputs import (
     AckermannInputs,
@@ -205,7 +206,7 @@ __all__ = [
     # an internal fallback, genesis_vehicle.visual.WheelJointInternalSync.)
     # Config
     "VehicleConfig", "WheelConfig", "ChassisConfig", "ResolvedConfig", "ConfigError",
-    "resolve",
+    "resolve", "suspension_from_mass",
     # Inputs
     "VehicleInputs", "VehicleStepInputs",
     "AckermannInputs", "PartialAckermannInputs", "SkidSteerInputs", "NoSteerInputs",

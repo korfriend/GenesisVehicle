@@ -433,8 +433,56 @@ class VehicleConfig:
 `from_urdf()` is the easiest path: pass strategies + a dict of per-wheel
 overrides keyed by URDF wheel link name; the wheel list is auto-populated.
 
+An override key that matches no wheel is dropped — since v1.2.1 that emits a
+`logging.WARNING` naming the dropped keys and the URDF's actual wheel names.
+Previously it was silent, which let a whole tuning block vanish and leave the
+vehicle on generic module defaults (see CHANGELOG v1.2.1).
+
 `resolve(config) -> ResolvedConfig` runs the URDF → user → default merge and
 each strategy's `validate()`. Called automatically by `VehiclePhysics.__init__`.
+It emits a `logging.WARNING` when the resolved spring cannot hold the vehicle
+up — static sag (`load / k_susp`) past 1.25× `rest_stroke` (v1.2.1).
+
+```python
+suspension_from_mass(
+    sprung_mass: float, n_wheels: int, *,
+    target_sag: float = 0.05,        # metres of static deflection
+    zeta_compression: float = 0.70,  # damping ratios, c / c_critical
+    zeta_extension: float = 0.45,
+    gravity: float = 9.81,
+) -> tuple[float, float, float]      # (k_susp, c_compression, c_extension)
+```
+
+Sizes one wheel's suspension from the mass it carries (v1.2.1):
+
+    k      = (m_sprung * g / n) / target_sag
+    c_crit = 2 * sqrt(k * m_sprung / n)
+
+Pass `parse_urdf(...).sprung_mass`, **not** `chassis_mass` — the latter is the
+base link alone and omits sprung children (a turret, a cargo body). A fixed
+spring rate cannot serve both a 2 t car and a 40 t tank; deriving from mass
+holds the sag, and hence the ride frequency, constant across vehicle scales.
+`tank_skid_belt` uses this internally.
+
+**Where a suspension value comes from** (v1.2.1) — one chain, honoured by both
+the Python API and the OSC server:
+
+```
+caller / OSC override  >  URDF <dynamics stiffness=...>  >  mass-derived / default
+```
+
+Standard URDF has **no spring-stiffness field** — `<dynamics>` carries only
+`damping` and `friction`, which on a prismatic joint describe the articulated
+solver, not a suspension. `stiffness` / `spring_stiffness` is a non-standard
+extension, so `parse_urdf()` honours a `<dynamics>` on a suspension joint **only
+when it declares a non-zero stiffness**, and only then reads `damping` /
+`compression_damping` / `extension_damping` from the same tag. A bare
+`damping="20.0"`, or `stiffness="0.0"` ("no spring here"), is ignored.
+
+Note this is about *sourcing the number*. The ray-wheel pipeline never applies
+suspension force through the URDF joint — `N` goes onto the chassis via
+`apply_links_external_force`, and the prismatic joint is visual
+(`visual_susp_mode`). See `docs/physics-contracts.md`.
 
 `ConfigError` — raised on bad config (missing required fields, wheel count
 mismatch, sides missing for skid-steer, etc.).
@@ -469,6 +517,12 @@ walking the URDF joint tree:
 `URDFParsedConfig` fields:
 
 - `base_link_name`, `chassis_mass`, `wheels: list[WheelConfig]`
+- `total_mass`, `sprung_mass`, `unsprung_mass: float | None` (v1.2.1) — split by
+  suspension-joint ancestry: unsprung is every link at or below a suspension
+  joint's child, sprung is the rest. **Size springs against `sprung_mass`, not
+  `chassis_mass`** — the latter is the base link alone and omits sprung children
+  such as a turret (on one reported vehicle: 27,134 kg vs a true 38,517 kg, a
+  42% undersize). See `suspension_from_mass()`.
 - `steer_axis_signs: dict[str, int]` — used by the visual layer for `<axis 0 0 -1>` flip
 - `susp_has_dynamics: dict[str, bool]` — picks `set_dofs_position` vs `control_dofs_position`
 
@@ -759,6 +813,7 @@ def truck_6w_partial_ackermann(
 ) -> VehicleConfig
 def tank_skid_belt(
     urdf_path: str, n_envs: int = 1, *, stability: str = "control",
+    target_sag: float = 0.05,   # v1.2.1 — static sag the spring is sized for
 ) -> VehicleConfig
 
 stability_hooks_for_profile(
@@ -773,6 +828,13 @@ stability_hooks_for_profile(
 | `car_4w_awd_ackermann(urdf_path)` | 4 wheels | Ackermann front | AWD | Independent |
 | `truck_6w_partial_ackermann(urdf_path)` | 6 wheels | Ackermann on axle 0 | Drive on mid + rear axles | Independent |
 | `tank_skid_belt(urdf_path)` | any wheel count (validated on 10- and 14-wheel tracked vehicles) | SkidSteer | PerSide (gear cap 0.3) | SameSideBelt |
+
+`tank_skid_belt` sizes its suspension from the URDF's own `sprung_mass` and
+wheel count via `suspension_from_mass()` (v1.2.1), keyed by the URDF's own wheel
+names — so it holds a ~2.2 Hz ride frequency on tracked vehicles of any mass.
+`target_sag` is the knob: raise it for a softer, longer-travel vehicle. Tire
+constants stay fixed (they describe track behaviour, which does not scale with
+hull mass), and the wheel radius comes from the URDF geometry.
 
 Tune by editing the returned config (`cfg.dt = ...`, replace a strategy,
 override `cfg.stability_hooks`) before passing it to `VehiclePhysics`.

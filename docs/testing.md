@@ -8,7 +8,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-155 pure-Python tests; no Genesis runtime required. Runs in ~30s on CPU. The
+177 pure-Python tests; no Genesis runtime required. Runs in ~40s on CPU. The
 reference URDFs the parsing tests read live in `tests/data/` (self-contained
 since v1.2.0).
 
@@ -25,6 +25,13 @@ CI without GPU.
 | Preset profile integration | `test_version_and_profile.py` | `car_4w_rwd_ackermann(stability="raw")` etc. produce expected hook lists |
 | Config resolve | `test_config_resolve.py` | URDF default + user override + module default merge; user-explicit `i_wheel` / `radius` wins over URDF |
 | URDF parsing (both susp-joint naming conventions) | `test_urdf_parse.py` | wheel discovery, side detection, axle clustering, chain walk for deep joint trees |
+| Sprung / unsprung mass split | `test_urdf_parse.py` | `sprung + unsprung == total`; sprung includes non-wheel children (turret) that `chassis_mass` omits; equals `chassis_mass` for a simple car |
+| Mass-derived suspension sizing | `test_config_resolve.py` | `suspension_from_mass()` formula, sag held constant across vehicle scale, input validation |
+| `tank_skid_belt` suspension derivation | `test_config_resolve.py` | keyed by the URDF's own wheel names, `k` from that URDF's sprung mass, `target_sag` scales it, URDF wheel radius wins |
+| Silent-failure guards | `test_config_resolve.py` | unmatched `wheel_overrides` key warns; undersprung suspension (sag > 1.25× stroke) warns; neither fires on a sane config |
+| URDF-declared suspension | `test_urdf_parse.py` | non-zero `<dynamics stiffness>` honoured (symmetric + asymmetric damping); `stiffness="0.0"` and bare `damping` ignored; reference URDFs declare none |
+| Suspension priority chain | `test_config_resolve.py` | caller override > URDF `<dynamics>` > mass-derived |
+| Cusp arrival heading | `test_path_follower.py` | a backwards boundary hop doesn't become the block's arrival heading; a genuine corner still does; explicit waypoint yaw wins |
 | Ackermann sign + inner/outer | `test_strategies_unit.py` | `+steer` → both wheels positive, FR > FL |
 | SkidSteer sign (left faster on +steer) | `test_strategies_unit.py` | `test_perside_iso_right_turn_left_faster` |
 | SameSideBelt averages each side | `test_strategies_unit.py` | |

@@ -27,6 +27,7 @@ from .config import (
     ConfigError,
     VehicleConfig,
     WheelConfig,
+    suspension_from_mass,
 )
 from .strategies import (
     Ackermann,
@@ -257,28 +258,66 @@ def truck_6w_partial_ackermann(
 # ---------------------------------------------------------------------------
 
 
-def _tank_wheel_overrides() -> dict[str, WheelConfig]:
-    """Per-wheel parameters (reference-tank tuning constants). The reference uses a
-    SYMMETRIC damper (C_SUSP applied both directions), expressed here as
-    c_compression == c_extension."""
+# Tracked-vehicle suspension sizing. `TANK_REST_STROKE` is the ray budget and
+# `TANK_TARGET_SAG` the static deflection we size the spring for; the damper is
+# symmetric (compression == extension), which is what the reference tracked
+# vehicle used. These reproduce the constants this preset carried as literals
+# until v1.2.1 (k = 1.00e6, c = 120,000 for the 53.2 t / 10-wheel reference) to
+# within 4% — the literals were never wrong, they were just never *applied* to
+# any URDF whose wheel links happened to be named differently.
+TANK_REST_STROKE = 0.05
+TANK_TARGET_SAG = 0.05
+TANK_ZETA = 0.80
+
+
+def _tank_wheel_overrides(
+    parsed: "Any",
+    target_sag: float = TANK_TARGET_SAG,
+) -> dict[str, WheelConfig]:
+    """Per-wheel tracked-vehicle parameters, keyed by THIS URDF's wheel names.
+
+    Suspension is derived from the URDF's sprung mass (v1.2.1) rather than
+    hard-coded, so the preset holds its ride frequency across tracked vehicles
+    of different mass and wheel count instead of only fitting the one vehicle
+    the literals came from. Tire constants stay fixed — they describe rubber /
+    track behaviour, which does not scale with hull mass.
+    """
+    n = len(parsed.wheels)
+    sprung = parsed.sprung_mass or parsed.chassis_mass
+    if sprung and n:
+        k, c_comp, c_ext = suspension_from_mass(
+            sprung, n, target_sag=target_sag,
+            zeta_compression=TANK_ZETA, zeta_extension=TANK_ZETA,
+        )
+    else:
+        # URDF declares no masses at all — nothing to size against.
+        k, c_comp, c_ext = 1_000_000.0, 120_000.0, 120_000.0
+
     common = dict(
-        rest_stroke=0.05,
-        k_susp=1_000_000.0,
-        c_compression=120_000.0,
-        c_extension=120_000.0,
         comp_rate_clamp=30.0,
         mu_long=0.9,
         mu_lat=0.9 * 0.7,        # reference LAT_SCALE = 0.7
         rolling_resistance_cr=0.05,
         pb_x=5.0, pc_x=1.6, pe_x=0.4,
         pb_y=4.0, pc_y=1.4, pe_y=0.4,
-        radius=0.4,
     )
-    names = [
-        "l_sprocket", "l_road1", "l_road2", "l_road3", "l_idler",
-        "r_sprocket", "r_road1", "r_road2", "r_road3", "r_idler",
-    ]
-    return {n: WheelConfig(**common) for n in names}
+    susp = dict(rest_stroke=TANK_REST_STROKE, k_susp=k,
+                c_compression=c_comp, c_extension=c_ext)
+
+    # NB: no `radius` override. The URDF's own wheel geometry is authoritative;
+    # a hard-coded radius silently rescaled every other tracked vehicle.
+    out: dict[str, WheelConfig] = {}
+    for w in parsed.wheels:
+        # A URDF that declares its own suspension (non-standard `<dynamics
+        # stiffness=...>`) outranks the preset's derived value — the author said
+        # something specific and we should not overwrite it. Anything it left
+        # unset still gets the derived value. (v1.2.1)
+        fields = dict(common)
+        for key, val in susp.items():
+            if getattr(w, key, None) is None:
+                fields[key] = val
+        out[w.name] = WheelConfig(**fields)
+    return out
 
 
 def tank_skid_belt(
@@ -286,13 +325,22 @@ def tank_skid_belt(
     n_envs: int = 1,
     *,
     stability: str = "control",
+    target_sag: float = TANK_TARGET_SAG,
 ) -> VehicleConfig:
     """Skid-steer tank with same-side belt coupling (any wheel count).
 
-    Wheel-count-generic: ``VehicleConfig.from_urdf`` discovers the wheels, and
-    ``SkidSteer`` / ``PerSide`` / ``SameSideBelt`` scale to however many the
-    URDF has (validated on 10- and 14-wheel tracked vehicles).
-    The suspension/tire tuning constants derive from the reference tank.
+    Wheel-count-generic in BOTH senses since v1.2.1: ``VehicleConfig.from_urdf``
+    discovers the wheels and ``SkidSteer`` / ``PerSide`` / ``SameSideBelt``
+    scale to however many the URDF has, AND the suspension is now sized from the
+    URDF's own sprung mass and attached to the URDF's own wheel names. Before
+    v1.2.1 the tuning constants were hard-coded literals keyed by the reference
+    vehicle's wheel-link names, so any other tracked URDF silently kept
+    car-sized module defaults (a 40 t hull on a 70 kN/m spring — four times its
+    travel in static sag, wallowing at 0.8 Hz).
+
+    ``target_sag`` sets that sizing: static deflection in metres, which fixes
+    the ride frequency (0.05 m -> ~2.2 Hz). Raise it for a softer, longer-travel
+    vehicle; lower it for a tighter one.
 
     Uses ``visual_susp_mode="control"`` because the tank's wheels are heavy
     (500 kg each) and a kinematic set_dofs_position cannot prevent them from
@@ -300,6 +348,8 @@ def tank_skid_belt(
     PD (kp=1e7, kv=1e5) on each suspension prismatic joint, matching the
     reference-tank behavior.
     """
+    from .urdf import parse_urdf
+
     return VehicleConfig.from_urdf(
         urdf_path,
         steering=SkidSteer(),
@@ -313,7 +363,7 @@ def tank_skid_belt(
         ),
         coupling=SameSideBelt(),
         tire=PacejkaAnisotropic(eps_v=0.5),
-        wheel_overrides=_tank_wheel_overrides(),
+        wheel_overrides=_tank_wheel_overrides(parse_urdf(urdf_path), target_sag),
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="tank"),
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19; legacy 0.005 verified unnecessary)

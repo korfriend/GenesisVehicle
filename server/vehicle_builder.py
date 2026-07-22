@@ -300,7 +300,12 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
             coupling = Independent()
 
         # 4. Dynamic suspension parameter computation
-        chassis_mass = urdf_parsed.chassis_mass if urdf_parsed.chassis_mass else 1500.0
+        # Size against the SPRUNG mass, not the base link alone (v1.2.1). Any
+        # sprung child - a turret, a cargo body - rides on these same springs;
+        # `chassis_mass` omits it and undersizes the spring by however much it
+        # weighs (a 27 t hull with a 10.7 t turret came out 42% too soft).
+        chassis_mass = (urdf_parsed.sprung_mass or urdf_parsed.chassis_mass
+                        or 1500.0)
         m_per_wheel = chassis_mass / len(wheels) if len(wheels) > 0 else chassis_mass / 4.0
 
         if chassis_mass < 1000.0:
@@ -347,28 +352,22 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
                         if (upper - lower) > 0.05:
                             rest_stroke = upper - lower
 
-                    # Support parsing stiffness and damping attributes from the dynamics tag
-                    dyn_elem = joint_elem.find("dynamics")
-                    if dyn_elem is not None:
-                        stiff = dyn_elem.get("stiffness") or dyn_elem.get("spring_stiffness")
-                        if stiff is not None:
-                            w.k_susp = float(stiff)
-                            print(f" [Genesis] URDF {w.susp_joint_name} stiffness override: {w.k_susp} N/m")
-
-                        damp = dyn_elem.get("damping")
-                        if damp is not None:
-                            w.c_compression = float(damp)
-                            w.c_extension = float(damp)
-
-                        comp_damp = dyn_elem.get("compression_damping")
-                        if comp_damp is not None:
-                            w.c_compression = float(comp_damp)
-
-                        ext_damp = dyn_elem.get("extension_damping")
-                        if ext_damp is not None:
-                            w.c_extension = float(ext_damp)
-
-                        print(f" [Genesis] URDF {w.susp_joint_name} damping overrides: comp={w.c_compression}, ext={w.c_extension}")
+                    # A URDF that declares its own suspension outranks the
+                    # mass-derived value. Shares urdf._susp_dynamics with the
+                    # preset path (v1.2.1) so both honour the SAME rule: only a
+                    # non-zero non-standard `stiffness`/`spring_stiffness` marks
+                    # the tag as a suspension characterization. This branch used
+                    # to take `stiffness` and `damping` at face value, so a URDF
+                    # writing `stiffness="0.0"` (meaning "no spring here", which
+                    # the bundled car does) silently zeroed the suspension.
+                    from genesis_vehicle.urdf import _susp_dynamics
+                    declared = _susp_dynamics(joint_elem)
+                    if declared:
+                        for key, val in declared.items():
+                            setattr(w, key, val)
+                        print(f" [Genesis] URDF {w.susp_joint_name} declares its own "
+                              f"suspension: k={w.k_susp} N/m, comp={w.c_compression}, "
+                              f"ext={w.c_extension} (overrides the mass-derived value)")
 
             w.rest_stroke = rest_stroke
             w.comp_rate_clamp = max(2.0, (w.radius if w.radius else 0.3) * 6.0)
