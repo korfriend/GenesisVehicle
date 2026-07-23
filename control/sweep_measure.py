@@ -132,8 +132,71 @@ def _load_config_module(config_path):
     return mod
 
 
+def _mean_wheel_radius(cfg, urdf_path):
+    """Mean resolved wheel radius. cfg.wheels may carry None radii before
+    resolve (the URDF fills them), so fall back to parsing the URDF, then to
+    the module default."""
+    radii = [w.radius for w in cfg.wheels if w.radius]
+    if not radii:
+        try:
+            from genesis_vehicle.urdf import parse_urdf
+            radii = [w.radius for w in parse_urdf(urdf_path).wheels if w.radius]
+        except Exception:
+            radii = []
+    from genesis_vehicle.config import DEFAULT_RADIUS
+    return sum(radii) / len(radii) if radii else DEFAULT_RADIUS
+
+
+def apply_plant_overrides(cfg, urdf_path, *, top_speed=None, omega_max_drive=None,
+                          i_wheel=None, mu_long=None, mu_lat=None,
+                          k_susp=None, rest_stroke=None, brake_max=None,
+                          log=print):
+    """Apply CLI plant overrides to a preset-built VehicleConfig (v1.2.2).
+
+    Lets a user parameterise the sweep plant end-to-end from the command line
+    instead of writing an ``apply_config`` Python file. Only non-None values
+    are applied, so anything omitted keeps the preset's value (suspension, for
+    a tracked preset, stays mass-derived unless ``k_susp`` is given).
+
+    ``top_speed`` (m/s) is radius-independent: it sets the drive omega cap to
+    ``top_speed / mean_wheel_radius``. ``omega_max_drive`` sets the cap directly
+    (rad/s); if both are given, ``top_speed`` wins.
+    """
+    for w in cfg.wheels:
+        if i_wheel is not None:
+            w.i_wheel = i_wheel
+        if mu_long is not None:
+            w.mu_long = mu_long
+        if mu_lat is not None:
+            w.mu_lat = mu_lat
+        if k_susp is not None:
+            w.k_susp = k_susp
+        if rest_stroke is not None:
+            w.rest_stroke = rest_stroke
+
+    dt_ = cfg.drivetrain
+    omega = omega_max_drive
+    if top_speed is not None:
+        r = _mean_wheel_radius(cfg, urdf_path)
+        omega = top_speed / r
+        log(f"  plant: --top-speed {top_speed} m/s / R={r:.3f} m "
+            f"-> omega_max_drive {omega:.1f} rad/s")
+    if omega is not None:
+        if hasattr(dt_, "omega_max_drive"):
+            dt_.omega_max_drive = omega
+        else:
+            log(f"  [warn] drivetrain {type(dt_).__name__} has no "
+                f"omega_max_drive; --omega-max-drive/--top-speed ignored")
+    if brake_max is not None:
+        if hasattr(dt_, "t_brake_max"):
+            dt_.t_brake_max = brake_max
+        else:
+            log(f"  [warn] drivetrain {type(dt_).__name__} has no "
+                f"t_brake_max; --brake-max ignored")
+
+
 def build_scene(n_envs, urdf_path, preset_fn, config_mod,
-                dt=DEFAULT_DT, substeps=DEFAULT_SUBSTEPS):
+                dt=DEFAULT_DT, substeps=DEFAULT_SUBSTEPS, overrides_fn=None):
     """Build a VehicleScene (dual_scene raycast) for the sweep. (v1.1.26)
 
     This tool used a raw ``gs.Scene`` + the low-level ``add_vehicle`` before,
@@ -156,6 +219,9 @@ def build_scene(n_envs, urdf_path, preset_fn, config_mod,
     veh = vs.add_vehicle(urdf_path, preset_fn, pos=(0.0, 0.0, 0.5))
     if config_mod is not None and hasattr(config_mod, "apply_config"):
         config_mod.apply_config(veh.cfg)
+    # CLI plant overrides win over the --config file (the explicit layer).
+    if overrides_fn is not None:
+        overrides_fn(veh.cfg)
     vs.build()
     physics = veh.physics
     if config_mod is not None and hasattr(config_mod, "apply_runtime_config"):
@@ -260,7 +326,7 @@ def measure_one_chunk(vs, veh, physics, wheel_radii,
 
 def run_sweep(urdf_path, preset_fn, config_mod, n_envs,
               v_arr, t_arr, s_arr, p_arr, r_arr, device, log=print,
-              dt=DEFAULT_DT, substeps=DEFAULT_SUBSTEPS):
+              dt=DEFAULT_DT, substeps=DEFAULT_SUBSTEPS, overrides_fn=None):
     """Build the scene ONCE and reuse it across chunks via reset.
 
     The last chunk is padded to ``n_envs`` by repeating the final combo
@@ -276,7 +342,8 @@ def run_sweep(urdf_path, preset_fn, config_mod, n_envs,
     v_p, t_p, s_p, p_p, r_p = (_pad(a) for a in (v_arr, t_arr, s_arr, p_arr, r_arr))
 
     vs, veh, physics = build_scene(
-        n_envs, urdf_path, preset_fn, config_mod, dt=dt, substeps=substeps)
+        n_envs, urdf_path, preset_fn, config_mod, dt=dt, substeps=substeps,
+        overrides_fn=overrides_fn)
     wheel_radii = _wheel_radii_tensor(physics, device)
 
     results = {k: [] for k in ("v_init", "throttle", "steer", "pitch", "roll",
@@ -330,12 +397,49 @@ def main(argv=None):
     ap.add_argument("--substeps", type=int, default=DEFAULT_SUBSTEPS,
                     help="solver substeps (default 4 -> internal 6.25 ms at "
                          "dt=0.025)")
+
+    plant = ap.add_argument_group(
+        "plant overrides",
+        "Parameterise the sweep plant from the CLI instead of a --config file "
+        "(v1.2.2). Only the flags you pass are applied; everything else keeps "
+        "the preset value — e.g. a tracked preset's suspension stays "
+        "mass-derived unless you pass --k-susp. CLI flags win over --config.")
+    plant.add_argument("--top-speed", type=float, default=None,
+                       help="target top speed (m/s), radius-independent: sets "
+                            "the drive omega cap to top_speed / mean_wheel_radius. "
+                            "e.g. 18.6 ~= 67 km/h (M1A2 road)")
+    plant.add_argument("--omega-max-drive", type=float, default=None,
+                       help="drive omega cap directly (rad/s). --top-speed wins "
+                            "if both are given")
+    plant.add_argument("--i-wheel", type=float, default=None,
+                       help="per-wheel spin inertia (kg*m^2). Higher = gentler "
+                            "spin-up; does NOT affect top speed or stability")
+    plant.add_argument("--mu-long", type=float, default=None,
+                       help="longitudinal friction coefficient")
+    plant.add_argument("--mu-lat", type=float, default=None,
+                       help="lateral friction coefficient (lower helps "
+                            "skid-steer yaw)")
+    plant.add_argument("--k-susp", type=float, default=None,
+                       help="suspension spring rate (N/m). Omit to keep the "
+                            "preset value (mass-derived for a tracked preset)")
+    plant.add_argument("--rest-stroke", type=float, default=None,
+                       help="suspension rest stroke (m)")
+    plant.add_argument("--brake-max", type=float, default=None,
+                       help="max brake torque (N*m)")
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.urdf):
         raise FileNotFoundError(f"URDF not found: {args.urdf}")
     preset_fn = _load_preset(args.preset)
     config_mod = _load_config_module(args.config)
+
+    _plant_keys = ("top_speed", "omega_max_drive", "i_wheel", "mu_long",
+                   "mu_lat", "k_susp", "rest_stroke", "brake_max")
+    _plant = {k: getattr(args, k) for k in _plant_keys}
+    overrides_fn = None
+    if any(v is not None for v in _plant.values()):
+        def overrides_fn(cfg, _u=args.urdf, _p=_plant):
+            apply_plant_overrides(cfg, _u, **_p)
 
     import genesis as gs
     from genesis_vehicle import VehicleScene
@@ -354,6 +458,9 @@ def main(argv=None):
     print(f"  URDF: {args.urdf}")
     print(f"  Preset: {args.preset}")
     print(f"  Config: {args.config or '(none)'}")
+    if overrides_fn is not None:
+        print("  CLI plant overrides: "
+              + ", ".join(f"{k}={v}" for k, v in _plant.items() if v is not None))
     print(f"  Output: {args.output}")
     print(f"  Backend: {'gpu' if args.gpu else 'cpu'}")
     print(f"  Combos: {n_total} "
@@ -366,7 +473,8 @@ def main(argv=None):
 
     results = run_sweep(args.urdf, preset_fn, config_mod, n_envs,
                         v_arr, t_arr, s_arr, p_arr, r_arr, device,
-                        dt=args.dt, substeps=args.substeps)
+                        dt=args.dt, substeps=args.substeps,
+                        overrides_fn=overrides_fn)
     table = SweepTable(results)
     table.save(args.output)
     print(f"\n[done] saved {n_total} rows -> {args.output}")
