@@ -170,6 +170,18 @@ def compute_wheel_step(
     total_F = F_world.sum(dim=1)
     total_T = torque.sum(dim=1)
 
+    # [AERO DRAG] chassis-level force opposing HORIZONTAL velocity (v1.2.4).
+    # F = -0.5 * rho * (Cd*A) * |v_h| * v_h, folded into the chassis force that
+    # is applied once per step — no extra solver call. Read live from
+    # resolved.chassis so drag_area / air_density can be tuned AT RUNTIME (mutate
+    # physics.resolved.chassis mid-drive). Vertical velocity is excluded so drag
+    # never fights the suspension. drag_area == 0 (default) is a no-op.
+    ch = resolved.chassis
+    drag_area = getattr(ch, "drag_area", 0.0) or 0.0
+    if drag_area > 0.0:
+        from .dynamics import aero_drag_force
+        total_F = total_F + aero_drag_force(vel, drag_area, ch.air_density)
+
     # [COUPLING] — affects omega for the next step only.
     new_omega = resolved.coupling.apply(new_omega, wm)
 

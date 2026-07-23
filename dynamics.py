@@ -8,6 +8,7 @@ The functions encode the physical contracts the SDK promises:
     decelerates the wheel).
   - `suspension_normal_force`: per-wheel asymmetric damper + non-negative
     clamp + air-mask zero. Normal force can never pull the wheel down.
+  - `aero_drag_force`: chassis aero drag opposing horizontal velocity.
 """
 
 from __future__ import annotations
@@ -17,6 +18,24 @@ from typing import Optional, Union
 import torch
 
 ScalarOrTensor = Union[torch.Tensor, float, int]
+
+
+def aero_drag_force(
+    vel: torch.Tensor, drag_area: float, air_density: float = 1.225
+) -> torch.Tensor:
+    """Chassis aerodynamic drag: ``F = -0.5 * rho * (Cd*A) * |v_h| * v_h``.
+
+    Opposes the **horizontal** chassis velocity only (vertical is zeroed so drag
+    never fights the suspension). ``drag_area`` is Cd*A in m^2; ``<= 0`` returns
+    a zero force (drag disabled). ``vel`` is ``(..., 3)`` world-frame linear
+    velocity; the return has the same shape. (v1.2.4)
+    """
+    if drag_area <= 0.0:
+        return torch.zeros_like(vel)
+    v_h = vel.clone()
+    v_h[..., 2] = 0.0
+    speed = torch.linalg.norm(v_h, dim=-1, keepdim=True)
+    return -(0.5 * float(air_density) * float(drag_area)) * speed * v_h
 
 
 def brake_torque_signed(

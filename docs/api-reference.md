@@ -840,6 +840,15 @@ names — so it holds a ~2.2 Hz ride frequency on tracked vehicles of any mass.
 constants stay fixed (they describe track behaviour, which does not scale with
 hull mass), and the wheel radius comes from the URDF geometry.
 
+**Aerodynamic drag (v1.2.4).** `ChassisConfig` has `drag_area` (Cd·A, m²;
+default 0.0 = off) and `air_density` (default 1.225). When set, a chassis force
+`-0.5·ρ·(Cd·A)·|v_h|·v_h` opposes horizontal velocity, so top speed comes from a
+drag-vs-traction balance with the omega cap as the ceiling above it. Presets set
+`drag_area` (kwarg): car 0.66, truck 6.0, tank 0.0. It is **runtime-tunable** —
+the pipeline reads `resolved.chassis` live, so mutating
+`physics.resolved.chassis.drag_area` mid-drive takes effect next step
+(`dynamics.aero_drag_force` is the pure helper).
+
 **Top-speed governor (v1.2.3).** Every drivable preset takes `top_speed` (m/s),
 converted to the drive-omega cap via `top_speed / mean_wheel_radius`, so the
 resulting top speed is the same across URDFs regardless of wheel size. Defaults:
