@@ -10,6 +10,24 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.2.5] — 2026-07-23
+
+### Added — explicit runtime setters on the `Vehicle` handle
+
+Changing a plant parameter mid-drive was possible before by poking
+`veh.resolved.chassis` / `resolved.drivetrain` directly — an implicit field
+mutation, not a documented API. The `Vehicle` handle now has explicit setters:
+
+- `veh.set_aero_drag(drag_area=…, air_density=…)`
+- `veh.set_top_speed(mps)` — radius-independent
+- `veh.set_omega_max_drive(rad_s)` — direct cap; `None` removes it
+
+They mutate the **live** resolved config (`veh.resolved`, which the pipeline
+reads every step) and work in **both** solver modes — no reaching into the
+config dataclass and no touching the Genesis solver. Effect lands on the next
+`step`; they return `self` so they chain. `samples/aero_drag_playground.py` uses
+`set_aero_drag`.
+
 ## [1.2.4] — 2026-07-23
 
 Aerodynamic drag (opt-in): top speed can now emerge from a traction-vs-drag

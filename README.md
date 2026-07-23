@@ -283,7 +283,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-206 pure-Python tests covering URDF parsing, config resolve, suspension
+212 pure-Python tests covering URDF parsing, config resolve, suspension
 sizing, strategy math, dynamics primitives, version reporting,
 stability-profile semantics, multi-vehicle grouping/input routing, and the
 server subpackage surface. No Genesis runtime needed — they run on CPU in ~40 s.
