@@ -102,6 +102,7 @@ from .config import (
     resolve,
     suspension_from_mass,
 )
+from .units import kmh_to_mps, mps_to_kmh, omega_from_top_speed
 from .inputs import (
     AckermannInputs,
     NoSteerInputs,
@@ -207,6 +208,7 @@ __all__ = [
     # Config
     "VehicleConfig", "WheelConfig", "ChassisConfig", "ResolvedConfig", "ConfigError",
     "resolve", "suspension_from_mass",
+    "kmh_to_mps", "mps_to_kmh", "omega_from_top_speed",
     # Inputs
     "VehicleInputs", "VehicleStepInputs",
     "AckermannInputs", "PartialAckermannInputs", "SkidSteerInputs", "NoSteerInputs",
