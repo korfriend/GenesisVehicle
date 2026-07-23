@@ -845,9 +845,18 @@ default 0.0 = off) and `air_density` (default 1.225). When set, a chassis force
 `-0.5·ρ·(Cd·A)·|v_h|·v_h` opposes horizontal velocity, so top speed comes from a
 drag-vs-traction balance with the omega cap as the ceiling above it. Presets set
 `drag_area` (kwarg): car 0.66, truck 6.0, tank 0.0. It is **runtime-tunable** —
-the pipeline reads `resolved.chassis` live, so mutating
-`physics.resolved.chassis.drag_area` mid-drive takes effect next step
-(`dynamics.aero_drag_force` is the pure helper).
+the pipeline reads `resolved.chassis` live. The explicit, supported way to
+change it (and the governor) mid-drive is the `Vehicle` handle setters (v1.2.5),
+which work in both solver modes and return `self`:
+
+```python
+veh.set_aero_drag(drag_area=1.2, air_density=1.225)  # Cd·A (m²), ρ (kg/m³)
+veh.set_top_speed(30.0)                              # m/s, radius-independent
+veh.set_omega_max_drive(90.0)                        # rad/s directly; None clears
+```
+
+Equivalent to mutating `veh.resolved.chassis` / `resolved.drivetrain` yourself;
+`dynamics.aero_drag_force` is the pure force helper.
 
 **Top-speed governor (v1.2.3).** Every drivable preset takes `top_speed` (m/s),
 converted to the drive-omega cap via `top_speed / mean_wheel_radius`, so the

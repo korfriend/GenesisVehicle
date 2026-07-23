@@ -118,12 +118,9 @@ def main():
                          pos=(0, 0, 0.5), material=gs.materials.Rigid(friction=1.0),
                          name="car")
     vs.build()
-    # veh.resolved is the live config the pipeline reads each step (veh.physics
-    # is None under the default batched solver). Mutating its chassis is what
-    # makes drag runtime-tunable.
-    ch = veh.resolved.chassis
 
-    controls = DragControls(drag_area=0.0, air_density=ch.air_density)
+    controls = DragControls(drag_area=0.0,
+                            air_density=veh.resolved.chassis.air_density)
     use_gui = (not args.sweep) and _try_start_gui(controls)
 
     # A scripted Cd*A sequence for the headless / no-GUI path.
@@ -145,8 +142,9 @@ def main():
                     break
 
         drag_area, air_density = controls.get()
-        ch.drag_area = drag_area           # <-- RUNTIME mutation, read next step
-        ch.air_density = air_density
+        # Explicit runtime setter (v1.2.5) — takes effect next step, both solver
+        # modes. (Equivalent to mutating veh.resolved.chassis directly.)
+        veh.set_aero_drag(drag_area=drag_area, air_density=air_density)
 
         veh.set_inputs(throttle=1.0, brake=0.0, steer=0.0)
         vs.step()

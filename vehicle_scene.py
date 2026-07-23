@@ -320,6 +320,43 @@ class Vehicle:
         self._inputs = VehicleInputs(throttle=throttle, brake=brake, steer=steer)
         return self
 
+    # ---- runtime parameter setters (v1.2.5) ----
+    # Explicit, supported way to change plant parameters mid-drive. They mutate
+    # the LIVE resolved config (``self.resolved``, which the pipeline reads every
+    # step) in BOTH solver modes — no need to poke ``resolved.chassis`` by hand
+    # or touch the Genesis solver. Effect lands on the next ``step``.
+    def _mean_wheel_radius(self) -> float:
+        radii = [w.radius for w in self.resolved.wheels if w.radius]
+        from .config import DEFAULT_RADIUS
+        return sum(radii) / len(radii) if radii else DEFAULT_RADIUS
+
+    def set_aero_drag(self, drag_area: Optional[float] = None,
+                      air_density: Optional[float] = None) -> "Vehicle":
+        """Change aerodynamic drag at runtime. ``drag_area`` = Cd*A (m^2;
+        0 disables), ``air_density`` in kg/m^3. Only the given args are applied.
+        """
+        ch = self.resolved.chassis
+        if drag_area is not None:
+            ch.drag_area = max(0.0, float(drag_area))
+        if air_density is not None:
+            ch.air_density = float(air_density)
+        return self
+
+    def set_omega_max_drive(self, omega_max_drive: Optional[float]) -> "Vehicle":
+        """Change the drive-omega cap (rad/s) at runtime; ``None`` removes it."""
+        dt = self.resolved.drivetrain
+        if hasattr(dt, "omega_max_drive"):
+            dt.omega_max_drive = (
+                None if omega_max_drive is None else float(omega_max_drive))
+        return self
+
+    def set_top_speed(self, top_speed_mps: float) -> "Vehicle":
+        """Change the top-speed governor at runtime (m/s, radius-independent):
+        sets the drive-omega cap to ``top_speed / mean_wheel_radius``."""
+        from .units import omega_from_top_speed
+        return self.set_omega_max_drive(
+            omega_from_top_speed(float(top_speed_mps), self._mean_wheel_radius()))
+
     # ---- pose accessors (main scene = physical truth) ----
     def get_pos(self):
         return self.entity_main.get_pos()
