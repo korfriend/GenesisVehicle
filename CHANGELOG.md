@@ -10,6 +10,55 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.2.3] — 2026-07-23
+
+Top-speed governor: presets now cap speed from a **target top speed (m/s)**
+instead of a hard-coded wheel rad/s, and the cap reaches every drivetrain.
+
+| abbr | meaning |
+|---|---|
+| omega_max_drive | drive-side wheel angular-velocity cap (rad/s) |
+| governor | the mechanism that limits top speed |
+| MBT | main battle tank |
+
+### Fixed — the tank preset no longer tops out at ~115 km/h
+
+`tank_skid_belt` set `omega_max_drive = 100` rad/s directly, which is ~115 km/h
+at a 0.33 m wheel (an M1A2 does ~67 km/h). It now takes a `top_speed` kwarg in
+**m/s** (default 18.6 ≈ 67 km/h road; pass ~13.3 for ~48 km/h off-road) and
+converts it to the cap via `top_speed / mean_wheel_radius`. Verified: the
+tracked hull settles at 18.5 m/s (67 km/h), hunt-free.
+
+### Added — the governor reaches RWD / FWD / AWD, not just PerSide
+
+The drive-omega cap lived only on `PerSide` (tank); cars had no top-speed
+governor at all and relied on a rolling-resistance balance. `DrivetrainStrategy`
+now carries `omega_max_drive` and a shared soft rev-limiter (`_rev_limit`) that
+tapers drive torque to 0 as `|omega|` approaches the cap — only in the direction
+the wheel is turning, so engine braking keeps full torque. `RWD`/`FWD`/`AWD`
+take an `omega_max_drive` kwarg (default `None` = uncapped, back-compat) and
+apply it. Verified: a car with `top_speed=10` caps at 9.9 m/s.
+
+### Added — `top_speed` on every drivable preset
+
+`car_4w_{fwd,rwd,awd}_ackermann`, `truck_6w_partial_ackermann` and
+`tank_skid_belt` take a `top_speed` (m/s) kwarg. Defaults: car 55.6 (~200 km/h),
+truck 27.8 (~100 km/h), tank 18.6 (~67 km/h). Because the cap is derived from
+the URDF's mean wheel radius, the resulting top speed is the **same across URDFs
+regardless of wheel size** — you ask for a speed, not a wheel rad/s.
+
+Top speed is set by the cap, not by wheel mass or drive torque (this drag-free
+model has no power/drag balance): mass and torque set how fast you *reach* the
+cap, not the ceiling. A physical aero-drag model (where torque/mass/drag would
+set top speed together) is a possible future opt-in.
+
+### Added — `genesis_vehicle.units`
+
+`kmh_to_mps`, `mps_to_kmh`, `omega_from_top_speed(top_speed_mps, wheel_radius)`
+— all exported from the top-level package. The SDK interface stays uniformly
+m/s; these convert only at the human-facing edges (a preset default written as
+"200 km/h", a CLI flag, a log line).
+
 ## [1.2.2] — 2026-07-23
 
 Parameterise sweep-table measurement from the CLI, and a note on tank top speed.

@@ -8,7 +8,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-183 pure-Python tests; no Genesis runtime required. Runs in ~40s on CPU. The
+195 pure-Python tests; no Genesis runtime required. Runs in ~40s on CPU. The
 reference URDFs the parsing tests read live in `tests/data/` (self-contained
 since v1.2.0).
 
@@ -33,6 +33,7 @@ CI without GPU.
 | Suspension priority chain | `test_config_resolve.py` | caller override > URDF `<dynamics>` > mass-derived |
 | Cusp arrival heading | `test_path_follower.py` | a backwards boundary hop doesn't become the block's arrival heading; a genuine corner still does; explicit waypoint yaw wins |
 | Sweep CLI plant overrides | `test_sweep_plant_overrides.py` | `--top-speed` → omega from mean radius, `--omega-max-drive` direct, top-speed wins; only passed flags applied (suspension stays mass-derived); per-wheel + drivetrain knobs; no-op when none given |
+| Top-speed governor + units | `test_top_speed_governor.py` | `kmh_to_mps`/`mps_to_kmh`/`omega_from_top_speed`; `_rev_limit` taper (untouched below cap, 0 at cap, half at half, engine-braking kept, no-op uncapped); presets cap from `top_speed`, radius-independent |
 | Ackermann sign + inner/outer | `test_strategies_unit.py` | `+steer` → both wheels positive, FR > FL |
 | SkidSteer sign (left faster on +steer) | `test_strategies_unit.py` | `test_perside_iso_right_turn_left_faster` |
 | SameSideBelt averages each side | `test_strategies_unit.py` | |

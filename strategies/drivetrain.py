@@ -18,6 +18,13 @@ from ..config import ConfigError
 class DrivetrainStrategy(ABC):
     """Maps user (throttle, brake) to per-wheel (T_drive, T_brake)."""
 
+    #: Drive-side wheel angular-velocity cap (rad/s); ``None`` = uncapped.
+    #: This is the de-facto top-speed governor: with negligible aero drag a
+    #: driven wheel spins up to this cap, so top speed = omega_max_drive x
+    #: wheel_radius. Presets set it from a target top speed (m/s) via
+    #: ``genesis_vehicle.units.omega_from_top_speed``. (v1.2.3)
+    omega_max_drive: Optional[float] = None
+
     @abstractmethod
     def distribute_torque(
         self,
@@ -28,6 +35,21 @@ class DrivetrainStrategy(ABC):
         dtype: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (T_drive_per_wheel, T_brake_per_wheel) both (n_envs, n_wheels)."""
+
+    def _rev_limit(self, T_drive: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
+        """Soft rev-limiter (v1.2.3). Taper drive torque linearly to 0 as
+        ``|omega|`` approaches ``omega_max_drive``, but only in the direction
+        the wheel is already turning — engine braking (drive torque opposing
+        rotation) keeps full torque. No-op when the cap is None.
+
+        Element-wise on ``(n_envs, n_wheels)``; non-driven wheels carry
+        ``T_drive == 0`` so the taper leaves them untouched. PerSide has its own
+        per-side variant and does not use this."""
+        if self.omega_max_drive is None:
+            return T_drive
+        taper = torch.clamp(1.0 - torch.abs(omega) / self.omega_max_drive, min=0.0)
+        driving = (T_drive * omega) > 0
+        return torch.where(driving, T_drive * taper, T_drive)
 
     def validate(self, wheels: list[Any]) -> None:
         return None
@@ -83,12 +105,15 @@ class RWD(DrivetrainStrategy):
         t_brake_max: float,
         driven_axles: Optional[tuple[int, ...]] = None,
         brake_bias: Optional[list[float]] = None,
+        omega_max_drive: Optional[float] = None,
     ):
         self.t_drive_max = float(t_drive_max)
         self.t_brake_max = float(t_brake_max)
         # If driven_axles is None, it's resolved to the rear-most axle at distribute time.
         self.driven_axles = driven_axles
         self.brake_bias = brake_bias
+        self.omega_max_drive = (
+            float(omega_max_drive) if omega_max_drive is not None else None)
 
     def _resolve_driven(self, wheel_meta: Any) -> tuple[int, ...]:
         if self.driven_axles is not None:
@@ -138,6 +163,7 @@ class RWD(DrivetrainStrategy):
         per_wheel_share = drive_mask / n_driven           # (n_wheels,)
         T_drive = (throttle * self.t_drive_max).unsqueeze(-1) * per_wheel_share.unsqueeze(0)
 
+        T_drive = self._rev_limit(T_drive, omega)
         bb = self._resolve_brake_bias(wheel_meta, device, dtype)   # (n_wheels,)
         T_brake = (brake * self.t_brake_max).unsqueeze(-1) * bb.unsqueeze(0)
         return T_drive, T_brake
@@ -161,11 +187,14 @@ class AWD(DrivetrainStrategy):
         t_brake_max: float,
         drive_weights: Optional[list[float]] = None,
         brake_bias: Optional[list[float]] = None,
+        omega_max_drive: Optional[float] = None,
     ):
         self.t_drive_max = float(t_drive_max)
         self.t_brake_max = float(t_brake_max)
         self.drive_weights = drive_weights
         self.brake_bias = brake_bias
+        self.omega_max_drive = (
+            float(omega_max_drive) if omega_max_drive is not None else None)
 
     def distribute_torque(
         self,
@@ -208,6 +237,7 @@ class AWD(DrivetrainStrategy):
                 bb = torch.full((n,), 1.0 / n, device=device, dtype=dtype)
 
         T_drive = (throttle * self.t_drive_max).unsqueeze(-1) * dw.unsqueeze(0)
+        T_drive = self._rev_limit(T_drive, omega)
         T_brake = (brake * self.t_brake_max).unsqueeze(-1) * bb.unsqueeze(0)
         return T_drive, T_brake
 

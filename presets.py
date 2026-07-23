@@ -107,6 +107,27 @@ def stability_hooks_for_profile(
 # ---------------------------------------------------------------------------
 
 
+# Target top speeds (m/s — the SDK interface unit; km/h shown for humans only).
+# These set the drive-omega governor via omega = top_speed / mean_wheel_radius,
+# so the resulting top speed is the SAME across URDFs regardless of wheel size.
+CAR_TOP_SPEED = 55.6      # ~200 km/h
+TRUCK_TOP_SPEED = 27.8    # ~100 km/h (heavy truck)
+TANK_TOP_SPEED = 18.6     # ~67 km/h (M1A2 road; ~48 km/h off-road = 13.3 m/s)
+
+
+def _omega_cap(urdf_path: str, top_speed: Optional[float]) -> Optional[float]:
+    """Convert a target top speed (m/s) to the drive-omega cap (rad/s) using the
+    URDF's mean wheel radius. None top_speed -> None (uncapped). (v1.2.3)"""
+    if top_speed is None:
+        return None
+    from .urdf import parse_urdf
+    from .units import omega_from_top_speed
+    from .config import DEFAULT_RADIUS
+    radii = [w.radius for w in parse_urdf(urdf_path).wheels if w.radius]
+    r = sum(radii) / len(radii) if radii else DEFAULT_RADIUS
+    return omega_from_top_speed(top_speed, r)
+
+
 def _car_brake_bias() -> list[float]:
     """Front-biased 60/40 split, equal within axle (reference-car tuning)."""
     return [0.30, 0.30, 0.20, 0.20]
@@ -140,8 +161,12 @@ def car_4w_rwd_ackermann(
     n_envs: int = 1,
     *,
     stability: str = "control",
+    top_speed: float = CAR_TOP_SPEED,
 ) -> VehicleConfig:
-    """4-wheel RWD car with front Ackermann steering (reference-car tuning)."""
+    """4-wheel RWD car with front Ackermann steering (reference-car tuning).
+
+    ``top_speed`` (m/s) governs the drive-omega cap (v1.2.3); default ~200 km/h.
+    """
     return VehicleConfig.from_urdf(
         urdf_path,
         steering=Ackermann(max_steer_rad=0.7, front_axle=0),
@@ -150,6 +175,7 @@ def car_4w_rwd_ackermann(
             t_brake_max=2500.0,
             driven_axles=(1,),
             brake_bias=_car_brake_bias(),
+            omega_max_drive=_omega_cap(urdf_path, top_speed),
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
@@ -165,8 +191,12 @@ def car_4w_fwd_ackermann(
     n_envs: int = 1,
     *,
     stability: str = "control",
+    top_speed: float = CAR_TOP_SPEED,
 ) -> VehicleConfig:
-    """4-wheel FWD car with front Ackermann steering (typical passenger car)."""
+    """4-wheel FWD car with front Ackermann steering (typical passenger car).
+
+    ``top_speed`` (m/s) governs the drive-omega cap (v1.2.3); default ~200 km/h.
+    """
     return VehicleConfig.from_urdf(
         urdf_path,
         steering=Ackermann(max_steer_rad=0.7, front_axle=0),
@@ -175,6 +205,7 @@ def car_4w_fwd_ackermann(
             t_brake_max=2500.0,
             driven_axles=(0,),
             brake_bias=_car_brake_bias(),
+            omega_max_drive=_omega_cap(urdf_path, top_speed),
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
@@ -190,8 +221,12 @@ def car_4w_awd_ackermann(
     n_envs: int = 1,
     *,
     stability: str = "control",
+    top_speed: float = CAR_TOP_SPEED,
 ) -> VehicleConfig:
-    """4-wheel AWD car with front Ackermann steering."""
+    """4-wheel AWD car with front Ackermann steering.
+
+    ``top_speed`` (m/s) governs the drive-omega cap (v1.2.3); default ~200 km/h.
+    """
     return VehicleConfig.from_urdf(
         urdf_path,
         steering=Ackermann(max_steer_rad=0.7, front_axle=0),
@@ -200,6 +235,7 @@ def car_4w_awd_ackermann(
             t_brake_max=2500.0,
             drive_weights=[0.25, 0.25, 0.25, 0.25],
             brake_bias=_car_brake_bias(),
+            omega_max_drive=_omega_cap(urdf_path, top_speed),
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
@@ -215,6 +251,7 @@ def truck_6w_partial_ackermann(
     n_envs: int = 1,
     *,
     stability: str = "control",
+    top_speed: float = TRUCK_TOP_SPEED,
 ) -> VehicleConfig:
     """6-wheel truck: front-axle Ackermann steering, middle + rear axles driven.
 
@@ -244,6 +281,7 @@ def truck_6w_partial_ackermann(
             t_brake_max=15_000.0,
             driven_axles=(1, 2),    # mid + rear (NOT front, which steers)
             brake_bias=None,        # default uniform within axle
+            omega_max_drive=_omega_cap(urdf_path, top_speed),
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
@@ -326,6 +364,7 @@ def tank_skid_belt(
     *,
     stability: str = "control",
     target_sag: float = TANK_TARGET_SAG,
+    top_speed: float = TANK_TOP_SPEED,
 ) -> VehicleConfig:
     """Skid-steer tank with same-side belt coupling (any wheel count).
 
@@ -342,6 +381,11 @@ def tank_skid_belt(
     the ride frequency (0.05 m -> ~2.2 Hz). Raise it for a softer, longer-travel
     vehicle; lower it for a tighter one.
 
+    ``top_speed`` (m/s) governs the drive-omega cap (v1.2.3): the wheels are
+    torque-limited to ``top_speed / mean_wheel_radius`` rad/s. Default 18.6 m/s
+    (~67 km/h, M1A2 road); use ~13.3 for off-road (~48 km/h). This replaces the
+    old hard-coded 100 rad/s (~115 km/h at a 0.33 m wheel).
+
     Uses ``visual_susp_mode="control"`` because the tank's wheels are heavy
     (500 kg each) and a kinematic set_dofs_position cannot prevent them from
     falling under gravity between substeps. The control path applies a stiff
@@ -357,7 +401,9 @@ def tank_skid_belt(
             t_drive_max=30_000.0,
             t_brake_max=30_000.0,
             steer_gain=1.0,
-            omega_max_drive=100.0,
+            # Governed from a realistic tank top speed (v1.2.3) instead of the
+            # old hard-coded 100 rad/s, which was ~115 km/h at a 0.33 m wheel.
+            omega_max_drive=_omega_cap(urdf_path, top_speed) or 100.0,
             throttle_gear_cap=0.3,
             use_per_side_taper=True,
         ),

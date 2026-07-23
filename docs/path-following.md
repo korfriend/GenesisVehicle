@@ -102,10 +102,10 @@ python -m genesis_vehicle.control.sweep_measure \
   `--rest-stroke`, `--brake-max`. Only the flags you pass are applied;
   everything else keeps the preset value (a tracked preset's suspension stays
   mass-derived unless you pass `--k-susp`). CLI flags win over `--config`.
-  > A tracked preset's `omega_max_drive` default (100 rad/s) has almost no drag
-  > to limit it, so the vehicle spins up to ~115 km/h at a 0.33 m wheel — pin a
-  > realistic speed with `--top-speed` (e.g. 18.6 ≈ 67 km/h road, 13.3 ≈ 48 km/h
-  > off-road for an MBT).
+  > Presets carry a realistic `top_speed` default since v1.2.3 (tank 18.6 m/s ≈
+  > 67 km/h, car 55.6 ≈ 200 km/h); `--top-speed` here re-pins it for the
+  > measurement (e.g. 13.3 ≈ 48 km/h off-road for an MBT). It sets the drive
+  > omega cap to `top_speed / mean_wheel_radius`.
 - `--config` (optional): Python file defining `apply_config(cfg)` (before
   `build`) and/or `apply_runtime_config(physics)` (after) — the same
   overrides you use when driving. Use this when the overrides are more than the

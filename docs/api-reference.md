@@ -804,16 +804,20 @@ def car_4w_fwd_ackermann(
 ) -> VehicleConfig
 def car_4w_rwd_ackermann(
     urdf_path: str, n_envs: int = 1, *, stability: str = "control",
+    top_speed: float = 55.6,    # v1.2.3 — m/s (~200 km/h)
 ) -> VehicleConfig
 def car_4w_awd_ackermann(
     urdf_path: str, n_envs: int = 1, *, stability: str = "control",
+    top_speed: float = 55.6,
 ) -> VehicleConfig
 def truck_6w_partial_ackermann(
     urdf_path: str, n_envs: int = 1, *, stability: str = "control",
+    top_speed: float = 27.8,    # v1.2.3 — m/s (~100 km/h)
 ) -> VehicleConfig
 def tank_skid_belt(
     urdf_path: str, n_envs: int = 1, *, stability: str = "control",
     target_sag: float = 0.05,   # v1.2.1 — static sag the spring is sized for
+    top_speed: float = 18.6,    # v1.2.3 — m/s (~67 km/h road)
 ) -> VehicleConfig
 
 stability_hooks_for_profile(
@@ -835,6 +839,17 @@ names — so it holds a ~2.2 Hz ride frequency on tracked vehicles of any mass.
 `target_sag` is the knob: raise it for a softer, longer-travel vehicle. Tire
 constants stay fixed (they describe track behaviour, which does not scale with
 hull mass), and the wheel radius comes from the URDF geometry.
+
+**Top-speed governor (v1.2.3).** Every drivable preset takes `top_speed` (m/s),
+converted to the drive-omega cap via `top_speed / mean_wheel_radius`, so the
+resulting top speed is the same across URDFs regardless of wheel size. Defaults:
+car 55.6 (~200 km/h), truck 27.8 (~100 km/h), tank 18.6 (~67 km/h). The cap — a
+soft rev-limiter that tapers drive torque to 0 as `|omega|` nears it — lives on
+`DrivetrainStrategy` and applies to RWD/FWD/AWD/PerSide alike. Top speed is set
+by the cap × radius, **not** by wheel mass or drive torque (this model has no
+aero drag; mass/torque set how fast you reach the cap). Convert units at the
+edge with `genesis_vehicle.units` (`kmh_to_mps`, `mps_to_kmh`,
+`omega_from_top_speed`).
 
 Tune by editing the returned config (`cfg.dt = ...`, replace a strategy,
 override `cfg.stability_hooks`) before passing it to `VehiclePhysics`.
