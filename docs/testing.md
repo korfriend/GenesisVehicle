@@ -8,7 +8,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-177 pure-Python tests; no Genesis runtime required. Runs in ~40s on CPU. The
+183 pure-Python tests; no Genesis runtime required. Runs in ~40s on CPU. The
 reference URDFs the parsing tests read live in `tests/data/` (self-contained
 since v1.2.0).
 
@@ -32,6 +32,7 @@ CI without GPU.
 | URDF-declared suspension | `test_urdf_parse.py` | non-zero `<dynamics stiffness>` honoured (symmetric + asymmetric damping); `stiffness="0.0"` and bare `damping` ignored; reference URDFs declare none |
 | Suspension priority chain | `test_config_resolve.py` | caller override > URDF `<dynamics>` > mass-derived |
 | Cusp arrival heading | `test_path_follower.py` | a backwards boundary hop doesn't become the block's arrival heading; a genuine corner still does; explicit waypoint yaw wins |
+| Sweep CLI plant overrides | `test_sweep_plant_overrides.py` | `--top-speed` → omega from mean radius, `--omega-max-drive` direct, top-speed wins; only passed flags applied (suspension stays mass-derived); per-wheel + drivetrain knobs; no-op when none given |
 | Ackermann sign + inner/outer | `test_strategies_unit.py` | `+steer` → both wheels positive, FR > FL |
 | SkidSteer sign (left faster on +steer) | `test_strategies_unit.py` | `test_perside_iso_right_turn_left_faster` |
 | SameSideBelt averages each side | `test_strategies_unit.py` | |

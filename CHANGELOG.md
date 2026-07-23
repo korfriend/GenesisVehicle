@@ -10,6 +10,45 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.2.2] — 2026-07-23
+
+Parameterise sweep-table measurement from the CLI, and a note on tank top speed.
+
+| abbr | meaning |
+|---|---|
+| omega_max_drive | drive-side wheel angular-velocity cap (rad/s); with negligible drag it is the de-facto top-speed governor |
+| CLI | command-line interface |
+| MBT | main battle tank |
+
+### Added — `sweep_measure` plant overrides on the command line
+
+`python -m genesis_vehicle.control.sweep_measure` gains a **plant overrides**
+group so a user can measure a table end-to-end without writing an
+`apply_config` Python file: `--top-speed`, `--omega-max-drive`, `--i-wheel`,
+`--mu-long`, `--mu-lat`, `--k-susp`, `--rest-stroke`, `--brake-max`. Only the
+flags passed are applied — everything else keeps the preset value, so a tracked
+preset's suspension stays mass-derived (v1.2.1) unless `--k-susp` is given. CLI
+flags win over `--config`.
+
+`--top-speed` is radius-independent: it sets `omega_max_drive = top_speed /
+mean_wheel_radius`, so you ask for a speed in m/s rather than a wheel rad/s that
+depends on the URDF's wheel size. `apply_plant_overrides()` is also importable.
+
+### Note — the tank preset's `omega_max_drive` default is unrealistically high
+
+`tank_skid_belt` sets `omega_max_drive = 100` rad/s. This model has almost no
+aero/rolling drag, so the wheels simply spin up to that cap: at a 0.33 m wheel
+that is ~32 m/s (**115 km/h**), versus an M1A2's ~67 km/h road / ~48 km/h
+off-road, or 40–72 km/h for MBTs generally. Every bundled demo masked this by
+overriding the cap in its tuning file, so a user driving the **raw** preset gets
+a runaway-speed tank. This is a bad default rather than a crash, so it is left
+as-is for now (changing it is a behaviour change for anyone relying on it); the
+new `--top-speed` flag is the intended way to pin a realistic speed
+(`--top-speed 18.6` ≈ 67 km/h). Empirically the cap — not wheel mass — governs
+top speed, and at any capped speed the plant is hunt-free regardless of
+`i_wheel`; the earlier belief that a heavier wheel was needed for stability was
+wrong (it only changes spin-up feel).
+
 ## [1.2.1] — 2026-07-23
 
 Suspension sizing. A tracked vehicle reported as "far too soft vs the client

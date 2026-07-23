@@ -89,15 +89,27 @@ python -m genesis_vehicle.samples.path_follow_demo [--viewer]
 python -m genesis_vehicle.control.sweep_measure \
     --urdf my_vehicle.urdf \
     --preset tank_skid_belt \
-    --config my_overrides.py \
+    --top-speed 18.6 --mu-lat 0.5 \
     --output my_vehicle_sweep.csv --gpu
 ```
 
 - `--preset`: any SDK preset name (`tank_skid_belt`,
   `car_4w_rwd_ackermann`, ...).
+- **Plant overrides (v1.2.2)** — parameterise the plant on the command line,
+  no config file needed: `--top-speed` (m/s, radius-independent — sets the
+  drive omega cap to `top_speed / mean_wheel_radius`), `--omega-max-drive`
+  (rad/s, direct), `--i-wheel`, `--mu-long`, `--mu-lat`, `--k-susp`,
+  `--rest-stroke`, `--brake-max`. Only the flags you pass are applied;
+  everything else keeps the preset value (a tracked preset's suspension stays
+  mass-derived unless you pass `--k-susp`). CLI flags win over `--config`.
+  > A tracked preset's `omega_max_drive` default (100 rad/s) has almost no drag
+  > to limit it, so the vehicle spins up to ~115 km/h at a 0.33 m wheel — pin a
+  > realistic speed with `--top-speed` (e.g. 18.6 ≈ 67 km/h road, 13.3 ≈ 48 km/h
+  > off-road for an MBT).
 - `--config` (optional): Python file defining `apply_config(cfg)` (before
   `build`) and/or `apply_runtime_config(physics)` (after) — the same
-  overrides you use when driving.
+  overrides you use when driving. Use this when the overrides are more than the
+  CLI flags cover.
 - `--gpu`: recommended when CUDA is available — the measurement is a
   ~500-env L3 batch, past the CPU/GPU crossover (see
   [`backends.md`](backends.md)). Measured full grid: **GPU ~3.6 min vs
