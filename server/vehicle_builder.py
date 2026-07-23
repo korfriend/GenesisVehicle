@@ -412,12 +412,32 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
         if hasattr(cfg.drivetrain, 't_brake_max'):
             cfg.drivetrain.t_brake_max = b_val
             print(f" [Genesis] Override maxBrake = {b_val} Nm on preset drivetrain.")
-    # Override the drive wheel-omega cap (top-speed limiter) if specified
+    # Top-speed governor. Prefer topSpeed (m/s) — radius-independent, the SDK
+    # interface unit — converting to the omega cap via the mean wheel radius
+    # (v1.2.4). omegaMaxDrive (rad/s) still works and wins if both are sent.
+    if 'topSpeed' in mapping or 'TopSpeed' in mapping:
+        v_top = float(mapping.get('topSpeed', mapping.get('TopSpeed', 0.0)))
+        radii = [w.radius for w in cfg.wheels if w.radius]
+        r = sum(radii) / len(radii) if radii else 0.35
+        if hasattr(cfg.drivetrain, 'omega_max_drive') and v_top > 0.0:
+            cfg.drivetrain.omega_max_drive = v_top / r
+            print(f" [Genesis] Override topSpeed = {v_top} m/s "
+                  f"({v_top * 3.6:.0f} km/h) -> omega_max_drive "
+                  f"{cfg.drivetrain.omega_max_drive:.1f} rad/s (R={r:.3f} m).")
     if 'omegaMaxDrive' in mapping or 'OmegaMaxDrive' in mapping:
         o_val = float(mapping.get('omegaMaxDrive', mapping.get('OmegaMaxDrive', 100.0)))
         if hasattr(cfg.drivetrain, 'omega_max_drive'):
             cfg.drivetrain.omega_max_drive = o_val
             print(f" [Genesis] Override omegaMaxDrive = {o_val} rad/s on preset drivetrain.")
+
+    # Aerodynamic drag (v1.2.4). dragArea = Cd*A (m^2); 0 disables. These are
+    # live-tunable at runtime by mutating cfg.chassis on the built vehicle.
+    if 'dragArea' in mapping or 'DragArea' in mapping:
+        cfg.chassis.drag_area = float(mapping.get('dragArea', mapping.get('DragArea', 0.0)))
+        print(f" [Genesis] Override dragArea (Cd*A) = {cfg.chassis.drag_area} m^2.")
+    if 'airDensity' in mapping or 'AirDensity' in mapping:
+        cfg.chassis.air_density = float(mapping.get('airDensity', mapping.get('AirDensity', 1.225)))
+        print(f" [Genesis] Override airDensity = {cfg.chassis.air_density} kg/m^3.")
 
     # Resolve wheel friction coefficients from URDF, falling back to chassis material friction (t_fric) or defaults
     for w in cfg.wheels:

@@ -125,6 +125,14 @@ class ChassisConfig:
     frame: str = "ISO8855"
     omega_max: float = 100.0
     eps_v: float = 0.5
+    # Aerodynamic drag (v1.2.4). ``drag_area`` is Cd*A (drag coefficient x
+    # frontal area, m^2); 0.0 = no drag (default, back-compat). When set, a
+    # chassis force ``F = -0.5 * air_density * drag_area * |v_h| * v_h`` opposes
+    # the HORIZONTAL chassis velocity, so top speed emerges from a traction-vs-
+    # drag balance instead of only the drive-omega cap. Vertical velocity is
+    # excluded so drag never fights the suspension.
+    drag_area: float = 0.0
+    air_density: float = 1.225   # kg/m^3, sea-level air
 
 
 @dataclass

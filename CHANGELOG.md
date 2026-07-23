@@ -10,6 +10,42 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.2.4] — 2026-07-23
+
+Aerodynamic drag (opt-in): top speed can now emerge from a traction-vs-drag
+balance, with the omega cap as the ceiling above it.
+
+| abbr | meaning |
+|---|---|
+| Cd·A | drag coefficient × frontal area (m²) |
+| rho | air density (kg/m³) |
+
+### Added — chassis aerodynamic drag
+
+`ChassisConfig` gains `drag_area` (Cd·A, m²; **default 0.0 = off**, back-compat)
+and `air_density` (default 1.225). When set, a chassis force
+`F = -0.5·rho·(Cd·A)·|v_h|·v_h` opposes the **horizontal** chassis velocity
+(vertical excluded so drag never fights the suspension). `dynamics.aero_drag_force`
+is the pure helper; the pipeline folds the force into the chassis force it
+already applies once per step — **no extra solver call** (measured ~0.01 ms/step,
+< 0.06% of a step).
+
+Top speed then comes from **drag and the omega cap together**: whichever binds
+first wins — the cap for a low-drag/geared vehicle, drag for a draggy one.
+Measured on a car with a 200 km/h cap: no drag → cap-governed; Cd·A 5 → 32 km/h;
+Cd·A 15 → 17 km/h.
+
+**Runtime-tunable.** The pipeline reads `resolved.chassis` live each step, so
+`drag_area` / `air_density` can be changed mid-drive by mutating
+`physics.resolved.chassis` (see `samples/aero_drag_playground.py`).
+
+### Added — `top_speed` / `drag_area` on presets and the OSC server
+
+Presets take a `drag_area` kwarg: car 0.66 (sedan Cd·A), truck 6.0, tank 0.0
+(tracked resistance is not aero-dominated). The OSC `/Genesis/Vehicle/Init`
+mapping gains `topSpeed` (m/s — radius-independent, converted to the omega cap;
+preferred over the rad/s `omegaMaxDrive`), `dragArea` (Cd·A) and `airDensity`.
+
 ## [1.2.3] — 2026-07-23
 
 Top-speed governor: presets now cap speed from a **target top speed (m/s)**

@@ -114,6 +114,13 @@ CAR_TOP_SPEED = 55.6      # ~200 km/h
 TRUCK_TOP_SPEED = 27.8    # ~100 km/h (heavy truck)
 TANK_TOP_SPEED = 18.6     # ~67 km/h (M1A2 road; ~48 km/h off-road = 13.3 m/s)
 
+# Aerodynamic drag Cd*A (m^2) — v1.2.4. With drag on, top speed emerges from a
+# traction-vs-drag balance and the omega cap is the ceiling above it. Tracked
+# vehicles are off (their resistance is track/steer loss, not aero).
+CAR_DRAG_AREA = 0.66      # sedan: Cd ~0.30 x frontal area ~2.2 m^2
+TRUCK_DRAG_AREA = 6.0     # box truck: Cd ~0.8 x ~7.5 m^2
+TANK_DRAG_AREA = 0.0      # off
+
 
 def _omega_cap(urdf_path: str, top_speed: Optional[float]) -> Optional[float]:
     """Convert a target top speed (m/s) to the drive-omega cap (rad/s) using the
@@ -162,6 +169,7 @@ def car_4w_rwd_ackermann(
     *,
     stability: str = "control",
     top_speed: float = CAR_TOP_SPEED,
+    drag_area: float = CAR_DRAG_AREA,
 ) -> VehicleConfig:
     """4-wheel RWD car with front Ackermann steering (reference-car tuning).
 
@@ -180,7 +188,7 @@ def car_4w_rwd_ackermann(
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
         wheel_overrides=_car_wheel_overrides(),
-        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
+        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5, drag_area=drag_area),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19)
     )
@@ -192,6 +200,7 @@ def car_4w_fwd_ackermann(
     *,
     stability: str = "control",
     top_speed: float = CAR_TOP_SPEED,
+    drag_area: float = CAR_DRAG_AREA,
 ) -> VehicleConfig:
     """4-wheel FWD car with front Ackermann steering (typical passenger car).
 
@@ -210,7 +219,7 @@ def car_4w_fwd_ackermann(
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
         wheel_overrides=_car_wheel_overrides(),
-        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
+        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5, drag_area=drag_area),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19)
     )
@@ -222,6 +231,7 @@ def car_4w_awd_ackermann(
     *,
     stability: str = "control",
     top_speed: float = CAR_TOP_SPEED,
+    drag_area: float = CAR_DRAG_AREA,
 ) -> VehicleConfig:
     """4-wheel AWD car with front Ackermann steering.
 
@@ -240,7 +250,7 @@ def car_4w_awd_ackermann(
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
         wheel_overrides=_car_wheel_overrides(),
-        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
+        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5, drag_area=drag_area),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="car"),
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19)
     )
@@ -252,6 +262,7 @@ def truck_6w_partial_ackermann(
     *,
     stability: str = "control",
     top_speed: float = TRUCK_TOP_SPEED,
+    drag_area: float = TRUCK_DRAG_AREA,
 ) -> VehicleConfig:
     """6-wheel truck: front-axle Ackermann steering, middle + rear axles driven.
 
@@ -285,7 +296,7 @@ def truck_6w_partial_ackermann(
         ),
         coupling=Independent(),
         tire=PacejkaAnisotropic(eps_v=0.5),
-        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
+        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5, drag_area=drag_area),
         stability_hooks=hooks,
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19)
     )
@@ -365,6 +376,7 @@ def tank_skid_belt(
     stability: str = "control",
     target_sag: float = TANK_TARGET_SAG,
     top_speed: float = TANK_TOP_SPEED,
+    drag_area: float = TANK_DRAG_AREA,
 ) -> VehicleConfig:
     """Skid-steer tank with same-side belt coupling (any wheel count).
 
@@ -410,7 +422,7 @@ def tank_skid_belt(
         coupling=SameSideBelt(),
         tire=PacejkaAnisotropic(eps_v=0.5),
         wheel_overrides=_tank_wheel_overrides(parse_urdf(urdf_path), target_sag),
-        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5),
+        chassis=ChassisConfig(omega_max=100.0, eps_v=0.5, drag_area=drag_area),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="tank"),
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19; legacy 0.005 verified unnecessary)
         visual_susp_mode="control",
