@@ -110,12 +110,12 @@ URDF = "<path to your 4-wheel-car URDF>"
 VehicleScene.init_backend("cpu")
 
 # VehicleScene is the single entry point: it owns gs.init / the scene(s) / build / step.
-vs = VehicleScene(raycast_mode="single_scene", dt=0.025, substeps=10)
+vs = VehicleScene(raycast_mode="single_scene", dt=0.025, substeps=4)  # substeps=4 is the default
 vs.add_ground_plane(friction=1.0)
 veh = vs.add_vehicle(URDF, preset=car_4w_rwd_ackermann, pos=(0, 0, 1.0))
 vs.build()
 
-for step in range(480):                       # 10 s @ 48 Hz
+for step in range(480):                       # 12 s @ 40 Hz
     veh.set_inputs(throttle=0.5, brake=0.0, steer=0.0)   # scalars or (n_envs,) tensors
     vs.step()
 

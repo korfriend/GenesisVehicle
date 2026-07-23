@@ -103,9 +103,10 @@ python -m genesis_vehicle.control.sweep_measure \
   [`backends.md`](backends.md)). Measured full grid: **GPU ~3.6 min vs
   CPU ~20 min**.
 - `--quick`: 81-combo smoke grid to check wiring (not usable for control).
-- `--dt` / `--substeps` (default **0.025 × 10** — the presets'
-  `recommended_dt`, internal 2.5 ms): **measure at the dt you will drive
-  at.** Discrete per-step effects (brake, stability hooks) are baked into
+- `--dt` / `--substeps` (default **0.025 × 4** — the SDK-wide default shared
+  by `VehicleScene` and the OSC server, internal 6.25 ms): **measure at the dt
+  AND substeps you will drive at.** Discrete per-step effects (brake, stability
+  hooks) are baked into
   the measured response, so dt/substeps are part of the table's validity
   contract alongside the (URDF, preset, config) triple.
 

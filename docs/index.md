@@ -18,6 +18,7 @@ Landing page. Pick the document that matches what you're doing.
 | Understand WHERE in the simulation step your hook runs | [`pipeline-and-hooks.md`](pipeline-and-hooks.md) |
 | Pick a stability profile (or understand why it matters for MPPI / Real2Sim) | [`stability-profiles.md`](stability-profiles.md) |
 | Verify what the SDK promises about brake sign / N clamp / `i_wheel` truth / steering convention | [`physics-contracts.md`](physics-contracts.md) |
+| Author a vehicle URDF by type (naming/axes the parser needs, per-preset topology, where suspension comes from when the URDF is silent, `<dynamics>` overrides) | [`urdf-guide.md`](urdf-guide.md) |
 | Author a URDF the ray-wheel model accepts (no wheel colliders, suspension origin = wheel centre, every link inertial) | [`physics-contracts.md` §7.9](physics-contracts.md#79-urdf-contracts-for-ray-wheels-auto-corrected-since-v1122) |
 | See what's tested and where things live | [`testing.md`](testing.md) |
 | Track what changed between versions | [`../CHANGELOG.md`](../CHANGELOG.md) |

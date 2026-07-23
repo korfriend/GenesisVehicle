@@ -29,7 +29,7 @@ VehicleScene.init_backend("cpu")
 # 1. VehicleScene owns gs.init / the scene(s) / build / step — the single entry point.
 #    raycast_mode defaults to "dual_scene" — keep it; it scales to mesh terrain
 #    and n_envs>1 unchanged (see dual-scene-raycast.md).
-vs = VehicleScene(dt=0.025, substeps=10)
+vs = VehicleScene(dt=0.025, substeps=4)                  # substeps=4 is the default
 vs.add_ground_plane(friction=1.0)
 
 # 2. Register a vehicle from a preset (it discovers wheels + builds the raycaster).
@@ -37,7 +37,7 @@ veh = vs.add_vehicle(URDF, preset=car_4w_rwd_ackermann, pos=(0, 0, 1.0))
 vs.build()
 
 # 3. Drive: set inputs (scalars or per-env (n_envs,) tensors), then step.
-for step in range(480):                                  # 10 s @ 48 Hz
+for step in range(480):                                  # 12 s @ 40 Hz
     veh.set_inputs(throttle=0.5, brake=0.0, steer=0.0)
     vs.step()
 

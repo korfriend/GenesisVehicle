@@ -440,6 +440,14 @@ and PascalCase both accepted):
 | `brakeBiasFrontRatio` | float | front brake fraction (rest to rear) |
 | `wheelOverrides` | `[{wheelName, radius, mass, stiffness, muLong, pbX, …}]` | per-wheel physical / Pacejka overrides. `wheelName` matches exact/position/substring against ANY name in the wheel's URDF joint chain (wheel link, spin, suspension, steer joint); `"*"` / `"all"` = every wheel (v1.1.26). An entry that matches nothing is skipped **with a warning** naming the URDF's wheel links |
 
+> **Choosing `wheelName` for a tracked / numbered vehicle:** position matching
+> (`FL`, `FR`, `RL`, `RR`, `front_left`, …) only fires on wheels whose URDF
+> names encode a position. A hull whose wheels are numbered — `L_wheel_01` …
+> `R_wheel_07` — has no front/rear token, so `"FL"` matches **nothing** and the
+> override is dropped (with a warning). Use `"*"` for all wheels, or a side
+> substring like `"L_wheel"` / `"R_wheel"` to address one track. This is a
+> common cause of "my suspension / friction override had no effect."
+
 ### You no longer need to send suspension values (v1.2.1)
 
 `stiffness` / `compressionDamping` / `extensionDamping` were the values a client
