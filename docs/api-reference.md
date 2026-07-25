@@ -858,6 +858,18 @@ veh.set_omega_max_drive(90.0)                        # rad/s directly; None clea
 Equivalent to mutating `veh.resolved.chassis` / `resolved.drivetrain` yourself;
 `dynamics.aero_drag_force` is the pure force helper.
 
+**Bump-stop spring (v1.2.6).** `WheelConfig.k_bump` (N/m, default 0 = off) adds
+`N += k_bump·max(compression − rest_stroke, 0)` — a progressive rate beyond the
+design stroke, exactly a real vehicle's bump stop. It bounds the transient
+over-compression a penalty contact needs on a fast slope hit or landing, so the
+rim stops sinking visibly below the ground (measured on the tracked preset:
+41 → 17 mm at 67 km/h onto a 12° ramp; cost 4–6 µs/step). `tank_skid_belt`
+enables it at `TANK_BUMP_FACTOR = 2.0 ×` the derived spring. **Stability
+bound:** the suspension force updates once per `dt`, so keep
+`(k_susp + k_bump)·dt²/m_share` well under ~0.7 (measured: 0.61 chatters,
+≥ 0.86 diverges) — `VehiclePhysics` warns past 0.7. OSC:
+`wheelOverrides.bumpStiffness`; sweep CLI: `--k-bump`.
+
 **Top-speed governor (v1.2.3).** Every drivable preset takes `top_speed` (m/s),
 converted to the drive-omega cap via `top_speed / mean_wheel_radius`, so the
 resulting top speed is the same across URDFs regardless of wheel size. Defaults:

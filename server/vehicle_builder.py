@@ -489,6 +489,9 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
                         w.c_extension = float(override.get('extensionDamping', override.get('ExtensionDamping', w.c_extension)))
                     if 'restStroke' in override or 'RestStroke' in override:
                         w.rest_stroke = float(override.get('restStroke', override.get('RestStroke', w.rest_stroke)))
+                    if 'bumpStiffness' in override or 'BumpStiffness' in override:
+                        # Bump-stop rate beyond rest_stroke (v1.2.6); 0 = off.
+                        w.k_bump = float(override.get('bumpStiffness', override.get('BumpStiffness', w.k_bump)))
 
                     # Friction properties
                     if 'muLong' in override or 'MuLong' in override:

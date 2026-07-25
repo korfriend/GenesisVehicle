@@ -150,7 +150,7 @@ def _mean_wheel_radius(cfg, urdf_path):
 def apply_plant_overrides(cfg, urdf_path, *, top_speed=None, omega_max_drive=None,
                           i_wheel=None, mu_long=None, mu_lat=None,
                           k_susp=None, rest_stroke=None, brake_max=None,
-                          log=print):
+                          k_bump=None, log=print):
     """Apply CLI plant overrides to a preset-built VehicleConfig (v1.2.2).
 
     Lets a user parameterise the sweep plant end-to-end from the command line
@@ -173,6 +173,8 @@ def apply_plant_overrides(cfg, urdf_path, *, top_speed=None, omega_max_drive=Non
             w.k_susp = k_susp
         if rest_stroke is not None:
             w.rest_stroke = rest_stroke
+        if k_bump is not None:
+            w.k_bump = k_bump
 
     dt_ = cfg.drivetrain
     omega = omega_max_drive
@@ -424,6 +426,9 @@ def main(argv=None):
                             "preset value (mass-derived for a tracked preset)")
     plant.add_argument("--rest-stroke", type=float, default=None,
                        help="suspension rest stroke (m)")
+    plant.add_argument("--k-bump", type=float, default=None,
+                       help="bump-stop rate beyond rest_stroke (N/m, v1.2.6); "
+                            "0 disables")
     plant.add_argument("--brake-max", type=float, default=None,
                        help="max brake torque (N*m)")
     args = ap.parse_args(argv)
@@ -434,7 +439,7 @@ def main(argv=None):
     config_mod = _load_config_module(args.config)
 
     _plant_keys = ("top_speed", "omega_max_drive", "i_wheel", "mu_long",
-                   "mu_lat", "k_susp", "rest_stroke", "brake_max")
+                   "mu_lat", "k_susp", "rest_stroke", "brake_max", "k_bump")
     _plant = {k: getattr(args, k) for k in _plant_keys}
     overrides_fn = None
     if any(v is not None for v in _plant.values()):
