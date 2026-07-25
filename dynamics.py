@@ -20,6 +20,24 @@ import torch
 ScalarOrTensor = Union[torch.Tensor, float, int]
 
 
+def bump_stop_force(
+    compression: torch.Tensor,
+    rest_stroke: torch.Tensor,
+    k_bump: torch.Tensor,
+) -> torch.Tensor:
+    """Progressive bump-stop force: ``k_bump * max(compression - rest_stroke, 0)``.
+
+    Zero anywhere the suspension is inside its design stroke; a stiff extra
+    spring beyond it — the same mechanism a real vehicle uses to bound travel.
+    A penalty contact must over-compress to absorb a slope hit or a landing;
+    without this term the linear spring lets that transient run several strokes
+    deep and the wheel rim visibly sinks below the ground. All args broadcast
+    against ``(n_envs, n_wheels)``; ``k_bump == 0`` returns zeros (off). (v1.2.6)
+    """
+    over = torch.clamp(compression - rest_stroke, min=0.0)
+    return k_bump * over
+
+
 def aero_drag_force(
     vel: torch.Tensor, drag_area: float, air_density: float = 1.225
 ) -> torch.Tensor:

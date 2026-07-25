@@ -159,6 +159,11 @@ class WheelMeta:
     c_compression: torch.Tensor      # (n_wheels,)
     c_extension: torch.Tensor        # (n_wheels,)
     comp_rate_clamp: torch.Tensor    # (n_wheels,)
+    # Bump-stop (v1.2.6): extra rate beyond rest_stroke; all-zero = off.
+    # `has_bump_stop` is a build-time python bool so the pipeline can skip the
+    # term without a per-step GPU sync.
+    k_bump: torch.Tensor             # (n_wheels,)
+    has_bump_stop: bool
     # Tire / hook coefficients (added in v0.5.0 for batched per-wheel ops).
     mu_long: torch.Tensor            # (n_wheels,)
     mu_lat: torch.Tensor             # (n_wheels,)
@@ -277,6 +282,26 @@ class VehiclePhysics:
                 pass
 
         self.wheel_meta = self._build_wheel_meta(self.resolved)
+
+        # Bump-stop stability guard (v1.2.6). The suspension force is
+        # recomputed once per dt (held through the substeps), so the total
+        # spring rate is stability-bounded by (k_susp + k_bump)*dt^2/m_share.
+        # Measured on a 38.5 t / 14-wheel tracked hull at dt=0.025: ratio 0.61
+        # shows mm-level rest chatter, >= 0.86 diverges outright.
+        if self.wheel_meta.has_bump_stop:
+            sprung = getattr(self.resolved.urdf, "sprung_mass", None)
+            if sprung:
+                m_share = float(sprung) / self.wheel_meta.n_wheels
+                k_tot = float((self.wheel_meta.k_susp + self.wheel_meta.k_bump).max())
+                ratio = k_tot * self.dt * self.dt / m_share
+                if ratio > 0.7:
+                    import logging
+                    logging.getLogger("genesis_vehicle").warning(
+                        "bump-stop is too stiff for this timestep: "
+                        "(k_susp + k_bump)*dt^2/m_share = %.2f (> 0.7). The "
+                        "suspension will chatter or diverge - lower k_bump or dt.",
+                        ratio,
+                    )
 
         self.pre_loop_hooks = [h for h in self.resolved.stability_hooks if "PRE_LOOP" in h.slots]
         self.post_tire_hooks = [h for h in self.resolved.stability_hooks if "POST_TIRE" in h.slots]
@@ -718,6 +743,7 @@ class VehiclePhysics:
         radius = _t("radius")
         i_wheel = _t("i_wheel")
         rest_d = radius + _t("rest_stroke")
+        k_bump = _t("k_bump")
         return WheelMeta(
             n_wheels=n,
             positions=positions,
@@ -729,6 +755,8 @@ class VehiclePhysics:
             c_compression=_t("c_compression"),
             c_extension=_t("c_extension"),
             comp_rate_clamp=_t("comp_rate_clamp"),
+            k_bump=k_bump,
+            has_bump_stop=bool(float(k_bump.max()) > 0.0),
             mu_long=_t("mu_long"), mu_lat=_t("mu_lat"),
             rolling_resistance_cr=_t("rolling_resistance_cr"),
             pb_x=_t("pb_x"), pc_x=_t("pc_x"), pe_x=_t("pe_x"),

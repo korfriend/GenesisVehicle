@@ -317,6 +317,19 @@ def truck_6w_partial_ackermann(
 TANK_REST_STROKE = 0.05
 TANK_TARGET_SAG = 0.05
 TANK_ZETA = 0.80
+# Bump-stop rate as a multiple of the main spring (v1.2.6). The tracked preset
+# deliberately rests AT its full stroke (sag == rest_stroke, belt keeps the
+# wheels loaded), so ANY dynamic compression runs past the stroke — a slope hit
+# at speed sinks the rim visibly below the ground before the linear spring
+# catches it. 2x halves that transient (measured 41 -> 17 mm at 67 km/h onto a
+# 12 deg ramp) with zero rest chatter.
+#
+# DO NOT raise this casually: the suspension force is recomputed once per dt
+# (not per substep), so the total rate is stability-bounded by
+# (k_susp + k_bump) * dt^2 / m_share — measured on a 38.5 t / 14-wheel hull at
+# dt 0.025, factor 4 shows mm-level rest chatter and factor >= 6 diverges.
+# VehiclePhysics warns when a config crosses the bound.
+TANK_BUMP_FACTOR = 2.0
 
 
 def _tank_wheel_overrides(
@@ -351,7 +364,8 @@ def _tank_wheel_overrides(
         pb_y=4.0, pc_y=1.4, pe_y=0.4,
     )
     susp = dict(rest_stroke=TANK_REST_STROKE, k_susp=k,
-                c_compression=c_comp, c_extension=c_ext)
+                c_compression=c_comp, c_extension=c_ext,
+                k_bump=TANK_BUMP_FACTOR * k)
 
     # NB: no `radius` override. The URDF's own wheel geometry is authoritative;
     # a hard-coded radius silently rescaled every other tracked vehicle.

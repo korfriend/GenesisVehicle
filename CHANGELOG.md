@@ -10,6 +10,42 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.2.6] — 2026-07-26
+
+Bump-stop suspension: bounds the wheel's visible ground penetration when a
+slope is hit (or a jump lands) at speed.
+
+| abbr | meaning |
+|---|---|
+| bump-stop | extra spring rate engaged only beyond the design stroke |
+| penalty contact | contact model that must penetrate to produce force (`N = k·c + C·ċ`) |
+| m_share | sprung mass carried by one wheel |
+
+### Added — `WheelConfig.k_bump` (bump-stop spring, default off)
+
+A penalty contact must over-compress to absorb the perpendicular velocity of a
+slope hit; with only the linear spring that transient runs several strokes deep
+and the rim visibly sinks below the ground. `k_bump` adds
+`N += k_bump·max(compression − rest_stroke, 0)` — the same mechanism a real
+vehicle's bump stop uses (`dynamics.bump_stop_force`; pipeline term guarded by a
+build-time bool). Cost: measured **4–6 µs/step** (< 0.05% of a step) — the
+full-step delta is inside run-to-run noise.
+
+The tracked preset enables it at `TANK_BUMP_FACTOR = 2.0 ×` the mass-derived
+spring (it rests AT full stroke by design, so it is the most exposed). Measured
+on a 38.5 t / 14-wheel hull entering a 12° ramp at 67 km/h: rim past design
+depth **41 → 17 mm**; crest-landing spike 1050 → 259 mm. Exposed as
+`wheelOverrides.bumpStiffness` (OSC) and `--k-bump` (sweep CLI). Cars/trucks
+stay off by default (they carry stroke headroom above their sag).
+
+### Added — bump-stop stability guard
+
+The suspension force is recomputed once per `dt` (held through the substeps),
+so the total rate is stability-bounded: measured at dt 0.025,
+`(k_susp + k_bump)·dt²/m_share = 0.61` shows mm-level rest chatter and ≥ 0.86
+diverges outright (this is why the factor is 2, not 20). `VehiclePhysics` warns
+when a config crosses 0.7 — lower `k_bump` or `dt`.
+
 ## [1.2.5] — 2026-07-23
 
 ### Added — explicit runtime setters on the `Vehicle` handle

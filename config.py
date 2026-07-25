@@ -28,6 +28,7 @@ DEFAULT_REST_STROKE = 0.10
 DEFAULT_MU = 1.0
 DEFAULT_ROLLING_RESISTANCE = 0.015
 DEFAULT_COMP_RATE_CLAMP = 30.0
+DEFAULT_K_BUMP = 0.0          # bump-stop off unless a preset/user enables it
 DEFAULT_RADIUS = 0.35
 DEFAULT_MASS = 20.0
 DEFAULT_I_WHEEL = 1.5
@@ -97,6 +98,12 @@ class WheelConfig:
     c_compression: Optional[float] = None
     c_extension: Optional[float] = None
     comp_rate_clamp: Optional[float] = None
+    # Bump-stop: extra spring rate engaged only BEYOND rest_stroke (v1.2.6):
+    # N += k_bump * (compression - rest_stroke). 0 = off (default). Real
+    # vehicles carry exactly this; it bounds the transient over-compression a
+    # penalty contact needs when hitting a slope/landing at speed, so the rim
+    # stops sinking visibly below the ground.
+    k_bump: Optional[float] = None
 
     # Friction / tire
     mu_long: Optional[float] = None
@@ -344,6 +351,7 @@ def _fill_defaults(w: WheelConfig) -> WheelConfig:
         "c_compression": DEFAULT_C_COMPRESSION,
         "c_extension": DEFAULT_C_EXTENSION,
         "comp_rate_clamp": DEFAULT_COMP_RATE_CLAMP,
+        "k_bump": DEFAULT_K_BUMP,
         "mu_long": DEFAULT_MU,
         "mu_lat": DEFAULT_MU,
         "rolling_resistance_cr": DEFAULT_ROLLING_RESISTANCE,

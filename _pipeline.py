@@ -88,6 +88,13 @@ def compute_wheel_step(
         wm.c_extension.unsqueeze(0).expand_as(comp_rate),
     )
     N = wm.k_susp.unsqueeze(0) * compression + c_damp * comp_rate
+    # Bump-stop (v1.2.6): progressive extra rate beyond rest_stroke, bounding
+    # the transient over-compression a penalty contact needs on a slope hit /
+    # landing. `has_bump_stop` is a build-time bool — zero cost when off.
+    if getattr(wm, "has_bump_stop", False):
+        from .dynamics import bump_stop_force
+        N = N + bump_stop_force(
+            compression, (wm.rest_d - wm.radius).unsqueeze(0), wm.k_bump.unsqueeze(0))
     N = torch.clamp(N, min=0.0)
     N = torch.where(air_mask, torch.zeros_like(N), N)
 
