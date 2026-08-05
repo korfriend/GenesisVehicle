@@ -301,3 +301,15 @@ def test_tank_preset_keeps_urdf_wheel_radius():
     urdf_radius = {w.name: w.radius for w in parse_urdf(TANK_URDF).wheels}
     for w in resolved.wheels:
         assert w.radius == pytest.approx(urdf_radius[w.name])
+
+
+def test_tank_preset_mu_lat_is_the_named_constant():
+    """v1.2.7: mu_lat lowered 0.63 -> 0.25 (TANK_MU_LAT) per the UE team's
+    spin-then-translate driving pattern — pin it so a stray retune is loud."""
+    from genesis_vehicle.presets import TANK_MU_LAT, tank_skid_belt
+
+    assert TANK_MU_LAT == pytest.approx(0.25)
+    resolved = resolve(tank_skid_belt(TANK_URDF))
+    for w in resolved.wheels:
+        assert w.mu_lat == pytest.approx(TANK_MU_LAT)
+        assert w.mu_long == pytest.approx(0.9)      # longitudinal grip untouched

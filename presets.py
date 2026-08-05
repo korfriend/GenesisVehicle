@@ -331,6 +331,12 @@ TANK_ZETA = 0.80
 # VehiclePhysics warns when a config crosses the bound.
 TANK_BUMP_FACTOR = 2.0
 
+# Lateral friction for tracked vehicles. Lowered 0.63 -> 0.25 in v1.2.7 at the
+# UE team's request: with the higher value the tank gripped too hard laterally
+# after a pivot spin, fighting the spin-then-translate driving pattern. 0.25
+# lets the hull slide into the new heading the way a real track does.
+TANK_MU_LAT = 0.25
+
 
 def _tank_wheel_overrides(
     parsed: "Any",
@@ -358,7 +364,7 @@ def _tank_wheel_overrides(
     common = dict(
         comp_rate_clamp=30.0,
         mu_long=0.9,
-        mu_lat=0.9 * 0.7,        # reference LAT_SCALE = 0.7
+        mu_lat=TANK_MU_LAT,
         rolling_resistance_cr=0.05,
         pb_x=5.0, pc_x=1.6, pe_x=0.4,
         pb_y=4.0, pc_y=1.4, pe_y=0.4,

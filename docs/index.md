@@ -104,6 +104,8 @@ Release history lives in
 [`../CHANGELOG.md`](../CHANGELOG.md).
 
 **Backend compatibility:** validated against the Genesis physics backend
-`genesis-world ≥ 1.0.0`. Per-release backend notes are in
+`genesis-world ≥ 1.0.0`; smoke-tested on `1.3.1` (the instanced-wheel
+renderer branches on the 1.3.x buffer API at runtime — see the 1.2.7
+CHANGELOG entry). Per-release backend notes are in
 [`../CHANGELOG.md`](../CHANGELOG.md) (see the 0.5.33 entry for the
 0.4.6 → 1.0.0 bump).

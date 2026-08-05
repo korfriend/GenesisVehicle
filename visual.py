@@ -609,11 +609,13 @@ class InstancedWheelRenderer:
                         ctx.add_external_node(obj)
                         nodes.append(ctx.external_nodes[name])   # pyrender Node
                     u["nodes"] = nodes
-                else:
+                elif hasattr(ctx._scene, "get_buffer_id"):
+                    # genesis <= 1.2.x: update_buffer takes a raw GL buffer
+                    # id, so resolve the ids ourselves. Buffers bind lazily
+                    # at the first render; re-lookup until every node has a
+                    # valid id, then cache.
                     buf_ids = u.get("buf_ids")
                     if buf_ids is None or any(b < 0 for b in buf_ids):
-                        # Buffers bind lazily at the first render; re-lookup
-                        # until every node has a valid id, then cache.
                         buf_ids = [ctx._scene.get_buffer_id(nd, "model")
                                    for nd in u["nodes"]]
                         u["buf_ids"] = buf_ids
@@ -623,6 +625,16 @@ class InstancedWheelRenderer:
                         if buf_ids[i] >= 0:
                             ctx.jit.update_buffer(
                                 buf_ids[i], T.transpose((0, 2, 1)))
+                else:
+                    # genesis >= 1.3: Scene.get_buffer_id is gone —
+                    # update_buffer now takes the NODE and queues the data;
+                    # the GL buffer id is resolved at flush time, so the
+                    # lazy-bind bookkeeping above is the engine's problem.
+                    for i, node in enumerate(u["nodes"]):
+                        T = _pose_mats(pos[:, i], quat[:, i])
+                        node.mesh.primitives[0].poses = T
+                        ctx.jit.update_buffer(
+                            node, "model", T.transpose((0, 2, 1)))
 
 
 def patch_viewer_atomic_update(viewer) -> bool:
@@ -630,7 +642,7 @@ def patch_viewer_atomic_update(viewer) -> bool:
     buffers (viewer._gv_pre_draw) and the rigid node poses reach the
     renderer inside ONE render-lock hold.
 
-    Genesis (verified against 1.2.0) updates the follow camera OUTSIDE the
+    Genesis (verified against 1.2.0 and 1.3.1) updates the follow camera OUTSIDE the
     render lock and the node poses INSIDE it. The interactive viewer draws on
     its own thread under that same (re-entrant) lock, so it can slip a frame
     between the two updates and pair a fresh camera with LAST steps body

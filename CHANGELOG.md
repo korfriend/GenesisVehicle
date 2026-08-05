@@ -10,6 +10,60 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.2.7] — 2026-08-05
+
+Genesis 1.3.1 compatibility + tracked-vehicle lateral-friction retune.
+
+| abbr | meaning |
+|---|---|
+| GL | OpenGL (the rasterizer's graphics API) |
+| mu_lat | lateral (sideways) tire friction coefficient |
+
+### Fixed — instanced wheel renderer on genesis-world 1.3.x
+
+Genesis 1.3.1 removed `pyrender.Scene.get_buffer_id` and changed
+`jit.update_buffer` from `(gl_buffer_id, data)` to `(node, buffer_name, data)`
+with the GL buffer id resolved at flush time. `InstancedWheelRenderer.update`
+now branches on `hasattr(ctx._scene, "get_buffer_id")`: the old path (with its
+lazy-bind id caching) is kept for genesis <= 1.2.x, and the new path simply
+queues per-node model-buffer updates — the lazy-bind bookkeeping is now the
+engine's job. Without this, any viewer/camera run on 1.3.x raised
+`AttributeError: 'Scene' object has no attribute 'get_buffer_id'` on the
+second `VehicleScene.step`.
+
+### Changed — `tank_skid_belt` default `mu_lat` 0.63 → 0.25 (`TANK_MU_LAT`)
+
+At the UE team's request: with 0.63 the hull gripped too hard laterally after
+a pivot spin, fighting their spin-then-translate driving pattern; 0.25 lets
+the hull slide into the new heading the way a real track does. The constant is
+now named (`presets.TANK_MU_LAT`) instead of the inline `0.9 * 0.7` literal.
+Per-wheel `wheelOverrides.muLat` (OSC) and `--mu-lat` (sweep CLI) still
+override it; bundled tank sweep tables were measured at explicit `mu_lat`
+overrides and are unaffected.
+
+### Compatibility review against genesis-world 1.3.1 (now the validated venv)
+
+Checked every genesis-version-sensitive spot in the SDK against the 1.3.1
+source; everything else holds:
+
+- `patch_viewer_atomic_update`: 1.3.1 still updates the follow camera outside
+  the render lock, so the flicker the patch removes still exists upstream —
+  the patch's attribute guard passes on 1.3.1 and it stays active.
+- `set_dofs_position` still defaults to `zero_velocity=True` → the SDK's
+  explicit `zero_velocity=False` convention remains required.
+- `apply_links_external_force/torque` signatures unchanged (new optional
+  `ref=`/`local=` kwargs default to the old behavior); the server's 3D→2D
+  tensor monkey-patches remain required and compatible.
+- `RaycastPattern` import path and raycaster read shapes unchanged →
+  `read_distances()` normalization and first-step protection stay.
+- Behavioral note (no SDK change): 1.3.1's rigid solver defaults to a new
+  contact resolution (`signorini`) whose normal forces are no longer biased by
+  friction/sliding speed. Ray-wheel vehicles are unaffected (wheel contact is
+  the SDK's own penalty model), but chassis-vs-terrain collision responses may
+  differ slightly from 1.2.0.
+
+---
+
 ## [1.2.6] — 2026-07-26
 
 Bump-stop suspension: bounds the wheel's visible ground penetration when a
