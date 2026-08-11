@@ -10,6 +10,68 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.2.8] — 2026-08-11
+
+Wheel spin-inertia correctness, plus three fixes for misleading OSC-server
+startup output reported from a UE run.
+
+| abbr | meaning |
+|---|---|
+| MOI | Moment Of Inertia (kg*m^2) |
+| CoACD | Collision-Aware Approximate Convex Decomposition (mesh -> convex parts) |
+| UGV | Unmanned Ground Vehicle |
+| SimTag | the collision-treatment label the server logs per obstacle |
+
+### Fixed — `i_wheel` is the MOI about the SPIN AXIS, not the largest principal
+
+`urdf._wheel_inertia` returned `max(ixx, iyy, izz)`. That is the spin MOI only
+for a disc-like wheel (length < sqrt(3)*radius). For a **wide, small-diameter**
+wheel — a tracked/UGV road wheel — the transverse moment is the larger one, so
+the parser handed the pipeline roughly **2x the true spin inertia** and
+`domega = T / I_WHEEL` spun the wheel up half as fast as the URDF describes
+(sluggish throttle, distorted slip ratio and brake response).
+
+It now projects the full tensor onto the wheel's actual spin axis,
+`I = a^T (R I R^T) a`, honouring `<inertial rpy>`, with the old `max(diag)` as
+the fallback for a degenerate tensor. `core.py`'s runtime estimator (used when
+the URDF has no tensor) likewise projects onto the SDK's +Y spin convention
+instead of taking the max.
+
+Measured over every URDF in the repo: unchanged for the reference car and the
+tracked URDFs the team has been running; **1.19x** for the bundled reference
+tank (`tank_ref`/`tank_ray`, 29.5 -> 24.8) and **1.96x** for a 16-wheel UGV
+(1.202 -> 0.612, exactly `1/2*m*r^2`).
+
+### Fixed — UE `Restitution` no longer emits one instability warning per obstacle
+
+Genesis has **no rigid-vs-rigid restitution**: `coup_restitution` is read only
+by the legacy coupler, i.e. rigid-vs-PARTICLE (SPH/MPM/PBD) contacts. A
+non-zero value in an all-rigid vehicle scene therefore produced no bounce at
+all — its only effect was Genesis logging *"Non-zero `coup_restitution` could
+lead to instability"* once per obstacle (13 lines in the reported run). The
+server now drops the value and prints ONE line naming the obstacle count and
+the dropped values, so the log states plainly that UE-side Restitution is inert
+here.
+
+### Fixed — mesh `SimTag` labels named the wrong collision treatment
+
+Two of the three labels were swapped against the branch actually taken: a mesh
+logged as `Decomposed_Convex (CoACD)` was loaded as a single convex hull, and
+one logged `Exact_Mesh (Raw HighPoly)` was CoACD-decomposed. Labels now match
+the branch (`Decomposed_Convex (CoACD)` / `Exact_Convex_Hulls (no CoACD)` /
+`PrimitiveBox (structures-as-primitive)`), so the startup log can be used to
+diagnose collision behaviour.
+
+### Changed — absent `RigidOptions` keys are filtered silently (L3)
+
+`prefer_parallel_linesearch` exists in no PyPI genesis build through 1.3.1, so
+every multi-env startup logged a `[WARN]` for an option whose requested value
+(`False`) is the default anyway. The kwargs are now filtered against
+`RigidOptions.model_fields` up front — reported only under `--verbose` — with
+the drop-and-retry loop kept as a fallback for lazily-validating builds.
+
+---
+
 ## [1.2.7] — 2026-08-05
 
 Genesis 1.3.1 compatibility + tracked-vehicle lateral-friction retune.

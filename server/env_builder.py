@@ -116,6 +116,9 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
     initial_dynamic_states = {}
     ue_driven_obstacle_ids = set()
     entities_to_set_mass = []
+    # (obs_id, value) for every obstacle whose UE Restitution was dropped — see
+    # the note at the assignment below. Summarized in ONE line after the loop.
+    requested_restitution: list = []
 
     if not init_data or not init_data.get('obstacles'):
         return obstacles, dynamic_obstacles, initial_dynamic_states, ue_driven_obstacle_ids, entities_to_set_mass
@@ -131,7 +134,15 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
         obs_mass = obs_data.get('mass', 1.0)
         obs_friction = ue_friction if obs_data.get('friction', -1.0) < 0 else obs_data['friction']
         obs_restitution = ue_restitution if obs_data.get('restitution', -1.0) < 0 else obs_data['restitution']
-        
+        # Genesis has NO rigid-rigid restitution: `coup_restitution` is read only
+        # by the legacy coupler, i.e. rigid-vs-PARTICLE (SPH/MPM/PBD) contacts.
+        # In an all-rigid vehicle scene it changes nothing, and any non-zero
+        # value makes Genesis log "could lead to instability" once PER OBSTACLE.
+        # So drop it here and say so once, instead of N misleading warnings.
+        if obs_restitution:
+            requested_restitution.append((obs_id, obs_restitution))
+            obs_restitution = 0.0
+
         b_dynamic = obs_data.get('b_dynamic', 0)
         is_fixed = (b_dynamic == 0 or b_dynamic == 2)
         if b_dynamic == 2:
@@ -143,13 +154,24 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
         is_user_convex = "[User:Convex]" in col_src
         is_user_complex = "[User:Complex]" in col_src
 
-        # Convert to an intuitive physics-engine loading-mode name (for log output)
+        # Convert to an intuitive physics-engine loading-mode name (for log
+        # output). MUST match the branch actually taken below — two of these
+        # labels were swapped before v1.2.8, so a mesh logged as "CoACD" was in
+        # fact loaded as a single convex hull and vice versa, which made the
+        # log useless for diagnosing collision behaviour.
         sim_handling = "Primitive"
-        if is_user_simple: sim_handling = "PrimitiveBox_Override"
+        if is_user_simple:
+            sim_handling = "PrimitiveBox_Override"
+        elif structures_as_primitive and obs_type == 5:
+            sim_handling = "PrimitiveBox (structures-as-primitive)"
         elif obs_type == 5:
-            if "[Simple:Aggregate]" in col_src: sim_handling = "Exact_Mesh (AutoConvex / Fast)"
-            elif "[Complex" in col_src or is_user_complex: sim_handling = "Exact_Mesh (Raw HighPoly / Lag-Warning)"
-            else: sim_handling = "Decomposed_Convex (CoACD)"
+            if "[Complex" in col_src or is_user_complex:
+                # -> convexify + CoACD decomposition (threshold 0.03)
+                sim_handling = "Decomposed_Convex (CoACD)"
+            else:
+                # -> convexify with an infinite error threshold = keep the hulls
+                #    UE exported, no decomposition
+                sim_handling = "Exact_Convex_Hulls (no CoACD)"
 
         mesh_path_str = f" | Mesh: {os.path.basename(obs_data.get('mesh_path', ''))}" if obs_type == 5 else ""
         print(f"  └ [Obs {obs_id}] SimTag: [{sim_handling}] | UE: {col_src} | Pos: [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}]{mesh_path_str}")
@@ -359,6 +381,16 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
         if b_dynamic in [1, 2]:
             dynamic_obstacles[obs_id] = obs_entity
             initial_dynamic_states[obs_id] = (np.array(pos, dtype=np.float32), np.array(quat, dtype=np.float32))
+
+    if requested_restitution:
+        vals = sorted({v for _, v in requested_restitution})
+        print(f" [Genesis] [Env] NOTE: {len(requested_restitution)} obstacle(s) sent a "
+              f"non-zero Restitution ({', '.join(f'{v:g}' for v in vals[:4])}"
+              f"{', ...' if len(vals) > 4 else ''}) — dropped. Genesis has no "
+              f"rigid-vs-rigid restitution (the engine's `coup_restitution` only "
+              f"affects rigid-vs-particle contacts), so the value could not "
+              f"produce bounce and would only emit one instability warning per "
+              f"obstacle. Set Restitution = 0 on the UE side to silence this.")
 
     # Obstacle masses are applied by VehicleScene (add_dynamic mass=); the
     # returned list stays empty for back-compat with the call sites.

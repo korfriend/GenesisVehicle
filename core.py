@@ -275,7 +275,13 @@ class VehiclePhysics:
             if spin_link_name is None:
                 continue
             try:
-                moi = estimate_spin_inertia_from_genesis(entity, spin_link_name)
+                # Project onto the spin axis rather than taking max(diag)
+                # (v1.2.8): a wide, small-diameter wheel has its LARGEST
+                # principal moment about a transverse axis, so the max would
+                # be the wrong component. Wheels spin about body +Y
+                # (ISO 8855; urdf._walk_to_wheel only accepts a ±Y spin joint).
+                moi = estimate_spin_inertia_from_genesis(
+                    entity, spin_link_name, spin_axis_local=(0.0, 1.0, 0.0))
                 if moi > 0.0:
                     w.i_wheel = moi
             except Exception:

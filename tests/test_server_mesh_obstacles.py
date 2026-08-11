@@ -212,6 +212,54 @@ def test_dynamic_obstacle_gets_wheel_raycast_mirror_in_dual_scene(cpu_genesis):
     assert vs2.dynamics[0].entity_raycast is None
 
 
+def test_ue_restitution_is_dropped_with_one_note(cpu_genesis, capsys):
+    """v1.2.8: Genesis reads `coup_restitution` only for rigid-vs-particle
+    contacts, so a non-zero UE Restitution cannot bounce anything in an
+    all-rigid scene — it only makes the engine log an instability warning ONCE
+    PER OBSTACLE. Drop it, and say so exactly once."""
+    init = {"obstacles": {i: dict(
+        type=1, pos=[float(i), 0.0, 0.5], quat=[1.0, 0.0, 0.0, 0.0],
+        scale=[1.0, 1.0, 1.0], collision_source="", mesh_path="", b_dynamic=0,
+        mass=2.0, friction=-1.0, restitution=0.6) for i in range(3)}}
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
+    env_builder.build_obstacles(
+        vs=vs, init_data=init, ue_friction=1.0, ue_restitution=0.0, vis_mode=None)
+
+    out = capsys.readouterr().out
+    assert out.count("non-zero Restitution") == 1     # one summary, not one per obstacle
+    assert "3 obstacle(s)" in out
+    assert "0.6" in out                               # the dropped value is reported
+
+    # Restitution 0 everywhere -> nothing to say.
+    for o in init["obstacles"].values():
+        o["restitution"] = 0.0
+    vs2 = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
+    env_builder.build_obstacles(
+        vs=vs2, init_data=init, ue_friction=1.0, ue_restitution=0.0, vis_mode=None)
+    assert "non-zero Restitution" not in capsys.readouterr().out
+
+
+def test_mesh_sim_tag_matches_the_branch_taken(cpu_genesis, cube_obj):
+    """v1.2.8: the logged SimTag must name the collision treatment the code
+    actually applies. Two labels were swapped, so a mesh logged as CoACD was
+    loaded as a single convex hull and vice versa."""
+    for col_src, expected in (("[Complex]", "Decomposed_Convex (CoACD)"),
+                              ("[Simple:Aggregate]", "Exact_Convex_Hulls (no CoACD)"),
+                              ("[Simple:FallbackMesh]", "Exact_Convex_Hulls (no CoACD)")):
+        vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            env_builder.build_obstacles(
+                vs=vs, init_data=_mesh_init(0, col_src, cube_obj),
+                ue_friction=1.0, ue_restitution=0.0, vis_mode=None)
+        out = buf.getvalue()
+        assert f"SimTag: [{expected}]" in out, f"{col_src} -> {out}"
+        # CoACD is applied iff the tag says so.
+        assert ("without CoACD merging" in out) == ("no CoACD" in expected)
+
+
 def test_add_raycast_surface_single_scene_fails_fast(cpu_genesis, cube_obj):
     """single_scene rays only hit rigid collision geoms → same fail-fast as
     add_static(collision=False)."""

@@ -147,13 +147,21 @@ Read from the **wheel link**, with fallbacks:
 |---|---|---|
 | `radius` | wheel link `<cylinder radius>` or `<sphere radius>` | `DEFAULT_RADIUS` 0.35 m |
 | `mass` | wheel link `<inertial><mass>` | `DEFAULT_MASS` 20 kg (informational; the pipeline does not read wheel mass) |
-| `i_wheel` | wheel link inertia (max diagonal, or `estimate_spin_inertia_from_genesis`) | `DEFAULT_I_WHEEL` 1.5 kg·m² |
+| `i_wheel` | wheel link `<inertia>` projected onto the spin axis (or `estimate_spin_inertia_from_genesis`) | `DEFAULT_I_WHEEL` 1.5 kg·m² |
 | chassis / sprung mass | base link `<inertial><mass>` + its non-wheel descendants | — |
 
 `i_wheel` **is** read by the pipeline (it sets how fast a wheel spins up under
 torque), so give heavy wheels a real inertia — a 500 kg tracked wheel left at
 the 1.5 kg·m² default spins up unrealistically fast. An explicit
 `WheelConfig.i_wheel` / `wheelOverrides.inertia` always wins over the URDF.
+
+> **Author the tensor in the wheel-link frame.** Since v1.2.8 the parser takes
+> the component about the **spin axis** (`iyy` for the SDK's `+Y` spin
+> convention), rotating first if `<inertial rpy>` is set. A wheel that is wide
+> relative to its radius (length > √3·radius — typical for tracked/UGV road
+> wheels) has its largest moment about a *transverse* axis, so `iyy` and
+> `max(ixx, iyy, izz)` are different numbers; only `iyy` is the spin inertia.
+> For a solid cylinder: `iyy = ½·m·r²`, `ixx = izz = ¼·m·r² + 1/12·m·L²`.
 
 > **Sprung vs chassis mass.** `chassis_mass` is the base link **alone**;
 > `sprung_mass` adds every non-wheel descendant (a turret, a cargo body).

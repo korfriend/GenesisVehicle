@@ -526,12 +526,17 @@ walking the URDF joint tree:
 - `steer_axis_signs: dict[str, int]` — used by the visual layer for `<axis 0 0 -1>` flip
 - `susp_has_dynamics: dict[str, bool]` — picks `set_dofs_position` vs `control_dofs_position`
 
+`parse_urdf` fills `i_wheel` with the moment about the wheel's **spin axis**,
+`a^T (R I R^T) a`, honouring `<inertial rpy>` (v1.2.8; it previously took
+`max(ixx, iyy, izz)`, which overstates a wide, small-diameter wheel by ~2×).
+
 `estimate_spin_inertia_from_genesis()` is a **fallback estimate** consulted
 only when `WheelConfig.i_wheel` is not set (by the user OR by the URDF).
 When `spin_axis_local` is provided, the helper projects the inertia tensor
 onto that axis (`a^T diag(I) a`); otherwise it returns `max(diag(inertial_i))`,
 which is the spin MOI for cylindrical wheels but a heuristic for general
-shapes. **`WheelConfig.i_wheel` (when supplied) is always authoritative.**
+shapes. `VehiclePhysics` always passes the SDK's `+Y` spin convention.
+**`WheelConfig.i_wheel` (when supplied) is always authoritative.**
 
 ## 5. Strategies
 

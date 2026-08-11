@@ -7,6 +7,7 @@ with per-wheel WheelConfig entries (URDF-derivable fields filled, others None).
 
 from __future__ import annotations
 
+import math
 import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -106,7 +107,12 @@ def parse_urdf(urdf_path: str) -> URDFParsedConfig:
         wheel_link = links_by_name.get(geom_link_name) if geom_link_name else None
         radius = _wheel_radius(wheel_link)
         mass = _link_mass(wheel_link)
-        i_wheel = _wheel_inertia(wheel_link)
+        # Project the inertia tensor onto the axis this wheel actually spins
+        # about (v1.2.8). Falls back to the SDK's +Y convention when the URDF
+        # models the wheel without a spin joint.
+        i_wheel = _wheel_inertia(
+            wheel_link,
+            _axis_xyz(spin_joint) if spin_joint is not None else (0.0, 1.0, 0.0))
 
         side = _detect_side(wheel_name)
         susp_has_dynamics[susp_name] = _joint_has_dynamics(sj)
@@ -269,6 +275,15 @@ def _origin_xyz(joint: ET.Element) -> tuple[float, float, float]:
     return (float(parts[0]), float(parts[1]), float(parts[2]))
 
 
+def _origin_rpy(element: ET.Element) -> tuple[float, float, float]:
+    """`<origin rpy="r p y">` of any element that carries one (rad). Zeros if absent."""
+    origin = element.find("origin")
+    if origin is None or origin.get("rpy") is None:
+        return (0.0, 0.0, 0.0)
+    parts = origin.get("rpy").split()
+    return (float(parts[0]), float(parts[1]), float(parts[2]))
+
+
 def _axis_xyz(joint: ET.Element) -> tuple[float, float, float]:
     axis = joint.find("axis")
     if axis is None or axis.get("xyz") is None:
@@ -314,9 +329,40 @@ def _wheel_radius(link: Optional[ET.Element]) -> Optional[float]:
     return None
 
 
-def _wheel_inertia(link: Optional[ET.Element]) -> Optional[float]:
-    """URDF-side fallback: max(ixx, iyy, izz). At runtime the SDK prefers
-    parse_inertia_max_principal_genesis() which reads from the built entity."""
+def _rpy_matrix(r: float, p: float, y: float) -> list[list[float]]:
+    """URDF `rpy` (fixed-axis XYZ) -> rotation matrix ``Rz(y) @ Ry(p) @ Rx(r)``."""
+    cr, sr = math.cos(r), math.sin(r)
+    cp, sp = math.cos(p), math.sin(p)
+    cy, sy = math.cos(y), math.sin(y)
+    return [
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp,     cp * sr,                cp * cr],
+    ]
+
+
+def _wheel_inertia(link: Optional[ET.Element],
+                   spin_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+                   ) -> Optional[float]:
+    """Wheel spin moment of inertia **about the spin axis** (kg*m^2).
+
+    URDF states the full inertia tensor in the link's inertial frame; what the
+    ray-wheel pipeline needs (``domega = T / I_WHEEL``) is the component about
+    the axis the wheel actually turns on:
+
+        I_spin = a^T (R I R^T) a          a = unit spin axis (child-link frame)
+                                          R = rotation from `<inertial rpy>`
+
+    Until v1.2.8 this returned ``max(ixx, iyy, izz)``, which is only correct
+    for a disc-like wheel (length < sqrt(3)*radius) where the spin term IS the
+    largest. For a WIDE, small-diameter wheel — a tracked/UGV road wheel, e.g.
+    r=0.124 m and 0.367 m across — the transverse term is the larger one, so
+    max() returned roughly 2x the true spin inertia and the wheel accelerated
+    half as fast as the URDF describes.
+
+    Falls back to ``max(diag)`` when the projection is unusable (degenerate
+    axis, non-positive result), so a malformed tensor can never make it zero.
+    """
     if link is None:
         return None
     inertial = link.find("inertial")
@@ -331,6 +377,28 @@ def _wheel_inertia(link: Optional[ET.Element]) -> Optional[float]:
         if v is None:
             return None
         diag.append(float(v))
+    ixx, iyy, izz = diag
+    ixy = float(inertia.get("ixy", 0.0) or 0.0)
+    ixz = float(inertia.get("ixz", 0.0) or 0.0)
+    iyz = float(inertia.get("iyz", 0.0) or 0.0)
+    tensor = [[ixx, ixy, ixz], [ixy, iyy, iyz], [ixz, iyz, izz]]
+
+    # Rotate the tensor out of the inertial frame into the link frame, which is
+    # the frame the joint axis is expressed in.
+    rpy = _origin_rpy(inertial)
+    if any(abs(v) > 1e-12 for v in rpy):
+        R = _rpy_matrix(*rpy)
+        RI = [[sum(R[i][k] * tensor[k][j] for k in range(3)) for j in range(3)]
+              for i in range(3)]
+        tensor = [[sum(RI[i][k] * R[j][k] for k in range(3)) for j in range(3)]
+                  for i in range(3)]
+
+    norm = math.sqrt(sum(c * c for c in spin_axis))
+    if norm > 1e-9:
+        a = [c / norm for c in spin_axis]
+        val = sum(a[i] * tensor[i][j] * a[j] for i in range(3) for j in range(3))
+        if math.isfinite(val) and val > 0.0:
+            return val
     return max(diag)
 
 

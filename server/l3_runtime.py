@@ -252,9 +252,20 @@ def run_l3(args):
         broadphase_traversal=gs.broadphase_traversal.SAP,
         max_collision_pairs=2048,
     )
-    # Some options may be absent depending on the genesis build (e.g. the
-    # 1.2.0 PyPI build lacks prefer_parallel_linesearch) — drop unrecognized
-    # keys and retry (v1.0.20: previously the server hard-crashed here).
+    # Some options exist only in certain genesis builds (no PyPI release up to
+    # 1.3.1 carries prefer_parallel_linesearch). Filter against the options
+    # class UP FRONT so an absent key is a silent non-event rather than a
+    # scary per-startup [WARN] for something that is already the default
+    # (v1.2.8; v1.0.20 first stopped this from hard-crashing).
+    _known = set(getattr(gs.options.RigidOptions, "model_fields", None) or _rigid_kwargs)
+    _dropped = [k for k in _rigid_kwargs if k not in _known]
+    for k in _dropped:
+        _rigid_kwargs.pop(k)
+    if _dropped and args.verbose:
+        print(f" [Genesis] [L3] RigidOptions not present in this genesis build, "
+              f"skipped: {', '.join(_dropped)}")
+    # Belt-and-braces: a build that validates lazily still reports the bad key
+    # by name, so keep the drop-and-retry loop for anything the filter missed.
     while True:
         try:
             _rigid_opts = gs.options.RigidOptions(**_rigid_kwargs)
@@ -262,8 +273,6 @@ def run_l3(args):
         except Exception as e:
             m = re.search(r"Unrecognized attribute '([^']+)'", str(e))
             if m and m.group(1) in _rigid_kwargs:
-                print(f" [Genesis] [L3] [WARN] RigidOptions '{m.group(1)}' 은 이 "
-                      f"genesis 빌드에 없음 — 제외하고 재시도.")
                 _rigid_kwargs.pop(m.group(1))
                 continue
             raise
