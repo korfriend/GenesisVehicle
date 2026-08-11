@@ -45,10 +45,17 @@ Implementation: `genesis_vehicle.dynamics.suspension_normal_force`.
 
 ```
 1. WheelConfig.i_wheel set by the user            -> AUTHORITATIVE (used as-is)
-2. URDF inertia (via parse_urdf, max diagonal)    -> default / estimate
-3. Genesis-runtime metadata                       -> fallback estimate
+2. URDF inertia (via parse_urdf, projected on the spin axis) -> default
+3. Genesis-runtime metadata (projected on +Y)     -> fallback estimate
 4. DEFAULT_I_WHEEL                                -> last-resort fallback
 ```
+
+`i_wheel` is the moment about the **spin axis**, `a^T (R I R^T) a` — not the
+largest principal moment. Since v1.2.8 both estimating paths project onto that
+axis (`<inertial rpy>` honoured). Before then they took `max(ixx, iyy, izz)`,
+which is the spin moment only for a disc-like wheel (length < √3·radius); a
+wide, small-diameter road wheel got roughly **2× its true spin inertia** and
+accelerated half as fast as its URDF describes.
 
 For ray-wheel dynamics, the wheel spin inertia is often different from the
 URDF hinge inertia (e.g. URDF wheel hinge is visual-only while real

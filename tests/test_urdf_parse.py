@@ -191,6 +191,84 @@ _NO_SPIN_JOINT_URDF = """<?xml version="1.0"?>
 """
 
 
+# A WIDE, small-diameter road wheel (the UGV / tracked-vehicle shape): a solid
+# cylinder r=0.1237 m, length 0.3666 m, 80 kg. Because length > sqrt(3)*r, the
+# TRANSVERSE moment (1.202) is larger than the spin moment (0.6121), so the
+# pre-v1.2.8 max(ixx, iyy, izz) heuristic picked the wrong component.
+_WIDE_WHEEL_URDF = """<?xml version="1.0"?>
+<robot name="wide_wheel">
+  <link name="base_link">
+    <inertial><mass value="3000.0"/>
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1"/></inertial>
+  </link>
+  <joint name="L_Wheel_01_susp" type="prismatic">
+    <parent link="base_link"/><child link="L_Wheel_01_carrier"/>
+    <origin xyz="1.0 0.9 0.14"/><axis xyz="0 0 1"/>
+    <limit lower="-0.05" upper="0.075" effort="5000" velocity="2"/>
+  </joint>
+  <link name="L_Wheel_01_carrier">
+    <inertial><mass value="1.0"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/></inertial>
+  </link>
+  <joint name="L_Wheel_01_spin" type="continuous">
+    <parent link="L_Wheel_01_carrier"/><child link="L_Wheel_01"/>
+    <origin xyz="0 0 0"/><axis xyz="0 1 0"/>
+  </joint>
+  <link name="L_Wheel_01">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="80.0"/>
+      <inertia ixx="1.2020" ixy="0" ixz="0" iyy="0.6121" iyz="0" izz="1.2020"/></inertial>
+    <visual><origin rpy="-1.570796 0 0"/>
+      <geometry><cylinder radius="0.1237" length="0.3666"/></geometry></visual>
+  </link>
+</robot>
+"""
+
+
+def test_wheel_inertia_is_taken_about_the_spin_axis(tmp_path):
+    """v1.2.8: `i_wheel` must be the moment about the SPIN axis, not the
+    largest principal moment. For a wide, small-diameter wheel those differ by
+    ~2x, and the old max() made the wheel accelerate half as fast as its URDF
+    describes."""
+    path = tmp_path / "wide.urdf"
+    path.write_text(_WIDE_WHEEL_URDF)
+    w = parse_urdf(str(path)).wheels[0]
+
+    assert w.spin_joint_name == "L_Wheel_01_spin"
+    assert w.i_wheel == pytest.approx(0.6121)        # iyy — about the +Y spin axis
+    assert w.i_wheel != pytest.approx(1.2020)        # NOT max(ixx, iyy, izz)
+    # Sanity: it really is 1/2*m*r^2 for this cylinder.
+    assert w.i_wheel == pytest.approx(0.5 * 80.0 * 0.1237 ** 2, rel=1e-3)
+
+
+def test_wheel_inertia_honours_a_rotated_inertial_frame(tmp_path):
+    """`<inertial rpy>` rotates the tensor: a wheel whose tensor is authored in
+    a frame rolled 90 deg about X puts the spin moment on Z, and the parser has
+    to rotate it back before projecting onto the +Y spin axis."""
+    src = _WIDE_WHEEL_URDF.replace(
+        '<inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="80.0"/>\n'
+        '      <inertia ixx="1.2020" ixy="0" ixz="0" iyy="0.6121" iyz="0" izz="1.2020"/>',
+        '<inertial><origin xyz="0 0 0" rpy="1.570796 0 0"/><mass value="80.0"/>\n'
+        '      <inertia ixx="1.2020" ixy="0" ixz="0" iyy="1.2020" iyz="0" izz="0.6121"/>')
+    path = tmp_path / "rolled.urdf"
+    path.write_text(src)
+
+    w = parse_urdf(str(path)).wheels[0]
+    assert w.i_wheel == pytest.approx(0.6121, rel=1e-6)
+
+
+def test_wheel_inertia_unchanged_for_a_disc_shaped_wheel(tmp_path):
+    """The common case — a wheel whose spin moment IS the largest — must keep
+    the exact value it had before v1.2.8, so no existing vehicle shifts."""
+    src = _WIDE_WHEEL_URDF.replace(
+        'ixx="1.2020" ixy="0" ixz="0" iyy="0.6121" iyz="0" izz="1.2020"',
+        'ixx="10" ixy="0" ixz="0" iyy="29.5" iyz="0" izz="10"')
+    path = tmp_path / "disc.urdf"
+    path.write_text(src)
+
+    w = parse_urdf(str(path)).wheels[0]
+    assert w.i_wheel == pytest.approx(29.5)          # == max(diag), as before
+
+
 def _urdf_with_susp_dynamics(attrs: str) -> str:
     return _NO_SPIN_JOINT_URDF.replace(
         '<limit lower="-0.1" upper="0.1" effort="1" velocity="1"/>',

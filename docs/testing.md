@@ -8,7 +8,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-221 pure-Python tests; no Genesis runtime required. Runs in ~40s on CPU. The
+226 pure-Python tests; no Genesis runtime required. Runs in ~40s on CPU. The
 reference URDFs the parsing tests read live in `tests/data/` (self-contained
 since v1.2.0).
 
@@ -29,6 +29,8 @@ CI without GPU.
 | Mass-derived suspension sizing | `test_config_resolve.py` | `suspension_from_mass()` formula, sag held constant across vehicle scale, input validation |
 | `tank_skid_belt` suspension derivation | `test_config_resolve.py` | keyed by the URDF's own wheel names, `k` from that URDF's sprung mass, `target_sag` scales it, URDF wheel radius wins |
 | Silent-failure guards | `test_config_resolve.py` | unmatched `wheel_overrides` key warns; undersprung suspension (sag > 1.25× stroke) warns; neither fires on a sane config |
+| Wheel spin inertia about the spin axis | `test_urdf_parse.py` | wide wheel takes `iyy` not `max(diag)`; `<inertial rpy>` rotated first; disc-shaped wheel keeps its pre-v1.2.8 value |
+| UE restitution drop + SimTag labels | `test_server_mesh_obstacles.py` | non-zero `Restitution` dropped with ONE summary line (none when all zero); logged SimTag matches the CoACD/convex-hull branch actually taken |
 | URDF-declared suspension | `test_urdf_parse.py` | non-zero `<dynamics stiffness>` honoured (symmetric + asymmetric damping); `stiffness="0.0"` and bare `damping` ignored; reference URDFs declare none |
 | Suspension priority chain | `test_config_resolve.py` | caller override > URDF `<dynamics>` > mass-derived |
 | Cusp arrival heading | `test_path_follower.py` | a backwards boundary hop doesn't become the block's arrival heading; a genuine corner still does; explicit waypoint yaw wins |
