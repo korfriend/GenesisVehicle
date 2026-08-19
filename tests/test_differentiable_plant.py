@@ -14,8 +14,9 @@ import pytest
 import torch
 
 from genesis_vehicle.config import resolve
-from genesis_vehicle.control import (DifferentiablePlant, PathFollower,
-                                     PlantMassProperties, SweepTable)
+from genesis_vehicle.control import (DifferentiablePlant, FleetFollower,
+                                     PathFollower, PlantMassProperties,
+                                     SweepTable)
 from genesis_vehicle.control.plant import is_state_source
 from genesis_vehicle.core import build_wheel_meta
 from genesis_vehicle.presets import car_4w_rwd_ackermann, tank_skid_belt
@@ -44,8 +45,9 @@ class _FakeSource:
     DEFAULT_SLIP = 0.02
 
     def __init__(self, cfg, *, v_long=4.0, v_lat=0.0, wz=0.0, dt=0.025,
-                 pitch_deg=0.0, roll_deg=0.0, omega=None):
+                 pitch_deg=0.0, roll_deg=0.0, omega=None, n_members=1):
         self.cfg = cfg
+        self.n_members = int(n_members)
         self.resolved = resolve(cfg)
         self.dev = torch.device("cpu")
         self.fdt = torch.float32
@@ -61,11 +63,12 @@ class _FakeSource:
         # Sit each wheel at half its rest stroke -> a sane, equal normal load.
         rest_d = self.wheel_meta.rest_d
         stroke = rest_d - self.wheel_meta.radius
-        self._dist = (rest_d - 0.5 * stroke).reshape(1, n)
-        self._comp = (0.5 * stroke).reshape(1, n)
+        M = self.n_members
+        self._dist = (rest_d - 0.5 * stroke).reshape(1, n).expand(M, n).clone()
+        self._comp = (0.5 * stroke).reshape(1, n).expand(M, n).clone()
         if omega is None:
             omega = (1.0 + self.DEFAULT_SLIP) * v_long / self.wheel_meta.radius
-        self._omega = torch.as_tensor(omega, dtype=self.fdt).expand(1, n).clone()
+        self._omega = torch.as_tensor(omega, dtype=self.fdt).expand(M, n).clone()
         self.pre_loop_hooks = list(self.resolved.stability_hooks)
         self.post_tire_hooks = list(self.resolved.stability_hooks)
         self.pre_loop_hooks = [h for h in self.pre_loop_hooks
@@ -82,15 +85,37 @@ class _FakeSource:
         width = float(pos[:, 1].max() - pos[:, 1].min()) * 1.3 + 0.5
         self.izz_kgm2 = self.mass_kg * (length ** 2 + width ** 2) / 12.0
 
-        p, r = math.radians(pitch_deg), math.radians(roll_deg)
-        cp, sp, cr, sr = math.cos(p / 2), math.sin(p / 2), math.cos(r / 2), math.sin(r / 2)
-        self._quat = np.array([cp * cr, cp * sr, sp * cr, -sp * sr])
-        self._vel = np.array([v_long, v_lat, 0.0])
-        self._ang = np.array([0.0, 0.0, wz])
+        # Members differ slightly so a batched solve cannot pass by accident.
+        p_all = [math.radians(pitch_deg) for _ in range(M)]
+        r_all = [math.radians(roll_deg) for _ in range(M)]
+        self._quat = np.zeros((M, 4))
+        self._vel = np.zeros((M, 3))
+        self._ang = np.zeros((M, 3))
+        for i in range(M):
+            p, r = p_all[i], r_all[i]
+            cp, sp = math.cos(p / 2), math.sin(p / 2)
+            cr, sr = math.cos(r / 2), math.sin(r / 2)
+            self._quat[i] = [cp * cr, cp * sr, sp * cr, -sp * sr]
+            self._vel[i] = [v_long + 0.5 * i, v_lat, 0.0]
+            self._ang[i] = [0.0, 0.0, wz + 0.02 * i]
+            self._omega[i] = (1.0 + self.DEFAULT_SLIP) * (
+                v_long + 0.5 * i) / self.wheel_meta.radius
 
     # -- the _StateSource surface --
     def chassis(self):
-        return (np.zeros(3), self._quat, self._vel, self._ang)
+        return (np.zeros((self.n_members, 3)), self._quat, self._vel, self._ang)
+
+    def member(self, i):
+        """A one-member source holding member ``i``'s state — the reference a
+        fleet result is checked against."""
+        one = _FakeSource(self.cfg, dt=self.dt)
+        one._quat = self._quat[i:i + 1].copy()
+        one._vel = self._vel[i:i + 1].copy()
+        one._ang = self._ang[i:i + 1].copy()
+        one._omega = self._omega[i:i + 1].clone()
+        one._dist = self._dist[i:i + 1].clone()
+        one._comp = self._comp[i:i + 1].clone()
+        return one
 
     def omega(self):
         return self._omega.clone()
@@ -358,6 +383,187 @@ def test_path_follower_still_accepts_a_sweep_table():
     assert f._coupled_plant is False
     thr, steer, brake = f.step((0.0, 0.0), 0.0, 2.0, 0.0, 0.0)
     assert -1.0 <= thr <= 1.0
+
+
+# --- fleet batching -----------------------------------------------------------
+
+_FLEET_KW = dict(mass=1500.0, izz=2500.0, com=(0.0, 0.0, 0.5))
+
+
+def _fleet(M, **kw):
+    src = _FakeSource(car_4w_rwd_ackermann(CAR_URDF), n_members=M, **kw)
+    return DifferentiablePlant(src, **_FLEET_KW), src
+
+
+def test_a_fleet_plant_reports_its_member_count():
+    plant, _ = _fleet(4)
+    assert plant.n_members == 4
+    assert "members=4" in repr(plant)
+
+
+def test_fleet_prediction_equals_the_members_predicted_alone():
+    """The whole point: widening the batch must not change any member's
+    answer, only what it costs."""
+    M = 4
+    plant, src = _fleet(M)
+    thr = np.array([0.1, 0.3, 0.5, 0.7])
+    steer = np.array([-0.2, 0.0, 0.2, 0.4])
+    a, w = plant.predict(thr, steer)
+    assert a.shape == (M,) and w.shape == (M,)
+    for i in range(M):
+        solo = DifferentiablePlant(src.member(i), **_FLEET_KW)
+        a_i, w_i = solo.predict(float(thr[i]), float(steer[i]))
+        assert a[i] == pytest.approx(a_i, rel=1e-5, abs=1e-6)
+        assert w[i] == pytest.approx(w_i, rel=1e-5, abs=1e-6)
+
+
+def test_fleet_jacobian_equals_the_members_taken_alone():
+    """One backward over the fleet gives each member its OWN gradient: batch
+    entries are independent, so d(sum_i a_i)/d(thr_j) is member j's."""
+    M = 3
+    plant, src = _fleet(M)
+    thr = np.array([0.2, 0.4, 0.6])
+    steer = np.array([0.0, 0.15, -0.15])
+    J, y = plant.jacobian(thr, steer)
+    assert J.shape == (M, 2, 2) and y.shape == (M, 2)
+    for i in range(M):
+        solo = DifferentiablePlant(src.member(i), **_FLEET_KW)
+        J_i, y_i = solo.jacobian(float(thr[i]), float(steer[i]))
+        assert np.allclose(J[i], J_i, rtol=1e-4, atol=1e-6), (J[i], J_i)
+        assert y[i] == pytest.approx(np.asarray(y_i), rel=1e-5, abs=1e-6)
+
+
+def test_fleet_solve_equals_the_members_solved_alone():
+    M = 3
+    plant, src = _fleet(M)
+    a_t = np.array([0.3, 0.5, 0.2])
+    w_t = np.array([-0.05, 0.0, 0.08])
+    thr, steer = plant.solve(np.zeros(M), a_t, w_t)
+    assert thr.shape == (M,) and steer.shape == (M,)
+    for i in range(M):
+        solo = DifferentiablePlant(src.member(i), **_FLEET_KW)
+        t_i, s_i = solo.solve(0.0, float(a_t[i]), float(w_t[i]))
+        assert thr[i] == pytest.approx(t_i, rel=1e-4, abs=1e-5)
+        assert steer[i] == pytest.approx(s_i, rel=1e-4, abs=1e-5)
+
+
+def test_fleet_diagnostics_are_per_member():
+    M = 3
+    plant, _ = _fleet(M)
+    plant.solve(np.zeros(M), [0.3, 0.5, 0.2], [-0.05, 0.0, 0.08])
+    assert plant.last_jacobian.shape == (M, 2, 2)
+    assert plant.last_response.shape == (M, 2)
+    assert plant.last_target.shape == (M, 2)
+    assert plant.last_u.shape == (M, 2)
+    assert plant.last_singular.shape == (M,)
+    assert plant.last_cost.shape == (M,)
+
+
+def test_set_applied_member_touches_only_that_row():
+    plant, _ = _fleet(3)
+    plant.set_applied([0.1, 0.2, 0.3], [0.0, 0.0, 0.0])
+    plant.set_applied_member(1, 0.9, -0.4)
+    assert plant.last_u[0].tolist() == pytest.approx([0.1, 0.0])
+    assert plant.last_u[1].tolist() == pytest.approx([0.9, -0.4])
+    assert plant.last_u[2].tolist() == pytest.approx([0.3, 0.0])
+
+
+def test_the_scalar_sweep_protocol_is_refused_by_a_fleet_plant():
+    plant, _ = _fleet(2)
+    with pytest.raises(ValueError, match="single-member"):
+        plant.throttle_for(4.0, 1.0)
+    with pytest.raises(ValueError, match="single-member"):
+        plant.steer_for(4.0, -0.1)
+
+
+def test_mixed_kinds_in_one_plant_are_refused():
+    a = _FakeSource(car_4w_rwd_ackermann(CAR_URDF))
+    b = _FakeSource(tank_skid_belt(TANK_URDF))
+    with pytest.raises((ValueError, TypeError)):
+        DifferentiablePlant([a, b], **_FLEET_KW)
+
+
+# --- plan / finish split ------------------------------------------------------
+
+def test_plan_then_finish_is_exactly_step():
+    p1 = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=4.0)
+    p2 = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=4.0)
+    f1 = PathFollower(_PATH, p1)
+    f2 = PathFollower(_PATH, p2)
+    state = ((3.0, 0.4), 0.1, 4.0, 0.0, 0.0)
+
+    whole = f1.step(*state)
+    plan = f2.plan(*state)
+    thr, steer = p2.solve(plan.v_long, plan.a_target, plan.omega_target)
+    halves = f2.finish(plan, thr, steer)
+    assert whole == pytest.approx(halves)
+    assert f1.last_mode == f2.last_mode
+
+
+def test_a_decided_plan_needs_no_inversion():
+    p = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=0.0)
+    f = PathFollower(_PATH, p)
+    plan = f.plan((19.0, 0.0), 0.0, 0.0, 0.0, 0.0)      # on the goal
+    assert plan.mode == "DONE" and plan.command == (0.0, 0.0, 1.0)
+    assert f.finish(plan, 0.0, 0.0) == (0.0, 0.0, 1.0)
+
+
+# --- FleetFollower ------------------------------------------------------------
+
+def _fleet_paths(M):
+    return [[(float(i), 0.5 * k, 0.0, 2.0) for i in range(20)] for k in range(M)]
+
+
+def test_fleet_follower_drives_every_member_from_one_solve():
+    M = 3
+    plant, src = _fleet(M, v_long=2.0)
+    paths = _fleet_paths(M)
+    fleet = FleetFollower([PathFollower(p, plant) for p in paths], plant)
+    assert len(fleet) == M
+
+    states = [((0.0, 0.5 * k), 0.0, 2.0 + 0.5 * k, 0.0, 0.0) for k in range(M)]
+    out = fleet.step(states)
+    assert len(out) == M
+    for thr, steer, brake in out:
+        assert -1.0 <= thr <= 1.0 and abs(steer) <= 0.5 and brake in (0.0, 1.0)
+    # Each follower kept its own mode and reported its own row to the plant.
+    assert len(set(id(f) for f in fleet.followers)) == M
+    assert plant.last_u.shape == (M, 2)
+    for i, (thr, steer, _b) in enumerate(out):
+        assert plant.last_u[i, 0] == pytest.approx(thr)
+        assert plant.last_u[i, 1] == pytest.approx(steer)
+
+
+def test_fleet_follower_matches_independent_followers():
+    """A batched fleet must produce the commands N independent followers on N
+    independent plants would."""
+    M = 3
+    plant, src = _fleet(M, v_long=2.0)
+    paths = _fleet_paths(M)
+    fleet = FleetFollower([PathFollower(p, plant) for p in paths], plant)
+    solo = [PathFollower(paths[i], DifferentiablePlant(src.member(i), **_FLEET_KW))
+            for i in range(M)]
+
+    states = [((1.0 + k, 0.5 * k), 0.05 * k, 2.0 + 0.5 * k, 0.0, 0.0)
+              for k in range(M)]
+    batched = fleet.step(states)
+    one_by_one = [f.step(*st) for f, st in zip(solo, states)]
+    for b, s in zip(batched, one_by_one):
+        assert b == pytest.approx(s, rel=1e-4, abs=1e-5)
+
+
+def test_fleet_follower_rejects_a_mismatched_or_unbatched_plant():
+    plant, _ = _fleet(3)
+    paths = _fleet_paths(2)
+    with pytest.raises(ValueError, match="one to one"):
+        FleetFollower([PathFollower(p, plant) for p in paths], plant)
+
+    csv = os.path.join(os.path.dirname(__file__), "..", "samples", "data",
+                       "tank_sweep_signed.csv")
+    if os.path.exists(csv):
+        table = SweepTable.load(csv)
+        with pytest.raises(TypeError, match="batched solve"):
+            FleetFollower([PathFollower(_PATH, table)], table)
 
 
 def test_path_follower_without_any_plant_is_an_error():

@@ -8,7 +8,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-245 pure-Python tests; no Genesis runtime required. Runs in ~40s on CPU. The
+259 pure-Python tests; no Genesis runtime required. Runs in ~40s on CPU. The
 reference URDFs the parsing tests read live in `tests/data/` (self-contained
 since v1.2.0).
 
@@ -53,6 +53,9 @@ CI without GPU.
 | Differentiable plant: ISO sign contract | `test_differentiable_plant.py` | `d(a)/d(throttle) > 0` and `d(omega_z)/d(steer) < 0` on both car and tank; yaw authority grows with the horizon |
 | Differentiable plant: prediction | `test_differentiable_plant.py` | batched over candidate commands (matches the scalar path); more throttle accelerates harder; slope attitude enters through gravity |
 | Differentiable plant: inversion | `test_differentiable_plant.py` | the solve hits self-calibrated reachable targets; respects command ranges; a degenerate derivative is rescued by the secant probe; `set_applied` / `reset` move the linearisation point |
+| Fleet batching equivalence | `test_differentiable_plant.py` | a member's predict / jacobian / solve inside an M-member plant equals the same member inverted alone; diagnostics are per-member; `set_applied_member` touches one row; mixed kinds and the scalar sweep protocol are refused |
+| plan / finish split | `test_differentiable_plant.py` | `plan()` then `finish()` reproduces `step()` exactly, including `last_mode`; a decided plan (DONE / cusp brake) needs no inversion |
+| `FleetFollower` | `test_differentiable_plant.py` | drives every member off one solve, reports each command to its own plant row, matches independent followers, rejects a count mismatch or an unbatched plant |
 | Plant / PathFollower wiring | `test_differentiable_plant.py` | plant vs sweep-table dispatch, `.sweep` back-compat alias, steer range tightened to `steer_cap`, applied command reported on early-return exits, bad plant rejected |
 | Server subpackage import + steer-key mapping | `test_server_import.py` | `genesis_vehicle.server` imports; `steerScale`/`maxSteerRad` mapping-key resolution (auto-skips without genesis/pythonosc) |
 
@@ -86,6 +89,6 @@ and that the lazy names (`VehiclePhysics`, `WheelRayPattern`,
 | `strategies/stability.py` | `StabilityHook` + 3 concrete |
 | `presets.py` | 4 ready-to-use `VehicleConfig` builders + `stability_hooks_for_profile` |
 | `_version.py` | `__version__`, `VERSION_INFO` (single source of truth) |
-| `control/plant.py` | `DifferentiablePlant` — autodiff inverse plant (the default for `PathFollower`) |
+| `control/plant.py` | `DifferentiablePlant` — autodiff inverse plant (the default for `PathFollower`), batched over (vehicle, env) members |
 | `tests/` | Pure-Python unit tests (no Genesis runtime needed) |
 | `CHANGELOG.md` | Per-version release notes |

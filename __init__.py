@@ -147,7 +147,8 @@ from .presets import (
     tank_skid_belt,
     stability_hooks_for_profile,
 )
-from .control import PathFollower, SweepTable, DifferentiablePlant
+from .control import (PathFollower, FleetFollower, SweepTable,
+                      DifferentiablePlant)
 
 # --- Lazy (require Genesis at import time) -----------------------------------
 
@@ -234,5 +235,5 @@ __all__ = [
     "truck_6w_partial_ackermann", "tank_skid_belt",
     "stability_hooks_for_profile",
     # Control utilities (path following; state extractors live in .control)
-    "PathFollower", "SweepTable", "DifferentiablePlant",
+    "PathFollower", "FleetFollower", "SweepTable", "DifferentiablePlant",
 ]
