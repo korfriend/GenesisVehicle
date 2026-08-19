@@ -30,7 +30,7 @@ Two inverse plants ship with the SDK, interchangeable in the same argument:
 | survives a plant change (mass, friction, `i_wheel`, dt) | yes, automatically | no — silently stale until re-measured |
 | operating point | the LIVE state: per-wheel normal loads, wheel speeds, attitude | grid interpolation on (v, pitch, roll) |
 | needs a live simulator | yes | no — numpy only |
-| cost per control step | ~17 ms (10-wheel tank, CPU, `horizon=4`) | ~0.2 ms |
+| cost per control step | ~20 ms (10-wheel tank, CPU, `horizon=4`) | ~0.2 ms |
 
 Use the sweep table when the controller runs in a process with no
 simulator (a game client driving the vehicle over OSC), or when the
@@ -109,11 +109,15 @@ over-throttles, and the vehicle overshoots the course in sim terms
 Sample #14 (`path_follow_osc_demo.py`) is the reference implementation,
 including the UE-frame decode (`docs/server.md` §4).
 
-Runnable end-to-end demo (bundled tank + reference sweep, PASS = final
-error < 3 m):
+Runnable end-to-end demos (bundled 10-wheel tank; both default to the
+Jacobian plant, and `--plant sweep` switches them to the measured table):
 
 ```bash
+# forward course around a wall — PASS = final error < 3 m
 python -m genesis_vehicle.samples.path_follow_demo [--viewer]
+
+# drive past a bay, cusp, reverse in on an explicit-yaw arc
+python -m genesis_vehicle.samples.path_follow_reverse_demo [--viewer]
 ```
 
 ## 1. The Jacobian plant (`DifferentiablePlant`)
@@ -123,6 +127,50 @@ from genesis_vehicle import DifferentiablePlant, PathFollower
 
 plant = DifferentiablePlant(vehicle)          # no CSV, no measurement
 follower = PathFollower(path, plant)          # or just PathFollower(path, vehicle)
+```
+
+Every knob is a constructor kwarg, so there are three equivalent ways to set
+one (`horizon` here — see the table further down for the rest):
+
+```python
+# 1. build the plant yourself
+follower = PathFollower(path, DifferentiablePlant(vehicle, horizon=6))
+
+# 2. let the follower build it, and forward the kwargs
+follower = PathFollower(path, vehicle, plant_kwargs={"horizon": 6})
+
+# 3. from the demos' CLI
+#    python -m genesis_vehicle.samples.path_follow_demo --horizon 6
+```
+
+The plant is a live object, so it also answers questions directly — useful for
+tuning, logging, or driving something other than a `PathFollower`:
+
+```python
+a, omega_z = plant.predict(throttle=0.4, steer=0.1)   # forward: what would happen
+J, y = plant.jacobian()                               # 2x2 d(a, omega_z)/d(thr, steer)
+thr, steer = plant.solve(v_long, a_target, omega_target)   # inverse
+
+# after the step is applied, diagnostics of the solve that produced it
+plant.last_jacobian, plant.last_response, plant.last_target, plant.last_singular
+```
+
+`predict` takes sequences too, evaluating every candidate command in one
+batched unroll — that is how the internal line search costs one pass, and it
+is the cheap way to sweep a response curve:
+
+```python
+a, omega_z = plant.predict([0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5)
+```
+
+If you post-process the plant's command before applying it — clamping,
+overriding, a supervisor of your own — tell the plant what the vehicle
+actually got, or the next Jacobian linearises a state the vehicle was never
+in (this is what `PathFollower` does internally):
+
+```python
+vehicle.set_inputs(throttle=thr, steer=steer, brake=brk)
+plant.set_applied(thr, steer)
 ```
 
 ### How it gets the inverse
@@ -225,7 +273,7 @@ python -m genesis_vehicle.samples.path_follow_demo --plant sweep
 
 | kwarg | default | effect |
 |---|---|---|
-| `horizon` | 4 steps | how far ahead the unroll looks, and the cost knob (the solve is linear in it). Longer is not better: 8 measured both slower AND looser than 4 on the reference course, because a controller running every step wants the near-term response and a long horizon drifts further from the frozen-load assumption. |
+| `horizon` | 4 steps | how far ahead the unroll looks — at 40 Hz, 4 steps is 0.1 s of predicted future. Also the cost knob (see below). Longer is not better: 8 measured both slower AND looser than 4 on the reference course (mean deviation 0.433 m vs 0.370 m), because a controller running every step wants the near-term response and a long horizon drifts further from the frozen-normal-load assumption. |
 | `newton_iters` | 2 | chord iterations after the Jacobian; each is one forward unroll |
 | `coupled` | `False` | solve the full 2×2 instead of channel-diagonal (see below) |
 | `damping` | 1e-2 | Levenberg damping of the coupled solve |
@@ -233,6 +281,21 @@ python -m genesis_vehicle.samples.path_follow_demo --plant sweep
 | `line_search_steps` | 3 | backtracking halvings, all evaluated in one batched unroll |
 | `scale_a` / `scale_w` | 1.0 / 0.2 | what counts as "one unit of error" in each channel |
 | `mass` / `izz` / `com` | read off the entity | override the planar mass properties |
+
+`horizon` is what the plant's cost buys, and it buys it linearly. Measured on
+the reference 10-wheel tank, CPU, one `solve()` call:
+
+| `horizon` | predicted ahead | per solve | vs a 25 ms control step |
+|---|---|---|---|
+| 2 | 0.05 s | 9.7 ms | 39 % |
+| 3 | 0.075 s | 15.3 ms | 61 % |
+| **4** (default) | **0.1 s** | **20.1 ms** | **80 %** |
+| 6 | 0.15 s | 29.6 ms | 118 % |
+| 8 | 0.2 s | 39.1 ms | 156 % |
+| 12 | 0.3 s | 56.1 ms | 224 % |
+
+For scale: the simulation step itself is ~10 ms on the same machine, and a
+`SweepTable` inversion of both channels is 0.16 ms.
 
 ### Two things that go wrong without care
 

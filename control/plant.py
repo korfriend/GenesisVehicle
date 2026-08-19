@@ -66,8 +66,8 @@ exact in the wheel forces and approximate in the body motion:
   loads are the ones measured this step (no in-horizon load transfer).
 - gravity enters through the live attitude, so slopes are modelled (this is
   what the sweep table's pitch/roll axes bought).
-- terrain is assumed locally flat over the horizon (~0.2 s at the default
-  ``horizon=8`` and 40 Hz).
+- terrain is assumed locally flat over the horizon (0.1 s at the default
+  ``horizon=4`` and 40 Hz).
 
 Those are the same assumptions a bicycle-model controller makes, and they cost
 nothing in the closed loop: the Jacobian is a local gain, refreshed every step.
@@ -339,7 +339,10 @@ class DifferentiablePlant:
             default despite being the more "complete" inverse.
         brake: brake command assumed during the prediction. 0.0 matches how
             the sweep tables were measured.
-        mass / izz / com: override the mass properties read off the entity.
+        mass / izz / com: override the planar mass properties, which are
+            otherwise composed from the entity's links. Giving both
+            `mass` and `izz` skips that read entirely, and `com` then
+            defaults to the base-link origin.
         damping: Levenberg damping of the least-squares inversion, on the
             row-normalised Jacobian. Larger = more conservative near a
             singular operating point (standstill, a skid-steer at full
@@ -416,11 +419,19 @@ class DifferentiablePlant:
         self.probe_delta = float(probe_delta)
         self.probe_threshold = float(probe_threshold)
 
-        if mass is None or izz is None or com is None:
+        if mass is None or izz is None:
             mp = plant_mass_properties(self.src.entity)
             mass = mp.mass if mass is None else mass
             izz = mp.izz if izz is None else izz
             com = mp.com if com is None else com
+        elif com is None:
+            # Both inertial terms were given, so there is nothing to go and
+            # read the entity for. The CoM offset only adds the surge/sway <->
+            # yaw coupling terms of the planar mass matrix, and assuming the
+            # base-link origin is a small, well-defined approximation — not a
+            # reason to require a live entity from a caller who already knows
+            # the vehicle's mass and yaw inertia.
+            com = (0.0, 0.0, 0.0)
         self.mass_props = PlantMassProperties(mass, com, izz)
 
         # Prediction-only hook copies: the live hooks own cross-step state
