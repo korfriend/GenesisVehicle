@@ -79,7 +79,7 @@ Visual demos (with `--viewer`):
 Requires Python 3.12+ and
 [Genesis](https://genesis-embodied-ai.github.io/) (`genesis-world ≥ 1.0.0`)
 with a CUDA-enabled `torch`. The SDK is validated against the Genesis
-`1.0.0` backend and smoke-tested on `1.3.1` (the renderer API split is
+`1.0.0` backend and smoke-tested on `1.3.3` (the renderer API split is
 handled at runtime — see the 1.2.7 entry); see [`CHANGELOG.md`](CHANGELOG.md)
 for the per-release backend-compatibility notes.
 

@@ -642,7 +642,7 @@ def patch_viewer_atomic_update(viewer) -> bool:
     buffers (viewer._gv_pre_draw) and the rigid node poses reach the
     renderer inside ONE render-lock hold.
 
-    Genesis (verified against 1.2.0 and 1.3.1) updates the follow camera OUTSIDE the
+    Genesis (verified against 1.2.0, 1.3.1 and 1.3.3) updates the follow camera OUTSIDE the
     render lock and the node poses INSIDE it. The interactive viewer draws on
     its own thread under that same (re-entrant) lock, so it can slip a frame
     between the two updates and pair a fresh camera with LAST steps body
