@@ -2,18 +2,24 @@
 
 End-to-end demo of ``genesis_vehicle.control``: the bundled 10-wheel tank
 (``urdf/tank_ray.urdf``) follows a waypoint path around a central wall,
-driven each step by :class:`PathFollower` inverting the bundled reference
-sweep table (``data/tank_sweep_signed.csv``).
+driven each step by :class:`PathFollower`.
 
-    python -m genesis_vehicle.samples.path_follow_demo [--viewer] [--gpu] [--mp4 [PATH]]
+    python -m genesis_vehicle.samples.path_follow_demo [--viewer] [--gpu]
+        [--mp4 [PATH]] [--plant {jacobian,sweep}]
 
 PASS criterion: final position within 3 m of the goal waypoint.
 
-The bundled sweep CSV was measured for EXACTLY this (URDF, preset,
-override) triple — the ``TankTuning`` constants below reproduce the
-overrides it was measured with. Change any of the three and you must
-re-measure: ``python -m genesis_vehicle.control.sweep_measure --urdf ...
---preset tank_skid_belt --config your_overrides.py --output new.csv``.
+``--plant jacobian`` (the default since v1.3.0) inverts a
+:class:`~genesis_vehicle.control.DifferentiablePlant` — the vehicle's own
+force model differentiated with ``torch.autograd``. It needs no CSV and no
+offline measurement, so it stays correct when the tuning below changes.
+
+``--plant sweep`` uses the pre-v1.3.0 path: the bundled sweep table
+(``data/tank_sweep_signed.csv``), measured for EXACTLY this (URDF, preset,
+override) triple — the ``TankTuning`` constants below reproduce the overrides
+it was measured with. Change any of the three and you must re-measure:
+``python -m genesis_vehicle.control.sweep_measure --urdf ... --preset
+tank_skid_belt --config your_overrides.py --output new.csv``.
 """
 from __future__ import annotations
 
@@ -69,6 +75,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--viewer", action="store_true", help="show the Genesis viewer")
     ap.add_argument("--gpu", action="store_true", help="GPU physics backend")
+    ap.add_argument("--plant", choices=("jacobian", "sweep"), default="jacobian",
+                    help="inverse plant: 'jacobian' = DifferentiablePlant (no "
+                         "CSV, default), 'sweep' = the bundled sweep table")
+    ap.add_argument("--horizon", type=int, default=None,
+                    help="DifferentiablePlant unroll length in sim steps "
+                         "(default: the plant's own)")
     ap.add_argument("--mp4", nargs="?", const="path_follow_demo.mp4",
                     default=None, metavar="PATH",
                     help="record the run to an mp4 (bird's-eye camera; works "
@@ -184,7 +196,15 @@ def main():
     except Exception:
         pass
 
-    follower = PathFollower(path, CSV)
+    if args.plant == "jacobian":
+        from genesis_vehicle import DifferentiablePlant
+        kw = {} if args.horizon is None else {"horizon": args.horizon}
+        plant = DifferentiablePlant(tank, **kw)
+        print(f"inverse plant: {plant}")
+    else:
+        plant = CSV
+        print(f"inverse plant: sweep table {os.path.basename(CSV)}")
+    follower = PathFollower(path, plant)
 
     recorder = None
     REC_EVERY = 2                       # record every 2nd step -> 20 fps
@@ -199,8 +219,12 @@ def main():
     T_MAX = 90.0
     n_steps = int(T_MAX / DT)
     done_t = None
+    devs = []
+    pxy = np.array([(p[0], p[1]) for p in path])
     for step in range(n_steps):
         st = extract_state(tank)
+        devs.append(float(np.hypot(pxy[:, 0] - st["pos_xy"][0],
+                                   pxy[:, 1] - st["pos_xy"][1]).min()))
         thr, steer, brk = follower.step(
             st["pos_xy"], st["yaw"], st["v_long"], st["pitch"], st["roll"])
         if follower.last_mode == "DONE":
@@ -225,6 +249,11 @@ def main():
         recorder.close()
     final_pos = tank.get_pos()[0].cpu().numpy()
     err = math.hypot(final_pos[0] - goal_xy[0], final_pos[1] - goal_xy[1])
+    if devs:
+        d = np.array(devs)
+        print(f"\npath deviation [{args.plant}]: mean {d.mean():.3f} m  "
+              f"max {d.max():.3f} m  over {len(d)} steps"
+              + (f"  (finished in {done_t:.2f}s)" if done_t else "  (timed out)"))
     print(f"\nFINAL pos=({final_pos[0]:+.2f}, {final_pos[1]:+.2f}) "
           f"goal=({goal_xy[0]:+.2f}, {goal_xy[1]:+.2f})  err={err:.2f}m  "
           f"{'PASS' if err < 3.0 else 'FAIL'} (criterion: err < 3m)")

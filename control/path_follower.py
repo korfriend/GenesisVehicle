@@ -1,10 +1,22 @@
-"""Path -> per-step (Steer, Throttle) controller driven by a sweep table.
+"""Path -> per-step (Steer, Throttle) controller.
 
-Give ``PathFollower`` a path (waypoints with signed target speeds) and the
-:class:`~genesis_vehicle.control.sweep.SweepTable` measured for the vehicle,
-and call :meth:`PathFollower.step` every simulation step with the current
-chassis state; it returns ``(throttle, steer, brake)`` ready for
-``vehicle.set_inputs(...)``.
+Give ``PathFollower`` a path (waypoints with signed target speeds) and an
+*inverse plant* — what turns a desired ``(a, omega_z)`` into a
+``(throttle, steer)`` command — and call :meth:`PathFollower.step` every
+simulation step with the current chassis state; it returns
+``(throttle, steer, brake)`` ready for ``vehicle.set_inputs(...)``.
+
+Two inverse plants ship with the SDK, and ``PathFollower`` takes either in the
+same argument slot:
+
+- :class:`~genesis_vehicle.control.DifferentiablePlant` (**default since
+  v1.3.0**) — differentiates the vehicle's own ray-wheel force model with
+  ``torch.autograd`` and inverts the resulting 2x2 Jacobian each step. Needs
+  the live vehicle handle and NO measurement, NO CSV.
+- :class:`~genesis_vehicle.control.sweep.SweepTable` — the pre-v1.3.0 path: a
+  5-D response grid measured offline by ``sweep_measure`` and loaded from CSV.
+  Still supported (and still the only option for a process with no simulator),
+  but it must be re-measured whenever the plant changes.
 
 The path is split into *direction blocks* — maximal runs of waypoints whose
 ``target_speed`` shares one sign. Within a block the controller is a plain
@@ -29,14 +41,18 @@ Per-step pipeline (within the active block):
        direction (+pi-flipped on backward waypoints)
     5. P control: a_target = k_v * (v_target - v_long),
                   omega_target = k_w * heading_err
-    6. sweep inverse: throttle = table^-1(v, a_target, pitch, roll),
-                      steer    = table^-1(v, omega_target, pitch, roll)
+    6. plant inverse: (throttle, steer) = plant^-1(v, a_target,
+                      omega_target, pitch, roll) — one coupled 2x2 solve for a
+                      DifferentiablePlant, two independent grid inversions for
+                      a SweepTable
     7. low-speed KICK (saturate throttle when far below target speed) and
        brake-at-rest handling
 
-The controller is simulator-agnostic (numpy/math only): feed it state from
-Genesis via :func:`extract_state`, or from any engine via
-:func:`extract_state_from_arrays`.
+The controller itself is simulator-agnostic (numpy/math only): feed it state
+from Genesis via :func:`extract_state`, or from any engine via
+:func:`extract_state_from_arrays`. That holds end-to-end with a
+:class:`SweepTable`; a :class:`DifferentiablePlant` reads the live vehicle, so
+that combination is Genesis-bound by construction.
 
 Tuned on skid-steer (tank) vehicles; Ackermann vehicles generally work,
 but re-measure the sweep so the steer sign convention of the actual
@@ -92,6 +108,32 @@ def extract_state(vehicle, env_idx: int = 0) -> dict:
         _row(vehicle.get_pos()), _row(vehicle.get_quat()), _row(vehicle.get_vel()))
 
 
+# --- Inverse-plant coercion ---------------------------------------------------
+
+def _as_plant(plant, plant_kwargs: dict):
+    """Coerce whatever the caller passed into an object with the inverse surface.
+
+    Accepts (in order): something that already answers ``throttle_for`` /
+    ``steer_for``; a CSV path; a live vehicle (``Vehicle`` handle or
+    ``VehiclePhysics``), which is wrapped in a
+    :class:`~genesis_vehicle.control.plant.DifferentiablePlant`.
+    """
+    if isinstance(plant, (str, os.PathLike)):
+        return SweepTable.load(plant)
+    if hasattr(plant, "throttle_for") and hasattr(plant, "steer_for"):
+        return plant
+    # A live vehicle: VehicleScene's Vehicle handle, or a VehiclePhysics.
+    looks_live = (hasattr(plant, "_slot") and hasattr(plant, "_scene")) or (
+        hasattr(plant, "resolved") and hasattr(plant, "wheel_meta"))
+    if looks_live:
+        from .plant import DifferentiablePlant
+        return DifferentiablePlant(plant, **plant_kwargs)
+    raise TypeError(
+        "PathFollower's plant must be a DifferentiablePlant, a SweepTable, a "
+        "sweep-CSV path, or a live vehicle (Vehicle handle / VehiclePhysics); "
+        f"got {type(plant).__name__}")
+
+
 # --- Follower -----------------------------------------------------------------
 
 class PathFollower:
@@ -118,7 +160,12 @@ class PathFollower:
             cannot be tracked.
             Adjacent waypoints should be ~0.3–1 m apart (densify long
             straight segments) for accurate projection/lookahead.
-        sweep: a :class:`SweepTable`, or a path to its CSV.
+        plant: the inverse plant. Any of
+            a :class:`~genesis_vehicle.control.DifferentiablePlant`;
+            a ``VehicleScene`` ``Vehicle`` handle or a ``VehiclePhysics``
+            (wrapped into a ``DifferentiablePlant`` for you — the no-CSV
+            default); a :class:`SweepTable`; or a path to a sweep CSV.
+            Also accepted as the keyword ``sweep=`` for pre-v1.3.0 call sites.
         lookahead: pursuit distance along the path (m).
         arrival_goal: distance to the final waypoint that counts as DONE (m).
         cusp_goal: distance to a cusp waypoint that starts the stop-and-
@@ -133,16 +180,32 @@ class PathFollower:
     ``DRV-1`` / ``STOP`` / ``BRAKE_TRANS`` (stopping for a cusp) / ``DONE``.
     """
 
-    def __init__(self, path, sweep, *,
+    def __init__(self, path, plant=None, *, sweep=None,
                  lookahead: float = 3.5, arrival_goal: float = 1.5,
                  cusp_goal: float = 1.0, k_v: float = 2.0, k_w: float = 1.5,
                  k_approach: float = 1.0, v_stop: float = 0.05,
-                 steer_cap: float = 0.5):
+                 steer_cap: float = 0.5, plant_kwargs=None):
         if len(path) < 2:
             raise ValueError("path needs at least 2 waypoints")
-        if isinstance(sweep, (str, os.PathLike)):
-            sweep = SweepTable.load(sweep)
-        self.sweep = sweep
+        if plant is None:
+            plant = sweep
+        if plant is None:
+            raise ValueError(
+                "PathFollower needs an inverse plant: pass the vehicle (or a "
+                "DifferentiablePlant) for the autodiff plant, or a SweepTable / "
+                "sweep CSV path for the measured one")
+        self.plant = _as_plant(plant, plant_kwargs or {})
+        #: Back-compat alias — ``.sweep`` was the pre-v1.3.0 attribute name.
+        self.sweep = self.plant
+        self._coupled_plant = bool(getattr(self.plant, "has_coupled_solve", False))
+        # A Jacobian plant linearises about the command it last handed out, so
+        # it has to work inside the same steer envelope this follower enforces
+        # — otherwise it can sit at steer=-1.0 while the vehicle is being given
+        # -steer_cap, and every Jacobian after that describes a vehicle state
+        # that never existed. `set_applied` at the end of step() closes the
+        # same loop for the throttle, which the KICK can override outright.
+        if hasattr(self.plant, "steer_range"):
+            self.plant.steer_range = (-abs(steer_cap), abs(steer_cap))
         # Normalize waypoints to (x, y, z, speed) + optional explicit yaw.
         self.path = []
         self.wp_yaws = []            # per-waypoint explicit yaw or None
@@ -369,6 +432,19 @@ class PathFollower:
     def step(self, pos_xy, yaw, v_long, pitch_deg, roll_deg):
         """One control step. Returns ``(throttle, steer, brake)``, each in
         the SDK input range (throttle/steer in [-1, 1], brake in [0, 1])."""
+        out = self._step(pos_xy, yaw, v_long, pitch_deg, roll_deg)
+        # EVERY exit reports the applied command to a Jacobian plant, not just
+        # the driving one. The cusp brake and the DONE stop return (0, 0, 1)
+        # early; leaving the plant warm-started on the last DRIVING command
+        # through a whole stop-and-reverse means the first command of the new
+        # direction is linearised about a vehicle that was still accelerating
+        # forwards — which spins a skid-steer instead of reversing it.
+        report = getattr(self.plant, "set_applied", None)
+        if report is not None:
+            report(out[0], out[1])
+        return out
+
+    def _step(self, pos_xy, yaw, v_long, pitch_deg, roll_deg):
         last_block = self.block_i == len(self.blocks) - 1
         blk_start, blk_end, dir_sign = self.blocks[self.block_i]
 
@@ -442,8 +518,15 @@ class PathFollower:
         a_target = self.k_v * (v_target - v_long)
         omega_target = self.k_w * heading_err
 
-        throttle = self.sweep.throttle_for(v_long, a_target, pitch_deg, roll_deg)
-        steer = self.sweep.steer_for(v_long, omega_target, pitch_deg, roll_deg)
+        if self._coupled_plant:
+            # One 2x2 inversion for both channels: a DifferentiablePlant knows
+            # that steering bleeds speed and that throttle shifts the yaw
+            # authority, which two independent grid lookups cannot express.
+            throttle, steer = self.plant.solve(
+                v_long, a_target, omega_target, pitch_deg, roll_deg)
+        else:
+            throttle = self.plant.throttle_for(v_long, a_target, pitch_deg, roll_deg)
+            steer = self.plant.steer_for(v_long, omega_target, pitch_deg, roll_deg)
 
         # Low-speed KICK: far below target speed -> saturate throttle so the
         # vehicle actually gets moving (the P term alone can be too shy).

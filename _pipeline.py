@@ -25,6 +25,31 @@ from genesis.utils.geom import transform_by_quat
 from .dynamics import brake_torque_signed
 
 
+def _rotate_by_quat(v: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
+    """``transform_by_quat`` that also works under ``torch.autograd``.
+
+    Genesis's own ``transform_by_quat`` is a TorchScript kernel that writes its
+    result into a preallocated buffer with ``copy_``. When its input carries a
+    gradient that buffer is a leaf requiring grad, and the in-place write raises
+    ``a leaf Variable that requires grad is being used in an in-place
+    operation``. That is exactly what happens in
+    :class:`genesis_vehicle.control.DifferentiablePlant`, whose unroll
+    differentiates the wheel-frame axes with respect to the steer command (a
+    skid-steer vehicle never noticed: its per-wheel steer is a constant zero, so
+    nothing downstream of it carries a gradient).
+
+    So: keep the fast kernel for the ordinary simulation path, and take the
+    functional quaternion rotation only when a gradient is actually flowing.
+    The check is one attribute read per call.
+    """
+    if v.requires_grad or quat.requires_grad:
+        w = quat[..., 0:1]
+        u = quat[..., 1:4]
+        t = 2.0 * torch.cross(u, v, dim=-1)
+        return v + w * t + torch.cross(u, t, dim=-1)
+    return transform_by_quat(v, quat)
+
+
 @dataclass
 class PipelineResult:
     total_F: torch.Tensor        # (B, 3)  base-link force
@@ -69,7 +94,7 @@ def compute_wheel_step(
     # World-space wheel positions: transform (B * n, 3) at once.
     quat_b_flat = quat.unsqueeze(1).expand(B, n, 4).reshape(B * n, 4)
     wheel_body_flat = wheel_body_b.reshape(B * n, 3)
-    wheel_world = (transform_by_quat(wheel_body_flat, quat_b_flat)
+    wheel_world = (_rotate_by_quat(wheel_body_flat, quat_b_flat)
                    .reshape(B, n, 3) + pos.unsqueeze(1))
 
     # (A) Compression / asymmetric damper / N.
@@ -104,10 +129,10 @@ def compute_wheel_step(
     zer = torch.zeros_like(cs)
     wheel_fwd_local = torch.stack([cs, -ss, zer], dim=-1)
     wheel_lat_local = torch.stack([ss,  cs, zer], dim=-1)
-    wheel_fwd_world = transform_by_quat(
+    wheel_fwd_world = _rotate_by_quat(
         wheel_fwd_local.reshape(B * n, 3), quat_b_flat
     ).reshape(B, n, 3)
-    wheel_lat_world = transform_by_quat(
+    wheel_lat_world = _rotate_by_quat(
         wheel_lat_local.reshape(B * n, 3), quat_b_flat
     ).reshape(B, n, 3)
 

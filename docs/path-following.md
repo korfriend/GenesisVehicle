@@ -3,26 +3,52 @@
 | abbr | meaning |
 |---|---|
 | S/T | Steer / Throttle command |
-| sweep table | measured (v, throttle, steer, pitch, roll) → (a, ω_z) grid of ONE vehicle |
+| inverse plant | whatever turns a desired `(a, ω_z)` into a `(throttle, steer)` command |
+| Jacobian plant | `DifferentiablePlant` — the inverse from autodiff through the vehicle's own force model (**default since v1.3.0**) |
+| sweep table | `SweepTable` — the inverse from a measured (v, throttle, steer, pitch, roll) → (a, ω_z) grid |
+| J | 2×2 Jacobian `d(a, ω_z) / d(throttle, steer)` |
+| autodiff | automatic differentiation (`torch.autograd`) |
 | cusp | sign flip of `target_speed` along the path = gear change (stop, then reverse) |
 | block | maximal run of waypoints with one speed sign (the unit the follower drives) |
 | ω_z | chassis yaw rate (rad/s) |
 | P control | proportional feedback (`u = K · error`) |
+| MOI | moment of inertia |
 
 Give a path — a list of `(x, y, z, target_speed)` waypoints — and get
 per-step `(throttle, steer, brake)` for any URDF + preset vehicle. The
-controller inverts a per-vehicle measured *sweep table* instead of assuming
-a dynamics model, so the same code drives a skid-steer tank and an
-Ackermann car.
+controller decides what physical response it wants (plain geometry, no
+vehicle knowledge) and then asks an **inverse plant** which commands
+produce it. Everything vehicle-specific lives in that one object, so the
+same controller drives a skid-steer tank and an Ackermann car.
+
+Two inverse plants ship with the SDK, interchangeable in the same argument:
+
+| | `DifferentiablePlant` (default, v1.3.0+) | `SweepTable` (pre-v1.3.0) |
+|---|---|---|
+| where the vehicle knowledge comes from | autodiff through the SDK's own ray-wheel force model, every step | a 5-D response grid measured offline |
+| setup per vehicle | **none** | a batched sweep run → CSV |
+| survives a plant change (mass, friction, `i_wheel`, dt) | yes, automatically | no — silently stale until re-measured |
+| operating point | the LIVE state: per-wheel normal loads, wheel speeds, attitude | grid interpolation on (v, pitch, roll) |
+| needs a live simulator | yes | no — numpy only |
+| cost per control step | ~17 ms (10-wheel tank, CPU, `horizon=4`) | ~0.2 ms |
+
+Use the sweep table when the controller runs in a process with no
+simulator (a game client driving the vehicle over OSC), or when the
+control loop has a hard real-time budget it cannot spare. Use the
+Jacobian plant everywhere else.
 
 ```mermaid
 flowchart LR
-    subgraph setup ["Setup (once per vehicle)"]
+    subgraph jac ["default — DifferentiablePlant (no setup)"]
+        VEHJ["live vehicle"] --> JP["autodiff J = d(a, ω_z)/d(thr, steer)<br/>+ Newton solve"]
+    end
+    subgraph sw ["alternative — SweepTable (offline setup)"]
         U["URDF + preset<br/>+ config overrides"] -->|sweep_measure CLI| CSV["sweep CSV<br/>(17,325 combos)"]
     end
     subgraph game ["Every step"]
         ST["chassis state<br/>pos, quat, vel"] --> EX["extract_state"]
         EX --> PF["PathFollower.step"]
+        JP --> PF
         CSV --> PF
         PF -->|"throttle, steer, brake"| VEH["vehicle.set_inputs"]
     end
@@ -45,7 +71,12 @@ path = [
     (-30.0,  0.0, 0.0, +2.0),
 ]
 
-follower = PathFollower(path, "my_vehicle_sweep.csv")
+# The second argument is the inverse plant. Hand it the vehicle and you get
+# the Jacobian plant with no measurement step at all:
+follower = PathFollower(path, vehicle)
+
+# ...or a sweep CSV, for a controller that must run without a simulator:
+#   follower = PathFollower(path, "my_vehicle_sweep.csv")
 
 for step in range(n_steps):
     st = extract_state(vehicle)          # Genesis entity or Vehicle wrapper
@@ -59,7 +90,9 @@ for step in range(n_steps):
 
 Outside Genesis (UE / Unity / replay), build the state dict with
 `extract_state_from_arrays(pos_xyz, quat_wxyz, vel_xyz)` — the controller
-itself is numpy-only and simulator-agnostic.
+itself is numpy-only and simulator-agnostic. That end-to-end property holds
+with a `SweepTable`; the Jacobian plant reads the live vehicle, so that
+combination is Genesis-bound by construction.
 
 **Driving over the OSC server (velocity estimation).** The state stream
 (`/Genesis/Vehicle/TargetBulk`) carries pos + quat but NO velocity, so a
@@ -83,7 +116,155 @@ error < 3 m):
 python -m genesis_vehicle.samples.path_follow_demo [--viewer]
 ```
 
-## 1. Measuring the sweep table (once per vehicle)
+## 1. The Jacobian plant (`DifferentiablePlant`)
+
+```python
+from genesis_vehicle import DifferentiablePlant, PathFollower
+
+plant = DifferentiablePlant(vehicle)          # no CSV, no measurement
+follower = PathFollower(path, plant)          # or just PathFollower(path, vehicle)
+```
+
+### How it gets the inverse
+
+The SDK's ray-wheel physics lives in one pure-`torch` function,
+`_pipeline.compute_wheel_step` — suspension load, slip, Pacejka tyre, the
+wheel-ω update, and the chassis wrench that comes out. Nothing in it does
+I/O, so it is differentiable exactly as written.
+
+Every control step the plant:
+
+1. **snapshots the live state** — per-wheel ray distances (hence normal
+   loads), wheel speeds, body velocity, yaw rate, attitude;
+2. **unrolls `horizon` steps** of that same force model against a planar
+   (surge / sway / yaw) rigid-body integrator built from the vehicle's real
+   composite mass and yaw MOI, and reads off the two quantities the sweep
+   table tabulates:
+   `a = (v_long(H) − v_long(0)) / (H·dt)` and the mean yaw rate;
+3. **differentiates** them with respect to `(throttle, steer)` →
+   `J`, one vmapped backward pass;
+4. **inverts** `J` — a Newton step warm-started from last step's command,
+   then chord iterations with a backtracking line search.
+
+```mermaid
+flowchart TD
+    LS["live state<br/>ray distances, wheel ω, v, ω_z, attitude"] --> UN
+    U0["command u₀<br/>(last step's, warm start)"] --> UN
+    UN["unroll H steps:<br/>compute_wheel_step + planar Newton-Euler"] --> Y["y = (a, ω_z)"]
+    UN -->|torch.autograd| J["J = d(a, ω_z)/d(throttle, steer)"]
+    Y --> R["residual = target − y"]
+    J --> SOL
+    R --> SOL["Newton step + line search"]
+    SOL --> UOUT["(throttle, steer)"]
+```
+
+Because the unroll starts from what the vehicle is actually doing, the
+inverse is local to the real operating point — load transfer already in the
+normal loads, the actual wheel speeds, the actual slope — rather than an
+interpolation between grid nodes measured from a clean flat-ground start.
+
+### Why not the Genesis differentiable solver
+
+Genesis does ship a differentiable rigid solver
+(`SimOptions(requires_grad=True)`), and the obvious plan is to backpropagate
+through `scene.step()`. **It cannot work for this SDK.** The solver's taped
+input set is exactly `set_pos` / `set_quat` / `set_dofs_velocity` /
+`control_dofs_force` (see `RigidEntity.process_input_grad`);
+`apply_links_external_force` and `apply_links_external_torque` are not on
+the tape — and they are the *only* way a ray-wheel vehicle touches the
+solver, because the SDK deliberately has no wheel joints to motor.
+
+Measured on genesis-world 1.3.3: a leaf tensor passed to
+`apply_links_external_force` comes back from `scene.backward()` with
+`grad is None`, while the same probe through `control_dofs_force` returns a
+finite gradient. So Genesis autodiff can differentiate a joint-motor
+vehicle, not a ray-wheel one.
+
+Differentiating the SDK's own force model instead gets the same Jacobian and
+costs less: no `requires_grad` scene, so no hibernation ban, no integrator
+restriction, no dense-Hessian solve, and it runs on CPU.
+
+### Accuracy
+
+The unroll is the real force model driven by a reduced chassis model: exact
+in the wheel forces, approximate in the body motion. Surge / sway / yaw only
+— heave, pitch and roll rates are frozen and the measured ray distances are
+held over the horizon, so the normal loads are this step's (no in-horizon
+load transfer). Gravity enters through the live attitude, which is what the
+sweep grid's pitch/roll axes bought. Terrain is assumed locally flat over
+the horizon (0.1 s at the default `horizon=4` and 40 Hz).
+
+Measured against the actual simulator (command held for `horizon` steps
+from the live state, `horizon=4`, reference 10-wheel tank and 4-wheel car):
+
+| vehicle | max \|Δa\| | max \|Δω_z\| | autodiff vs finite difference |
+|---|---|---|---|
+| `tank_ref` (10 wheels, 58.7 t) | 0.18 m/s² | 0.0014 rad/s | ≤ 6e-4 relative |
+| `car_4w` (4 wheels, 1.33 t) | 0.10 m/s² | 0.0029 rad/s | ≤ 8e-4 relative |
+
+The composite mass properties the planar model uses reproduce the entity's
+own 6×6 mass matrix to six digits.
+
+### Closed-loop, against the sweep table
+
+Same course, same vehicle, same tuning — `path_follow_demo` (10-wheel tank
+around a wall) and `path_follow_reverse_demo` (drive past a bay, cusp,
+reverse in on an explicit-yaw arc):
+
+| plant | forward course, path deviation | reverse-into-bay |
+|---|---|---|
+| `SweepTable` (78,302 measured rollouts) | mean 0.384 m, max 1.034 m | 1.50 m / 0.33 rad, PASS |
+| `DifferentiablePlant` (no measurement) | mean 0.370 m, max 0.917 m | 1.50 m / 0.32 rad, PASS |
+
+```bash
+python -m genesis_vehicle.samples.path_follow_demo --plant jacobian   # default
+python -m genesis_vehicle.samples.path_follow_demo --plant sweep
+```
+
+### Tuning knobs
+
+| kwarg | default | effect |
+|---|---|---|
+| `horizon` | 4 steps | how far ahead the unroll looks, and the cost knob (the solve is linear in it). Longer is not better: 8 measured both slower AND looser than 4 on the reference course, because a controller running every step wants the near-term response and a long horizon drifts further from the frozen-load assumption. |
+| `newton_iters` | 2 | chord iterations after the Jacobian; each is one forward unroll |
+| `coupled` | `False` | solve the full 2×2 instead of channel-diagonal (see below) |
+| `damping` | 1e-2 | Levenberg damping of the coupled solve |
+| `probe_delta` | 0.2 | secant step used when a channel's derivative degenerates (see below) |
+| `line_search_steps` | 3 | backtracking halvings, all evaluated in one batched unroll |
+| `scale_a` / `scale_w` | 1.0 / 0.2 | what counts as "one unit of error" in each channel |
+| `mass` / `izz` / `com` | read off the entity | override the planar mass properties |
+
+### Two things that go wrong without care
+
+**A least-squares 2×2 solve will spin the vehicle to make it go faster.**
+The coupled inverse is free to spend whichever command reduces the residual
+most, and near rest `|∂a/∂steer|` on a skid-steer exceeds
+`|∂a/∂throttle|` — so a speed error gets "fixed" by throwing the vehicle
+into a spin. Path following wants the opposite priority, so the default is
+channel-diagonal: throttle answers for `a`, steer for `ω_z`. The cross terms
+are not discarded — the chord iterations re-evaluate the full coupled
+response at the updated command, which is the useful half of the coupling
+without the pathology.
+
+**The plant has dead zones where the derivative is honestly zero.** The
+v0.6.0 `F_long` overshoot clamp pins tyre force to exactly zero whenever
+friction could not carry the wheel past rolling within one step, and a zero
+Jacobian reads as "no authority, do not move" — which froze the controller
+mid-manoeuvre on the reverse course. Where a whole Jacobian column
+vanishes, the plant re-estimates it with a one-sided **secant** over
+`probe_delta` of command, large enough to step out of the dead zone. The
+derivative is a local object; the secant over a control-sized step is not.
+
+### Feeding it a non-Genesis state
+
+`DifferentiablePlant` accepts any object providing the state-source surface
+(`genesis_vehicle.control.plant.STATE_SOURCE_SURFACE`) in place of a
+vehicle — the resolved config, the wheel meta, and callables returning the
+chassis pose/velocity, wheel ω, previous compression and ray distances.
+That is how the Genesis-free unit tests drive it, and it is the hook for
+wiring the plant to an external state feed.
+
+## 2. Measuring a sweep table (only for `SweepTable`)
 
 ```bash
 python -m genesis_vehicle.control.sweep_measure \
@@ -154,31 +335,30 @@ dt/substeps change** — the table is only valid for that exact quadruple.
 > silently skips your overrides). The bundled demo shows the correct
 > sequence.
 
-## 2. How the follower works
+## 3. How the follower works
 
-### The concept: a two-stage controller around a measured response map
+### The concept: a two-stage controller around a forward map
 
-The sweep table is the vehicle's measured **forward map**: "at state
-(v, pitch, roll), command (throttle | steer) produces response
-(a | ω_z)". The controller never models the vehicle analytically — each
-step it does two things:
+Both plants answer the same question — "at this state, what response does
+this command produce?" — and are read BACKWARD. The sweep table gets that
+map by measuring it; the Jacobian plant gets it by differentiating the
+force model. Either way the controller itself never models the vehicle, and
+each step it does two things:
 
 1. **Decide WHAT physical response it wants** (plain geometry + P control,
    vehicle-agnostic): from the current state and the path it computes a
    speed error and a heading error, and turns them into a desired
    acceleration `a_target` and a desired yaw rate `ω_target` — physical
    quantities, no actuator knowledge.
-2. **Read the measured map BACKWARD** (all vehicle specifics live here):
-   find the throttle whose measured acceleration at the current
-   (v, pitch, roll) equals `a_target`, and the steer whose measured yaw
-   rate equals `ω_target`. Unachievable targets saturate to the actuator
-   limit.
+2. **Read the forward map BACKWARD** (all vehicle specifics live here):
+   find the throttle whose acceleration equals `a_target` and the steer
+   whose yaw rate equals `ω_target`, at the current operating point.
+   Unachievable targets saturate to the actuator limit.
 
 So "current state in → (S, T, B) out to match the path" is exactly right,
 with the state used TWICE: once to compute the errors (pos, yaw, v_long),
-and once as the operating point of the inverse lookup (v_long, pitch,
-roll). Swapping the vehicle only swaps the table; the controller code is
-untouched.
+and once as the operating point of the inverse. Swapping the vehicle only
+swaps the plant; the controller code is untouched.
 
 ```mermaid
 flowchart TD
@@ -190,7 +370,7 @@ flowchart TD
         T["a_target = k_v · Δv<br/>ω_target = k_w · heading_err"]
     end
     subgraph two ["stage 2 — actuator commands (vehicle-specific)"]
-        T --> I["sweep-table INVERSE at (v_long, pitch, roll):<br/>throttle = table⁻¹(a_target)<br/>steer = table⁻¹(ω_target)"]
+        T --> I["INVERSE PLANT at the current operating point:<br/>Jacobian Newton solve, or sweep-table lookup"]
         I --> K["supervisors: cusp state machine,<br/>low-speed KICK, brake-at-rest, caps"]
     end
     K --> O["(throttle, steer, brake) → vehicle.set_inputs"]
@@ -212,9 +392,11 @@ The path is split into **direction blocks** (runs of same-sign
    chassis yaw flipped by π — the chassis faces away from travel);
 5. P control: `a_target = k_v·(v_target − v_long)`,
    `ω_target = k_w·heading_err`;
-6. sweep inversion: `throttle = table⁻¹(v, a_target, pitch, roll)`,
-   `steer = table⁻¹(v, ω_target, pitch, roll)` (4-D multilinear
-   interpolation + bisection; out-of-grid states clamp to the boundary);
+6. plant inversion: one `plant.solve(v, a_target, ω_target, pitch, roll)`
+   for a `DifferentiablePlant` (Newton on the autodiff Jacobian), or two
+   independent grid lookups `table⁻¹(...)` for a `SweepTable` (4-D
+   multilinear interpolation + bisection; out-of-grid states clamp to the
+   boundary);
 7. low-speed KICK: if the along-direction speed is below 40 % of
    `|v_target|`, saturate throttle toward the target direction;
 8. near-zero throttle at near-zero speed ⇒ `brake = 1`.
@@ -248,7 +430,7 @@ spot). If a vehicle rolls past the cusp, raise `v_stop` (accept the flip
 at a slow roll), increase `k_approach` tapering, or give it a stronger
 low-speed brake.
 
-## 3. Path requirements
+## 4. Path requirements
 
 - ≥ 2 waypoints; adjacent spacing 0.3–1 m recommended (densify long
   straights — see the demo's `build_path`).

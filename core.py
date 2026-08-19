@@ -141,6 +141,18 @@ def _print_version_banner(resolved: ResolvedConfig, n_envs: int) -> None:
     )
 
 
+def build_wheel_meta(resolved: ResolvedConfig, device: Any, dtype: Any) -> "WheelMeta":
+    """Build the cached per-wheel tensor bundle from a resolved config.
+
+    Hoisted out of :class:`VehiclePhysics` in v1.3.0 so anything that needs the
+    same per-wheel arrays without a built Genesis entity can get them — notably
+    :class:`genesis_vehicle.control.DifferentiablePlant`, whose prediction
+    unroll calls the very same ``_pipeline.compute_wheel_step``, and the
+    Genesis-free unit tests that exercise it.
+    """
+    return VehiclePhysics._build_wheel_meta_impl(resolved, device, dtype)
+
+
 @dataclass
 class WheelMeta:
     """Cached per-wheel arrays built once at __init__ from ResolvedConfig.
@@ -730,9 +742,12 @@ class VehiclePhysics:
     # -----------------------------------------------------------------
 
     def _build_wheel_meta(self, resolved: ResolvedConfig) -> WheelMeta:
+        return build_wheel_meta(resolved, self.dev, self.fdt)
+
+    @staticmethod
+    def _build_wheel_meta_impl(resolved: ResolvedConfig, d, f) -> WheelMeta:
         wheels = resolved.wheels
         n = len(wheels)
-        d, f = self.dev, self.fdt
         positions = torch.tensor([w.position for w in wheels], device=d, dtype=f)
         side_L = torch.tensor([w.side == "L" for w in wheels], device=d, dtype=torch.bool)
         side_R = torch.tensor([w.side == "R" for w in wheels], device=d, dtype=torch.bool)

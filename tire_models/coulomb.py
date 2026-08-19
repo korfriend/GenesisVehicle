@@ -30,8 +30,14 @@ class CoulombIsotropic(TireModel):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         slip_long = v_long - v_roll
         slip_lat = v_lat
-        slip_mag = torch.sqrt(slip_long * slip_long + slip_lat * slip_lat)
-        denom = torch.clamp(slip_mag, min=self.eps_v)
+        # Clamp INSIDE the sqrt, not after it: `clamp(sqrt(x), min=eps)` leaves
+        # a non-slipping wheel sitting exactly on sqrt's infinite-derivative
+        # point, which NaNs the gradient the DifferentiablePlant takes through
+        # this model. Substituting eps^2 for the argument below the floor gives
+        # the identical forward value with a bounded derivative.
+        eps2 = self.eps_v * self.eps_v
+        sq = slip_long * slip_long + slip_lat * slip_lat
+        denom = torch.sqrt(torch.where(sq > eps2, sq, torch.full_like(sq, eps2)))
 
         mu = wheel_meta.mu_long.unsqueeze(0)           # (1, n_wheels)
         F_long = -mu * N * slip_long / denom
