@@ -253,7 +253,7 @@ def run_l3(args):
         max_collision_pairs=2048,
     )
     # Some options exist only in certain genesis builds (no PyPI release up to
-    # 1.3.1 carries prefer_parallel_linesearch). Filter against the options
+    # 1.3.3 carries prefer_parallel_linesearch). Filter against the options
     # class UP FRONT so an absent key is a silent non-event rather than a
     # scary per-startup [WARN] for something that is already the default
     # (v1.2.8; v1.0.20 first stopped this from hard-crashing).
