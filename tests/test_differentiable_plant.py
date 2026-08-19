@@ -324,6 +324,16 @@ def test_path_follower_takes_a_plant_and_prefers_the_coupled_solve():
     assert -1.0 <= thr <= 1.0 and abs(steer) <= f.steer_cap and brake in (0.0, 1.0)
 
 
+def test_path_follower_forwards_plant_kwargs_when_it_builds_the_plant():
+    # Documented in docs/path-following.md as one of the three ways to set a
+    # plant option, and the only one that goes through PathFollower.
+    src = _FakeSource(car_4w_rwd_ackermann(CAR_URDF))
+    f = PathFollower(_PATH, src, plant_kwargs={
+        "horizon": 6, "mass": src.mass_kg, "izz": src.izz_kgm2})
+    assert isinstance(f.plant, DifferentiablePlant)
+    assert f.plant.horizon == 6
+
+
 def test_path_follower_tightens_the_plant_steer_range_to_its_own_cap():
     p = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=4.0)
     PathFollower(_PATH, p, steer_cap=0.35)

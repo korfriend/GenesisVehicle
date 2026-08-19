@@ -55,8 +55,9 @@ Closed loop, same course and tuning as the measured table:
 | `SweepTable` (78,302 measured rollouts) | mean 0.384 m, max 1.034 m | 1.50 m / 0.33 rad |
 | `DifferentiablePlant` (no measurement) | mean 0.370 m, max 0.917 m | 1.50 m / 0.32 rad |
 
-Cost is ~17 ms per control step for the 10-wheel tank on CPU at `horizon=4`,
-against ~0.2 ms for a table lookup. `SweepTable` therefore stays supported and
+Cost is ~20 ms per control step for the 10-wheel tank on CPU at `horizon=4`
+(the sim step itself is ~10 ms), against ~0.2 ms for a table lookup, and it
+scales linearly with `horizon`. `SweepTable` therefore stays supported and
 stays the right answer for a hard real-time loop, and for a controller running
 in a process with no simulator (a game client driving over OSC) it remains the
 only option — the Jacobian plant reads the live vehicle by construction.
