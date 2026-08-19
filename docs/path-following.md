@@ -607,6 +607,13 @@ low-speed brake.
 
 ## See also
 
+- [`differentiable-sot.md`](differentiable-sot.md) — the standing record of
+  the differentiable work: why Genesis's own autodiff cannot serve a
+  ray-wheel vehicle (measured), what was built instead, every accuracy /
+  cost figure and how to reproduce it, the four bugs it exposed, and the
+  open research questions.
+
+
 - [`samples/path_follow_demo.py`](../samples/path_follow_demo.py) — bundled
   end-to-end demo (tank + reference sweep + wall detour).
 - [`samples/path_follow_osc_demo.py`](../samples/path_follow_osc_demo.py) —
