@@ -10,6 +10,106 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.3.0] — 2026-08-19
+
+**Path following no longer needs a sweep table.** `DifferentiablePlant` is a
+new inverse plant that differentiates the SDK's own ray-wheel force model with
+`torch.autograd` and inverts the resulting Jacobian every step. It is now the
+default for `PathFollower`: no offline sweep run, no CSV, and no silent
+staleness when the plant changes.
+
+| abbr | meaning |
+|---|---|
+| inverse plant | what turns a desired `(a, omega_z)` into a `(throttle, steer)` command |
+| J | 2x2 Jacobian `d(a, omega_z) / d(throttle, steer)` |
+| autodiff | automatic differentiation (`torch.autograd`) |
+| MOI | moment of inertia |
+| dead zone | operating point where the model's derivative is identically zero |
+| secant | finite difference over a control-sized step, as opposed to a derivative |
+
+### `DifferentiablePlant` (new)
+
+Snapshots the live state (per-wheel ray distances and therefore normal loads,
+wheel speeds, body velocity, yaw rate, attitude), unrolls `horizon` steps of
+`_pipeline.compute_wheel_step` against a planar surge/sway/yaw rigid-body
+integrator built from the vehicle's composite mass and yaw MOI, reads off the
+same two quantities a sweep table tabulates, and differentiates them. One
+Newton step with a backtracking line search inverts it, warm-started from the
+previous command.
+
+Interchangeable with `SweepTable` in `PathFollower`'s plant slot; the follower
+also accepts a `Vehicle` handle or a `VehiclePhysics` directly and wraps it.
+`PathFollower(path, sweep=...)` keeps working, as does the `.sweep` attribute.
+
+Measured against the actual simulator (command held for `horizon` steps,
+`horizon=4`): max `|delta a|` 0.18 m/s^2 and max `|delta omega_z|` 0.0014 rad/s
+on the reference 10-wheel tank, 0.10 / 0.0029 on the 4-wheel car; the autodiff
+Jacobian agrees with a finite difference of the same unroll to under 1e-3
+relative. The composite mass properties reproduce the entity's own 6x6 mass
+matrix to six digits.
+
+Closed loop, same course and tuning as the measured table:
+
+| plant | forward course deviation | reverse-into-bay |
+|---|---|---|
+| `SweepTable` (78,302 measured rollouts) | mean 0.384 m, max 1.034 m | 1.50 m / 0.33 rad |
+| `DifferentiablePlant` (no measurement) | mean 0.370 m, max 0.917 m | 1.50 m / 0.32 rad |
+
+Cost is ~17 ms per control step for the 10-wheel tank on CPU at `horizon=4`,
+against ~0.2 ms for a table lookup. `SweepTable` therefore stays supported and
+stays the right answer for a hard real-time loop, and for a controller running
+in a process with no simulator (a game client driving over OSC) it remains the
+only option — the Jacobian plant reads the live vehicle by construction.
+
+**Why not the Genesis differentiable solver.** Its taped input set is exactly
+`set_pos` / `set_quat` / `set_dofs_velocity` / `control_dofs_force`;
+`apply_links_external_force` and `apply_links_external_torque` are not on the
+tape, and they are the only way a ray-wheel vehicle touches the solver, which
+has no wheel joints to motor. Verified on genesis-world 1.3.3: a leaf tensor
+passed to `apply_links_external_force` returns from `scene.backward()` with
+`grad is None`, while the same probe through `control_dofs_force` returns a
+finite gradient. Differentiating the SDK's own model gets the same Jacobian
+without a `requires_grad` scene, so no hibernation ban, no integrator
+restriction, no dense-Hessian cost, and it runs on CPU.
+
+### Fixes this exposed
+
+- **`PacejkaAnisotropic` / `CoulombIsotropic` were not autograd-safe.** Both
+  took `sqrt` of a quantity that is exactly zero at zero slip, where the
+  derivative is infinite; `torch.where` backpropagates through both branches,
+  so every non-sliding wheel produced NaN gradients. Rewritten as a double
+  `where` (Pacejka) and a clamp inside the `sqrt` (Coulomb). Forward values are
+  unchanged in both.
+- **`_pipeline` now takes an autograd-safe rotation.** Genesis's
+  `transform_by_quat` is a TorchScript kernel that writes into a preallocated
+  buffer with `copy_`, which raises `a leaf Variable that requires grad is
+  being used in an in-place operation` when its input carries a gradient — hit
+  by any steered vehicle, whose wheel-frame axes depend on the steer command.
+  `_rotate_by_quat` keeps the fast kernel for the ordinary path and takes the
+  functional quaternion rotation only when a gradient is flowing.
+- **`PathFollower` now reports the applied command back to the plant** on every
+  exit, including the DONE and cusp-brake early returns. The Jacobian
+  linearises about the command the vehicle actually got; leaving it warm-started
+  on a stale one — the follower clamps steer to `steer_cap` and overrides
+  throttle outright with its low-speed KICK — put the linearisation on a vehicle
+  state that never existed. It also tightens the plant's steer range to its own
+  cap for the same reason.
+
+### Also
+
+- `build_wheel_meta(resolved, device, dtype)` hoisted out of `VehiclePhysics`,
+  so the per-wheel tensor bundle can be built without a Genesis entity.
+- `plant_mass_properties(entity)` composes a vehicle's planar mass, centre of
+  mass and yaw MOI from its links, in the body frame (the entity's own mass
+  matrix would give the same numbers but in world axes at the current
+  attitude, so it is only usable while the vehicle sits level).
+- `path_follow_demo` and `path_follow_reverse_demo` take
+  `--plant {jacobian,sweep}` (default `jacobian`); the forward demo also
+  reports path deviation so the two are directly comparable.
+- 19 new tests (245 total), Genesis-free: the plant accepts any object
+  providing `STATE_SOURCE_SURFACE`, so a fake vehicle exercises the whole
+  prediction and inversion path.
+
 ## [1.2.8] — 2026-08-11
 
 Wheel spin-inertia correctness, plus three fixes for misleading OSC-server

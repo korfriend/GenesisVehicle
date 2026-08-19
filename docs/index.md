@@ -12,7 +12,7 @@ Landing page. Pick the document that matches what you're doing.
 | Decide CPU vs GPU physics (measured crossover, `init_backend`, `--gpu`) | [`backends.md`](backends.md) |
 | Choose a tire model (Pacejka vs Coulomb) and understand the ground-contact mechanism | [`tire-and-contact.md`](tire-and-contact.md) |
 | Drive from one unified `VehicleScene` object, and cut the wheel-raycast cost on heavy static terrain | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
-| Make a vehicle follow a waypoint path (path → Steer/Throttle, sweep-table based) | [`path-following.md`](path-following.md) |
+| Make a vehicle follow a waypoint path (path → Steer/Throttle) | [`path-following.md`](path-following.md) |
 | Run the OSC physics server for an external client (Unreal / Unity), or look up the wire schema | [`server.md`](server.md) |
 | Look up a specific class / function / default | [`api-reference.md`](api-reference.md) |
 | Understand WHERE in the simulation step your hook runs | [`pipeline-and-hooks.md`](pipeline-and-hooks.md) |
@@ -48,7 +48,7 @@ from genesis_vehicle import (
     # utilities
     WheelRayPattern, parse_urdf, stability_hooks_for_profile,
     # path following (docs/path-following.md)
-    PathFollower, SweepTable,
+    PathFollower, DifferentiablePlant, SweepTable,
     # per-link transforms (telemetry / animation / attach)
     get_link_transforms, LinkTransforms,
     # version
@@ -67,8 +67,10 @@ The right-hand column is where the full story lives.
 
 | Utility | What it does | Entry point | Details |
 |---|---|---|---|
-| Path following | waypoints + signed target speeds → per-step `(throttle, steer, brake)` by inverting a measured sweep table; cusps (speed-sign flips) handled as stop-and-reverse; numpy-only at control time | `PathFollower`, `SweepTable` | [`path-following.md`](path-following.md) |
-| Sweep measurement | measures a vehicle's (v, throttle, steer, pitch, roll) → (a, ω_z) response grid in one batched L3 run (build-once, body-frame accurate) | `python -m genesis_vehicle.control.sweep_measure` | [`path-following.md`](path-following.md) §1 |
+| Path following | waypoints + signed target speeds → per-step `(throttle, steer, brake)` by inverting the vehicle's response map; cusps (speed-sign flips) handled as stop-and-reverse | `PathFollower` | [`path-following.md`](path-following.md) |
+| Inverse plant (default) | autodiff through the SDK's own ray-wheel force model → 2×2 Jacobian → Newton solve, every step. No measurement, no CSV, tracks plant edits automatically | `DifferentiablePlant` | [`path-following.md`](path-following.md) §1 |
+| Inverse plant (measured) | a pre-measured (v, throttle, steer, pitch, roll) → (a, ω_z) grid; numpy-only, so a simulator-free process can still path-follow | `SweepTable` | [`path-following.md`](path-following.md) §2 |
+| Sweep measurement | measures that grid in one batched L3 run (build-once, body-frame accurate) — only needed for `SweepTable` | `python -m genesis_vehicle.control.sweep_measure` | [`path-following.md`](path-following.md) §2 |
 | Stability profiles | maps a use-case profile (`"control"` / `"raw"` / `"research"`) to the right stability-hook stack | `stability_hooks_for_profile` | [`stability-profiles.md`](stability-profiles.md) |
 | OSC physics server | runs the SDK as a standalone physics process for an external engine (UE / Unity), L2 and L3 modes | `python -m genesis_vehicle.server` | [`server.md`](server.md) |
 | Server benchmark | official server perf matrix (mock UE client, tanks × terrain × mode × backend) | `python -m genesis_vehicle.server.benchmark` | [`server.md`](server.md) §2.1 |

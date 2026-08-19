@@ -62,14 +62,20 @@ class PacejkaAnisotropic(TireModel):
         F_lat = -_pacejka(alpha, pb_y, pc_y, mu_N_lat, pe_y)
 
         # Friction-circle clamp (combined long + lat <= unit ellipse).
+        #
+        # Written as a DOUBLE where so the clamp stays differentiable at zero
+        # slip. d/dx sqrt(x) is infinite at x == 0, and `torch.where` evaluates
+        # (and backprops through) BOTH branches, so a plain
+        # `where(sqrt(sq) > 1, 1/sqrt(sq), 1)` hands back NaN gradients for
+        # every wheel that is not sliding — i.e. all of them at a standstill.
+        # Pinning the sqrt argument to 1.0 wherever the clamp is inactive keeps
+        # it >= 1 on the differentiated path. Forward values are identical to
+        # the single-where form (`sq > 1` and `sqrt(sq) > 1` agree for
+        # non-negative `sq`).
         mu_N_safe = torch.clamp(mu_N, min=1e-6)
         mu_N_lat_safe = torch.clamp(mu_N_lat, min=1e-6)
-        norm = torch.sqrt(
-            (F_long / mu_N_safe) ** 2 + (F_lat / mu_N_lat_safe) ** 2
-        )
-        scale = torch.where(
-            norm > 1.0,
-            1.0 / torch.clamp(norm, min=1e-6),
-            torch.ones_like(norm),
-        )
+        sq = (F_long / mu_N_safe) ** 2 + (F_lat / mu_N_lat_safe) ** 2
+        over = sq > 1.0
+        ones = torch.ones_like(sq)
+        scale = torch.where(over, 1.0 / torch.sqrt(torch.where(over, sq, ones)), ones)
         return F_long * scale, F_lat * scale, kappa, alpha

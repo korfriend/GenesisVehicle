@@ -6,7 +6,14 @@ along a curved path into the bay — with the desired chassis heading (psi)
 supplied explicitly on every reverse waypoint, so the vehicle arrives
 facing bay-north, front-out.
 
-    python -m genesis_vehicle.samples.path_follow_reverse_demo [--viewer] [--gpu] [--mp4 [PATH]]
+    python -m genesis_vehicle.samples.path_follow_reverse_demo [--viewer]
+        [--gpu] [--mp4 [PATH]] [--plant {jacobian,sweep}]
+
+``--plant jacobian`` (default since v1.3.0) drives the maneuver off a
+:class:`~genesis_vehicle.control.DifferentiablePlant` — no sweep CSV involved.
+``--plant sweep`` uses the bundled measured table instead. The cusp is the
+harder test of the two plants: the vehicle has to decelerate to a stop and
+invert its response through a direction change.
 
 Why explicit yaw here: on reverse waypoints the follower's default heading
 is the densified segment tangent +pi — fine when the path is smooth, but a
@@ -79,6 +86,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--viewer", action="store_true", help="show the Genesis viewer")
     ap.add_argument("--gpu", action="store_true", help="GPU physics backend")
+    ap.add_argument("--plant", choices=("jacobian", "sweep"), default="jacobian",
+                    help="inverse plant: 'jacobian' = DifferentiablePlant (no "
+                         "CSV, default), 'sweep' = the bundled sweep table")
     ap.add_argument("--mp4", nargs="?", const="path_follow_reverse_demo.mp4",
                     default=None, metavar="PATH",
                     help="record the run to an mp4 (works headless; needs "
@@ -161,7 +171,14 @@ def main():
     except Exception:
         pass
 
-    follower = PathFollower(path, CSV)
+    if args.plant == "jacobian":
+        from genesis_vehicle import DifferentiablePlant
+        inverse_plant = DifferentiablePlant(tank)
+        print(f"inverse plant: {inverse_plant}")
+    else:
+        inverse_plant = CSV
+        print(f"inverse plant: sweep table {os.path.basename(CSV)}")
+    follower = PathFollower(path, inverse_plant)
 
     recorder = None
     REC_EVERY = 2                       # record every 2nd step -> 20 fps

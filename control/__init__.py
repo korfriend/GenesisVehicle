@@ -1,20 +1,28 @@
 """Vehicle control utilities on top of the physics SDK.
 
-- :class:`SweepTable` — measured (input -> response) grid of one vehicle,
-  with the inverse lookups a controller needs (numpy-only, no Genesis).
+- :class:`DifferentiablePlant` — the **default** inverse plant (v1.3.0):
+  differentiates the SDK's own ray-wheel force model with ``torch.autograd``
+  and inverts the resulting 2x2 Jacobian every step. No sweep measurement, no
+  CSV, and it tracks plant edits (mass, friction, ``i_wheel``) automatically.
+- :class:`SweepTable` — the pre-v1.3.0 inverse plant: a measured
+  (input -> response) grid of one vehicle, loaded from CSV (numpy-only, no
+  Genesis, so a simulator-free runtime can still path-follow).
 - :class:`PathFollower` — path (waypoints + signed target speeds) ->
-  per-step ``(throttle, steer, brake)`` via sweep-table inversion.
+  per-step ``(throttle, steer, brake)``. Takes either plant in the same slot.
 - :func:`extract_state` / :func:`extract_state_from_arrays` — chassis-state
   extraction helpers (Genesis entity / any simulator).
 - ``python -m genesis_vehicle.control.sweep_measure`` — measure the sweep
-  CSV for a new (URDF, preset, config) triple (needs Genesis).
+  CSV for a new (URDF, preset, config) triple (needs Genesis). Only needed
+  for the SweepTable path.
 
 See ``docs/path-following.md`` for the full pipeline.
 """
 from .sweep import SweepTable, SWEEP_COLUMNS
+from .plant import DifferentiablePlant, PlantMassProperties, plant_mass_properties
 from .path_follower import PathFollower, extract_state, extract_state_from_arrays
 
 __all__ = [
+    "DifferentiablePlant", "PlantMassProperties", "plant_mass_properties",
     "SweepTable", "SWEEP_COLUMNS",
     "PathFollower", "extract_state", "extract_state_from_arrays",
 ]
