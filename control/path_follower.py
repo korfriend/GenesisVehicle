@@ -62,6 +62,8 @@ from __future__ import annotations
 
 import math
 import os
+from dataclasses import dataclass
+from typing import Optional
 
 from .sweep import SweepTable
 
@@ -106,6 +108,105 @@ def extract_state(vehicle, env_idx: int = 0) -> dict:
         return arr[env_idx] if getattr(arr, "ndim", 1) == 2 else arr
     return extract_state_from_arrays(
         _row(vehicle.get_pos()), _row(vehicle.get_quat()), _row(vehicle.get_vel()))
+
+
+# --- The two halves of a control step -----------------------------------------
+
+@dataclass
+class FollowerPlan:
+    """What :meth:`PathFollower.plan` decided, before any vehicle is consulted.
+
+    ``command`` set means the step needs no inversion at all — the path state
+    machine already knows the answer (arrived, or braking into a cusp).
+    Otherwise ``a_target`` / ``omega_target`` are the physical response the
+    inverse plant has to deliver.
+    """
+    mode: str
+    a_target: float = 0.0
+    omega_target: float = 0.0
+    v_long: float = 0.0
+    v_target: float = 0.0
+    pitch_deg: float = 0.0
+    roll_deg: float = 0.0
+    command: Optional[tuple] = None
+
+
+class FleetFollower:
+    """Drives N :class:`PathFollower` s off ONE batched inverse plant.
+
+    A follower is per-vehicle by nature — its path, its block, its cusp state
+    machine — but the expensive half of a step is the inversion, and a
+    :class:`~genesis_vehicle.control.DifferentiablePlant` can invert a whole
+    fleet in one unroll. So the step runs in three phases rather than N
+    independent ones::
+
+        plan   (per follower, cheap geometry)
+        solve  (ONCE, batched over every member)
+        finish (per follower, caps + KICK + brake)
+
+    The plant must have one member per follower, in the same order.
+
+    Example::
+
+        plant = DifferentiablePlant(tanks)             # M members
+        fleet = FleetFollower([PathFollower(p, plant) for p in paths], plant)
+        cmds = fleet.step([extract_state(t) for t in tanks])
+    """
+
+    def __init__(self, followers, plant):
+        followers = list(followers)
+        n = int(getattr(plant, "n_members", 1))
+        if n != len(followers):
+            raise ValueError(
+                f"the plant serves {n} members but there are {len(followers)} "
+                "followers — they must correspond one to one, in order")
+        if not getattr(plant, "has_coupled_solve", False):
+            raise TypeError(
+                "FleetFollower needs a plant with a batched solve() "
+                "(DifferentiablePlant); a SweepTable is inverted per vehicle "
+                "anyway, so plain PathFollower.step() is the right call there")
+        self.followers = followers
+        self.plant = plant
+        for i, f in enumerate(followers):
+            f.plant = plant
+            f.plant_member = i
+            f._coupled_plant = True
+        self.last_modes = ["INIT"] * len(followers)
+
+    def __len__(self) -> int:
+        return len(self.followers)
+
+    def step(self, states):
+        """One control step for the whole fleet.
+
+        ``states`` is a sequence of the dicts :func:`extract_state` returns,
+        or of ``(pos_xy, yaw, v_long, pitch_deg, roll_deg)`` tuples — one per
+        follower. Returns a list of ``(throttle, steer, brake)``.
+        """
+        states = list(states)
+        if len(states) != len(self.followers):
+            raise ValueError(
+                f"got {len(states)} states for {len(self.followers)} followers")
+
+        plans = []
+        for f, st in zip(self.followers, states):
+            if isinstance(st, dict):
+                st = (st["pos_xy"], st["yaw"], st["v_long"],
+                      st["pitch"], st["roll"])
+            plans.append(f.plan(*st))
+
+        # One inversion for everyone. Followers whose step is already decided
+        # still occupy a slot — asking for their current response makes their
+        # solve a no-op, and a batched unroll does not care about the width.
+        v_long = [p.v_long for p in plans]
+        a_t = [p.a_target for p in plans]
+        w_t = [p.omega_target for p in plans]
+        thr, steer = self.plant.solve(v_long, a_t, w_t)
+
+        out = [f.finish(p, thr[i], steer[i])
+               for i, (f, p) in enumerate(zip(self.followers, plans))]
+        self.last_modes = [f.last_mode for f in self.followers]
+        return out
 
 
 # --- Inverse-plant coercion ---------------------------------------------------
@@ -303,6 +404,10 @@ class PathFollower:
                     self._forward_end_yaw(bs, be, sgn, prev))
         self.yaws[self.n - 1] = self._block_end_yaw[-1]
 
+        #: Which member of a fleet plant this follower drives; None when the
+        #: plant serves it alone. Set by :class:`FleetFollower`.
+        self.plant_member = None
+
         self.block_i = 0
         blk_start = self.blocks[0][0]
         self.current_idx = blk_start
@@ -432,19 +537,83 @@ class PathFollower:
     def step(self, pos_xy, yaw, v_long, pitch_deg, roll_deg):
         """One control step. Returns ``(throttle, steer, brake)``, each in
         the SDK input range (throttle/steer in [-1, 1], brake in [0, 1])."""
-        out = self._step(pos_xy, yaw, v_long, pitch_deg, roll_deg)
-        # EVERY exit reports the applied command to a Jacobian plant, not just
-        # the driving one. The cusp brake and the DONE stop return (0, 0, 1)
-        # early; leaving the plant warm-started on the last DRIVING command
-        # through a whole stop-and-reverse means the first command of the new
-        # direction is linearised about a vehicle that was still accelerating
-        # forwards — which spins a skid-steer instead of reversing it.
+        plan = self.plan(pos_xy, yaw, v_long, pitch_deg, roll_deg)
+        if plan.command is not None:
+            return self.finish(plan, 0.0, 0.0)
+        if self._coupled_plant:
+            # One 2x2 inversion for both channels: a DifferentiablePlant knows
+            # that steering bleeds speed and that throttle shifts the yaw
+            # authority, which two independent grid lookups cannot express.
+            throttle, steer = self.plant.solve(
+                v_long, plan.a_target, plan.omega_target,
+                plan.pitch_deg, plan.roll_deg)
+        else:
+            throttle = self.plant.throttle_for(
+                v_long, plan.a_target, plan.pitch_deg, plan.roll_deg)
+            steer = self.plant.steer_for(
+                v_long, plan.omega_target, plan.pitch_deg, plan.roll_deg)
+        return self.finish(plan, throttle, steer)
+
+    def _report_applied(self, throttle, steer) -> None:
+        """Tell a Jacobian plant what this vehicle was ACTUALLY commanded.
+
+        Called on EVERY exit, not just the driving one. The cusp brake and the
+        DONE stop return (0, 0, 1) without consulting the plant; leaving it
+        warm-started on the last DRIVING command through a whole
+        stop-and-reverse means the first command of the new direction is
+        linearised about a vehicle that was still accelerating forwards —
+        which spins a skid-steer instead of reversing it.
+        """
+        if self.plant_member is not None:
+            per_member = getattr(self.plant, "set_applied_member", None)
+            if per_member is not None:
+                per_member(self.plant_member, throttle, steer)
+                return
         report = getattr(self.plant, "set_applied", None)
         if report is not None:
-            report(out[0], out[1])
-        return out
+            report(throttle, steer)
 
-    def _step(self, pos_xy, yaw, v_long, pitch_deg, roll_deg):
+    def finish(self, plan, throttle, steer):
+        """Turn a raw plant command into the applied ``(throttle, steer, brake)``.
+
+        The second half of a control step: the supervisors that sit on top of
+        the inversion (low-speed KICK, actuator caps, brake-at-rest) plus the
+        report back to the plant. Split out of :meth:`step` so a fleet can run
+        one batched inversion between everyone's :meth:`plan` and everyone's
+        :meth:`finish` — see :class:`FleetFollower`.
+        """
+        if plan.command is not None:
+            self.last_mode = plan.mode
+            self._report_applied(plan.command[0], plan.command[1])
+            return plan.command
+
+        v_long, v_target = plan.v_long, plan.v_target
+        # Low-speed KICK: far below target speed -> saturate throttle so the
+        # vehicle actually gets moving (the P term alone can be too shy).
+        # Signed comparison: v_long * sign(v_target), so moving the WRONG
+        # way also kicks toward the target direction.
+        if abs(v_target) > 0.1:
+            v_along = v_long * math.copysign(1.0, v_target)
+            if v_along < 0.4 * abs(v_target):
+                throttle = math.copysign(1.0, v_target)
+
+        throttle = max(-1.0, min(1.0, float(throttle)))
+        steer = max(-self.steer_cap, min(self.steer_cap, float(steer)))
+        brake = 1.0 if abs(throttle) < 0.02 and abs(v_long) < 0.1 else 0.0
+
+        self._report_applied(throttle, steer)
+        self.last_mode = plan.mode
+        return throttle, steer, brake
+
+    def plan(self, pos_xy, yaw, v_long, pitch_deg, roll_deg):
+        """The vehicle-agnostic half of a control step.
+
+        Advances the path state machine and turns the geometry into the
+        physical response the vehicle should produce — a desired acceleration
+        and yaw rate. Returns a :class:`FollowerPlan`; when its ``command`` is
+        set the step is already decided (DONE, cusp brake) and no inversion is
+        needed.
+        """
         last_block = self.block_i == len(self.blocks) - 1
         blk_start, blk_end, dir_sign = self.blocks[self.block_i]
 
@@ -452,15 +621,17 @@ class PathFollower:
         last = self.path[-1]
         if last_block and math.hypot(pos_xy[0] - last[0],
                                      pos_xy[1] - last[1]) < self.arrival_goal:
-            self.last_mode = "DONE"
-            return 0.0, 0.0, 1.0
+            return FollowerPlan(mode="DONE", command=(0.0, 0.0, 1.0),
+                                v_long=v_long, pitch_deg=pitch_deg,
+                                roll_deg=roll_deg)
 
         # Cusp state machine: brake to a stop at the block boundary, then
         # switch to the next block (flipped direction).
         if self.transitioning:
             if abs(v_long) > self.v_stop:
-                self.last_mode = "BRAKE_TRANS"
-                return 0.0, 0.0, 1.0
+                return FollowerPlan(mode="BRAKE_TRANS", command=(0.0, 0.0, 1.0),
+                                    v_long=v_long, pitch_deg=pitch_deg,
+                                    roll_deg=roll_deg)
             self.transitioning = False
             self.block_i += 1
             blk_start, blk_end, dir_sign = self.blocks[self.block_i]
@@ -480,8 +651,9 @@ class PathFollower:
             if reached or math.hypot(pos_xy[0] - cusp[0],
                                      pos_xy[1] - cusp[1]) < self.cusp_goal:
                 self.transitioning = True
-                self.last_mode = "BRAKE_TRANS"
-                return 0.0, 0.0, 1.0
+                return FollowerPlan(mode="BRAKE_TRANS", command=(0.0, 0.0, 1.0),
+                                    v_long=v_long, pitch_deg=pitch_deg,
+                                    roll_deg=roll_deg)
 
         self._advance(pos_xy)
 
@@ -515,31 +687,9 @@ class PathFollower:
             pos_err = (bearing + math.pi - yaw + math.pi) % (2 * math.pi) - math.pi
         heading_err = 0.7 * yaw_err + 0.3 * pos_err
 
-        a_target = self.k_v * (v_target - v_long)
-        omega_target = self.k_w * heading_err
-
-        if self._coupled_plant:
-            # One 2x2 inversion for both channels: a DifferentiablePlant knows
-            # that steering bleeds speed and that throttle shifts the yaw
-            # authority, which two independent grid lookups cannot express.
-            throttle, steer = self.plant.solve(
-                v_long, a_target, omega_target, pitch_deg, roll_deg)
-        else:
-            throttle = self.plant.throttle_for(v_long, a_target, pitch_deg, roll_deg)
-            steer = self.plant.steer_for(v_long, omega_target, pitch_deg, roll_deg)
-
-        # Low-speed KICK: far below target speed -> saturate throttle so the
-        # vehicle actually gets moving (the P term alone can be too shy).
-        # Signed comparison: v_long * sign(v_target), so moving the WRONG
-        # way also kicks toward the target direction.
-        if abs(v_target) > 0.1:
-            v_along = v_long * math.copysign(1.0, v_target)
-            if v_along < 0.4 * abs(v_target):
-                throttle = math.copysign(1.0, v_target)
-
-        throttle = max(-1.0, min(1.0, throttle))
-        steer = max(-self.steer_cap, min(self.steer_cap, steer))
-        brake = 1.0 if abs(throttle) < 0.02 and abs(v_long) < 0.1 else 0.0
-
-        self.last_mode = f"DRV{dir_sign:+d}" if dir_sign != 0 else "STOP"
-        return throttle, steer, brake
+        return FollowerPlan(
+            mode=(f"DRV{dir_sign:+d}" if dir_sign != 0 else "STOP"),
+            a_target=self.k_v * (v_target - v_long),
+            omega_target=self.k_w * heading_err,
+            v_long=v_long, v_target=v_target,
+            pitch_deg=pitch_deg, roll_deg=roll_deg)

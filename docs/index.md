@@ -48,7 +48,7 @@ from genesis_vehicle import (
     # utilities
     WheelRayPattern, parse_urdf, stability_hooks_for_profile,
     # path following (docs/path-following.md)
-    PathFollower, DifferentiablePlant, SweepTable,
+    PathFollower, FleetFollower, DifferentiablePlant, SweepTable,
     # per-link transforms (telemetry / animation / attach)
     get_link_transforms, LinkTransforms,
     # version
@@ -69,6 +69,7 @@ The right-hand column is where the full story lives.
 |---|---|---|---|
 | Path following | waypoints + signed target speeds → per-step `(throttle, steer, brake)` by inverting the vehicle's response map; cusps (speed-sign flips) handled as stop-and-reverse | `PathFollower` | [`path-following.md`](path-following.md) |
 | Inverse plant (default) | autodiff through the SDK's own ray-wheel force model → 2×2 Jacobian → Newton solve, every step. No measurement, no CSV, tracks plant edits automatically | `DifferentiablePlant` | [`path-following.md`](path-following.md) §1 |
+| Fleet control | one plant inverts K vehicles × N envs in ONE unrolled batch (26.5× faster than a plant each, at 30 tanks); `plan` → batched `solve` → `finish` | `FleetFollower` | [`path-following.md`](path-following.md) §1 |
 | Inverse plant (measured) | a pre-measured (v, throttle, steer, pitch, roll) → (a, ω_z) grid; numpy-only, so a simulator-free process can still path-follow | `SweepTable` | [`path-following.md`](path-following.md) §2 |
 | Sweep measurement | measures that grid in one batched L3 run (build-once, body-frame accurate) — only needed for `SweepTable` | `python -m genesis_vehicle.control.sweep_measure` | [`path-following.md`](path-following.md) §2 |
 | Stability profiles | maps a use-case profile (`"control"` / `"raw"` / `"research"`) to the right stability-hook stack | `stability_hooks_for_profile` | [`stability-profiles.md`](stability-profiles.md) |

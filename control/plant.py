@@ -40,6 +40,18 @@ speeds, body velocity, attitude), the inverse is local to what the vehicle is
 actually doing, rather than an interpolation of a grid measured at a handful of
 (v, throttle, steer, pitch, roll) nodes.
 
+Fleet batching (v1.4.0)
+-----------------------
+One plant serves **M members** — (vehicle, env) pairs of a single kind, the
+same granularity ``MultiVehicleKindPhysics`` groups by. Every member carries
+its own state, target, warm start and Jacobian; they share the force model,
+the wheel meta and the mass properties, which is what "one kind" means.
+
+This matters because the unroll is dominated by torch's per-op dispatch at
+these tensor sizes, not by arithmetic: a batch of 128 costs 1.25x a batch of
+1, so the per-member cost falls by two orders of magnitude across a fleet.
+``M == 1`` keeps the scalar-in / scalar-out surface unchanged.
+
 Why not the Genesis differentiable solver
 -----------------------------------------
 Genesis does ship a differentiable rigid solver (``SimOptions(requires_grad=True)``),
@@ -137,15 +149,24 @@ def _as_np(x, shape=None):
 
 
 def _quat_to_R(q) -> np.ndarray:
-    """Scalar-first (w, x, y, z) quaternion -> 3x3 rotation matrix."""
-    w, x, y, z = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
-    n = math.sqrt(w * w + x * x + y * y + z * z) or 1.0
-    w, x, y, z = w / n, x / n, y / n, z / n
-    return np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-    ], dtype=np.float64)
+    """Scalar-first (w, x, y, z) quaternion -> rotation matrix.
+
+    Batched: ``(..., 4)`` in, ``(..., 3, 3)`` out.
+    """
+    q = np.asarray(q, dtype=np.float64)
+    q = q / np.maximum(np.linalg.norm(q, axis=-1, keepdims=True), 1e-12)
+    w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    R = np.empty(q.shape[:-1] + (3, 3), dtype=np.float64)
+    R[..., 0, 0] = 1 - 2 * (y * y + z * z)
+    R[..., 0, 1] = 2 * (x * y - w * z)
+    R[..., 0, 2] = 2 * (x * z + w * y)
+    R[..., 1, 0] = 2 * (x * y + w * z)
+    R[..., 1, 1] = 1 - 2 * (x * x + z * z)
+    R[..., 1, 2] = 2 * (y * z - w * x)
+    R[..., 2, 0] = 2 * (x * z - w * y)
+    R[..., 2, 1] = 2 * (y * z + w * x)
+    R[..., 2, 2] = 1 - 2 * (x * x + y * y)
+    return R
 
 
 def plant_mass_properties(entity: Any) -> PlantMassProperties:
@@ -206,7 +227,8 @@ def plant_mass_properties(entity: Any) -> PlantMassProperties:
 #: What :class:`DifferentiablePlant` reads every step. Anything providing all
 #: of it can be handed to the plant directly, in place of a Genesis vehicle —
 #: which is how the Genesis-free unit tests drive the prediction, and the hook
-#: for wiring the plant to a non-Genesis state feed.
+#: for wiring the plant to a non-Genesis state feed. A source serving more than
+#: one member also sets ``n_members``; without it the plant assumes one.
 STATE_SOURCE_SURFACE = ("resolved", "wheel_meta", "dt", "dev", "fdt", "physics",
                         "chassis", "omega", "prev_compression", "distances")
 
@@ -217,38 +239,68 @@ def is_state_source(obj: Any) -> bool:
 
 
 class _StateSource:
-    """Everything the unroll needs, pulled from one live vehicle.
+    """Everything the unroll needs, pulled from M live (vehicle, env) members.
 
     Resolves both driver layouts: a plain :class:`VehiclePhysics`
-    (``VehicleScene(solver="per_vehicle")``) and one vehicle slot of a batched
-    :class:`MultiVehicleKindPhysics` (the default ``solver="batched"``), where
-    the per-wheel state lives in the kind's shared ``(n_envs*K, n_wheels)``
-    proto and this vehicle is row ``env_idx * K + slot``.
+    (``VehicleScene(solver="per_vehicle")``) and vehicle slots of a batched
+    ``MultiVehicleKindPhysics`` (the default ``solver="batched"``), where the
+    per-wheel state lives in the kind's shared ``(n_envs*K, n_wheels)`` proto
+    and a member is row ``env * K + slot``.
+
+    All members must belong to ONE kind: they share ``resolved``,
+    ``wheel_meta`` and the force model, which is what a kind is. Mixed kinds
+    take one plant each.
     """
 
-    def __init__(self, source: Any, env_idx: int = 0):
-        self.env_idx = int(env_idx)
-        physics, entity, row, n_envs, K = self._resolve(source, self.env_idx)
+    def __init__(self, source: Any, env_idx=0):
+        sources = list(source) if isinstance(source, (list, tuple)) else [source]
+        if not sources:
+            raise ValueError("DifferentiablePlant needs at least one vehicle")
+        envs = ([int(env_idx)] if np.ndim(env_idx) == 0
+                else [int(e) for e in env_idx])
+
+        parts = [self._resolve(s) for s in sources]
+        physics = parts[0][0]
+        if any(p[0] is not physics for p in parts):
+            raise ValueError(
+                "all vehicles of one DifferentiablePlant must belong to the same "
+                "kind (they share the force model and the wheel meta) — build "
+                "one plant per kind")
         self.physics = physics
-        self.entity = entity
-        self.row = row
-        self.n_envs = n_envs
+        self.entities = [p[1] for p in parts]
+        self.kind = parts[0][3]
+        K = parts[0][4]
+        slots = [p[2] for p in parts]
+
+        # Members are the cartesian product, env-major so the rows they map to
+        # follow the proto's own (env * K + slot) ordering.
+        self.envs = np.array([e for e in envs for _ in slots], dtype=np.int64)
+        self.slots = np.array([s for _ in envs for s in slots], dtype=np.int64)
+        self.n_members = int(self.envs.size)
         self.K = K
+        self.n_envs = int(getattr(physics, "n_envs", 1))
+        rows = self.envs * K + self.slots
+        self.rows = torch.as_tensor(rows, dtype=torch.long)
+        self.n_rows_total = self.n_envs * K
+
         self.resolved = physics.resolved
         self.wheel_meta = physics.wheel_meta
         self.dt = float(physics.dt)
         self.dev = physics.dev
         self.fdt = physics.fdt
+        # Single-member back-compat surface.
+        self.env_idx = int(self.envs[0])
+        self.row = int(rows[0])
+        self.entity = self.entities[0]
 
     @staticmethod
-    def _resolve(source, env_idx):
-        # A VehicleScene Vehicle handle.
+    def _resolve(source):
+        """-> (physics, entity, slot, kind_or_None, K)"""
         scene = getattr(source, "_scene", None)
         if scene is not None and hasattr(source, "_slot"):
             entity = source.entity_main
             if getattr(source, "physics", None) is not None:      # per_vehicle
-                p = source.physics
-                return p, entity, env_idx, p.n_envs, 1
+                return source.physics, entity, 0, None, 1
             mvp = getattr(scene, "_mvp", None)
             if mvp is None:
                 raise ValueError(
@@ -257,16 +309,14 @@ class _StateSource:
             for flat_i, kind_idx, slot_idx in mvp._flat_to_kind:
                 if flat_i == source._slot:
                     kind = mvp.kinds[kind_idx]
-                    return (kind._proto, entity, env_idx * kind.K + slot_idx,
-                            kind.n_envs, kind.K)
+                    return kind._proto, entity, slot_idx, kind, kind.K
             raise ValueError(f"vehicle slot {source._slot} not found in the scene's kinds")
 
-        # A VehiclePhysics (or a kind's proto) directly.
         if hasattr(source, "resolved") and hasattr(source, "wheel_meta"):
             entity = getattr(source, "entity", None)
             if entity is None:
                 raise ValueError("state source has no .entity to read chassis state from")
-            return source, entity, env_idx, getattr(source, "n_envs", 1), 1
+            return source, entity, 0, None, 1
 
         raise TypeError(
             "DifferentiablePlant needs a VehicleScene Vehicle handle or a "
@@ -274,33 +324,56 @@ class _StateSource:
 
     # -- reads -----------------------------------------------------------------
 
-    def _row(self, t):
+    def _rows(self, t):
+        """Gather this source's member rows out of a proto-batched tensor."""
         if t is None:
             return None
-        return t[self.row] if t.dim() >= 2 else t
+        if t.dim() < 2:
+            return t.unsqueeze(0).expand(self.n_members, -1)
+        return t[self.rows.to(t.device)]
 
     def chassis(self):
-        """(pos, quat, vel, ang) as numpy (3,)/(4,) for THIS vehicle+env."""
-        ent = self.entity
+        """``(pos, quat, vel, ang)`` as numpy ``(M, 3)`` / ``(M, 4)``.
 
-        def _pick(t):
+        A kind reads all its base links in ONE batched solver call however many
+        members this plant serves; only the per-vehicle driver (which has a
+        single entity anyway) falls back to entity reads.
+        """
+        if self.kind is not None:
+            idx = self.kind.base_idx_tensor
+            solver = self.kind.solver
+
+            def _pick(t):
+                a = _as_np(t)
+                if a.ndim == 3:                       # (n_envs, K, d)
+                    return a[self.envs, self.slots]
+                return a[self.slots]                  # (K, d) when n_envs == 0
+            return (_pick(solver.get_links_pos(idx)),
+                    _pick(solver.get_links_quat(idx)),
+                    _pick(solver.get_links_vel(idx)),
+                    _pick(solver.get_links_ang(idx)))
+
+        ent = self.entities[0]
+
+        def _pick1(t):
             a = _as_np(t)
-            return a[self.env_idx] if a.ndim == 2 else a
-
-        return (_pick(ent.get_pos()), _pick(ent.get_quat()),
-                _pick(ent.get_vel()), _pick(ent.get_ang()))
+            if a.ndim == 2:                           # (n_envs, d)
+                return a[self.envs]
+            return np.repeat(a[None, :], self.n_members, axis=0)
+        return (_pick1(ent.get_pos()), _pick1(ent.get_quat()),
+                _pick1(ent.get_vel()), _pick1(ent.get_ang()))
 
     def omega(self) -> torch.Tensor:
-        return self._row(self.physics.omega).detach().clone()
+        return self._rows(self.physics.omega).detach().clone()
 
     def prev_compression(self) -> torch.Tensor:
-        return self._row(self.physics.prev_compression).detach().clone()
+        return self._rows(self.physics.prev_compression).detach().clone()
 
     def distances(self) -> Optional[torch.Tensor]:
         d = getattr(self.physics, "last_distances", None)
         if d is None:
             return None
-        return self._row(d).detach().clone()
+        return self._rows(d).detach().clone()
 
 
 # --- The plant ----------------------------------------------------------------
@@ -314,19 +387,28 @@ class DifferentiablePlant:
     coupled :meth:`solve` (both channels from one 2x2 inversion), which the
     follower prefers when present.
 
+    Serves **M members** — (vehicle, env) pairs of one kind. With ``M == 1``
+    (the default) every entry point takes and returns scalars, exactly as
+    before fleet batching existed; with ``M > 1`` they take and return arrays
+    of length M, and one call covers the whole fleet in a single unroll.
+
     Args:
         source: the live vehicle — a ``VehicleScene`` ``Vehicle`` handle
-            (either solver mode) or a :class:`VehiclePhysics`.
-        env_idx: which Genesis env to read when the scene is batched.
+            (either solver mode), a ``VehiclePhysics``, or a SEQUENCE of
+            vehicles of the same kind.
+        env_idx: which Genesis env to read; a sequence selects several. The
+            members are the cartesian product of ``source`` x ``env_idx``,
+            env-major.
         horizon: unroll length in SIM STEPS, and the plant's cost knob (the
             solve is linear in it). Throttle reaches the ground only after the
             wheel-omega update — omega first, slip second, force third — so a
             1-step unroll sees the response only through the overshoot clamp
-            and is rejected. The default 4 (0.1 s at 40 Hz) measured both faster
-            AND tighter than 8 on the reference tank course: a controller
-            running every step wants the near-term response, and a longer
-            horizon also drifts further from the frozen-normal-load assumption.
-            Raise it if the vehicle's tyre transients are slower than 0.1 s.
+            and is rejected. The default 4 (0.1 s at 40 Hz) measured both
+            faster AND tighter than 8 on the reference tank course: a
+            controller running every step wants the near-term response, and a
+            longer horizon also drifts further from the frozen-normal-load
+            assumption. Raise it if the vehicle's tyre transients are slower
+            than 0.1 s.
         newton_iters: chord iterations after the Jacobian is taken. The
             Jacobian is computed once per :meth:`solve`; each extra iteration
             is one forward unroll (no backward), which buys most of the
@@ -339,10 +421,6 @@ class DifferentiablePlant:
             default despite being the more "complete" inverse.
         brake: brake command assumed during the prediction. 0.0 matches how
             the sweep tables were measured.
-        mass / izz / com: override the planar mass properties, which are
-            otherwise composed from the entity's links. Giving both
-            `mass` and `izz` skips that read entirely, and `com` then
-            defaults to the base-link origin.
         damping: Levenberg damping of the least-squares inversion, on the
             row-normalised Jacobian. Larger = more conservative near a
             singular operating point (standstill, a skid-steer at full
@@ -362,19 +440,26 @@ class DifferentiablePlant:
         probe_delta: command step used to rescue a channel whose autograd
             derivative is identically zero (see :meth:`jacobian`). 0 disables
             the rescue and lets such a channel report no authority.
+        mass / izz / com: override the planar mass properties, which are
+            otherwise composed from the entity's links. Giving both
+            `mass` and `izz` skips that read entirely, and `com` then
+            defaults to the base-link origin. Shared by every member, which is
+            what "one kind" means.
 
     Example::
 
         plant = DifferentiablePlant(veh)          # no CSV anywhere
         follower = PathFollower(path, plant)
-        thr, steer, brake = follower.step(*state)
+
+        fleet = DifferentiablePlant(all_tanks)    # one unroll for the lot
+        thr, steer = fleet.solve(v_long, a_target, omega_target)   # arrays
     """
 
     #: Marks the coupled two-channel solve, which PathFollower prefers.
     has_coupled_solve = True
 
     def __init__(self, source: Any, *,
-                 env_idx: int = 0,
+                 env_idx=0,
                  horizon: int = 4,
                  newton_iters: int = 2,
                  coupled: bool = False,
@@ -402,6 +487,7 @@ class DifferentiablePlant:
                 "F_long overshoot clamp — a numerical guard, not the response "
                 "the controller is trying to invert")
         self.src = source if is_state_source(source) else _StateSource(source, env_idx)
+        self.n_members = int(getattr(self.src, "n_members", 1))
         self.horizon = int(horizon)
         self.newton_iters = int(newton_iters)
         self.coupled = bool(coupled)
@@ -437,25 +523,27 @@ class DifferentiablePlant:
         # Prediction-only hook copies: the live hooks own cross-step state
         # (StaticFrictionLock anchors its stick-slip springs), which an
         # unrolled what-if must not advance. Re-synced from the live ones at
-        # the top of every solve so the prediction still starts where the
-        # vehicle actually is.
+        # the top of every unroll so the prediction still starts where the
+        # vehicles actually are.
         p = self.src.physics
         self._pred_pre_hooks = copy.deepcopy(list(p.pre_loop_hooks))
         self._pred_post_hooks = copy.deepcopy(list(p.post_tire_hooks))
 
-        # Warm start + diagnostics. Everything a caller needs to see why a
-        # command came out the way it did: `last_jacobian` is the 2x2 the solve
-        # linearised on, `last_response` the (a, omega_z) it converged to,
-        # `last_target` what was asked for, `last_singular` whether a channel
-        # had no authority at this operating point.
-        self.last_u = (0.0, 0.0)
-        self.last_jacobian: Optional[np.ndarray] = None
-        self.last_response: Optional[tuple] = None
-        self.last_target: Optional[tuple] = None
+        # Warm start + diagnostics, per member. Everything a caller needs to
+        # see why a command came out the way it did: `last_jacobian` is the
+        # 2x2 the solve linearised on, `last_response` the (a, omega_z) it
+        # converged to, `last_target` what was asked for, `last_singular`
+        # whether a channel had no authority at this operating point.
+        M = self.n_members
+        self._u = np.zeros((M, 2))
+        self._jacobian = np.zeros((M, 2, 2))
+        self._response = np.zeros((M, 2))
+        self._target = np.zeros((M, 2))
+        self._singular = np.zeros(M, dtype=bool)
+        self._cost = np.zeros(M)
         self.last_iters = 0
-        self.last_cost = 0.0
-        self.last_singular = False
         self._pending_a: Optional[float] = None
+        self._has_solved = False
 
     # -- introspection ---------------------------------------------------------
 
@@ -463,54 +551,113 @@ class DifferentiablePlant:
     def dt(self) -> float:
         return self.src.dt
 
+    @property
+    def last_u(self):
+        """Warm start: ``(throttle, steer)``, or an ``(M, 2)`` array."""
+        return tuple(self._u[0]) if self.n_members == 1 else self._u.copy()
+
+    @property
+    def last_jacobian(self):
+        if not self._has_solved:
+            return None
+        return self._jacobian[0] if self.n_members == 1 else self._jacobian.copy()
+
+    @property
+    def last_response(self):
+        if not self._has_solved:
+            return None
+        return tuple(self._response[0]) if self.n_members == 1 else self._response.copy()
+
+    @property
+    def last_target(self):
+        if not self._has_solved:
+            return None
+        return tuple(self._target[0]) if self.n_members == 1 else self._target.copy()
+
+    @property
+    def last_singular(self):
+        return bool(self._singular[0]) if self.n_members == 1 else self._singular.copy()
+
+    @property
+    def last_cost(self):
+        return float(self._cost[0]) if self.n_members == 1 else self._cost.copy()
+
     def __repr__(self) -> str:
-        return (f"DifferentiablePlant(n_wheels={self.src.wheel_meta.n_wheels}, "
+        members = "" if self.n_members == 1 else f"members={self.n_members}, "
+        return (f"DifferentiablePlant({members}"
+                f"n_wheels={self.src.wheel_meta.n_wheels}, "
                 f"horizon={self.horizon}, dt={self.dt:.4f}, "
                 f"{self.mass_props!r})")
 
     # -- prediction ------------------------------------------------------------
 
-    def _sync_hooks(self) -> None:
-        p = self.src.physics
-        for live, pred in ((p.pre_loop_hooks, self._pred_pre_hooks),
-                           (p.post_tire_hooks, self._pred_post_hooks)):
+    def _sync_hooks(self, cands: int = 1) -> None:
+        """Reset the prediction hooks to the live per-member state.
+
+        Two jobs at once. It re-anchors the copies on what the vehicles are
+        actually doing, and it detaches — a hook carrying a graph tensor from
+        the previous unroll would chain every unroll into one ever-growing
+        graph, which turns repeated calls quadratic.
+
+        Tensors indexed by the proto's flat batch are gathered down to this
+        plant's members and then widened to the ``M * cands`` rows the unroll
+        will run at, because a hook that re-allocates on a shape mismatch
+        (StaticFrictionLock does) would silently zero its anchors instead.
+        """
+        rows = self.src.rows if hasattr(self.src, "rows") else None
+        n_total = getattr(self.src, "n_rows_total", None)
+        for live, pred in ((self.src.physics.pre_loop_hooks, self._pred_pre_hooks),
+                           (self.src.physics.post_tire_hooks, self._pred_post_hooks)):
             for lh, ph in zip(live, pred):
                 for k, v in lh.__dict__.items():
-                    if torch.is_tensor(v):
-                        setattr(ph, k, v.detach().clone())
+                    if not torch.is_tensor(v):
+                        continue
+                    t = v.detach()
+                    if (rows is not None and n_total is not None
+                            and t.dim() >= 1 and t.shape[0] == n_total):
+                        t = t[rows.to(t.device)]
+                    if cands > 1:
+                        t = t.repeat_interleave(cands, dim=0)
+                    setattr(ph, k, t.clone())
 
     def _snapshot(self) -> dict:
-        """Freeze the live state the next unroll starts from."""
+        """Freeze the live per-member state the next unroll starts from."""
         src = self.src
+        M = self.n_members
         pos, quat, vel, ang = src.chassis()
-        R = _quat_to_R(quat)
+        quat = np.atleast_2d(np.asarray(quat, dtype=np.float64))
+        vel = np.atleast_2d(np.asarray(vel, dtype=np.float64))
+        ang = np.atleast_2d(np.asarray(ang, dtype=np.float64))
+        R = _quat_to_R(quat)                                    # (M, 3, 3)
         dev, fdt = src.dev, src.fdt
         dist = src.distances()
         if dist is None:
             raise RuntimeError(
                 "the vehicle has no wheel-ground distances yet — step the scene "
                 "at least once before asking the plant for a command")
-        v_b = R.T @ np.asarray(vel, dtype=np.float64).reshape(3)
-        w_b = R.T @ np.asarray(ang, dtype=np.float64).reshape(3)
-        g_b = R.T @ np.array([0.0, 0.0, -9.81])
+        n = src.wheel_meta.n_wheels
+        g_world = np.array([0.0, 0.0, -9.81])
         return {
-            "distances": dist.reshape(1, -1).to(device=dev, dtype=fdt),
-            "omega": src.omega().reshape(1, -1).to(device=dev, dtype=fdt),
-            "prev_compression": src.prev_compression().reshape(1, -1).to(device=dev, dtype=fdt),
-            "v_b": v_b, "w_z": float(w_b[2]), "g_b": g_b,
+            "distances": dist.reshape(M, n).to(device=dev, dtype=fdt),
+            "omega": src.omega().reshape(M, n).to(device=dev, dtype=fdt),
+            "prev_compression": src.prev_compression().reshape(M, n).to(
+                device=dev, dtype=fdt),
+            "v_b": np.einsum("mji,mj->mi", R, vel),             # R^T v, (M, 3)
+            "w_z": np.einsum("mji,mj->mi", R, ang)[:, 2],       # (M,)
+            "g_b": np.einsum("mji,j->mi", R, g_world),          # (M, 3)
         }
 
     def _unroll(self, throttle: torch.Tensor, steer: torch.Tensor,
-                snap: dict) -> tuple:
+                snap: dict, cands: int = 1) -> tuple:
         """H steps of the real wheel pipeline + a planar chassis integrator.
 
-        ``throttle`` / ``steer`` are ``(B,)``: the whole method is batched over
-        candidate COMMANDS, so a line search evaluates all of its candidates in
-        one pass. On CPU at these sizes the unroll is dominated by torch's
-        per-op dispatch, not by arithmetic, so B candidates cost barely more
-        than one.
+        ``throttle`` / ``steer`` are ``(M * cands,)``, member-major: member 0's
+        candidates first, then member 1's. The batch axis therefore carries
+        BOTH the fleet and the candidate commands of a line search, and at
+        these tensor sizes the unroll is dominated by per-op dispatch, so
+        widening it is close to free.
 
-        Returns ``(a, omega_z)``, both ``(B,)`` and graph-carrying.
+        Returns ``(a, omega_z)``, both ``(M * cands,)`` and graph-carrying.
         """
         src = self.src
         dev, fdt = src.dev, src.fdt
@@ -518,7 +665,8 @@ class DifferentiablePlant:
         resolved = src.resolved
         DT = src.dt
         n = wm.n_wheels
-        B = int(throttle.reshape(-1).shape[0])
+        M = self.n_members
+        B = M * cands
 
         from ..core import PipelineContext
         from ..inputs import VehicleInputs
@@ -532,17 +680,27 @@ class DifferentiablePlant:
         up = torch.tensor([0.0, 0.0, 1.0], device=dev, dtype=fdt).expand(B, 3)
         wheel_body_b = wm.positions.to(device=dev, dtype=fdt).unsqueeze(0).expand(B, n, 3)
 
+        def _wide(t):
+            return t if cands == 1 else t.repeat_interleave(cands, dim=0)
+
+        def _np_wide(a):
+            a = np.asarray(a, dtype=np.float64)
+            return np.repeat(a, cands, axis=0) if cands > 1 else a
+
         brake_t = torch.full((B,), self.brake, device=dev, dtype=fdt)
-        omega = snap["omega"].expand(B, n)
-        prev_comp = snap["prev_compression"].expand(B, n)
-        distances = snap["distances"].expand(B, n)
+        omega = _wide(snap["omega"])
+        prev_comp = _wide(snap["prev_compression"])
+        distances = _wide(snap["distances"])
 
         # Planar state, body frame, referenced at the base-link origin.
-        vx = torch.full((B,), float(snap["v_b"][0]), device=dev, dtype=fdt)
-        vy = torch.full((B,), float(snap["v_b"][1]), device=dev, dtype=fdt)
-        wz = torch.full((B,), float(snap["w_z"]), device=dev, dtype=fdt)
+        v_b = _np_wide(snap["v_b"])
+        vx = torch.as_tensor(v_b[:, 0], device=dev, dtype=fdt)
+        vy = torch.as_tensor(v_b[:, 1], device=dev, dtype=fdt)
+        wz = torch.as_tensor(_np_wide(snap["w_z"]), device=dev, dtype=fdt)
         vx0 = vx
-        gx = float(snap["g_b"][0]); gy = float(snap["g_b"][1])
+        g_b = _np_wide(snap["g_b"])
+        gx = torch.as_tensor(g_b[:, 0], device=dev, dtype=fdt)
+        gy = torch.as_tensor(g_b[:, 1], device=dev, dtype=fdt)
 
         m = self.mass_props.mass
         cx, cy = self.mass_props.com[0], self.mass_props.com[1]
@@ -603,71 +761,87 @@ class DifferentiablePlant:
         omega_z = wz_sum / self.horizon
         return a, omega_z
 
-    def predict(self, throttle, steer, snap: Optional[dict] = None):
-        """Forward-only prediction of ``(a, omega_z)`` for a held command.
+    def predict(self, throttle, steer, snap: Optional[dict] = None,
+                cands: Optional[int] = None):
+        """Forward-only prediction of ``(a, omega_z)`` for held commands.
 
-        Scalars in, scalars out. Pass sequences to evaluate several candidate
-        commands in ONE unroll — the line search does exactly that — and get
-        two ``(B,)`` arrays back.
+        With one member and scalar inputs, returns scalars. Otherwise returns
+        two arrays of length ``M * cands``, member-major — several candidate
+        commands per member, all in ONE unroll, which is what the line search
+        does.
+
+        ``cands`` is inferred from the input length when omitted, so a
+        single-member plant can be swept with a plain list of commands.
         """
         if snap is None:
             snap = self._snapshot()
+        M = self.n_members
         dev, fdt = self.src.dev, self.src.fdt
-        batched = np.ndim(throttle) > 0 or np.ndim(steer) > 0
+        scalar_in = np.ndim(throttle) == 0 and np.ndim(steer) == 0
         t = torch.as_tensor(np.atleast_1d(np.asarray(throttle, dtype=np.float64)),
                             device=dev, dtype=fdt)
         s = torch.as_tensor(np.atleast_1d(np.asarray(steer, dtype=np.float64)),
                             device=dev, dtype=fdt)
         if t.shape != s.shape:
             t, s = torch.broadcast_tensors(t, s)
-        # The prediction hooks carry cross-step state, so every unroll has to
-        # start from the live vehicle's — otherwise candidate N inherits
-        # candidate N-1's stick-slip anchors AND keeps its autograd graph
-        # alive, which turns repeated calls quadratic.
-        self._sync_hooks()
+        n_in = int(t.numel())
+        if cands is None:
+            if n_in % M:
+                raise ValueError(
+                    f"predict got {n_in} commands, which is not a whole number "
+                    f"of candidates for this plant's {M} members")
+            cands = n_in // M
+        elif n_in != M * cands:
+            raise ValueError(
+                f"predict got {n_in} commands, expected M*cands = {M}*{cands}")
+        if scalar_in and M > 1:
+            # One command for the whole fleet: hold it on every member.
+            t = t.expand(M).contiguous()
+            s = s.expand(M).contiguous()
+            cands = 1
+        self._sync_hooks(cands)
         with torch.no_grad():
-            a, w = self._unroll(t, s, snap)
+            a, w = self._unroll(t, s, snap, cands)
         a = a.detach().cpu().numpy()
         w = w.detach().cpu().numpy()
-        return (a, w) if batched else (float(a[0]), float(w[0]))
+        if scalar_in and M == 1:
+            return float(a[0]), float(w[0])
+        return a, w
 
-    def jacobian(self, throttle: Optional[float] = None, steer: Optional[float] = None,
-                 snap: Optional[dict] = None) -> tuple:
-        """``(J, y)`` at the given command — ``J`` is 2x2, ``y`` is ``(a, omega_z)``.
+    def jacobian(self, throttle=None, steer=None, snap: Optional[dict] = None):
+        """``(J, y)`` at the given command.
 
-        Rows are ``(a, omega_z)``, columns ``(throttle, steer)``.
+        ``J`` is ``(2, 2)`` and ``y`` is ``(a, omega_z)`` for a single member;
+        ``(M, 2, 2)`` and ``(M, 2)`` for a fleet. Rows are ``(a, omega_z)``,
+        columns ``(throttle, steer)``.
+
+        Both rows come from one backward pass each over the WHOLE fleet: batch
+        members are independent in the unroll, so ``d(sum_i a_i)/d(thr_j)`` is
+        exactly member j's own gradient, and M members cost what one does.
         """
         if snap is None:
             snap = self._snapshot()
-        u0 = self.last_u
-        thr = u0[0] if throttle is None else float(throttle)
-        st = u0[1] if steer is None else float(steer)
+        M = self.n_members
+        u0 = self._u
+        thr = u0[:, 0] if throttle is None else np.broadcast_to(
+            np.asarray(throttle, dtype=np.float64), (M,))
+        st = u0[:, 1] if steer is None else np.broadcast_to(
+            np.asarray(steer, dtype=np.float64), (M,))
         dev, fdt = self.src.dev, self.src.fdt
-        self._sync_hooks()
-        t = torch.tensor([float(thr)], device=dev, dtype=fdt, requires_grad=True)
-        s = torch.tensor([float(st)], device=dev, dtype=fdt, requires_grad=True)
-        a, w = self._unroll(t, s, snap)
-        y = (float(a[0].detach()), float(w[0].detach()))
-        outs = torch.cat([a.reshape(1), w.reshape(1)])
-        J = np.zeros((2, 2))
-        try:
-            # Both rows of the Jacobian in ONE vmapped backward instead of two
-            # sequential ones — the unroll graph is deep (horizon x pipeline)
-            # and walking it twice is the single largest cost in the solve.
-            seeds = torch.eye(2, device=outs.device, dtype=outs.dtype)
-            g = torch.autograd.grad(outs, (t, s), grad_outputs=seeds,
-                                    is_grads_batched=True, allow_unused=True)
+        self._sync_hooks(1)
+        t = torch.tensor(np.ascontiguousarray(thr), device=dev, dtype=fdt,
+                         requires_grad=True)
+        s = torch.tensor(np.ascontiguousarray(st), device=dev, dtype=fdt,
+                         requires_grad=True)
+        a, w = self._unroll(t, s, snap, cands=1)
+        y = np.stack([a.detach().cpu().numpy(), w.detach().cpu().numpy()], axis=1)
+        J = np.zeros((M, 2, 2))
+        for i, out in enumerate((a, w)):
+            g = torch.autograd.grad(out.sum(), (t, s), retain_graph=(i == 0),
+                                    allow_unused=True)
             for c in (0, 1):
                 if g[c] is not None:
-                    J[:, c] = g[c].reshape(2).detach().cpu().numpy()
-        except (RuntimeError, NotImplementedError):
-            # vmap-over-backward is not supported for every op; fall back to
-            # the plain two-pass form.
-            for i, out in enumerate((a, w)):
-                gi = torch.autograd.grad(out.sum(), (t, s), retain_graph=(i == 0),
-                                         allow_unused=True)
-                J[i, 0] = 0.0 if gi[0] is None else float(gi[0])
-                J[i, 1] = 0.0 if gi[1] is None else float(gi[1])
+                    J[:, i, c] = g[c].detach().cpu().numpy()
 
         # Secant rescue for a channel whose derivative is degenerate.
         #
@@ -679,39 +853,48 @@ class DifferentiablePlant:
         # in reverse sat in exactly that state and froze the controller, since
         # a zero Jacobian means "no authority, do not move".
         #
-        # So: where a whole column of the Jacobian vanishes, replace it with a
+        # So: where a column of a member's Jacobian vanishes, replace it with a
         # one-sided difference over `probe_delta`, large enough to step out of
-        # the dead zone. Both probes ride one batched unroll.
+        # the dead zone. Both columns of every member ride one batched unroll.
         if self.probe_delta > 0.0:
-            dead = np.flatnonzero(np.abs(J).max(axis=0) <= self.probe_threshold)
-            if dead.size:
-                u = np.array([thr, st])
+            u = np.stack([thr, st], axis=1)                       # (M, 2)
+            dead = np.abs(J).max(axis=1) <= self.probe_threshold  # (M, 2)
+            if dead.any():
                 lo = np.array([self.throttle_range[0], self.steer_range[0]])
                 hi = np.array([self.throttle_range[1], self.steer_range[1]])
-                trials = np.repeat(u[None, :], dead.size, axis=0)
-                steps = np.zeros(dead.size)
-                for i, c in enumerate(dead):
-                    # Probe towards whichever side has room (a saturated
-                    # command has room only inwards).
-                    d = self.probe_delta if u[c] + self.probe_delta <= hi[c] \
-                        else -self.probe_delta
-                    d = max(min(d, hi[c] - u[c]), lo[c] - u[c])
-                    trials[i, c] = u[c] + d
-                    steps[i] = d
-                ok = np.abs(steps) > 1e-9
-                if ok.any():
-                    a_t, w_t = self.predict(trials[:, 0], trials[:, 1], snap=snap)
-                    for i, c in enumerate(dead):
-                        if not ok[i]:
-                            continue
-                        J[0, c] = (float(a_t[i]) - y[0]) / steps[i]
-                        J[1, c] = (float(w_t[i]) - y[1]) / steps[i]
+                # Probe towards whichever side has room (a saturated command
+                # has room only inwards). Column c of every member at once.
+                trials = np.repeat(u[:, None, :], 2, axis=1)      # (M, 2, 2)
+                steps = np.zeros((M, 2))
+                for c in (0, 1):
+                    d = np.where(u[:, c] + self.probe_delta <= hi[c],
+                                 self.probe_delta, -self.probe_delta)
+                    d = np.clip(d, lo[c] - u[:, c], hi[c] - u[:, c])
+                    trials[:, c, c] = u[:, c] + d
+                    steps[:, c] = d
+                a_t, w_t = self.predict(trials[:, :, 0].reshape(-1),
+                                        trials[:, :, 1].reshape(-1),
+                                        snap=snap, cands=2)
+                a_t = np.asarray(a_t).reshape(M, 2)
+                w_t = np.asarray(w_t).reshape(M, 2)
+                ok = dead & (np.abs(steps) > 1e-9)
+                for c in (0, 1):
+                    sel = ok[:, c]
+                    if not sel.any():
+                        continue
+                    J[sel, 0, c] = (a_t[sel, c] - y[sel, 0]) / steps[sel, c]
+                    J[sel, 1, c] = (w_t[sel, c] - y[sel, 1]) / steps[sel, c]
+
+        if M == 1:
+            return J[0], (float(y[0, 0]), float(y[0, 1]))
         return J, y
 
     # -- inversion -------------------------------------------------------------
 
     def _step_command(self, J, err, u):
-        """One command update from a Jacobian and a response error.
+        """One command update per member, from Jacobians and response errors.
+
+        ``J`` is ``(M, 2, 2)``; ``err`` and ``u`` are ``(M, 2)``.
 
         Damped least squares rather than a straight ``J^-1 e``. The plant has
         genuine local singularities — a skid-steer at full steer differential
@@ -721,24 +904,23 @@ class DifferentiablePlant:
         channel cannot buy anything here, so leave it alone", which is the
         correct action; :class:`PathFollower`'s low-speed KICK covers pulling
         away from rest, where no plant inverse can help.
-
-        Rows are normalised first so the ``m/s^2`` and ``rad/s`` residuals are
-        weighted comparably and one damping constant serves both.
         """
-        thr, st = u
         J = np.nan_to_num(np.asarray(J, dtype=np.float64), nan=0.0,
                           posinf=0.0, neginf=0.0)
         e = np.asarray(err, dtype=np.float64)
         floors = np.array([self.min_gain_a, self.min_gain_w])
 
         if self.coupled:
-            rows = np.linalg.norm(J, axis=1)
+            # Rows are normalised first so the m/s^2 and rad/s residuals are
+            # weighted comparably and one damping constant serves both.
+            rows = np.linalg.norm(J, axis=2)                       # (M, 2)
             weak = rows < floors
             scale = np.where(rows > 1e-12, rows, 1.0)
-            Jn = J / scale[:, None]
+            Jn = J / scale[:, :, None]
             en = np.where(weak, 0.0, e / scale)
-            A = Jn.T @ Jn + self.damping * np.eye(2)
-            du = np.linalg.solve(A, Jn.T @ en)
+            A = np.matmul(np.swapaxes(Jn, 1, 2), Jn) + self.damping * np.eye(2)
+            rhs = np.matmul(np.swapaxes(Jn, 1, 2), en[:, :, None])
+            du = np.linalg.solve(A, rhs)[:, :, 0]
         else:
             # Channel-diagonal inversion: throttle answers for `a`, steer for
             # `omega_z`. The cross terms are NOT ignored, they are handled by
@@ -749,39 +931,42 @@ class DifferentiablePlant:
             # `|dA/dthrottle|`, which for a skid-steer near rest it does: the
             # controller then throws the vehicle into a spin to make it go
             # faster. Path following wants the opposite priority.
-            g = np.array([J[0, 0], J[1, 1]])
+            g = np.stack([J[:, 0, 0], J[:, 1, 1]], axis=1)         # (M, 2)
             weak = np.abs(g) < floors
             du = np.where(weak, 0.0, e / np.where(weak, 1.0, g))
 
         du = np.clip(du, -self.max_delta, self.max_delta)
-        thr = min(max(thr + float(du[0]), self.throttle_range[0]), self.throttle_range[1])
-        st = min(max(st + float(du[1]), self.steer_range[0]), self.steer_range[1])
-        return (thr, st), bool(weak.any())
+        lo = np.array([self.throttle_range[0], self.steer_range[0]])
+        hi = np.array([self.throttle_range[1], self.steer_range[1]])
+        return np.clip(u + du, lo, hi), weak.any(axis=1)
 
-    def solve(self, v_long: float, a_target: float, omega_target: float,
-              pitch_deg: float = 0.0, roll_deg: float = 0.0) -> tuple:
-        """Coupled inverse: ``(throttle, steer)`` hitting ``(a_target, omega_target)``.
+    def solve(self, v_long, a_target, omega_target,
+              pitch_deg=0.0, roll_deg=0.0):
+        """Inverse: the ``(throttle, steer)`` hitting ``(a_target, omega_target)``.
+
+        Scalars in, ``(throttle, steer)`` out for a single member; arrays of
+        length M in, two arrays out for a fleet — one unroll covers the lot.
 
         ``v_long`` / ``pitch_deg`` / ``roll_deg`` are accepted for signature
         symmetry with :class:`SweepTable` but are NOT used — the plant reads
-        the live speed and attitude off the vehicle itself, which is strictly
-        more information than those three scalars carry.
+        the live speed and attitude off the vehicles themselves, which is
+        strictly more information than those three scalars carry.
         """
-        self._sync_hooks()
+        M = self.n_members
         snap = self._snapshot()
-        target = np.array([float(a_target), float(omega_target)])
-        self.last_target = (float(a_target), float(omega_target))
+        target = np.stack([
+            np.broadcast_to(np.asarray(a_target, dtype=np.float64), (M,)),
+            np.broadcast_to(np.asarray(omega_target, dtype=np.float64), (M,)),
+        ], axis=1)                                                  # (M, 2)
+        self._target = target.copy()
         w = np.array([1.0 / self.scale_a, 1.0 / self.scale_w])
 
-        def cost(y):
-            return float(np.linalg.norm((target - np.asarray(y)) * w))
-
-        u = self.last_u
-        J, y = self.jacobian(u[0], u[1], snap=snap)
-        self.last_jacobian = J
-        self.last_response = y
-        best_cost = cost(y)
-        singular = False
+        u = self._u.copy()
+        J, y = self.jacobian(u[:, 0], u[:, 1], snap=snap)
+        J = np.asarray(J, dtype=np.float64).reshape(M, 2, 2)
+        y = np.asarray(y, dtype=np.float64).reshape(M, 2)
+        best_cost = np.linalg.norm((target - y) * w, axis=1)        # (M,)
+        singular = np.zeros(M, dtype=bool)
         iters = 0
 
         # Chord iterations with a backtracking line search. Reusing the same J
@@ -791,42 +976,64 @@ class DifferentiablePlant:
         # response, and a Jacobian read on the wrong side of one can point
         # uphill. Rather than guess which derivatives to trust, take the step
         # only if the predicted residual actually shrinks.
+        fracs = 0.5 ** np.arange(self.line_search_steps)
+        C = self.line_search_steps
+        rows = np.arange(M)
         for _ in range(max(1, self.newton_iters)):
-            if best_cost < self.tol:
+            live = best_cost >= self.tol
+            if not live.any():
                 break
-            cand, sing = self._step_command(J, target - np.asarray(y), u)
-            singular = singular or sing
-            du = np.array(cand) - np.array(u)
+            # A converged member contributes no residual, so its step is zero
+            # and the batched unroll simply re-evaluates it at no extra cost.
+            err = np.where(live[:, None], target - y, 0.0)
+            cand, sing = self._step_command(J, err, u)
+            singular |= sing
+            du = cand - u
             if not np.any(np.abs(du) > 1e-12):
                 break
-            # All backtracking candidates in ONE batched unroll: the halvings
-            # are independent, and a B-wide unroll costs almost the same as a
-            # single one at these sizes.
-            fracs = 0.5 ** np.arange(self.line_search_steps)
-            trials = np.array(u)[None, :] + du[None, :] * fracs[:, None]
-            a_t, w_t = self.predict(trials[:, 0], trials[:, 1], snap=snap)
-            costs = np.linalg.norm((target[None, :] - np.stack([a_t, w_t], 1)) * w[None, :],
-                                   axis=1)
-            k = int(np.argmin(costs))
-            iters += 1
-            if costs[k] >= best_cost:
-                break
-            u = (float(trials[k, 0]), float(trials[k, 1]))
-            y = (float(a_t[k]), float(w_t[k]))
-            best_cost = float(costs[k])
 
-        self.last_u = (float(u[0]), float(u[1]))
-        self.last_response = y
+            # All backtracking candidates of all members in ONE batched
+            # unroll: the halvings are independent, and a wider batch costs
+            # almost the same at these sizes.
+            trials = u[:, None, :] + du[:, None, :] * fracs[None, :, None]
+            a_t, w_t = self.predict(trials[:, :, 0].reshape(-1),
+                                    trials[:, :, 1].reshape(-1),
+                                    snap=snap, cands=C)
+            y_t = np.stack([np.asarray(a_t), np.asarray(w_t)], axis=1).reshape(M, C, 2)
+            costs = np.linalg.norm((target[:, None, :] - y_t) * w, axis=2)  # (M, C)
+            k = np.argmin(costs, axis=1)
+            best_k = costs[rows, k]
+            take = live & (best_k < best_cost)
+            iters += 1
+            if not take.any():
+                break
+            u = np.where(take[:, None], trials[rows, k], u)
+            y = np.where(take[:, None], y_t[rows, k], y)
+            best_cost = np.where(take, best_k, best_cost)
+
+        self._u = u
+        self._jacobian = J
+        self._response = y
+        self._cost = best_cost
+        self._singular = singular
         self.last_iters = iters
-        self.last_cost = best_cost
-        self.last_singular = singular
-        return self.last_u
+        self._has_solved = True
+        if M == 1:
+            return float(u[0, 0]), float(u[0, 1])
+        return u[:, 0].copy(), u[:, 1].copy()
 
     # -- SweepTable-compatible surface ----------------------------------------
     #
     # These exist so the plant can stand in for a SweepTable anywhere, but they
     # cost one solve each. PathFollower checks `has_coupled_solve` and calls
     # solve() once per step instead.
+
+    def _require_single(self, what: str) -> None:
+        if self.n_members != 1:
+            raise ValueError(
+                f"{what} is the scalar SweepTable protocol and only applies to a "
+                f"single-member plant; this one serves {self.n_members}. Use "
+                "solve() with arrays, or one plant per vehicle.")
 
     def throttle_for(self, v: float, a_target: float,
                      pitch_deg: float = 0.0, roll_deg: float = 0.0) -> float:
@@ -836,26 +1043,26 @@ class DifferentiablePlant:
         :class:`PathFollower` calls them in — can solve both channels together
         instead of fighting this one.
         """
+        self._require_single("throttle_for")
         self._pending_a = float(a_target)
         return self.solve(v, a_target, self._held_omega(), pitch_deg, roll_deg)[0]
 
     def steer_for(self, v: float, omega_target: float,
                   pitch_deg: float = 0.0, roll_deg: float = 0.0) -> float:
         """Steer for ``omega_target``, honouring a pending :meth:`throttle_for`."""
+        self._require_single("steer_for")
         a_t = self._pending_a if self._pending_a is not None else self._held_a()
         self._pending_a = None
         return self.solve(v, a_t, omega_target, pitch_deg, roll_deg)[1]
 
     def _held_omega(self) -> float:
-        r = self.last_response
-        return 0.0 if r is None else r[1]
+        return float(self._response[0, 1]) if self._has_solved else 0.0
 
     def _held_a(self) -> float:
-        r = self.last_response
-        return 0.0 if r is None else r[0]
+        return float(self._response[0, 0]) if self._has_solved else 0.0
 
-    def set_applied(self, throttle: float, steer: float) -> None:
-        """Tell the plant what the vehicle was ACTUALLY commanded this step.
+    def set_applied(self, throttle, steer) -> None:
+        """Tell the plant what the vehicles were ACTUALLY commanded this step.
 
         The Jacobian is a linearisation about the warm-start command, so the
         warm start has to be the command the vehicle really got. A caller that
@@ -865,13 +1072,33 @@ class DifferentiablePlant:
         differentiates the plant at an operating point the vehicle was never
         in. That mismatch is invisible while the two agree and divergent the
         moment they do not.
+
+        Takes scalars for a single member, arrays of length M for a fleet.
         """
-        self.last_u = (float(throttle), float(steer))
+        M = self.n_members
+        self._u = np.stack([
+            np.broadcast_to(np.asarray(throttle, dtype=np.float64), (M,)),
+            np.broadcast_to(np.asarray(steer, dtype=np.float64), (M,)),
+        ], axis=1).copy()
+
+    def set_applied_member(self, i: int, throttle: float, steer: float) -> None:
+        """:meth:`set_applied` for ONE member of a fleet plant.
+
+        The per-vehicle followers driving a fleet each report their own
+        command, so they need to write a single row without disturbing the
+        others.
+        """
+        self._u[int(i), 0] = float(throttle)
+        self._u[int(i), 1] = float(steer)
 
     def reset(self) -> None:
         """Drop the warm start (after a teleport / scenario reset)."""
-        self.last_u = (0.0, 0.0)
-        self.last_jacobian = None
-        self.last_response = None
-        self.last_target = None
+        M = self.n_members
+        self._u = np.zeros((M, 2))
+        self._jacobian = np.zeros((M, 2, 2))
+        self._response = np.zeros((M, 2))
+        self._target = np.zeros((M, 2))
+        self._singular = np.zeros(M, dtype=bool)
+        self._cost = np.zeros(M)
+        self._has_solved = False
         self._pending_a = None

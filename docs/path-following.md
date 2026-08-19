@@ -13,6 +13,10 @@
 | ω_z | chassis yaw rate (rad/s) |
 | P control | proportional feedback (`u = K · error`) |
 | MOI | moment of inertia |
+| member | one (vehicle, env) pair a plant serves |
+| M | number of members |
+| L2 / L3 | batching axes: K interacting vehicles / `n_envs` parallel scenarios |
+| kind | vehicles sharing a URDF + resolved config |
 
 Give a path — a list of `(x, y, z, target_speed)` waypoints — and get
 per-step `(throttle, steer, brake)` for any URDF + preset vehicle. The
@@ -30,7 +34,7 @@ Two inverse plants ship with the SDK, interchangeable in the same argument:
 | survives a plant change (mass, friction, `i_wheel`, dt) | yes, automatically | no — silently stale until re-measured |
 | operating point | the LIVE state: per-wheel normal loads, wheel speeds, attitude | grid interpolation on (v, pitch, roll) |
 | needs a live simulator | yes | no — numpy only |
-| cost per control step | ~20 ms (10-wheel tank, CPU, `horizon=4`) | ~0.2 ms |
+| cost per control step | ~20 ms for one 10-wheel tank, ~0.9 ms each across a fleet of 30 (CPU, `horizon=4`) | ~0.2 ms, per vehicle |
 
 Use the sweep table when the controller runs in a process with no
 simulator (a game client driving the vehicle over OSC), or when the
@@ -317,6 +321,89 @@ mid-manoeuvre on the reverse course. Where a whole Jacobian column
 vanishes, the plant re-estimates it with a one-sided **secant** over
 `probe_delta` of command, large enough to step out of the dead zone. The
 derivative is a local object; the secant over a control-sized step is not.
+
+### Fleets: one plant, many vehicles
+
+One plant serves **M members** — (vehicle, env) pairs of a single kind, the
+granularity `MultiVehicleKindPhysics` already groups by. Pass a sequence of
+vehicles, a sequence of `env_idx`, or both (members are their cartesian
+product, env-major):
+
+```python
+from genesis_vehicle import DifferentiablePlant, FleetFollower, PathFollower
+
+plant = DifferentiablePlant(tanks)                 # M = len(tanks)
+followers = [PathFollower(path, plant) for path in paths]
+fleet = FleetFollower(followers, plant)
+
+cmds = fleet.step([extract_state(t) for t in tanks])   # one solve for the lot
+for t, (thr, steer, brake) in zip(tanks, cmds):
+    t.set_inputs(throttle=thr, steer=steer, brake=brake)
+```
+
+`M == 1` keeps the scalar surface exactly as it was; `M > 1` makes `predict` /
+`jacobian` / `solve` / `set_applied` take and return arrays of length M, and
+the diagnostics per-member.
+
+**Why it is nearly free.** The unroll was already batch-shape-agnostic
+(`compute_wheel_step` is); that axis simply carried candidate commands, and
+now carries `M x candidates`. At these tensor sizes the unroll is dominated by
+torch's per-op dispatch rather than arithmetic, so widening it barely costs
+anything — measured forward unroll, 10-wheel tank, `horizon=4`:
+
+| batch | ms/call | ms per item |
+|---|---|---|
+| 1 | 6.83 | 6.83 |
+| 8 | 6.93 | 0.87 |
+| 32 | 8.34 | 0.26 |
+| 128 | 8.57 | 0.067 |
+
+The Jacobian rides the same trick: batch members are independent in the
+unroll, so `d(sum_i a_i)/d(thr_j)` IS member j's own gradient, and one
+backward per row covers the whole fleet.
+
+End to end, control cost per step against one plant per vehicle:
+
+| K tanks | K separate plants | 1 batched plant | per vehicle |
+|---|---|---|---|
+| 8 | 200.7 ms | 26.2 ms (**7.7x**) | 25.1 -> 3.27 ms |
+| 30 | 743.9 ms | 28.1 ms (**26.5x**) | 24.8 -> 0.94 ms |
+
+with the command streams agreeing to float32 noise (at K=30, max
+`|d throttle|` 3.3e-05, max `|d steer|` 1.8e-04, final position spread
+1.5e-05 m over 40 steps).
+
+**How the follower splits.** A `PathFollower` is per-vehicle by nature — its
+path, its block, its cusp state machine — but the expensive half of a step is
+the inversion. So `step()` is two halves that a fleet runs around one solve:
+
+```mermaid
+flowchart LR
+    subgraph per1 ["per follower"]
+        P["plan(state)<br/>geometry -> (a_target, omega_z_target)"]
+    end
+    subgraph once ["ONCE, batched over M members"]
+        S["plant.solve(...)<br/>one unroll, one Jacobian"]
+    end
+    subgraph per2 ["per follower"]
+        F["finish(plan, thr, steer)<br/>KICK, caps, brake, report back"]
+    end
+    P --> S --> F
+```
+
+A plan whose `command` is already set (arrived, braking into a cusp) needs no
+inversion at all; it still occupies a batch slot, which costs nothing.
+`PathFollower.step()` is exactly this composition for one vehicle, so
+single-vehicle behaviour is unchanged.
+
+All members of a plant must share one kind — they share the force model, the
+wheel meta and the mass properties, which is what a kind means. Mixed kinds
+are refused; give them one plant each and one `FleetFollower` each.
+
+**What this does NOT change.** The simulation path is untouched: L2/L3
+batching, `MultiVehiclePhysics` and `n_envs` are the same code, and a plant
+reads a batched scene through the kind's own single batched solver call
+however many members it serves.
 
 ### Feeding it a non-Genesis state
 

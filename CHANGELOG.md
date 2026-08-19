@@ -10,6 +10,91 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.4.0] — 2026-08-20
+
+**One `DifferentiablePlant` now serves a whole fleet.** The plant gains a
+member axis — (vehicle, env) pairs of one kind — so K vehicles are inverted in
+ONE unrolled batch instead of K. Measured on 30 reference tanks, CPU: the
+control step drops from 743.9 ms to 28.1 ms, **26.5x**, while producing the
+same commands to float32 noise.
+
+| abbr | meaning |
+|---|---|
+| member | one (vehicle, env) pair a plant serves |
+| M | number of members |
+| L2 / L3 | batching axes: K interacting vehicles / `n_envs` parallel scenarios |
+| J | 2x2 Jacobian `d(a, omega_z) / d(throttle, steer)` |
+| kind | vehicles sharing a URDF + resolved config (what `MultiVehicleKindPhysics` groups) |
+
+### Why it is nearly free
+
+The unroll was already batch-shape-agnostic, because `compute_wheel_step` is;
+that axis simply carried candidate commands. It now carries `M * candidates`.
+At these tensor sizes the unroll is dominated by torch's per-op dispatch
+rather than arithmetic, so a batch of 128 costs 1.25x a batch of 1 — measured
+forward-unroll cost per item falls from 6.83 ms to 0.067 ms across that range.
+
+The Jacobian comes out of ONE backward per row over the whole fleet: batch
+members are independent in the unroll, so `d(sum_i a_i)/d(thr_j)` IS member
+j's own gradient. M members cost what one does.
+
+| K tanks | K separate plants | 1 batched plant | per vehicle |
+|---|---|---|---|
+| 8 | 200.7 ms | 26.2 ms (7.7x) | 25.1 -> 3.27 ms |
+| 30 | 743.9 ms | 28.1 ms (26.5x) | 24.8 -> 0.94 ms |
+
+Equivalence at K=30: max `|d throttle|` 3.3e-05, max `|d steer|` 1.8e-04,
+final position spread 1.5e-05 m against per-vehicle plants over 40 steps.
+
+### API
+
+`DifferentiablePlant` takes a sequence of vehicles and/or a sequence of
+`env_idx`; members are their cartesian product, env-major, matching the
+proto's own `env * K + slot` row order. With `M == 1` every entry point still
+takes and returns scalars, so nothing about the single-vehicle surface moved.
+With `M > 1` `predict` / `jacobian` / `solve` / `set_applied` take and return
+arrays of length M, and the diagnostics (`last_jacobian`, `last_response`,
+`last_target`, `last_singular`, `last_cost`, `last_u`) become per-member.
+
+`set_applied_member(i, throttle, steer)` writes one member's warm start
+without disturbing the others — what a per-vehicle follower needs.
+
+All members must share one kind: they share the force model, the wheel meta
+and the mass properties, which is what a kind means. Mixed kinds are rejected
+and take one plant each.
+
+### `FleetFollower`
+
+A `PathFollower` is per-vehicle by nature — its path, its block, its cusp
+state machine — but the expensive half of a step is the inversion. `step()`
+is therefore split into two halves that a fleet can run around one batched
+solve:
+
+- `plan(...)` -> `FollowerPlan`: the vehicle-agnostic geometry, producing the
+  desired `(a, omega_z)`. A plan whose `command` is set (arrived, braking into
+  a cusp) needs no inversion at all.
+- `finish(plan, throttle, steer)`: the supervisors on top of the inversion —
+  low-speed KICK, actuator caps, brake-at-rest — plus the report back to the
+  plant.
+
+`FleetFollower(followers, plant)` runs plan (per follower) -> solve (once,
+batched) -> finish (per follower). `PathFollower.step()` is now exactly that
+composition for one vehicle, so its behaviour is unchanged.
+
+### Notes
+
+- The simulation path is untouched, as in 1.3.0: L2/L3 batching,
+  `MultiVehiclePhysics` and `n_envs` are the same code, and the plant reads a
+  batched scene through the kind's own single batched solver call however many
+  members it serves.
+- `SweepTable` remains the right tool for a hard real-time fleet (0.16 ms per
+  inversion, stateless and shareable across every vehicle of a kind) and the
+  only option for a controller in a process with no simulator.
+- 13 new tests (259 total): fleet predict / jacobian / solve each checked
+  against the same members inverted alone, per-member diagnostics, the
+  plan/finish split reproducing `step()` exactly, and `FleetFollower` matching
+  independent followers command for command.
+
 ## [1.3.0] — 2026-08-19
 
 **Path following no longer needs a sweep table.** `DifferentiablePlant` is a
