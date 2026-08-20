@@ -10,6 +10,51 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.4.1] — 2026-08-20
+
+New sample: `fleet_follow_demo.py` (#18), the fleet counterpart of
+`path_follow_demo` and the first place both inverse plants run on the SAME
+fleet.
+
+| abbr | meaning |
+|---|---|
+| inverse plant | what turns a desired `(a, omega_z)` into a `(throttle, steer)` command |
+| cross-track | perpendicular distance from the vehicle to the path |
+
+K tanks on K lanes, each with a phase-shifted S-curve so no two vehicles ask
+the plant for the same thing. `--plant jacobian` drives them all from ONE
+batched `DifferentiablePlant` through `FleetFollower`; `--plant sweep` shares
+ONE stateless `SweepTable` across K independent `PathFollower`s;
+`--plant both` (default) runs each and compares. `--k N`, `--horizon`,
+`--newton-iters`, `--k-w`, `--viewer`, `--mp4`.
+
+Measured at 8 tanks, CPU, both PASS (every vehicle inside 3 m of its goal):
+
+| plant | mean cross-track | control per step | per vehicle |
+|---|---|---|---|
+| jacobian | 0.605 m | 53.2 ms | 6.65 ms |
+| sweep | 0.352 m | 6.0 ms | 0.75 ms |
+
+Two things the sample is written to make honest rather than flattering:
+
+- **Cost scales differently, and that is the real difference.** The Jacobian
+  plant pays per FLEET, so its per-vehicle cost falls as the fleet grows; the
+  table pays per vehicle but so little it does not matter at these sizes.
+  What the table does not show at runtime is the offline measurement it
+  already paid and must pay again on any vehicle change.
+- **Tracking is course-dependent and NOT in one plant's favour.** The table
+  holds a tighter line on this continuous S-curve (0.352 m vs 0.605 m);
+  the Jacobian plant is tighter on `path_follow_demo`'s
+  straights-and-corners (0.370 m vs 0.384 m). The gap is not the plant
+  missing its target — raising the outer heading gain (`--k-w 3.0`) and
+  letting the inversion converge harder (`--newton-iters 5`) both leave it
+  where it was. Documented in the module docstring rather than glossed.
+
+Cross-track is measured point-to-POLYLINE, not to the nearest waypoint: a
+waypoint distance carries a floor set by the waypoint spacing (up to 0.5 m on
+this 1 m-spaced path) that would land a discretisation artefact straight in
+the number both plants are judged on.
+
 ## [1.4.0] — 2026-08-20
 
 **One `DifferentiablePlant` now serves a whole fleet.** The plant gains a

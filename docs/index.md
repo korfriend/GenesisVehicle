@@ -13,7 +13,6 @@ Landing page. Pick the document that matches what you're doing.
 | Choose a tire model (Pacejka vs Coulomb) and understand the ground-contact mechanism | [`tire-and-contact.md`](tire-and-contact.md) |
 | Drive from one unified `VehicleScene` object, and cut the wheel-raycast cost on heavy static terrain | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
 | Make a vehicle follow a waypoint path (path → Steer/Throttle) | [`path-following.md`](path-following.md) |
-| Understand what the SDK differentiates, what it measured, and what is still open | [`differentiable-sot.md`](differentiable-sot.md) |
 | Run the OSC physics server for an external client (Unreal / Unity), or look up the wire schema | [`server.md`](server.md) |
 | Look up a specific class / function / default | [`api-reference.md`](api-reference.md) |
 | Understand WHERE in the simulation step your hook runs | [`pipeline-and-hooks.md`](pipeline-and-hooks.md) |
