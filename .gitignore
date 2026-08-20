@@ -46,3 +46,7 @@ outputs/
 *.npy
 *.ckpt
 tmp*.urdf
+
+# --- Working notes kept out of the repo ---
+# The differentiable-control SOT is a local research record, not shipped docs.
+docs/differentiable-sot.md

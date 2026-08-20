@@ -341,6 +341,13 @@ for t, (thr, steer, brake) in zip(tanks, cmds):
     t.set_inputs(throttle=thr, steer=steer, brake=brake)
 ```
 
+Runnable, with both plants on the same fleet for comparison:
+
+```bash
+python -m genesis_vehicle.samples.fleet_follow_demo --k 8            # both
+python -m genesis_vehicle.samples.fleet_follow_demo --k 8 --plant jacobian
+```
+
 `M == 1` keeps the scalar surface exactly as it was; `M > 1` makes `predict` /
 `jacobian` / `solve` / `set_applied` take and return arrays of length M, and
 the diagnostics per-member.
@@ -606,13 +613,6 @@ low-speed brake.
   the backward steer sign is baked in from the actual drivetrain.
 
 ## See also
-
-- [`differentiable-sot.md`](differentiable-sot.md) — the standing record of
-  the differentiable work: why Genesis's own autodiff cannot serve a
-  ray-wheel vehicle (measured), what was built instead, every accuracy /
-  cost figure and how to reproduce it, the four bugs it exposed, and the
-  open research questions.
-
 
 - [`samples/path_follow_demo.py`](../samples/path_follow_demo.py) — bundled
   end-to-end demo (tank + reference sweep + wall detour).
