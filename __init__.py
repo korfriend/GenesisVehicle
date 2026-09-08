@@ -160,6 +160,10 @@ _GENESIS_LAZY = {
     "MultiVehicleKindPhysics": ("genesis_vehicle.multi_vehicle", "MultiVehicleKindPhysics"),
     "WheelRayPattern": ("genesis_vehicle.raycast", "WheelRayPattern"),
     "read_distances": ("genesis_vehicle.raycast", "read_distances"),
+    "single_scene_up_offset": ("genesis_vehicle.raycast", "single_scene_up_offset"),
+    "set_sensor_up_offset": ("genesis_vehicle.raycast", "set_sensor_up_offset"),
+    "sensor_up_offset": ("genesis_vehicle.raycast", "sensor_up_offset"),
+    "self_collision_ceiling": ("genesis_vehicle.urdf", "self_collision_ceiling"),
     "get_link_transforms": ("genesis_vehicle.kinematics", "get_link_transforms"),
     "LinkTransforms": ("genesis_vehicle.kinematics", "LinkTransforms"),
     "VisualPartsTransforms": ("genesis_vehicle.core", "VisualPartsTransforms"),
@@ -194,6 +198,8 @@ __all__ = [
     "MultiVehiclePhysics", "MultiVehicleKindPhysics",
     # Sensor / raycast (lazy)
     "WheelRayPattern", "read_distances",
+    "single_scene_up_offset", "set_sensor_up_offset", "sensor_up_offset",
+    "self_collision_ceiling",
     # Kinematics — per-link transforms (lazy)
     "get_link_transforms", "LinkTransforms",
     # Render feed for external engines (lazy)

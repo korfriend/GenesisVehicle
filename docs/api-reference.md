@@ -532,12 +532,20 @@ walking the URDF joint tree:
 `max(ixx, iyy, izz)`, which overstates a wide, small-diameter wheel by ~2×).
 
 `estimate_spin_inertia_from_genesis()` is a **fallback estimate** consulted
-only when `WheelConfig.i_wheel` is not set (by the user OR by the URDF).
-When `spin_axis_local` is provided, the helper projects the inertia tensor
-onto that axis (`a^T diag(I) a`); otherwise it returns `max(diag(inertial_i))`,
-which is the spin MOI for cylindrical wheels but a heuristic for general
-shapes. `VehiclePhysics` always passes the SDK's `+Y` spin convention.
-**`WheelConfig.i_wheel` (when supplied) is always authoritative.**
+only when `WheelConfig.i_wheel` is not set (by the user OR by the URDF). It
+rotates the link's stored inertia into the LINK frame first (`R I R^T`), then
+projects onto `spin_axis_local` (`a^T I_body a`, exact); without an axis it
+returns `max(diag(I_body))`, the spin MOI for cylindrical wheels but a
+heuristic for general shapes. `VehiclePhysics` always passes the SDK's `+Y`
+spin convention. **`WheelConfig.i_wheel` (when supplied) is always
+authoritative.**
+
+> The rotation is not cosmetic (v1.5.0): genesis-world >= 1.4.0 diagonalizes an
+> authored inertia onto its principal axes and PERMUTES the components, so
+> projecting the raw stored diagonal read the wrong one — the reference wheel
+> (`ixx=1, iyy=2, izz=1`) returned 1.0 instead of 2.0. The read also moved:
+> `link.inertial_*` on genesis <= 1.3.3, `link.desc.*` on >= 1.4.0, branched in
+> `genesis_vehicle/_gs_compat.py`.
 
 ## 5. Strategies
 
@@ -638,12 +646,28 @@ class CoulombIsotropic(TireModel):
 
 ```python
 class WheelRayPattern(genesis.options.sensors.raycaster.RaycastPattern):
-    def __init__(positions: list[tuple[float, float, float]])
+    def __init__(positions: list[tuple[float, float, float]],
+                 up_offset: float = RAY_UP_OFFSET)
     @classmethod
     def from_config(resolved: ResolvedConfig) -> WheelRayPattern
 
-read_distances(sensor, n_envs: int) -> torch.Tensor
-    # Returns (n_envs, n_wheels). Handles the n_envs=1 sensor shape quirk.
+read_distances(sensor, n_envs: int, up_offset: float | None = None) -> torch.Tensor
+    # Returns (n_envs, n_wheels). Handles the n_envs=1 sensor shape quirk and
+    # subtracts the high-cast offset back out. up_offset=None (the default)
+    # takes it off the sensor — see set_sensor_up_offset.
+
+# --- High-cast offset, per vehicle since v1.5.0 ---
+single_scene_up_offset(urdf_path, wheel_positions, name="vehicle") -> float
+    # RAY_UP_OFFSET capped at the vehicle's own collision ceiling. Needed only
+    # for single_scene, where the rays are cast in the scene the chassis
+    # collides in and an origin above its own collision box self-hits.
+self_collision_ceiling(urdf_path, ray_positions, *, margin=0.02) -> float | None
+    # The gap from each ray up to the nearest own-collision surface, from the
+    # URDF's rest-pose collision AABBs. None = nothing above any ray.
+set_sensor_up_offset(sensor, up_offset: float) -> None
+sensor_up_offset(sensor) -> float
+    # Record / recover the offset a sensor's rays were built with, so
+    # read_distances subtracts exactly what WheelRayPattern added.
 
 # --- Pure-Python dynamics primitives (testable without Genesis) ---
 brake_torque_signed(
