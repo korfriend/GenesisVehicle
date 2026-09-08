@@ -147,7 +147,7 @@ Read from the **wheel link**, with fallbacks:
 |---|---|---|
 | `radius` | wheel link `<cylinder radius>` or `<sphere radius>` | `DEFAULT_RADIUS` 0.35 m |
 | `mass` | wheel link `<inertial><mass>` | `DEFAULT_MASS` 20 kg (informational; the pipeline does not read wheel mass) |
-| `i_wheel` | wheel link `<inertia>` projected onto the spin axis (or `estimate_spin_inertia_from_genesis`) | `DEFAULT_I_WHEEL` 1.5 kg·m² |
+| `i_wheel` | wheel link `<inertia>` projected onto the spin axis (or `estimate_spin_inertia_from_genesis` off the built entity) | `DEFAULT_I_WHEEL` 1.5 kg·m² |
 | chassis / sprung mass | base link `<inertial><mass>` + its non-wheel descendants | — |
 
 `i_wheel` **is** read by the pipeline (it sets how fast a wheel spins up under
@@ -157,11 +157,35 @@ the 1.5 kg·m² default spins up unrealistically fast. An explicit
 
 > **Author the tensor in the wheel-link frame.** Since v1.2.8 the parser takes
 > the component about the **spin axis** (`iyy` for the SDK's `+Y` spin
-> convention), rotating first if `<inertial rpy>` is set. A wheel that is wide
+> convention), rotating first if `<inertial rpy>` is set. The Genesis-side
+> fallback does the same since v1.5.0 — it must, because genesis-world >= 1.4.0
+> stores link inertia on its PRINCIPAL axes and permutes the components, so
+> reading the stored diagonal without rotating it back picked the wrong one
+> (the reference wheel, `ixx=1 iyy=2 izz=1`, read 1.0 instead of 2.0). A wheel that is wide
 > relative to its radius (length > √3·radius — typical for tracked/UGV road
 > wheels) has its largest moment about a *transverse* axis, so `iyy` and
 > `max(ixx, iyy, izz)` are different numbers; only `iyy` is the spin inertia.
 > For a solid cylinder: `iyy = ½·m·r²`, `ixx = izz = ¼·m·r² + 1/12·m·L²`.
+
+> **Keep the chassis collision box above the wheel ray origins.** The wheel
+> rays start at the suspension joint's `<origin xyz>` and are HIGH-CAST some
+> distance further up (`raycast.RAY_UP_OFFSET`, 1.0 m) so a bottomed suspension
+> can still see the ground. In `raycast_mode="single_scene"` those rays are cast
+> in the scene the chassis collides in, so a collision geom sitting between the
+> attachment point and the ray origin is a target: the rays hit the vehicle's
+> own body instead of the ground. Since v1.5.0 the SDK measures the gap and caps
+> the offset per vehicle, so authoring this wrong no longer breaks the vehicle —
+> but the cap costs over-compression headroom, so leave real clearance. The
+> reference `car_4w.urdf` puts the wheel attachment at `z=0.30` and the chassis
+> collision box bottom at `z=0.60`, which caps the offset at 0.28 m.
+> `dual_scene` (the default) raycasts a scene holding no vehicle collision
+> geometry and is unaffected. See
+> [`physics-contracts.md` §7.8](physics-contracts.md#78-high-cast-rays-and-over-compression-v1116).
+
+> **Wheel links usually need no `<collision>` at all.** Contact comes from the
+> raycast pipeline, not the rigid solver's wheel collision — a visual-only wheel
+> link is the convention the reference URDFs follow, and it keeps the wheel out
+> of both the collision broadphase and the ray target set.
 
 > **Sprung vs chassis mass.** `chassis_mass` is the base link **alone**;
 > `sprung_mass` adds every non-wheel descendant (a turret, a cargo body).

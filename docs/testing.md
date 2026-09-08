@@ -8,9 +8,13 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-259 pure-Python tests; no Genesis runtime required. Runs in ~40s on CPU. The
-reference URDFs the parsing tests read live in `tests/data/` (self-contained
-since v1.2.0).
+291 tests, almost all pure-Python. Runs in ~30s on CPU. The reference URDFs the
+parsing tests read live in `tests/data/` (self-contained since v1.2.0).
+
+A handful build a real `VehicleScene` on the CPU backend (the batched-visual /
+proxy-sync / to-host parity tests, and the one ray pattern that allocates
+Genesis tensors), so `genesis-world` must be importable — but nothing needs a
+GPU.
 
 GPU integration is exercised by user-side demo scripts in your downstream
 project — the SDK's own test suite stays pure-Python so it can run in any

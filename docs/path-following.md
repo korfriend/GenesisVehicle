@@ -223,8 +223,9 @@ through `scene.step()`. **It cannot work for this SDK.** The solver's taped
 input set is exactly `set_pos` / `set_quat` / `set_dofs_velocity` /
 `control_dofs_force` (see `RigidEntity.process_input_grad`); the external
 wrench API is not on the tape (`apply_links_external_wrench` on genesis
->= 1.4.0, `apply_links_external_force` / `_torque` on <= 1.3.3) — and they are the *only* way a ray-wheel vehicle touches the
-solver, because the SDK deliberately has no wheel joints to motor.
+>= 1.4.0, `apply_links_external_force` / `_torque` on <= 1.3.3) — and it is
+the *only* way a ray-wheel vehicle touches the solver, because the SDK
+deliberately has no wheel joints to motor.
 
 Measured on genesis-world 1.3.3, and unchanged on 1.4.0, which only renamed
 the call: a leaf tensor passed to the external-wrench API comes back from
