@@ -125,7 +125,7 @@ def main():
         viewer_options=(gs.options.ViewerOptions(
             camera_pos=(20.0, -30.0, 25.0), camera_lookat=(22.0, 6.0, 0.0),
             camera_fov=50) if args.viewer else None),
-        rigid_options=gs.options.RigidOptions(dt=DT, enable_collision=True),
+        rigid_options=gs.options.RigidOptions(enable_collision=True),
     )
     vs.add_ground_plane(friction=1.0)
     for i, wp in enumerate(path[::3]):

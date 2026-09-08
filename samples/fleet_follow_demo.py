@@ -114,7 +114,7 @@ def build_scene(args, n_lanes):
             camera_pos=(30.0, -0.6 * span, 0.9 * span),
             camera_lookat=(30.0, 0.0, 0.0),
             camera_fov=50) if args.viewer else None,
-        rigid_options=gs.options.RigidOptions(dt=DT, enable_collision=True),
+        rigid_options=gs.options.RigidOptions(enable_collision=True),
         vis_options=gs.options.VisOptions(shadow=True),
     )
     vs.add_ground_plane(friction=1.0)

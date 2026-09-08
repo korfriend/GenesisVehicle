@@ -57,6 +57,7 @@ from .core import (
     VehiclePhysics, PipelineContext, VisualPartsTransforms,
     _quat_axis_angle, _quat_mul, _susp_visual_offset,
 )
+from ._gs_compat import apply_links_wrench
 from ._pipeline import compute_wheel_step
 from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import read_distances
@@ -234,8 +235,7 @@ class MultiVehicleKindPhysics:
         built with n_envs=N and we target K different links per env."""
         F_NK3 = total_F.reshape(self.n_envs, self.K, 3)
         T_NK3 = total_T.reshape(self.n_envs, self.K, 3)
-        self.solver.apply_links_external_force(F_NK3, self.base_idx_tensor)
-        self.solver.apply_links_external_torque(T_NK3, self.base_idx_tensor)
+        apply_links_wrench(self.solver, F_NK3, T_NK3, self.base_idx_tensor)
 
     # ------------------------------------------------------------------
     # The step pipeline. Mirrors VehiclePhysics.step but with batched I/O.
@@ -695,8 +695,8 @@ class MultiVehiclePhysics:
                 F_parts.append(out[0])
                 T_parts.append(out[1])
             off += Kk
-        solver.apply_links_external_force(torch.cat(F_parts, dim=1), idx)
-        solver.apply_links_external_torque(torch.cat(T_parts, dim=1), idx)
+        apply_links_wrench(solver, torch.cat(F_parts, dim=1),
+                           torch.cat(T_parts, dim=1), idx)
 
     def _assemble_kind_distances(self, distances):
         """Re-bucket a flat per-vehicle distances list (length ``n_vehicles``, each

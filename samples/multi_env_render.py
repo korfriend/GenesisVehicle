@@ -100,7 +100,7 @@ def main():
         n_envs=n_envs, view=view,
         dt=cfg.recommended_dt, substeps=10,
         rigid_options=gs.options.RigidOptions(
-            dt=cfg.recommended_dt, enable_collision=True,
+            enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
         vis_options=gs.options.VisOptions(

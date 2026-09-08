@@ -17,6 +17,7 @@ from genesis.utils.geom import transform_by_quat
 
 from ._version import __version__
 from .config import ResolvedConfig, VehicleConfig, resolve
+from ._gs_compat import apply_links_wrench
 from ._pipeline import compute_wheel_step
 from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import read_distances
@@ -728,8 +729,8 @@ class VehiclePhysics:
         self.last_alpha = res.alpha
 
         # [APPLY]
-        self.solver.apply_links_external_force(total_F.unsqueeze(1), self.base_idx_list)
-        self.solver.apply_links_external_torque(total_T.unsqueeze(1), self.base_idx_list)
+        apply_links_wrench(self.solver, total_F.unsqueeze(1), total_T.unsqueeze(1),
+                           self.base_idx_list)
         self._prev_init = True
         self._stepped_once = True
 

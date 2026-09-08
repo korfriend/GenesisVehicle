@@ -25,6 +25,36 @@
   (the backend cannot change within a process); requesting `"gpu"` without
   a working CUDA stack is a REAL init failure and propagates.
 
+  ### Reproducible GPU rollouts (`deterministic=True`)
+
+  ```python
+  VehicleScene.init_backend("gpu", deterministic=True)   # genesis-world >= 1.4.0
+  ```
+
+  Genesis's rigid constraint solver ships two arms that reach the same answer
+  down different floating-point paths, and **on GPU** it picks between them by
+  timing them as the simulation runs — so which arm runs at a given step
+  follows machine load rather than the scene. Under fp32, re-ordering the
+  accumulation of 8 contacts yields 3 distinct values (relative spread 2.3e-7),
+  which a per-step feedback controller judged on a binary condition amplifies
+  into a flipped verdict: a slalom rig on genesis-world v1.1.1 scored 546 one
+  run and 545 the next on identical inputs.
+
+  `deterministic=True` forwards `use_deterministic_algorithms` to `gs.init`,
+  which pins the arm and makes a rollout bit-exact on given hardware. It is
+  opt-in because pinning costs the throughput the autotuner was buying. Two
+  things narrow when you need it:
+
+  - **CPU never needed it.** The CPU backend pins the arm unconditionally, in
+    every genesis version, multi-threaded included. Since CPU is the SDK
+    default everywhere, most users are already reproducible.
+  - **genesis-world 1.4.0 already helps without it.** Upstream #3187 changed
+    the re-benchmark trigger from a 5-second wall clock to a 300-call count, so
+    the arm schedule follows the step number instead of the clock. The flag
+    (upstream #3222) is what removes the choice entirely.
+
+  On a genesis without the option the SDK warns and continues unpinned.
+
 - **Renderer** — independent of the physics backend: the viewer/cameras
   rasterize on the GPU graphics stack regardless of where physics runs
   (falling back to slow software rendering only when no GPU is present).

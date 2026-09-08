@@ -79,9 +79,14 @@ Visual demos (with `--viewer`):
 Requires Python 3.12+ and
 [Genesis](https://genesis-embodied-ai.github.io/) (`genesis-world ≥ 1.0.0`)
 with a CUDA-enabled `torch`. The SDK is validated against the Genesis
-`1.0.0` backend and smoke-tested on `1.3.3` (the renderer API split is
-handled at runtime — see the 1.2.7 entry); see [`CHANGELOG.md`](CHANGELOG.md)
-for the per-release backend-compatibility notes.
+`1.0.0` backend and smoke-tested on `1.4.0`; the same source also runs on
+`1.3.3`, since the APIs that moved between the two are branched at runtime
+(see the 1.5.0 entry, and 1.2.7 for the renderer API split). On
+`genesis-world >= 1.4.0`, ask for the solver rate with
+`VehicleScene(substeps=...)` and do **not** pass `dt=` to `RigidOptions` —
+that field now means the substep interval. See
+[`CHANGELOG.md`](CHANGELOG.md) for the per-release backend-compatibility
+notes.
 
 The SDK is a single Python package directory; there is no `pip install`
 yet. Clone and add the parent directory to `PYTHONPATH`:

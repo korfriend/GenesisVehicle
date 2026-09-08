@@ -99,7 +99,7 @@ def main():
     vs = VehicleScene(
         n_envs=args.n_envs, view=view,
         dt=cfg.recommended_dt, substeps=10,
-        rigid_options=gs.options.RigidOptions(dt=cfg.recommended_dt, enable_collision=True),
+        rigid_options=gs.options.RigidOptions(enable_collision=True),
         vis_options=gs.options.VisOptions(
             shadow=True, ambient_light=(0.40, 0.40, 0.40),
             background_color=(0.05, 0.07, 0.10),

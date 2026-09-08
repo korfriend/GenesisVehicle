@@ -10,6 +10,193 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.5.0] — 2026-09-08
+
+**Genesis backbone 1.3.3 -> 1.4.0.** The engine renamed or moved five APIs the
+SDK is built on; each is now branched at ONE place so the SDK runs unchanged on
+both 1.3.3 and 1.4.0. Open-loop trajectories carry over: the reference car and
+tank reproduce their 1.3.3 poses to 4 decimals everywhere except the skid-steer
+turn, which spreads by 0.04% of distance travelled (see the parity table
+below).
+
+| abbr | meaning |
+|---|---|
+| wrench | a force and a torque applied together as one generalized force |
+| BVH | Bounding Volume Hierarchy (the acceleration structure the wheel rays are cast against) |
+| dt | duration of one scene step, in seconds |
+| substep | one solver integration inside a scene step (`substep_dt = dt / substeps`) |
+| L2 / L3 | batching axes: K interacting vehicles / `n_envs` parallel scenarios |
+| desc | a link's resolved description (what genesis >= 1.4.0 hangs the authored inertial values off) |
+
+New private module `genesis_vehicle/_gs_compat.py` holds the shims:
+`apply_links_wrench`, `link_inertial`, `has_wrench_api`.
+
+### What genesis 1.4.0 changed, and what the SDK does about it
+
+1. **`RigidOptions.dt` changed meaning.** Up to 1.3.3 it was the solver's STEP
+   duration (`substep_dt = RigidOptions.dt / SimOptions.substeps`), so the
+   ubiquitous `RigidOptions(dt=DT)` beside `SimOptions(dt=DT, substeps=N)` was a
+   no-op restating of the step rate. In 1.4.0 it is the solver's SUBSTEP
+   interval (`substeps = round(SimOptions.dt / RigidOptions.dt)`), so that same
+   pair now derives 1 substep, contradicts the requested `N`, and `Scene.build`
+   raises `GenesisException`. `VehicleScene` now unsets a `RigidOptions.dt` that
+   merely restates `SimOptions.dt` (one warning, exact pre-1.4.0 behaviour); a
+   `dt` saying something else is left alone. The bundled samples and the
+   `GeneVehicle_*` demos stopped passing it. **Set `VehicleScene(substeps=...)`,
+   never `RigidOptions(dt=...)`.**
+2. **`RigidSolver.apply_links_external_force` / `.apply_links_external_torque`
+   were removed**, replaced by one `apply_links_external_wrench(force=,
+   torque=)`. Step 5 of the ray-wheel pipeline goes through
+   `_gs_compat.apply_links_wrench`, which is one kernel launch instead of two on
+   1.4.0 and falls back to the two calls on 1.3.3. Numerically identical: both
+   accumulate into `cfrc_applied_*` and the wrench kernel's moment arm
+   `(link.pos - root_COM) x force` is exactly what the old force kernel added.
+   The server's `apply_monkey_patches` patches whichever of the two the engine
+   exposes.
+3. **`RigidLink.inertial_mass / .inertial_pos / .inertial_quat / .inertial_i`
+   were removed**, moved onto `link.desc.mass / .inertial_pos / .inertial_quat /
+   .inertia`. Read through `_gs_compat.link_inertial`, so
+   `DifferentiablePlant`'s `plant_mass_properties` works on both. 1.4.0
+   diagonalizes an authored inertia onto its principal axes and carries the
+   rotation in `inertial_quat`; `R I R^T` gives the authored tensor back, and
+   the reference tank's `(mass, com, izz)` come out bit-identical to 1.3.3.
+4. **`gs.morphs.Terrain` no longer resolves on the KinematicSolver** — 1.4.0
+   moved terrain onto a rigid-only `TerrainEntity`, so the `dual_scene` raycast
+   mirror hit `GenesisException: Unsupported morph`. `add_static` now mirrors a
+   terrain as a FIXED RIGID body in the raycast scene when the kinematic solver
+   cannot host it (probed off the solver's entity-class table, not a version
+   string). The rays then hit it through the collision BVH instead of the visual
+   one; the raycast scene still holds nothing that moves, so the dual-scene
+   "build the BVH once" property is preserved, and `two_scene_terrain`
+   reproduces its 1.3.3 result exactly (`x=-1.62 z=-84.16 speed=2.17`).
+5. **`RigidSolver.faces_info` is gone.** `samples/dual_scene_terrain.py` uses
+   the public `rigid_solver.n_faces`, which is the same count on both versions.
+6. **The principal-axis rewrite silently halved a wheel's estimated spin MOI.**
+   1.4.0 diagonalizes an authored inertia and PERMUTES its components, so
+   `estimate_spin_inertia_from_genesis`, which projected the raw stored diagonal
+   onto the spin axis, read the wrong one: the reference car's wheel
+   (`ixx=1, iyy=2, izz=1`, spinning about +Y) returned `1.0` instead of `2.0`.
+   Worse, the caller in `core.py` wraps it in `except Exception: pass`, so the
+   removal of `inertial_i` would have degraded quietly rather than raised. The
+   tensor is now rotated into the LINK frame with `inertial_quat` before
+   anything is read off it (`I_body = R I R^T`), which is exact and identical on
+   both versions. **This only reaches vehicles that let the estimate run** — one
+   whose `WheelConfig.i_wheel` comes neither from the user nor the URDF. Every
+   bundled preset sets `i_wheel` explicitly (car 2.0, tank 24.8), which is why
+   the parity table above is unaffected.
+
+### Fixed: `raycast_mode="single_scene"` drove every vehicle into the sky
+
+Not a 1.4.0 regression — this was broken since v1.1.16 and reproduces
+identically on genesis-world 1.3.3. It surfaced here because 1.4.0 turns the
+resulting blow-up into a `GenesisException` instead of silent nonsense.
+
+`single_scene` casts the wheel rays in the SAME scene the chassis collides in.
+v1.1.16's high-cast scheme starts each ray `RAY_UP_OFFSET = 1.0` m above the
+wheel attachment point, so on the reference car — attachment at `z=0.30`,
+chassis collision box spanning `z=[0.60, 1.10]` — the origin sat at `z=1.30`,
+0.20 m above its own roof. Every ray hit the roof, `read_distances` reported
+`0.20 - 1.0 = -0.80` m, the pipeline read that as maximum compression, and the
+suspension fired the vehicle upward. The measured `-0.80` matches that
+arithmetic exactly.
+
+The offset is now capped per vehicle at the vehicle's own collision ceiling
+(`raycast.single_scene_up_offset` over `urdf.self_collision_ceiling`, which
+walks the URDF's rest-pose collision AABBs): 0.28 m for the reference car and
+tank, 0.38 m for the 6-wheel truck. A ray with nothing of its own above it keeps
+the full 1.0 m — the HJW/JMK demo cars, whose collision box is a narrow
+`y=+/-0.25` spine the wheel rays pass beside, are untouched. `read_distances`
+recovers the offset from the sensor (`set_sensor_up_offset`) rather than from a
+module constant, so no call site has to thread it. `dual_scene` — the default —
+raycasts a scene holding no vehicle collision geometry and is unchanged, which
+is why the parity table below still stands.
+
+Applies to both entry points: `VehicleScene(raycast_mode="single_scene")` and
+the standalone `scene_helpers.make_wheel_raycaster` (which is single-scene by
+construction — it anchors the sensor to the vehicle in the vehicle's own scene),
+the path the `GeneVehicle_*` demos use. `make_wheel_raycaster` gained an
+`up_offset=` override.
+
+What this restores, on CPU:
+
+| check | before | after |
+|---|---|---|
+| car, flat, straight 5 s, `single_scene` | `(-171.9, -151.4, 2333.8)` | `(14.3113, 0.0097, 0.1114)` |
+| ... vs the same run in `dual_scene` | 2333 m apart | `(14.3112, 0.0075, 0.1114)` |
+| `samples/slope_hold.py` (20 deg slope, `single_scene`) | roll 57.5 deg, 555,153.8 mm slip, "REGRESSION" | roll 20.29 deg, **0.1 mm** slip, OK |
+| `samples/dual_scene_terrain.py --compare` pose match | `\|dx\|=47.342` DIVERGED | `\|dx\|=0.000` OK |
+| `samples/road_loop.py` (12 cars, `single_scene`) | `GenesisException: nan` at step ~480/750 | 750/750, all 12 on the ground at z=+0.09, 10.5 m/s |
+| `GeneVehicle_Truck6w` final z | +1495.9 | -15.6 (now just drives off the demo's finite 60 m ground) |
+
+`slope_hold` had been printing a false `StaticFrictionLock` regression the whole
+time; the hook was fine, the rays were not. `road_loop`'s NaN was the same
+launch feeding the constraint solver garbage, and it reproduced on 1.3.3 too.
+
+Still open in the affected demos, and NOT this bug: `road_loop`'s fixed steer
+under-turns to a 44 m radius against its 25 m target; `GeneVehicle_JMK` and
+`GeneVehicle_Truck6w` drive past the edge of the 60 m ground plate their HUD
+helper lays down; `GeneVehicle_HJW` settles at z=0.04 against a hard-coded
+`0.20 < z < 0.50` check because its URDF's ride height does not match the
+preset it borrows.
+
+### GPU run-to-run determinism (`init_backend(deterministic=True)`)
+
+Reported from the field against genesis-world **v1.1.1**: the same vehicle and
+options gave different slalom pass/fail results across two GPU runs. Genesis's
+rigid constraint solver ships two arms that reach the same answer down different
+floating-point paths, and on GPU it picks between them by timing them as the
+simulation runs. Under fp32, re-ordering the accumulation of 8 contacts yields 3
+distinct values (relative spread 2.3e-7), which a per-step feedback controller
+judged on a binary in/out-of-cone test amplifies to a flipped verdict.
+
+Both upstream fixes are present in genesis-world 1.4.0 and verified by
+`tests/test_gs_compat.py`:
+
+| upstream | what it changes | in 1.4.0 |
+|---|---|---|
+| #3187 (a2e6fc76) | re-benchmark trigger: 5 s wall clock -> 300 calls, so the arm schedule stops following machine load | yes: `repeat_after_count=300, repeat_after_seconds=0` |
+| #3222 (e0d21100) | `gs.init(use_deterministic_algorithms=True)` pins the arm outright | yes: pins `prefer_decomposed_solver=1` |
+
+`VehicleScene.init_backend("gpu", deterministic=True)` forwards the flag. It is
+opt-in because pinning costs the throughput the autotuner was buying, and it is
+GPU-only: the CPU backend has always pinned the arm unconditionally
+(`prefer_decomposed_solver=0`), which is why the SDK's CPU default was never
+exposed to this. On a genesis without the option the SDK warns and continues.
+
+### Cross-version parity (CPU, identical inputs)
+
+| scenario | genesis 1.3.3 | genesis 1.4.0 |
+|---|---|---|
+| car, flat, straight 5 s | pos `(14.3112, -0.0091, 0.1114)` | `(14.3112, 0.0075, 0.1114)` |
+| car, flat, steer 0.4 for 5 s | pos `(8.0728, -7.3781, 0.1115)` | `(8.0729, -7.3781, 0.1115)` |
+| tank, settle + straight 2 s | pos `(7.4383, 0.0, 0.399)` | `(7.4383, -0.0001, 0.399)` |
+| tank, skid turn 2 s | pos `(24.5798, -2.3635, 0.3989)` | `(24.5904, -2.3654, 0.3989)` |
+| tank, mass properties | `mass 58200.0, izz 354468.999` | identical |
+| terrain, `dual_scene`, on-terrain | pos `(28.1664, 19.982, 0.1114)` | identical |
+
+The only visible spread is in the skid-steer turn (0.04% of distance travelled
+over 2 s), the belt/lateral-slip regime where small differences accumulate;
+`samples/path_follow_reverse_demo.py` amplifies it over a 17 s closed-loop
+parking maneuver and lands at `yaw_err=0.43` against its `0.4` threshold.
+
+### Notes on the engine
+
+`quadrants` stays at 1.3.0 — 1.4.0 pulls no new dependency. `Scene.__init__`
+still takes `sim_options=` / `rigid_options=` / `vis_options=` / `viewer_options=`
+even though 1.4.0 gathers them into a `SceneOptions` internally, and
+`gs.sensors.Raycaster` plus `ext/pyrender/jit_render.py` (the instanced
+wheel renderer's `update_buffer` path) are byte-identical between the two
+releases, so neither needed a change.
+
+### Tests
+
+`genesis_vehicle/tests/test_gs_compat.py` (16 tests) exercises every shim
+against BOTH engine shapes with stubs, so the branch this machine's genesis
+does not take is still covered — including the spin-MOI regression above,
+pinned with an authored tensor and its principal-axis twin, and both upstream
+determinism fixes. `tests/test_single_scene_rays.py` (14 tests) pins the
+collision-ceiling measurement and the offset/read-back pairing. Suite: 291 pass.
+
 ## [1.4.1] — 2026-08-20
 
 New sample: `fleet_follow_demo.py` (#18), the fleet counterpart of

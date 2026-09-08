@@ -154,7 +154,9 @@ be reduced from its raw output near rolling. Implementation: inline in
 Wheel rays start `RAY_UP_OFFSET` (default 1.0 m) ABOVE the wheel
 attachment point and the read layer (`read_distances`) subtracts the
 offset from hits, so every consumer still sees attachment-relative
-distances. Contract points:
+distances. In `single_scene` the offset is capped per vehicle (v1.5.0, see
+below); `read_distances` takes the offset off the sensor, so it always
+subtracts back exactly what the pattern added. Contract points:
 
 - A ray MISS keeps its sentinel value (>= 19.9); the offset is NOT
   subtracted from misses.
@@ -166,10 +168,23 @@ distances. Contract points:
   the origins below the ground; the rays then missed, the air mask killed
   `N`, and the vehicle rested on its chassis collision box forever (a
   stable buried equilibrium — the v1.1.16 field report).
-- Vehicles are never raycast targets (`use_visual_raycasting` defaults
-  to False), so the elevated origin cannot self-hit in either raycast
-  mode. Keep overhead raycast terrain (tunnel ceilings) more than
-  `RAY_UP_OFFSET` above the wheel attachment points.
+- **`single_scene` CAN self-hit, and the offset is capped so it does not**
+  (v1.5.0). A vehicle is never a *visual* raycast target
+  (`use_visual_raycasting` defaults to False), which is why `dual_scene` —
+  whose raycast scene holds no vehicle collision geometry at all — is safe at
+  the full offset. But a raycaster also casts against the rigid solver's
+  COLLISION BVH, and in `single_scene` that BVH contains the vehicle's own
+  chassis box: from v1.1.16 to v1.5.0 the elevated origin sat above the
+  reference car's roof and every ray self-hit, reporting -0.80 m and launching
+  the vehicle. `raycast.single_scene_up_offset` now caps the offset at the
+  vehicle's own collision ceiling (`urdf.self_collision_ceiling`, from the
+  URDF's rest-pose collision AABBs) — 0.28 m for the reference car. A ray with
+  nothing of its own above it keeps the full 1.0 m.
+- The capped offset buys proportionally less over-compression headroom, so a
+  `single_scene` vehicle recovers from a deep bottom-out less readily than a
+  `dual_scene` one. `dual_scene` is the default for this reason among others.
+- Keep overhead raycast terrain (tunnel ceilings) more than the vehicle's
+  effective offset above the wheel attachment points.
 
 Related: `WheelJointInternalSync` is intended to be cosmetic but is not
 perfectly physics-neutral (the control path's PD applies real joint

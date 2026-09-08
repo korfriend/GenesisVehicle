@@ -75,7 +75,10 @@ import genesis as gs
 
 from .core import VehiclePhysics
 from .inputs import VehicleInputs
-from .raycast import WheelRayPattern, read_distances
+from .raycast import (
+    WheelRayPattern, read_distances, set_sensor_up_offset,
+    single_scene_up_offset,
+)
 from .urdf import parse_urdf
 
 _logger = logging.getLogger("genesis_vehicle.vehicle_scene")
@@ -158,7 +161,8 @@ def _guard_collision_mesh(morph: Any, where: str) -> None:
 _GENESIS_BACKEND: Optional[str] = None
 
 
-def _ensure_genesis(backend: Optional[str] = None) -> None:
+def _ensure_genesis(backend: Optional[str] = None,
+                   deterministic: bool = False) -> None:
     """Ensure the Genesis **physics** backend is up (process-global, set once).
 
     ``backend`` is an EXPLICIT request from ``VehicleScene.init_backend`` (``"cpu"``
@@ -167,7 +171,13 @@ def _ensure_genesis(backend: Optional[str] = None) -> None:
     backend warns and is ignored — but the silent auto-ensure (``backend=None``)
     never warns, it just reuses whatever is up. Uses ``gs._initialized`` (not a
     swallowed exception) so a REAL init failure (e.g. missing libcuda on GPU) still
-    propagates."""
+    propagates.
+
+    ``deterministic`` forwards ``gs.init(use_deterministic_algorithms=True)``
+    (genesis >= 1.4.0), which pins the rigid constraint solver's arm instead of
+    letting the runtime autotuner pick it — see
+    :meth:`VehicleScene.init_backend`. Ignored with a warning on a genesis that
+    does not have the option."""
     global _GENESIS_BACKEND
     if getattr(gs, "_initialized", False) or _GENESIS_BACKEND is not None:
         if (backend is not None and _GENESIS_BACKEND is not None
@@ -177,11 +187,94 @@ def _ensure_genesis(backend: Optional[str] = None) -> None:
                 "requested %r (the backend is process-global and set once — call "
                 "VehicleScene.init_backend(...) before any VehicleScene to choose it).",
                 _GENESIS_BACKEND, backend)
+        if deterministic and not getattr(gs, "use_deterministic_algorithms", False):
+            _logger.warning(
+                "Genesis is already initialized WITHOUT deterministic algorithms; "
+                "ignoring deterministic=True. gs.init runs once per process — call "
+                "VehicleScene.init_backend(..., deterministic=True) before any "
+                "VehicleScene is constructed.")
         _GENESIS_BACKEND = _GENESIS_BACKEND or backend or "cpu"
         return
     be_str = backend or "cpu"     # auto-ensure (backend=None) defaults to cpu
-    gs.init(backend=(gs.gpu if be_str == "gpu" else gs.cpu), logging_level="warning")
+    kw = dict(backend=(gs.gpu if be_str == "gpu" else gs.cpu),
+              logging_level="warning")
+    if deterministic:
+        import inspect
+        if "use_deterministic_algorithms" in inspect.signature(gs.init).parameters:
+            kw["use_deterministic_algorithms"] = True
+        else:
+            _logger.warning(
+                "deterministic=True needs genesis-world >= 1.4.0 "
+                "(gs.init(use_deterministic_algorithms=...)); this build has no "
+                "such option, so the GPU constraint solver keeps autotuning its "
+                "arm and a rollout is not bit-reproducible. Upgrade genesis-world "
+                "or run on the CPU backend, which pins the arm anyway.")
+    gs.init(**kw)
     _GENESIS_BACKEND = be_str
+
+
+_rigid_dt_warned = False
+
+
+def _normalize_rigid_dt(rigid_options, sim_options) -> None:
+    """Strip the legacy ``RigidOptions.dt`` that genesis >= 1.4.0 reinterprets.
+
+    Up to genesis 1.3.3 ``RigidOptions.dt`` was the solver's *step* duration
+    (``substep_dt = RigidOptions.dt / SimOptions.substeps``), so the ubiquitous
+    ``RigidOptions(dt=DT)`` alongside ``SimOptions(dt=DT, substeps=N)`` was a
+    no-op restating of the step rate. Genesis 1.4.0 redefined it as the solver's
+    *substep* interval (``substeps = round(SimOptions.dt / RigidOptions.dt)``),
+    so that same pair now derives 1 substep, contradicts the requested ``N`` and
+    ``Scene.build`` raises ``GenesisException``.
+
+    We therefore unset ``dt`` when it merely restates ``SimOptions.dt`` — which
+    reproduces the pre-1.4.0 behaviour exactly on both old and new genesis. A
+    ``dt`` that says something *else* (e.g. a deliberate ``SimOptions.dt / N``
+    written for 1.4.0 semantics) is left untouched."""
+    global _rigid_dt_warned
+    try:
+        step_dt = float(sim_options.dt)
+        rigid_dt = getattr(rigid_options, "dt", None)
+        fields_set = getattr(rigid_options, "model_fields_set", ())
+        if rigid_dt is None or "dt" not in fields_set:
+            return
+        if abs(float(rigid_dt) - step_dt) > 1e-12 * max(step_dt, 1.0):
+            return                                  # deliberate substep interval
+        rigid_options.dt = None
+        try:
+            rigid_options.model_fields_set.discard("dt")
+        except AttributeError:                      # pragma: no cover - old pydantic
+            pass
+        if not _rigid_dt_warned:
+            _rigid_dt_warned = True
+            _logger.warning(
+                "RigidOptions(dt=%g) restates SimOptions.dt and is ignored: since "
+                "genesis 1.4.0 that field is the solver SUBSTEP interval, not the "
+                "step duration. Drop it and set VehicleScene(substeps=...) instead.",
+                step_dt)
+    except Exception:                               # never fail scene construction
+        _logger.debug("could not normalize RigidOptions.dt", exc_info=True)
+
+
+def _kinematic_supports_terrain() -> bool:
+    """Can the KinematicSolver host a ``gs.morphs.Terrain``?
+
+    Genesis <= 1.3.3: yes — every morph resolved through one kinematic entity
+    class, so a terrain could be mirrored into the raycast scene as a visual-
+    raycasting kinematic body. Genesis 1.4.0 moved terrain onto a rigid-only
+    ``TerrainEntity`` and the kinematic description now rejects the morph with
+    ``GenesisException: Unsupported morph``. Probed off the solver's entity-class
+    table rather than a version string, so a future genesis that re-adds it is
+    picked up automatically."""
+    try:
+        from genesis.engine.solvers.kinematic_solver import KinematicSolver
+    except Exception:                                   # pragma: no cover
+        return True
+    classes = getattr(KinematicSolver, "_entity_classes", None)
+    if classes is None:                                 # genesis <= 1.3.3
+        return True
+    return any(issubclass(gs.morphs.Terrain, morph_cls) and "Terrain" in cls.__name__
+               for morph_cls, cls in classes)
 
 
 def _render_gpu_available() -> bool:
@@ -424,7 +517,7 @@ class VehicleScene:
     """Unified vehicle simulation scene — the center of the SDK API."""
 
     @staticmethod
-    def init_backend(backend: str = "cpu") -> None:
+    def init_backend(backend: str = "cpu", *, deterministic: bool = False) -> None:
         """Initialize the Genesis **physics** backend, explicitly, before constructing
         any ``VehicleScene``. ``backend`` is ``"cpu"`` (the default) or ``"gpu"`` and
         is the COMPUTE backend only — the renderer is separate (always GPU; see
@@ -436,10 +529,27 @@ class VehicleScene:
 
         >>> VehicleScene.init_backend("gpu")   # GPU physics (e.g. large-n_envs L3)
         >>> vs = VehicleScene(n_envs=4096)
+
+        ``deterministic=True`` forwards ``use_deterministic_algorithms`` to
+        ``gs.init`` (genesis-world >= 1.4.0). **Only the GPU backend needs it.**
+        Genesis's rigid constraint solver ships two arms that reach the same
+        answer down different floating-point paths, and on GPU it picks between
+        them by timing them as the simulation runs — so which arm runs at a
+        given step follows machine load, and fp32 non-associativity turns that
+        into last-bit differences that a closed-loop controller amplifies
+        (the slalom pass/fail flip reported against genesis-world v1.1.1). Two
+        upstream changes address it: the re-benchmark trigger became a call
+        count instead of a 5-second wall clock (so the schedule stops following
+        the clock), and this flag pins the arm outright, which is what makes a
+        rollout bit-reproducible on given hardware. The CPU backend pins the arm
+        unconditionally and never needed either. Pinning costs the throughput
+        the autotuner was buying, hence opt-in.
+
+        >>> VehicleScene.init_backend("gpu", deterministic=True)  # reproducible rollouts
         """
         if backend not in ("cpu", "gpu"):
             raise ValueError(f"backend must be 'cpu' or 'gpu', got {backend!r}")
-        _ensure_genesis(backend)
+        _ensure_genesis(backend, deterministic=deterministic)
 
     def __init__(
         self,
@@ -530,7 +640,8 @@ class VehicleScene:
             _ensure_genesis()
 
         _sim = sim_options or gs.options.SimOptions(dt=dt, substeps=substeps, gravity=gravity)
-        _rigid = rigid_options or gs.options.RigidOptions(dt=dt, enable_collision=True)
+        _rigid = rigid_options or gs.options.RigidOptions(enable_collision=True)
+        _normalize_rigid_dt(_rigid, _sim)
         _vis = vis_options or gs.options.VisOptions()
 
         # viewer_options (gs.options.ViewerOptions: camera_pos / camera_lookat /
@@ -657,10 +768,21 @@ class VehicleScene:
                 # --vis-mode=collision leaking through, or a changed Genesis default)
                 # makes on_rigid touch entity.geoms → AttributeError at build. This
                 # scene is sensors-only and never user-rendered, so "visual" is right.
-                body.entity_raycast = self._raycast_scene.add_entity(
-                    rc_morph, **_add_kwargs(
-                        gs.materials.Kinematic(use_visual_raycasting=True),
-                        surface, "visual"))
+                if (isinstance(rc_morph, gs.morphs.Terrain)
+                        and not _kinematic_supports_terrain()):
+                    # genesis >= 1.4.0: terrain is a rigid-only entity, so the
+                    # raycast mirror is a FIXED RIGID body there instead. The rays
+                    # then hit it through the rigid solver's collision BVH rather
+                    # than the visual one — same hit distances, and the BVH is still
+                    # static (the raycast scene holds nothing that moves), so the
+                    # dual_scene "build the BVH once" property is preserved.
+                    body.entity_raycast = self._raycast_scene.add_entity(
+                        rc_morph, **_add_kwargs(gs.materials.Rigid(), surface, None))
+                else:
+                    body.entity_raycast = self._raycast_scene.add_entity(
+                        rc_morph, **_add_kwargs(
+                            gs.materials.Kinematic(use_visual_raycasting=True),
+                            surface, "visual"))
             else:
                 # single_scene mode: the rigid collision body IS the raycast target.
                 if body.entity_main is None:
@@ -910,10 +1032,25 @@ class VehicleScene:
                 entity_idx=veh.proxy.idx,
                 max_range=raycaster_max_range, min_range=0.0, return_world_frame=True))
         else:
+            # single_scene: the rays are cast in the SAME scene the chassis
+            # collides in, so a high-cast origin lifted above the vehicle's own
+            # collision box hits its ROOF instead of the ground — every wheel
+            # then reads a near-zero (post-offset NEGATIVE) distance, the
+            # pipeline reads maximum compression, and the vehicle launches. Cap
+            # the offset at the vehicle's own collision ceiling (v1.5.0; the
+            # reference car has 0.30 m between the wheel attachment at z=0.30
+            # and the chassis box bottom at z=0.60, so 1.0 m was 0.7 m too
+            # high). dual_scene raycasts a scene with no vehicle collision
+            # geometry in it and keeps the full RAY_UP_OFFSET.
+            up_offset = single_scene_up_offset(urdf_path, wheel_positions, name)
+            pattern = WheelRayPattern(wheel_positions, up_offset=up_offset)
             veh.sensor = self._main_scene.add_sensor(gs.sensors.Raycaster(
-                pattern=WheelRayPattern(wheel_positions),
+                pattern=pattern,
                 entity_idx=veh.entity_main.idx,
                 max_range=raycaster_max_range, min_range=0.0, return_world_frame=True))
+            # read_distances subtracts the offset back out, and it is per-vehicle
+            # now, so tell the sensor rather than every call site.
+            set_sensor_up_offset(veh.sensor, up_offset)
 
         self._vehicles.append(veh)
         return veh
@@ -1314,7 +1451,7 @@ class VehicleScene:
     @property
     def rigid_solver(self):
         """The main scene's rigid solver — for read-only sim introspection
-        (``n_geoms`` / ``n_links`` / ``faces_info`` …). Valid after ``build()``."""
+        (``n_geoms`` / ``n_links`` / ``n_faces`` …). Valid after ``build()``."""
         return self._main_scene.sim.rigid_solver
 
     @property

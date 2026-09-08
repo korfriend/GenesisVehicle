@@ -182,23 +182,38 @@ def estimate_spin_inertia_from_genesis(
     authoritative truth when set.
 
     Caveats:
-      - Genesis stores ``link.inertial_i`` in the inertial principal frame,
-        which may be rotated relative to the body frame. The max diagonal is
-        the spin MOI for cylindrical wheels (mass distributed about the spin
-        axis) but is a heuristic for general shapes.
-      - When ``spin_axis_local`` is provided as a unit 3-vector in body
-        coordinates, the helper projects the (assumed-diagonal) tensor onto
-        that axis: ``I_about_axis = a^T diag(I) a``. This is exact when the
-        inertial frame coincides with the body frame and a reasonable
-        approximation otherwise.
-      - Falls back to ``max(diag(inertial_i))`` on numerical issues or when
-        ``spin_axis_local`` is None.
+      - Genesis stores the link inertia in the link's INERTIAL frame, which may
+        be rotated relative to the body frame — and genesis >= 1.4.0 always
+        diagonalizes an authored tensor onto its principal axes, permuting the
+        components in the process. The tensor is therefore rotated into the BODY
+        frame with the link's ``inertial_quat`` before anything is read off it,
+        which makes the result identical on every genesis version. (Projecting
+        the raw stored diagonal, as this did before v1.5.0, silently read the
+        wrong component on >= 1.4.0: the reference car's wheel is
+        ``ixx=1, iyy=2, izz=1`` and its spin MOI about +Y came back as 1.0
+        instead of 2.0.)
+      - With ``spin_axis_local`` a unit 3-vector in body coordinates, the spin
+        MOI is the exact ``I_about_axis = a^T I_body a``.
+      - Falls back to ``max(diag(I_body))`` when ``spin_axis_local`` is None or
+        on numerical trouble: for a cylindrical wheel the largest principal
+        moment is the one about the spin axis, but that is a heuristic for
+        general shapes — pass ``spin_axis_local``.
+
+    Reads the tensor through :func:`genesis_vehicle._gs_compat.link_inertial`
+    (genesis <= 1.3.3 spells it ``link.inertial_i``, >= 1.4.0
+    ``link.desc.inertia``). Raises ``ValueError`` for a link with no inertia,
+    which the caller in ``core.py`` treats like any other failure — keep the
+    authored ``i_wheel``.
     """
     import numpy as np
+    from ._gs_compat import link_inertial
     link = entity.get_link(link_name)
-    I_mat = np.asarray(link.inertial_i)
-    diag = np.diag(I_mat) if I_mat.ndim == 2 else np.asarray(I_mat).flatten()
-    diag = np.asarray(diag, dtype=float)
+    props = link_inertial(link)
+    if props is None or props.i is None:
+        raise ValueError(
+            f"link {link_name!r} carries no inertia to estimate a spin MOI from")
+    I_body = _inertia_in_link_frame(np.asarray(props.i, dtype=float), props.quat)
+    diag = np.diag(I_body)
     if spin_axis_local is None:
         return float(np.max(diag))
     a = np.asarray(spin_axis_local, dtype=float)
@@ -206,11 +221,198 @@ def estimate_spin_inertia_from_genesis(
     if norm < 1e-12:
         return float(np.max(diag))
     a = a / norm
-    # I about axis = a^T diag(I) a = sum(a_i^2 * I_i)
-    I_about = float(np.sum((a ** 2) * diag))
+    I_about = float(a @ I_body @ a)
     if not np.isfinite(I_about) or I_about <= 0.0:
         return float(np.max(diag))
     return I_about
+
+
+def _inertia_in_link_frame(I_inertial, quat) -> "Any":
+    """Rotate an inertia tensor from the link's inertial frame into the link
+    frame: ``I_body = R I R^T`` with ``R`` from the wxyz ``quat``. Identity
+    (a copy) when ``quat`` is None or degenerate."""
+    import numpy as np
+    I_inertial = np.asarray(I_inertial, dtype=float)
+    if I_inertial.ndim == 1:                     # a bare diagonal
+        I_inertial = np.diag(I_inertial)
+    if quat is None:
+        return I_inertial
+    q = np.asarray(quat, dtype=float).reshape(4)
+    n = float(np.linalg.norm(q))
+    if not np.isfinite(n) or n < 1e-12:
+        return I_inertial
+    w, x, y, z = q / n
+    R = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
+        [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
+    ])
+    return R @ I_inertial @ R.T
+
+
+def self_collision_ceiling(
+    urdf_path: str,
+    ray_positions,
+    *,
+    margin: float = 0.02,
+) -> Optional[float]:
+    """How far a wheel ray may start ABOVE its attachment point before it would
+    begin inside — or above — the vehicle's OWN collision geometry.
+
+    Only ``raycast_mode="single_scene"`` needs this. There the wheel rays are
+    cast in the SAME scene the chassis collides in, so a ray origin lifted above
+    the chassis collision box (``raycast.RAY_UP_OFFSET``, 1.0 m by default) hits
+    the vehicle's own roof instead of the ground — the "launches into sky" bug
+    class the URDF comments warn about. ``dual_scene`` raycasts in a scene that
+    holds no vehicle collision geometry at all, so it is unaffected and keeps
+    the full offset.
+
+    Returns the smallest gap over ``ray_positions``, minus ``margin``, clamped
+    at 0.0; or ``None`` when no own-collision geometry sits above any ray, which
+    means the offset needs no cap. Geometry is evaluated at the URDF REST pose
+    (every joint at zero), which is the pose the ray origins are authored in.
+
+    ``ray_positions`` is an iterable of chassis-local ``(x, y, z)`` wheel
+    attachment points.
+
+    A collision geom is treated as an obstruction when its rest-pose
+    axis-aligned bounding box spans the ray's ``(x, y)``. Using the AABB rather
+    than the exact surface over-approximates a rotated or round geom, which can
+    only shrink the offset — never leave a ray starting inside the body.
+    """
+    boxes = _collision_aabbs(urdf_path)
+    if not boxes:
+        return None
+    gap: Optional[float] = None
+    for (x, y, z) in ray_positions:
+        for (lo, hi) in boxes:
+            if not (lo[0] <= x <= hi[0] and lo[1] <= y <= hi[1]):
+                continue
+            if hi[2] <= z:
+                continue                       # entirely below the ray origin
+            here = max(0.0, lo[2] - z)         # 0 if the ray starts inside it
+            gap = here if gap is None else min(gap, here)
+    if gap is None:
+        return None
+    return max(0.0, gap - margin)
+
+
+def _collision_aabbs(urdf_path: str) -> list[tuple[Any, Any]]:
+    """Rest-pose axis-aligned bounds of every ``<collision>`` in the URDF, in the
+    BASE-LINK frame, as a list of ``(min_xyz, max_xyz)`` numpy pairs.
+
+    Link poses come from composing the ``<origin>`` of each joint on the path
+    from the base link, with every joint at zero — a URDF's rest pose. A geom
+    whose extent cannot be determined (an unreadable mesh, an unknown shape) is
+    skipped rather than guessed at: it drops out of the obstruction test, which
+    is the same outcome as there being nothing there.
+    """
+    import numpy as np
+
+    try:
+        root = ET.parse(urdf_path).getroot()
+    except Exception:
+        return []
+    joints_by_parent: dict[str, list[ET.Element]] = {}
+    joints_by_name = {j.get("name"): j for j in root.findall("joint")}
+    for j in root.findall("joint"):
+        parent = j.find("parent")
+        if parent is not None:
+            joints_by_parent.setdefault(parent.get("link"), []).append(j)
+    base = _find_base_link(root, joints_by_name)
+
+    # Breadth-first walk from the base link, composing (R, t) per link.
+    poses: dict[str, tuple[Any, Any]] = {base: (np.eye(3), np.zeros(3))}
+    queue = [base]
+    while queue:
+        name = queue.pop()
+        R_p, t_p = poses[name]
+        for j in joints_by_parent.get(name, ()):
+            child = j.find("child")
+            if child is None or child.get("link") in poses:
+                continue
+            R_j = _rpy_to_R(_origin_rpy(j))
+            t_j = np.asarray(_origin_xyz(j), dtype=float)
+            poses[child.get("link")] = (R_p @ R_j, t_p + R_p @ t_j)
+            queue.append(child.get("link"))
+
+    out: list[tuple[Any, Any]] = []
+    for link in root.findall("link"):
+        pose = poses.get(link.get("name"))
+        if pose is None:                        # not connected to the base link
+            continue
+        R_l, t_l = pose
+        for col in link.findall("collision"):
+            half = _collision_half_extents(col)
+            if half is None:
+                continue
+            R_c = R_l @ _rpy_to_R(_origin_rpy(col))
+            t_c = t_l + R_l @ np.asarray(_origin_xyz(col), dtype=float)
+            # AABB of the rotated box: |R| @ half_extents (the standard bound).
+            radius = np.abs(R_c) @ half
+            out.append((t_c - radius, t_c + radius))
+    return out
+
+
+def _collision_half_extents(collision: ET.Element):
+    """Half-extents of a ``<collision>``'s shape in its own frame, or None when
+    the shape is unknown or a mesh whose bounds cannot be read."""
+    import numpy as np
+
+    geom = collision.find("geometry")
+    if geom is None:
+        return None
+    box = geom.find("box")
+    if box is not None and box.get("size"):
+        return np.asarray([float(v) for v in box.get("size").split()], dtype=float) / 2.0
+    sphere = geom.find("sphere")
+    if sphere is not None and sphere.get("radius"):
+        r = float(sphere.get("radius"))
+        return np.asarray([r, r, r], dtype=float)
+    cyl = geom.find("cylinder")
+    if cyl is not None and cyl.get("radius") and cyl.get("length"):
+        r, h = float(cyl.get("radius")), float(cyl.get("length"))
+        return np.asarray([r, r, h / 2.0], dtype=float)      # URDF cylinders are +z
+    mesh = geom.find("mesh")
+    if mesh is not None and mesh.get("filename"):
+        return _mesh_half_extents(mesh)
+    return None
+
+
+def _mesh_half_extents(mesh: ET.Element):
+    """Half-extents of a ``<mesh>`` from its file's bounding box, scaled by the
+    element's ``scale``. None if the file cannot be read — trimesh is a Genesis
+    dependency, but the path may be a package:// URI we cannot resolve."""
+    import numpy as np
+
+    path = mesh.get("filename")
+    if path.startswith(("package://", "model://")):
+        return None
+    try:
+        import trimesh
+        loaded = trimesh.load(path, force="mesh", skip_materials=True)
+        lo, hi = np.asarray(loaded.bounds, dtype=float)
+    except Exception:
+        return None
+    scale = mesh.get("scale")
+    half = (hi - lo) / 2.0
+    if scale:
+        half = half * np.abs(np.asarray([float(v) for v in scale.split()], dtype=float))
+    return half
+
+
+def _rpy_to_R(rpy):
+    """URDF fixed-axis roll-pitch-yaw (Rz @ Ry @ Rx) to a 3x3 rotation matrix."""
+    import numpy as np
+
+    r, p, y = (float(v) for v in rpy)
+    cr, sr, cp, sp, cy, sy = (math.cos(r), math.sin(r), math.cos(p),
+                              math.sin(p), math.cos(y), math.sin(y))
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp,     cp * sr,                cp * cr],
+    ])
 
 
 # ---------------------------------------------------------------------------

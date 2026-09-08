@@ -109,7 +109,7 @@ def main():
         viewer_options=(gs.options.ViewerOptions(
             camera_pos=(-8.0, -12.0, 6.0), camera_lookat=(10.0, 0.0, 0.0),
             camera_fov=55) if args.viewer else None),
-        rigid_options=gs.options.RigidOptions(dt=DT, enable_collision=True),
+        rigid_options=gs.options.RigidOptions(enable_collision=True),
     )
     vs.add_ground_plane(friction=1.0)
     # Start with drag off; the car preset's own default (0.66) is replaced so

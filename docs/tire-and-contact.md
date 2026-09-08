@@ -30,7 +30,8 @@ combination.
 This SDK **fixes Axis A to ray-hit** and lets you pick Axis B (Coulomb or
 Pacejka) on top. The wheel has no collision geometry for tire forces; a
 downward ray measures ground distance and the SDK applies suspension +
-tire forces analytically (`apply_links_external_force`).
+tire forces analytically (as one chassis wrench — see
+`_gs_compat.apply_links_wrench`).
 
 > **History note.** The old "Coulomb = always test cylinder-vs-ground
 > collision" memory refers to Axis A being *collider contact*, where

@@ -36,7 +36,9 @@ VehiclePhysics.step(inputs)
     (E) accumulate F_world, torque into total_F, total_T
 
 [4] CouplingStrategy.apply(omega, meta)              # post-loop, pre-force-apply
-[5] solver.apply_links_external_force/torque (chassis)
+[5] _gs_compat.apply_links_wrench(solver, F, T) (chassis)
+    → solver.apply_links_external_wrench  (genesis >= 1.4.0)
+    → solver.apply_links_external_force + _torque  (genesis <= 1.3.3)
 [6] wheel visuals (rendered scenes only): VehicleScene streams closed-form
     wheel poses into instanced render nodes AFTER the physics advance — NOT
     via the rigid solver; with the native viewer the stream happens inside
@@ -66,7 +68,7 @@ for the recommended ordering).
 
 `CouplingStrategy.apply()` runs at step [4], after the per-wheel loop
 completes and after `omega` has been integrated for every wheel, but
-**before** `solver.apply_links_external_force/torque` is called. The chassis
+**before** the chassis wrench is applied (step [5]). The chassis
 force applied in the same step still reflects the pre-coupling per-wheel
 F_long (because F_long was computed inside the loop using pre-coupling
 omegas). The coupled omega becomes visible to the next step. This is the

@@ -35,7 +35,7 @@ mode. No GPU present → software render + a `build()` warning.
 ```python
 class VehicleScene:
     @staticmethod
-    def init_backend(backend="cpu") -> None    # PHYSICS backend, once; "cpu"|"gpu"
+    def init_backend(backend="cpu", *, deterministic=False) -> None   # PHYSICS backend, once
 
     def __init__(*, n_envs=1, dt=1/200,
                  raycast_mode="dual_scene",        # "dual_scene" (default) | "single_scene"
@@ -85,7 +85,7 @@ class VehicleScene:
 
     # --- accessors (the raw Genesis scenes are PRIVATE — not exposed) ---
     viewer                               # native viewer | None  (property)
-    rigid_solver                         # n_geoms / n_links / faces_info (read-only)
+    rigid_solver                         # n_geoms / n_links / n_faces (read-only)
     sim_options                          # runtime dt / gravity tweaks
     is_dual_scene: bool                  # raycast_mode == "dual_scene"
     physics                              # batched MultiVehiclePhysics (solver="batched"), else None
@@ -480,8 +480,9 @@ when it declares a non-zero stiffness**, and only then reads `damping` /
 `damping="20.0"`, or `stiffness="0.0"` ("no spring here"), is ignored.
 
 Note this is about *sourcing the number*. The ray-wheel pipeline never applies
-suspension force through the URDF joint — `N` goes onto the chassis via
-`apply_links_external_force`, and the prismatic joint is visual
+suspension force through the URDF joint — `N` goes onto the chassis with the
+rest of the wrench (`_gs_compat.apply_links_wrench`), and the prismatic joint
+is visual
 (`visual_susp_mode`). See `docs/physics-contracts.md`.
 
 `ConfigError` — raised on bad config (missing required fields, wheel count

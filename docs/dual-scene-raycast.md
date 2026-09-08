@@ -211,6 +211,16 @@ for t in range(N):
 raycaster and reproduces the prior SDK behavior; prefer it for a flat ground at
 `n_envs=1`.
 
+> **Single-scene rays see the vehicle itself.** The one scene's collision BVH
+> contains the chassis box, so the high-cast ray origin
+> (`raycast.RAY_UP_OFFSET`) is capped at the vehicle's own collision ceiling —
+> 0.28 m on the reference car, whose wheel attachment sits at `z=0.30` and whose
+> chassis box starts at `z=0.60`. Without the cap (v1.1.16 through v1.4.1) every
+> ray hit the roof and the vehicle launched. The cap costs over-compression
+> headroom on a hard landing, which `dual_scene` — raycasting a scene with no
+> vehicle collision geometry in it — does not pay. See
+> [`physics-contracts.md` §7.8](physics-contracts.md#78-high-cast-rays-and-over-compression-v1116).
+
 Runnable demo: `python -m genesis_vehicle.samples.dual_scene_terrain --compare`.
 
 ## Scope & follow-ups
