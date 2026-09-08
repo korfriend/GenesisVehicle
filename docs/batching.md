@@ -105,8 +105,9 @@ overrides) and runs a single batched compute per kind:
   n_wheels)` tensors.
 - **State reads**: One `solver.get_links_{pos,quat,vel,ang}(K_idx)`
   call returns `(N=1, K_kind, ...)` for all K vehicles. No Python loop.
-- **Force / torque writes**: One `solver.apply_links_external_force`
-  call with K link indices applies forces to all K base links.
+- **Force / torque writes**: One `_gs_compat.apply_links_wrench` call with K
+  link indices applies force AND torque to all K base links — one solver call
+  on genesis >= 1.4.0 (`apply_links_external_wrench`), two on <= 1.3.3.
 - **Sensor reads**: K small `sensor.read()` calls in a Python loop
   (one raycaster per vehicle — unavoidable per-vehicle I/O).
 - **Visual writes** (only when `enable_wheel_joint_internal_sync=True`): since

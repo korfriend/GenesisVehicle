@@ -69,7 +69,7 @@ def _internal_run(K: int, N: int, warmup: int, steps: int, gpu: bool = False) ->
     vs = VehicleScene(
         n_envs=N, dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
-            dt=DT, enable_collision=True,
+            enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
     )

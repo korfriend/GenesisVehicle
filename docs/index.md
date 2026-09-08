@@ -107,8 +107,18 @@ Release history lives in
 [`../CHANGELOG.md`](../CHANGELOG.md).
 
 **Backend compatibility:** validated against the Genesis physics backend
-`genesis-world ≥ 1.0.0`; smoke-tested on `1.3.3` (the instanced-wheel
-renderer branches on the 1.3.x buffer API at runtime — see the 1.2.7
-CHANGELOG entry). Per-release backend notes are in
-[`../CHANGELOG.md`](../CHANGELOG.md) (see the 0.5.33 entry for the
-0.4.6 → 1.0.0 bump).
+`genesis-world ≥ 1.0.0`; smoke-tested on `1.4.0`, and the same source also
+runs on `1.3.3` — the APIs that moved between the two are branched at runtime
+in `genesis_vehicle/_gs_compat.py` (force/torque -> wrench, link inertial
+accessors) and in `vehicle_scene.py` (`RigidOptions.dt`, terrain raycast
+mirror). The instanced-wheel renderer likewise branches on the 1.3.x buffer
+API — see the 1.2.7 CHANGELOG entry. Per-release backend notes are in
+[`../CHANGELOG.md`](../CHANGELOG.md) (see the 1.5.0 entry for the
+1.3.3 → 1.4.0 bump and its cross-version parity table, and 0.5.33 for the
+0.4.6 → 1.0.0 one).
+
+**On `genesis-world >= 1.4.0`, never pass `dt=` to `RigidOptions`** — that
+field became the solver SUBSTEP interval, so restating `SimOptions.dt` there
+now contradicts `substeps` and `Scene.build` raises. Ask for the rate with
+`VehicleScene(substeps=...)` instead; `VehicleScene` strips the legacy
+spelling and warns once.

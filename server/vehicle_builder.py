@@ -43,25 +43,31 @@ def apply_monkey_patches(rigid_solver):
     inputs to the current Genesis engine's 2D tensor requirement (avoids
     modifying the SDK source).
     """
-    orig_apply_force = rigid_solver.apply_links_external_force
-    def patched_apply_force(force, links_idx=None, envs_idx=None, **kwargs):
-        if isinstance(force, torch.Tensor) and force.dim() == 3:
-            if force.shape[1] == 1:
-                force = force.squeeze(1)
-            else:
-                force = force.reshape(-1, force.shape[-1])
-        return orig_apply_force(force, links_idx, envs_idx, **kwargs)
-    rigid_solver.apply_links_external_force = patched_apply_force
+    def _squeeze_3d(t):
+        if isinstance(t, torch.Tensor) and t.dim() == 3:
+            return t.squeeze(1) if t.shape[1] == 1 else t.reshape(-1, t.shape[-1])
+        return t
 
-    orig_apply_torque = rigid_solver.apply_links_external_torque
-    def patched_apply_torque(torque, links_idx=None, envs_idx=None, **kwargs):
-        if isinstance(torque, torch.Tensor) and torque.dim() == 3:
-            if torque.shape[1] == 1:
-                torque = torque.squeeze(1)
-            else:
-                torque = torque.reshape(-1, torque.shape[-1])
-        return orig_apply_torque(torque, links_idx, envs_idx, **kwargs)
-    rigid_solver.apply_links_external_torque = patched_apply_torque
+    # genesis >= 1.4.0 folded apply_links_external_force/_torque into a single
+    # apply_links_external_wrench; patch whichever this build exposes (the SDK
+    # reaches both through genesis_vehicle._gs_compat.apply_links_wrench).
+    if hasattr(rigid_solver, "apply_links_external_wrench"):
+        orig_apply_wrench = rigid_solver.apply_links_external_wrench
+        def patched_apply_wrench(force=None, torque=None, links_idx=None,
+                                 envs_idx=None, **kwargs):
+            return orig_apply_wrench(_squeeze_3d(force), _squeeze_3d(torque),
+                                     links_idx, envs_idx, **kwargs)
+        rigid_solver.apply_links_external_wrench = patched_apply_wrench
+    else:
+        orig_apply_force = rigid_solver.apply_links_external_force
+        def patched_apply_force(force, links_idx=None, envs_idx=None, **kwargs):
+            return orig_apply_force(_squeeze_3d(force), links_idx, envs_idx, **kwargs)
+        rigid_solver.apply_links_external_force = patched_apply_force
+
+        orig_apply_torque = rigid_solver.apply_links_external_torque
+        def patched_apply_torque(torque, links_idx=None, envs_idx=None, **kwargs):
+            return orig_apply_torque(_squeeze_3d(torque), links_idx, envs_idx, **kwargs)
+        rigid_solver.apply_links_external_torque = patched_apply_torque
 
     orig_set_dofs_pos = rigid_solver.set_dofs_position
     def patched_set_dofs_pos(position, dofs_idx=None, envs_idx=None, **kwargs):

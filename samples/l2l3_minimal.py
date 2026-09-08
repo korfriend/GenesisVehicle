@@ -60,7 +60,7 @@ def main():
     vs = VehicleScene(
         n_envs=N,
         dt=DT, substeps=10,
-        rigid_options=gs.options.RigidOptions(dt=DT, enable_collision=True,
+        rigid_options=gs.options.RigidOptions(enable_collision=True,
                                               enable_self_collision=False),
     )
     vs.add_ground_plane(friction=1.0)

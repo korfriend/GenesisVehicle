@@ -221,15 +221,15 @@ Genesis does ship a differentiable rigid solver
 (`SimOptions(requires_grad=True)`), and the obvious plan is to backpropagate
 through `scene.step()`. **It cannot work for this SDK.** The solver's taped
 input set is exactly `set_pos` / `set_quat` / `set_dofs_velocity` /
-`control_dofs_force` (see `RigidEntity.process_input_grad`);
-`apply_links_external_force` and `apply_links_external_torque` are not on
-the tape — and they are the *only* way a ray-wheel vehicle touches the
+`control_dofs_force` (see `RigidEntity.process_input_grad`); the external
+wrench API is not on the tape (`apply_links_external_wrench` on genesis
+>= 1.4.0, `apply_links_external_force` / `_torque` on <= 1.3.3) — and they are the *only* way a ray-wheel vehicle touches the
 solver, because the SDK deliberately has no wheel joints to motor.
 
-Measured on genesis-world 1.3.3: a leaf tensor passed to
-`apply_links_external_force` comes back from `scene.backward()` with
-`grad is None`, while the same probe through `control_dofs_force` returns a
-finite gradient. So Genesis autodiff can differentiate a joint-motor
+Measured on genesis-world 1.3.3, and unchanged on 1.4.0, which only renamed
+the call: a leaf tensor passed to the external-wrench API comes back from
+`scene.backward()` with `grad is None`, while the same probe through
+`control_dofs_force` returns a finite gradient. So Genesis autodiff can differentiate a joint-motor
 vehicle, not a ray-wheel one.
 
 Differentiating the SDK's own force model instead gets the same Jacobian and

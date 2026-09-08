@@ -14,11 +14,14 @@ For a fully encapsulated CARLA-/Gym-style API, see (future) modules under
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Optional
 
 import genesis as gs
 
-from .raycast import WheelRayPattern
+from .raycast import (
+    WheelRayPattern, set_sensor_up_offset, single_scene_up_offset,
+)
 from .urdf import parse_urdf
 
 
@@ -30,28 +33,46 @@ def make_wheel_raycaster(
     max_range: float = 20.0,
     min_range: float = 0.0,
     return_world_frame: bool = True,
+    up_offset: Optional[float] = None,
 ) -> Any:
     """Add a wheel raycaster sensor to ``scene`` using wheel positions parsed
     from ``urdf_path``. Returns the sensor handle.
 
+    This is inherently a SINGLE-SCENE raycaster: the sensor is anchored to the
+    vehicle in the very scene the vehicle collides in, so the high-cast ray
+    origins are capped at the vehicle's own collision ceiling
+    (:func:`genesis_vehicle.raycast.single_scene_up_offset`) — without the cap
+    the rays hit the vehicle's own chassis box and it launches. Pass
+    ``up_offset`` to override the cap. ``read_distances`` recovers the offset
+    off the sensor, so callers need not pass it on.
+
     Equivalent to:
 
         parsed = parse_urdf(urdf_path)
+        wheels = [w.position for w in parsed.wheels]
+        offset = single_scene_up_offset(urdf_path, wheels)
         sensor = scene.add_sensor(gs.sensors.Raycaster(
-            pattern=WheelRayPattern([w.position for w in parsed.wheels]),
+            pattern=WheelRayPattern(wheels, up_offset=offset),
             entity_idx=entity.idx,
             max_range=max_range, min_range=min_range,
             return_world_frame=return_world_frame,
         ))
+        set_sensor_up_offset(sensor, offset)
     """
     parsed = parse_urdf(urdf_path)
-    return scene.add_sensor(gs.sensors.Raycaster(
-        pattern=WheelRayPattern([w.position for w in parsed.wheels]),
+    wheels = [w.position for w in parsed.wheels]
+    if up_offset is None:
+        up_offset = single_scene_up_offset(urdf_path, wheels,
+                                           name=os.path.basename(urdf_path))
+    sensor = scene.add_sensor(gs.sensors.Raycaster(
+        pattern=WheelRayPattern(wheels, up_offset=up_offset),
         entity_idx=entity.idx,
         max_range=max_range,
         min_range=min_range,
         return_world_frame=return_world_frame,
     ))
+    set_sensor_up_offset(sensor, up_offset)
+    return sensor
 
 
 def add_vehicle(

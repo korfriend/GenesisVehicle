@@ -113,7 +113,7 @@ def _internal_run(solver: str, n_per_kind: int,
         solver=("batched" if solver == "multi_batched" else "per_vehicle"),
         dt=DT, substeps=30,
         rigid_options=gs.options.RigidOptions(
-            dt=DT, enable_collision=True,
+            enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
     )

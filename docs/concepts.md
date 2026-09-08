@@ -45,7 +45,9 @@ Every simulation step, for every wheel:
    still measures the ground — `d` can then go **negative** = ground above
    the attachment point = maximum compression, which is what lets the
    suspension recover a hard landing instead of locking into a "buried"
-   rest state. See [`physics-contracts.md`](physics-contracts.md#78-high-cast-rays-and-over-compression-v1116).)
+   rest state. In `single_scene` the offset is capped at the vehicle's own
+   collision ceiling so the rays cannot hit its chassis box — see
+   [`physics-contracts.md`](physics-contracts.md#78-high-cast-rays-and-over-compression-v1116).)
 2. **Suspension** — compression `c = max(rest_d - d, 0)`, then a per-wheel
    asymmetric damper produces normal force `N`. See
    [`physics-contracts.md`](physics-contracts.md#72-normal-force-is-non-negative-air-mask-wheels-contribute-nothing)

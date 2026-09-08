@@ -352,7 +352,7 @@ def main():
         # coarser step is intentionally not in this scene — see the kinds note).
         dt=DT, substeps=SUBSTEPS,
         rigid_options=gs.options.RigidOptions(
-            dt=DT, enable_collision=True,
+            enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
         vis_options=gs.options.VisOptions(

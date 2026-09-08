@@ -93,6 +93,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
+from .._gs_compat import link_inertial
 from .._pipeline import compute_wheel_step
 
 
@@ -192,24 +193,19 @@ def plant_mass_properties(entity: Any) -> PlantMassProperties:
     mc = np.zeros(3)
     i_o = np.zeros((3, 3))
     for i, link in enumerate(entity.links):
-        m_i = getattr(link, "inertial_mass", None)
-        if m_i is None:
+        # Version-independent read: genesis >= 1.4.0 moved link.inertial_* onto
+        # link.desc (see genesis_vehicle._gs_compat.link_inertial).
+        props = link_inertial(link)
+        if props is None:
             continue
-        m_i = float(m_i)
-        if m_i <= 0.0:
-            continue
+        m_i = props.mass
         R_l = _quat_to_R(quat[i])
-        c_local = _as_np(getattr(link, "inertial_pos", None))
-        c_local = np.zeros(3) if c_local is None else c_local.reshape(3)
-        c_i = pos[i] + R_l @ c_local
-        q_in = _as_np(getattr(link, "inertial_quat", None))
-        R_in = R_l if q_in is None else R_l @ _quat_to_R(q_in.reshape(4))
-        I_local = _as_np(getattr(link, "inertial_i", None))
-        if I_local is None:
+        c_i = pos[i] + R_l @ props.pos
+        R_in = R_l if props.quat is None else R_l @ _quat_to_R(props.quat)
+        if props.i is None:
             I_c = np.zeros((3, 3))
         else:
-            I_local = I_local.reshape(3, 3)
-            I_c = R_in @ I_local @ R_in.T
+            I_c = R_in @ props.i @ R_in.T
         # Parallel-axis onto the base-link origin.
         i_o += I_c + m_i * (float(c_i @ c_i) * np.eye(3) - np.outer(c_i, c_i))
         m_tot += m_i

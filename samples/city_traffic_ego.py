@@ -217,7 +217,7 @@ def main():
         # substeps=10 is the floor for this vehicle stack (verified in road_loop).
         dt=DT, substeps=10,
         rigid_options=gs.options.RigidOptions(
-            dt=DT, enable_collision=True,
+            enable_collision=True,
             enable_self_collision=False, enable_joint_limit=True,
         ),
         vis_options=gs.options.VisOptions(
