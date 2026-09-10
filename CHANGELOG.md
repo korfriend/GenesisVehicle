@@ -10,6 +10,275 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.6.1] — 2026-09-10
+
+**The order-free raycast-mode benchmark the v1.5.1 retraction asked for now
+exists — and its first four runs on this machine disagree about whether there
+is a number to publish, which IS the result.** `samples/bench_raycast_mode.py`
+compares `raycast_mode="single_scene"` against `"dual_scene"` with a fresh
+process per measurement, an alternating slot order, a paired ratio inside each
+repeat, and a fail-closed publication rule that prints NO ratio when this
+machine's own run-to-run noise cannot carry one. Two runs at the defaults, in
+one session, both fully valid, landed on opposite sides of that rule. **The SDK
+still publishes no raycast-mode speedup figure.** What it now has is a harness
+that says when it cannot produce one, instead of a table nobody could
+reproduce.
+
+| abbr | meaning |
+|---|---|
+| ms/step | wall-clock milliseconds per simulation step (one `veh.set_inputs` + one `vs.step`) |
+| r_k | paired ratio of repeat k: ms(single_scene, k) / ms(dual_scene, k) |
+| slot | a mode's position inside a repeat: slot 1 runs first, slot 2 second |
+| A / B | repeat groups by slot order: A = dual_scene ran slot 1, B = single_scene ran slot 1 |
+| fail-closed | no ratio is printed unless both disclosure conditions hold; the default answer is "not measurable here" |
+| hs | `horizontal_scale` — terrain cell size in metres (faces ~= 2*(size/hs)^2) |
+| BVH | Bounding Volume Hierarchy (the acceleration structure the wheel rays are cast against) |
+| L3 / `n_envs` | the parallel-scenario batching axis (see `docs/batching.md`) |
+| (a)-(d) | `dual_scene_terrain.verdicts()` criteria: rays hit / ride height / drove forward / stayed on the plate |
+| (d) bound | the on-plate x/y limit, `terrain_half - 2.0` m |
+
+### New — `samples/bench_raycast_mode.py`
+
+What the code enforces, criterion by criterion:
+
+- **Fresh process per measurement.** Every ms/step comes from a child process
+  that does its own `gs.init` / build / settle / drive, as `perf_vectorization.py`
+  does. The parent never calls `gs.init` and never builds a `VehicleScene`;
+  every heavy import lives inside `_worker_main`. This is NOT a claim that
+  genesis is absent from parent memory — `__init__.py:150` →
+  `control/plant.py:97` → `_pipeline.py:23` imports `genesis.utils.geom`
+  eagerly, so that would be impossible, and the docstring says so.
+- **Alternating slot order, paired.** `--repeats` must be EVEN and >= 4
+  (`argparse.error` before a single worker spawns). Even repeats put
+  dual_scene in slot 1, odd repeats put single_scene there, and the two workers
+  of a repeat are adjacent with nothing interleaved between them. The published
+  statistic is the within-repeat ratio `r_k`, so drift that moves both slots of
+  a repeat cancels.
+- **Always printed, published or not**: every `r_k`, the pooled median with its
+  `[min .. max]` and `n`, and group A and B summaries. A published ratio is only
+  ever `single/dual = median X [lo .. hi] n=N`; there is no bare point estimate
+  and no PASS/FAIL verdict on speed anywhere.
+- **The rule.** A RATIO line is printed only if BOTH hold: **(i)** mutual group
+  inclusion — median(A) lies inside `[min(B), max(B)]` AND median(B) lies inside
+  `[min(A), max(A)]`; if the groups separate, what is being measured is the slot,
+  not the mode. **(ii)** 1.0 lies OUTSIDE `[min(r_k), max(r_k)]`; if one repeat
+  crossed 1.0, the sign of the effect is not established here. This is a
+  **heuristic disclosure rule, not a statistical test** — at `repeats=6` no exact
+  test reaches significance, so none is attempted, and `[min .. max]` is a lower
+  bound on the uncertainty, not a confidence interval. Condition (ii) gets
+  HARDER with more repeats while (i) gets easier, so "run it longer until it
+  publishes" is not what more repeats do.
+- **Validity gates, abort-never-skip.** Every worker — INCLUDING the discarded
+  warm-up — must pass all four `dual_scene_terrain.verdicts()` criteria and an
+  x-margin gate `max(|x_min|, |x_max|) < 0.75 x the (d) bound` (x-axis only; y
+  stays covered by (d)). Any failure aborts the run with a non-zero exit and no
+  aggregate. This is not optional caution: a run that fell off the plate is a
+  run that is FASTER, so dropping-and-averaging biases the result in the
+  direction least likely to be questioned. One fresh-process pair measured while
+  planning this change (default 40x40 m plate, hs 0.25, CPU/WSL2, genesis-world
+  1.4.0, dt 0.025 / substeps 10, n_envs 1, throttle 0.6) shows the shape of it:
+  the `drive_s=12` run left the plate at ~5.7 s, free-fell the rest, and timed
+  **7.66 ms/step**, against **10.85 ms/step** for the valid `drive_s=4` run —
+  indicative only, since the valid run was that session's first (cold) process.
+- **Identity and completeness.** A worker's payload must carry every key the
+  parent reads (`_REQUIRED_PAYLOAD_KEYS`) — a pre-v1.6.1 `dual_scene_terrain` on
+  `PYTHONPATH` aborts by NAME with that hint, instead of dying in whichever
+  accessor reached it first — and must report the mode / repeat / slot /
+  config / warm-up flag it was DISPATCHED with, because pairing is done on the
+  payload's own labels. Cross-worker equality is asserted on everything the
+  printed conditions block takes from one worker (`genesis_version`, `dt`,
+  `substeps`, `terrain_size`, `terrain_half`, backend, SDK/python version,
+  settle/drive seconds, throttle, steer, warm-up steps, timed steps, the ms/step
+  definition) plus `faces` within a config. `speed_at_window_start` is
+  deliberately NOT an equality invariant — it differs between the modes
+  (measured 0.332 dual vs 0.329 m/s single) — and is reported as a min..max
+  envelope. Every value in the conditions block is read from a worker payload
+  except four parent-owned entries (`harness_version`, `repeats`,
+  `warmup_workers`, `config_ids`).
+
+### Defaults, and the measurements they came from
+
+All from a CPU/WSL2 probe on this machine, genesis-world 1.4.0, dt 0.025 /
+substeps 10, `n_envs=1`, `car_4w_rwd_ackermann` dropped at `(0, 0, 3)`, 3 s
+brake settle, then constant throttle 0.6 / steer 0.0:
+
+| default | value | why |
+|---|---|---|
+| `--terrain-size` | 640 x 640 m | lets the timed window be long without approaching the plate edge: x_end 208.15 m against a (d) bound of 318 m, 34.5% margin. 640/4.0 = 160 cells exactly, which genesis requires |
+| `--horizontal-scale` | 4.0 | 51,212 faces — the SAME face count as the sample's 40 m / hs 0.25 plate (measured, both) |
+| `--settle-s` | 3.0 | the car is still bouncing at 1.0 s (z 0.479 vs a settled 0.112) |
+| `--drive-s` | 20.0 | 800 timed steps; probe x(20 s) = 208.15 m, v = 18.86 m/s. `drive_s=24` reaches 288.78 m (9% margin) and was rejected |
+| `--repeats` | 6 | even and >= 4 is enforced; 6 gives 13 workers — measured 5.6 min per run end to end (334.8 s and 335.6 s from the first worker's start to the last worker's end; 263.0 s and 256.3 s of that spent inside workers) |
+| warm-up workers | 1 | one gated, discarded worker so a cold-start cost, IF present, lands in no statistic |
+
+Because the timed window is a constant-throttle ACCELERATION, the vehicle state
+is not stationary across it: at the defaults it covers **v = 0.33 .. 18.86 m/s**
+(harness-measured `speed_at_window_start` 0.3292 .. 0.3321 and
+`speed_at_window_end` 18.8569 m/s over the 12 measured workers of each default
+run — the same envelope in both). That is a condition of the measurement,
+printed and stored per worker, not a defect.
+
+Both modes drive the same distance over that window, so `r_k` compares equal
+work: **x_end = 208.148712 m for every dual_scene worker and 208.148788 m for
+every single_scene worker** (|dx| = 7.6e-5 m), bit-repeatable within a mode
+across all 6 repeats of both default runs, and reproduced independently by
+plan-review's own probe.
+
+The 640 m plate is justified by ONE thing: the timed window's share of a
+worker. Over the 24 non-warm-up workers of the two default runs (`--drive-s 20`,
+CPU/WSL2, this machine), ms/step ran 8.41 .. 12.44, so the 800-step window took
+6.73 .. 9.95 s inside workers whose total wall time was 16.43 .. 22.58 s — a
+timed fraction of 32 .. 51%, median 39%. No comparable figure is quoted for the
+old 40 m plate, because none was measured under this harness.
+
+### The result on this machine: a flip, written up as a flip
+
+Conditions for all four runs: genesis-world 1.4.0, CPU (WSL2), SDK 1.6.1,
+python 3.12.3, 640 x 640 m plate at hs 4.0 (51,212 faces), dt 0.025 /
+substeps 10, `n_envs=1`, 3 s brake settle, constant throttle 0.6 / steer 0.0,
+one discarded warm-up worker, `harness=bench_raycast_mode/1`.
+
+| run | settings | r_k | pooled median [min .. max] n | rule (i) | rule (ii) | outcome |
+|---|---|---|---|---|---|---|
+| bench1 | defaults (repeats 6, drive 20 s, window v 0.33 .. 18.86 m/s) | 1.1515, 1.2513, 1.2347, 0.9794, 1.1871, 1.1378 | 1.169 [0.979 .. 1.251] n=6 | FAIL — median(B)=1.138 outside A=[1.151 .. 1.235] | FAIL — 1.0 inside | **NO RATIO** |
+| bench2 | defaults, same session | 1.1832, 1.2323, 1.0345, 1.1339, 1.3313, 1.4094 | 1.208 [1.034 .. 1.409] n=6 | PASS | PASS | **published**: `single/dual = median 1.208 [1.034 .. 1.409] n=6` |
+| impl-review #1 | `--repeats 4 --drive-s 8` (window v 0.33 .. 8.94 m/s) | 1.1626, 1.3024, 1.2228, 1.1183 | 1.193 [1.118 .. 1.302] n=4 | PASS | PASS | **published**: `single/dual = median 1.193 [1.118 .. 1.302] n=4` |
+| impl-review #2 | `--repeats 4 --drive-s 4` (window v 0.33 .. 4.83 m/s) | 1.1930, 1.0060, 1.2173, 1.1488 | 1.171 [1.006 .. 1.217] n=4 | FAIL — median(A)=1.205 vs B=[1.006 .. 1.149], groups separated | PASS | **NO RATIO** |
+
+Absolute per-step cost at the defaults, for orientation only (never a ratio):
+bench1 dual_scene median 9.062 [8.414 .. 10.994] ms/step n=6, single_scene
+10.710 [10.503 .. 11.026] n=6; bench2 dual_scene 9.025 [8.748 .. 10.034],
+single_scene 10.669 [10.350 .. 12.442].
+
+This flip is not a defect in the runs and was predicted before they were made.
+Plan-review simulated the rule against this machine's measured run-to-run spread
+(5 fresh dual_scene processes: 9.438, 8.620, 8.597, 10.065, 7.799 ms/step — a
+range of 26% of the median): at `repeats=6`, P(publish) is 0.47% under a null
+effect, 0.072% for a pure 1.0 ms slot effect (0.000% at 2.0 and 4.0 ms), **17.1%
+at a true 1.13x**, and 48.6% at a true 2.79x rising to 77.4% at `repeats=10`.
+At 17.1%, two honest runs disagree about publishability roughly **28%** of the
+time even with a perfect rule. Those percentages describe that simulation's
+noise model, not a guarantee of this code.
+
+Consequently: **no raycast-mode speedup figure is published by the SDK**, and
+none of the four numbers above may be quoted on its own. The default stays
+`dual_scene` on the structural argument it always rested on — `single_scene`
+re-fits the collision BVH, terrain faces included, every step because the
+vehicle in that solver is movable, while `dual_scene`'s raycast scene holds
+nothing movable, so its BVH is built once and is shared across `n_envs`.
+
+### Fixed — three statements that were wrong
+
+- **`docs/dual-scene-raycast.md` and the v1.5.1 CHANGELOG entry said the order
+  effect showed `single_scene` running slower in SLOT 1. That was backwards: it
+  is slot 2.** The preserved measurement is unchanged and unambiguous — the
+  single/dual full-step ratio median was **1.10 with single-then-dual** (single
+  in slot 1) and **1.28 with dual-then-single** (single in slot 2), so
+  single_scene looks WORSE when it runs second. `dual_scene_terrain.py` and
+  `samples/README.md` said slot 2 all along; only the two prose restatements
+  were inverted. The doc is corrected in place and labelled as a correction; the
+  v1.5.1 entry below is history and is left as written.
+- **"~7 s to leave the 40 m plate" was wrong.** Measured (dual_scene, CPU/WSL2,
+  genesis-world 1.4.0, 40x40 m plate at hs 0.25, dt 0.025 / substeps 10,
+  `n_envs=1`, 3 s brake settle then constant throttle 0.6, no steering): x
+  crosses the (d) bound of 18 m at **t = 5.650 s** and the terrain edge at 20 m
+  at **t = 5.950 s** — independently reproduced by impl-review. By ~7 s the car
+  is already off the plate, so every number taken at that point is a measurement
+  of a fall. The `--drive-s` help and the (d) comment now carry the measured
+  times.
+- **A draft of the harness's `--no-warmup` help paired "~19 s cold vs ~11 s
+  warm". Withdrawn — the two numbers came from different `--drive-s` settings
+  and were never comparable.** Measured properly at `--drive-s 20`, the cold
+  worker sat INSIDE the warm range both times: 19.33 s against 16.91 .. 22.23 s
+  (bench1) and 16.54 s against 16.43 .. 22.58 s (bench2). The warm-up worker is
+  kept anyway (it is cheap insurance and lands in no statistic), and the JSON
+  keeps it with `warmup=true` so a reader can check for themselves.
+
+### Changed — `samples/dual_scene_terrain.py` (additive; the default run did not move)
+
+- `run(..., terrain_size=)` (scalar or `(Lx, Ly)`, default `None` = the module's
+  40x40 m plate) builds a bigger plate; `_terrain(..., size=)` re-centres
+  whatever size is in force. The half-extent actually used is returned as
+  `terrain_half`, and `verdicts()` derives the (d) bound from it, falling back to
+  the module's `TERRAIN_HALF` for a dict with no such key — so a result recorded
+  before v1.6.1 verdicts exactly as it did then.
+- `run()`'s result dict gained a conditions block so a caller in another process
+  can PRINT what it measured instead of restating literals: `dt`, `substeps`,
+  `terrain_size`, `terrain_half`, `settle_s`, `drive_s`, `throttle`, `steer`,
+  `n_envs`, `backend`, `horizontal_scale`, `genesis_version`, `sdk_version`, and
+  the timing-window block `warmup_steps`, `n_timed_steps`, `timing_definition`,
+  `x_at_window_start`, `speed_at_window_start`, `speed_at_window_end`. No
+  existing key was removed or renamed. **On the `measure=False` path every key in
+  the timing-window block is `None`** — the convention `ms` has always used;
+  `n_timed_steps=None` does NOT mean zero steps driven.
+- That dict is now a de-facto contract: `bench_raycast_mode.py` consumes it and
+  aborts by name when a key is missing.
+- The default run is unchanged: `python -m genesis_vehicle.samples.dual_scene_terrain`
+  produces a byte-identical FINAL block against pristine HEAD (verified by the
+  implementer and re-verified by impl-review), including the (d) detail string
+  `need < 18.0; terrain spans ±20 m about the origin`.
+
+### Docs
+
+- `docs/dual-scene-raycast.md` — the slot-direction correction in place and
+  labelled; "None exists yet" replaced by a pointer to the harness with the
+  retraction kept (all four retracted tables untouched); a new section, "What
+  the harness measured (v1.6.1) — still no publishable figure", carrying the
+  four-run flip with intervals and a full conditions block; the `--compare`
+  paragraphs point at the harness while still refusing to derive a ratio.
+- `samples/README.md` — rows 19 (`bench_raycast_mode.py`) and 20
+  (`terrain_drive.py`, previously uncatalogued) added; "the three perf
+  benchmarks (5, 7, 8)" -> "the four benchmarks (5, 7, 8, 19)"; row 11 records
+  `terrain_size=` and that `run()`'s dict is what the harness consumes; run
+  commands and a `dual-scene-raycast.md` cross-reference row added.
+- `README.md`, `docs/index.md` — the sample count was stated three ways (9, 15,
+  20, plus "all 10" in a table). One basis now, stated where it is used: **20
+  runnable sample programs** = every `samples/*.py` with a `__main__` entry,
+  minus the `_hud.py` / `tank_tuning.py` helpers and the deprecated
+  `two_scene_terrain` alias. `docs/index.md` also gains a tool-table row for the
+  harness.
+- `docs/testing.md` — count and runtime refreshed; inventory row for
+  `tests/test_bench_raycast_mode.py`.
+- `CLAUDE.md` (outside the SDK repo) — the "`--compare` in a sample is not a
+  benchmark" gotcha now names the harness, records the 2-of-4 flip, keeps "no
+  figure is published", and states the slot direction.
+
+### Tests
+
+**375 -> 436** (`python -m pytest tests/`, CPU). The 61 new tests live in
+`tests/test_bench_raycast_mode.py` and are pure Python: they drive the shipped
+entry point `main(argv, runner=fake)` with an injected runner, so a full
+schedule, the gates, the invariants, the pairing and the publication rule are
+exercised without spawning a process or touching genesis. One of them patches
+`genesis.init` to raise and still runs a full schedule — evidence that the
+PARENT path never calls `gs.init`, and explicitly NOT a claim that genesis is
+absent from the parent's memory. Also covered: the x-margin gate, and
+`verdicts()` backward compatibility (no `terrain_half` -> bound 18.0 and "±20 m";
+`terrain_half=(320, 320)` -> 318.0 and "±320 m").
+
+### Known gaps
+
+- **The raycast cannot be timed in isolation.** Every number here is a FULL
+  simulation step (raycast + the 5-step wheel pipeline + `scene.step`), because
+  `single_scene`'s BVH refit happens inside the engine step and the SDK exposes
+  no symmetric hook. A raycast-only effect is therefore diluted, and an r_k near
+  1.0 does NOT mean the two raycasters cost the same.
+- **`_REQUIRED_PAYLOAD_KEYS` is hand-maintained.** It was audited against the
+  parent's actual reads (AST) and is exact today; no test pins it, so a future
+  parent read of a new key will not be caught by the completeness check until
+  the tuple is updated.
+- **The runtime estimate line is a stale probe**, labelled ESTIMATE ONLY in the
+  output (`~11 s fixed + ~7 ms/step` from a 640 m / hs 4.0 CPU/WSL2 probe). It is
+  not a measurement of the machine it prints on.
+- **GPU is unverified.** `--gpu` is wired to the same code path, but every
+  number, default and threshold in the harness was measured on CPU. The retracted
+  GPU tables in `docs/dual-scene-raycast.md` cannot be re-measured here and stay
+  retracted.
+
+Closed by this release: the v1.5.1 "Still open: there is no order-free
+raycast-mode benchmark". There is one. It has not, so far, produced a figure
+this repo is willing to publish.
+
 ## [1.6.0] — 2026-09-09
 
 **A wheel is a circle, and the SDK was reading the ground with a point.** One

@@ -48,7 +48,13 @@ one; see ``docs/dual-scene-raycast.md`` for that explanation. Producing a
 figure worth quoting needs a dedicated harness: a fresh process per mode,
 repeats, and an alternating order (cf. ``perf_vectorization.py``, which
 subprocesses every measurement). That is deliberately not this sample's job —
-its job is the API and the pose match.
+its job is the API and the pose match. That harness now exists as
+``samples/bench_raycast_mode.py``; it drives THIS module's ``run()`` and
+``verdicts()`` in a fresh subprocess per measurement — which is why ``run()``
+takes ``terrain_size=`` and returns its own conditions (dt, substeps, faces,
+window speeds, ...) in the result dict. Whether it prints a ratio at all is
+decided by its own fail-closed rule; it may legitimately report that the ratio
+is not measurable on your machine.
 
 Run
 ---
@@ -85,34 +91,90 @@ N_SUBTERRAINS = (1, 1)
 SUBTERRAIN_SIZE = (40.0, 40.0)          # metres per subterrain (x, y)
 TERRAIN_SPAN = (N_SUBTERRAINS[0] * SUBTERRAIN_SIZE[0],
                 N_SUBTERRAINS[1] * SUBTERRAIN_SIZE[1])
-# Half-extent after re-centring; the (d) criterion's bound is derived from it.
+# DEFAULT half-extent after re-centring; the (d) criterion's bound is derived
+# from it. This is the DEFAULT only: ``run(terrain_size=...)`` builds a
+# different plate and reports the half-extent it actually used as
+# ``terrain_half`` in its result dict, which is what ``verdicts()`` reads.
+# ``verdicts()`` falls back to this constant only for a dict with no
+# ``terrain_half`` key (i.e. any result produced before v1.6.1).
 TERRAIN_HALF = (TERRAIN_SPAN[0] / 2.0, TERRAIN_SPAN[1] / 2.0)
 
 
-def _terrain(horizontal_scale: float):
+def _as_size(size) -> "tuple[float, float]":
+    """Normalise a terrain size to (Lx, Ly) metres.
+
+    ``None`` -> the module default ``SUBTERRAIN_SIZE``; a scalar -> a square
+    plate of that side; a 2-sequence -> (Lx, Ly) as given.
+    """
+    if size is None:
+        return (float(SUBTERRAIN_SIZE[0]), float(SUBTERRAIN_SIZE[1]))
+    if isinstance(size, (int, float)):
+        return (float(size), float(size))
+    lx, ly = size
+    return (float(lx), float(ly))
+
+
+def _terrain(horizontal_scale: float, size=None):
     """A single flat subterrain, re-centred on the world origin.
 
     Bump face count with a smaller horizontal_scale
     (faces ~= 2*(size/horizontal_scale)^2) to see the dual_scene advantage grow.
+
+    ``size`` (metres; scalar or (Lx, Ly)) overrides ``SUBTERRAIN_SIZE`` for a
+    bigger plate; ``None`` keeps the module default, so the default call is
+    unchanged. The re-centring ``pos=`` below is derived from whichever size is
+    in force. NOTE genesis requires size/horizontal_scale to be a whole number
+    of cells (e.g. 640/4.0 = 160).
     """
     # gs.morphs.Terrain's ORIGIN IS A CORNER, not the centre: the mesh spans
     # [0, span_x] x [0, span_y], so a morph at the default pos leaves the world
     # origin ON the -X/-Y corner and a vehicle spawned at (0, 0) half off it.
     # This pos= shifts the corner to (-span/2, -span/2), which is what puts the
-    # terrain's CENTRE at (0, 0) and gives the spawn 20 m of margin every way.
+    # terrain's CENTRE at (0, 0) and gives the spawn half the plate as margin
+    # every way (20 m at the default 40x40 m size).
+    span = _as_size(size)
+    half = (span[0] / 2.0, span[1] / 2.0)
     return gs.morphs.Terrain(
-        n_subterrains=N_SUBTERRAINS, subterrain_size=SUBTERRAIN_SIZE,
-        pos=(-TERRAIN_HALF[0], -TERRAIN_HALF[1], 0.0),
+        n_subterrains=N_SUBTERRAINS, subterrain_size=span,
+        pos=(-half[0], -half[1], 0.0),
         horizontal_scale=horizontal_scale, subterrain_types="flat_terrain")
 
 
 def run(mode: str, backend: str, horizontal_scale: float, n_envs: int = 1,
-        settle_s: float = 3.0, drive_s: float = 4.0, measure: bool = False):
+        settle_s: float = 3.0, drive_s: float = 4.0, measure: bool = False,
+        terrain_size=None):
+    """Settle a car on a flat plate, then drive it open-loop; return a result dict.
+
+    ``terrain_size`` (v1.6.1, metres, scalar or (Lx, Ly); default ``None`` =
+    the module's 40x40 m plate) lets a caller ask for a bigger plate so a long
+    timed window stays on the terrain. The half-extent actually used is
+    returned as ``terrain_half`` and is what ``verdicts()`` bounds against.
+
+    ``measure=True`` adds a 10-step warm-up and times the drive loop.
+
+    Result keys (v1.6.1 added the conditions block so a caller in another
+    process can print the conditions it MEASURED rather than assume them):
+    the pre-existing pose/settle keys are unchanged, and the dict now also
+    carries dt, substeps, terrain_size, terrain_half, settle_s, drive_s,
+    throttle, steer, n_envs, backend, horizontal_scale, genesis_version,
+    sdk_version, plus the
+    timing-window block ``ms``, ``warmup_steps``, ``n_timed_steps``,
+    ``timing_definition``, ``x_at_window_start``, ``speed_at_window_start``,
+    ``speed_at_window_end``.
+
+    ON THE ``measure=False`` PATH EVERY KEY IN THAT TIMING-WINDOW BLOCK IS
+    ``None`` — following the convention ``ms`` has always used. That path has
+    no warm-up loop and no timer, so there is no window whose speeds could be
+    reported; the drive steps still run, they are simply not timed. Callers
+    must not treat ``n_timed_steps=None`` as zero steps driven.
+    """
     # SDK default timing (v1.0.19): 40 Hz (dt=0.025), substeps=10 → internal 2.5 ms.
+    span = _as_size(terrain_size)
+    terrain_half = (span[0] / 2.0, span[1] / 2.0)
     VehicleScene.init_backend(backend)
     vs = VehicleScene(raycast_mode=mode, dt=0.025,
                       substeps=10, n_envs=n_envs)
-    vs.add_static(morph=_terrain(horizontal_scale))
+    vs.add_static(morph=_terrain(horizontal_scale, size=span))
     veh = vs.add_vehicle(URDF_PATH, car_4w_rwd_ackermann, pos=(0.0, 0.0, 3.0))
     vs.build()
     # genesis >= 1.4.0 dropped the RigidSolver.faces_info accessor; n_faces is
@@ -137,18 +199,34 @@ def run(mode: str, backend: str, horizontal_scale: float, n_envs: int = 1,
     d0_min, d0_max = float(d0.min()), float(d0.max())
     z_settle = float(veh.get_pos()[0, 2])
 
+    # The drive-phase inputs, as ONE binding used by every drive loop below
+    # and reported in the result dict — so a caller in another process reads
+    # what actually drove the car instead of restating a literal.
+    throttle, steer = 0.6, 0.0
+
     ms = None
+    warmup_steps = n_timed_steps = None
+    x_w0 = v_w0 = v_w1 = None
     n = int(drive_s / vs.dt)
     if measure:
-        for _ in range(10):
-            veh.set_inputs(throttle=0.6, steer=0.0); vs.step()
+        warmup_steps, n_timed_steps = 10, n
+        for _ in range(warmup_steps):
+            veh.set_inputs(throttle=throttle, steer=steer); vs.step()
+        # State at the window's START, read AFTER the warm-up and BEFORE the
+        # timer starts. It must not be read inside the timed loop: every read
+        # here is a device->host sync, and putting one in the loop would
+        # contaminate the very ms/step this function exists to produce.
+        x_w0 = float(veh.get_pos()[0, 0])
+        v_w0 = float(np.linalg.norm(veh.get_vel()[0].cpu().numpy()[:2]))
         t0 = time.perf_counter()
         for _ in range(n):
-            veh.set_inputs(throttle=0.6, steer=0.0); vs.step()
+            veh.set_inputs(throttle=throttle, steer=steer); vs.step()
         ms = (time.perf_counter() - t0) / n * 1e3
+        # ... and the END state after the timer has stopped.
+        v_w1 = float(np.linalg.norm(veh.get_vel()[0].cpu().numpy()[:2]))
     else:
         for _ in range(n):
-            veh.set_inputs(throttle=0.6, steer=0.0); vs.step()
+            veh.set_inputs(throttle=throttle, steer=steer); vs.step()
 
     P = veh.get_pos().detach().cpu().numpy()          # (n_envs, 3)
     p = P[0]
@@ -164,13 +242,38 @@ def run(mode: str, backend: str, horizontal_scale: float, n_envs: int = 1,
         y_min=float(P[:, 1].min()), y_max=float(P[:, 1].max()),
         z_min=float(P[:, 2].min()), z_max=float(P[:, 2].max()),
         d0_min=d0_min, d0_max=d0_max, z_settle=z_settle, grounded=grounded,
+        # --- conditions (v1.6.1). Everything below is READ from this run, so a
+        # parent process can print the conditions instead of restating them.
+        dt=float(vs.dt), substeps=10,
+        terrain_size=(span[0], span[1]), terrain_half=terrain_half,
+        settle_s=float(settle_s), drive_s=float(drive_s),
+        # The open-loop drive inputs actually used (warm-up and drive loops
+        # alike). Reported on BOTH paths — they describe the drive, not the
+        # timing window, so measure=False does not null them.
+        throttle=float(throttle), steer=float(steer),
+        n_envs=int(n_envs), backend=str(backend),
+        horizontal_scale=float(horizontal_scale),
+        genesis_version=str(getattr(gs, "__version__", "unknown")),
+        sdk_version=str(sdk_version),
+        # --- timing window (all None when measure=False; see the docstring)
+        warmup_steps=warmup_steps, n_timed_steps=n_timed_steps,
+        timing_definition=("wall time of the full vs.step() loop including "
+                           "veh.set_inputs, divided by n_timed_steps"),
+        x_at_window_start=x_w0,
+        speed_at_window_start=v_w0, speed_at_window_end=v_w1,
     )
 
 
 def verdicts(r: dict) -> "list[tuple[str, bool, str]]":
     """(label, ok, detail) for each pass criterion. Every threshold below is
     stated with the measurement it was set from (CPU backend, horizontal_scale
-    0.25, faces=51212, n_envs=1)."""
+    0.25, faces=51212, n_envs=1).
+
+    The (d) bounds come from ``r["terrain_half"]`` — the half-extent the run
+    ACTUALLY built (v1.6.1) — falling back to the module default
+    ``TERRAIN_HALF`` (20 m, bound 18.0) for a dict without that key, so a
+    result recorded before v1.6.1 verdicts exactly as it did then. The (a)-(c)
+    thresholds are absolute and do not scale with the plate."""
     out = []
 
     # (a) Every wheel ray must HIT the terrain after settling.
@@ -217,15 +320,23 @@ def verdicts(r: dict) -> "list[tuple[str, bool, str]]":
     #     18 m leaves ~2 m for the car's own footprint.
     #     NOTE: this CANNOT fire at default arguments — 4 s of driving only
     #     reaches 10.34 m. It is a guard for users who raise --drive-s (or add
-    #     steering): past ~7 s the car leaves the terrain and every other number
-    #     here becomes a measurement of a fall. Do not delete it as dead code.
-    bound = TERRAIN_HALF[0] - 2.0
+    #     steering). MEASURED on the default plate (40x40 m, horizontal_scale
+    #     0.25, CPU, genesis-world 1.4.0, dt=0.025/substeps=10, n_envs=1, 3 s
+    #     brake settle then constant throttle 0.6, no steering): x crosses this
+    #     18 m bound at t = 5.65 s and the terrain edge at 20 m at t = 5.95 s.
+    #     (A comment here previously said "~7 s"; that was wrong — the car is
+    #     already off the plate by then and every other number in this block
+    #     becomes a measurement of a fall.) Do not delete this as dead code.
+    #     On a larger plate (``run(terrain_size=...)``) both bounds and the
+    #     crossing time scale with the plate; the times above are the default's.
+    half = r.get("terrain_half", TERRAIN_HALF)
+    bound = half[0] - 2.0
     ax = max(abs(r["x_min"]), abs(r["x_max"]))
     ay = max(abs(r["y_min"]), abs(r["y_max"]))
-    ok = (ax < bound) and (ay < TERRAIN_HALF[1] - 2.0)
+    ok = (ax < bound) and (ay < half[1] - 2.0)
     out.append(("(d) stayed within terrain bounds",
                 ok, f"|x|max={ax:.2f} |y|max={ay:.2f}  (need < {bound:.1f}; "
-                    f"terrain spans ±{TERRAIN_HALF[0]:.0f} m about the origin)"))
+                    f"terrain spans ±{half[0]:.0f} m about the origin)"))
     return out
 
 
@@ -262,7 +373,11 @@ def main():
                          "(structural; not benchmarked here).")
     ap.add_argument("--drive-s", type=float, default=4.0,
                     help="Seconds of open-loop throttle after settling (default 4). "
-                         "Past ~7 s the car runs off the 40x40 m terrain.")
+                         "Measured on this 40x40 m terrain (CPU, horizontal_scale "
+                         "0.25, 3 s settle, constant throttle 0.6, no steering): "
+                         "x passes the (d) bound of 18 m at t=5.65 s and the "
+                         "terrain edge at 20 m at t=5.95 s, so anything past ~5.6 s "
+                         "fails (d) and then measures a fall.")
     args = ap.parse_args()
     backend = "gpu" if args.gpu else "cpu"
 

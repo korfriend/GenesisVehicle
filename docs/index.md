@@ -5,7 +5,7 @@ Landing page. Pick the document that matches what you're doing.
 | If you want to... | Start here |
 |---|---|
 | Run something in 1 minute | [`quickstart.md`](quickstart.md) |
-| See all 15 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
+| See all 20 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
 | Build a mental model before reading code | [`concepts.md`](concepts.md) |
 | Choose the high-level (`VehicleScene`) vs low-level (`VehiclePhysics`) API | [`concepts.md`](concepts.md#start-here-the-two-api-layers) |
 | Pick the right batching axis (L1 / L2 / L3) for your workflow | [`batching.md`](batching.md) |
@@ -76,7 +76,8 @@ The right-hand column is where the full story lives.
 | Stability profiles | maps a use-case profile (`"control"` / `"raw"` / `"research"`) to the right stability-hook stack | `stability_hooks_for_profile` | [`stability-profiles.md`](stability-profiles.md) |
 | OSC physics server | runs the SDK as a standalone physics process for an external engine (UE / Unity), L2 and L3 modes | `python -m genesis_vehicle.server` | [`server.md`](server.md) |
 | Server benchmark | official server perf matrix (mock UE client, tanks × terrain × mode × backend) | `python -m genesis_vehicle.server.benchmark` | [`server.md`](server.md) §2.1 |
-| Samples | 20 runnable, self-contained examples with bundled assets | `python -m genesis_vehicle.samples.<name>` | [`../samples/README.md`](../samples/README.md) |
+| Raycast-mode benchmark | order-independent, paired, fail-closed comparison of `dual_scene` vs `single_scene` (fresh process per measurement; prints NO ratio when the machine's noise cannot carry one) | `python -m genesis_vehicle.samples.bench_raycast_mode` | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
+| Samples | 20 runnable, self-contained example programs with bundled assets (every `samples/*.py` with a `__main__` entry, minus the `_hud.py` / `tank_tuning.py` helpers and the deprecated `two_scene_terrain` alias) | `python -m genesis_vehicle.samples.<name>` | [`../samples/README.md`](../samples/README.md) |
 
 **Model preparation & scene assembly**
 
