@@ -15,7 +15,8 @@ What this demonstrates
   *rigid* body. The wheel distances are identical to ``"single_scene"`` mode; only the
   per-step raycast cost differs.
 - That the car is actually ON the terrain: the FINAL block asserts every wheel
-  ray hits and that the chassis stays at ride height. This sample shipped for several releases silently "passing"
+  ray hits (``veh.all_wheels_grounded``) and that the chassis stays at
+  ride height. This sample shipped for several releases silently "passing"
   while the car fell off the corner-origin terrain to z = -84 m.
 
 What this does NOT demonstrate
@@ -77,7 +78,6 @@ import genesis as gs
 from genesis_vehicle import (
     VehicleScene, car_4w_rwd_ackermann, __version__ as sdk_version,
 )
-from genesis_vehicle.raycast import RAY_MISS_THRESHOLD
 
 URDF_PATH = os.path.join(os.path.dirname(__file__), "urdf", "car_4w.urdf")
 
@@ -127,8 +127,12 @@ def run(mode: str, backend: str, horizontal_scale: float, n_envs: int = 1,
         veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
         vs.step()
 
-    # Read the wheel rays AFTER the settle loop: before the first scene.step()
-    # the sensor buffer is a zero tensor (core.py), which is not "all rays hit".
+    # Read the wheel rays AFTER the settle loop. `all_wheels_grounded` is the
+    # supported "did every ray find ground?" question (v1.5.2): it tests the
+    # raycaster's OWN miss sentinel and is gated on the per-env has-stepped
+    # flag, so it cannot pass on the zero tensor `distances` starts out as.
+    # The raw distances below are reported for context only.
+    grounded = bool(veh.all_wheels_grounded.all())
     d0 = veh.distances.detach().cpu().numpy()
     d0_min, d0_max = float(d0.min()), float(d0.max())
     z_settle = float(veh.get_pos()[0, 2])
@@ -159,7 +163,7 @@ def run(mode: str, backend: str, horizontal_scale: float, n_envs: int = 1,
         x_min=float(P[:, 0].min()), x_max=float(P[:, 0].max()),
         y_min=float(P[:, 1].min()), y_max=float(P[:, 1].max()),
         z_min=float(P[:, 2].min()), z_max=float(P[:, 2].max()),
-        d0_min=d0_min, d0_max=d0_max, z_settle=z_settle,
+        d0_min=d0_min, d0_max=d0_max, z_settle=z_settle, grounded=grounded,
     )
 
 
@@ -170,19 +174,23 @@ def verdicts(r: dict) -> "list[tuple[str, bool, str]]":
     out = []
 
     # (a) Every wheel ray must HIT the terrain after settling.
-    #     d0_max < RAY_MISS_THRESHOLD: a miss reads back as the sentinel (19.9 is
-    #     the DEFAULT raycaster_max_range=20.0 less a margin — this check is
-    #     valid only at that default range). d0_min > 0.0: a pre-step sensor
-    #     read is a ZERO tensor (core.py), which would satisfy the max check
-    #     vacuously, so the min half is what makes the criterion mean "hit".
+    #     `veh.all_wheels_grounded` (v1.5.2) compares each ray distance with the
+    #     raycaster's own miss sentinel (no_hit_value, defaulting to max_range)
+    #     and AND's in the per-env has-stepped flag — the mask is produced by
+    #     the read layer on the RAW distances where it can be (single_scene) and
+    #     from the sentinel alone on injected, offset-corrected ones
+    #     (dual_scene); the has-stepped gate covers the difference. It replaces this
+    #     sample's old hand-rolled `d0_max < RAY_MISS_THRESHOLD and d0_min > 0`,
+    #     which was only valid at the DEFAULT raycaster_max_range=20.0 — at a
+    #     lower range a miss came back UNDER 19.9 and the check passed forever.
     #     Measured on the centred terrain: d0 = [0.411, 0.411, 0.412, 0.412].
     #     Reproduced with the pos= line deleted: d0 = [20, 20, 20, 20] (all four
     #     rays missing, the car already 17 m below the world) and z_end = -185 —
     #     the exact bug that used to exit 0.
-    ok = (r["d0_max"] < RAY_MISS_THRESHOLD) and (r["d0_min"] > 0.0)
+    ok = bool(r["grounded"])
     out.append(("(a) all wheel rays hit terrain",
-                ok, f"d0 min={r['d0_min']:.3f} max={r['d0_max']:.3f} m "
-                    f"(miss sentinel >= {RAY_MISS_THRESHOLD})"))
+                ok, f"all_wheels_grounded={r['grounded']}  "
+                    f"d0 min={r['d0_min']:.3f} max={r['d0_max']:.3f} m"))
 
     # (b) The chassis sits at ride height and STAYS there.
     #     0 < z < 1.0: the settled ride height is 0.112 m; 1.0 m is far above any

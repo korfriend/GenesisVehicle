@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from genesis_vehicle._gs_compat import (
-    apply_links_wrench, has_wrench_api, link_inertial,
+    apply_links_wrench, has_wrench_api, link_inertial, sensor_miss_value,
 )
 
 
@@ -271,3 +271,53 @@ def test_this_genesis_carries_both_upstream_determinism_fixes():
     from genesis.engine.solvers.rigid.constraint import solver as _solver
     src = inspect.getsource(_solver)
     assert "repeat_after_count=300" in src and "repeat_after_seconds=0" in src
+
+
+# --- sensor_miss_value: both raycaster option shapes -------------------------
+#
+# Every genesis the SDK supports resolves `no_hit_value` (defaulting to
+# `max_range`) onto the sensor's options at CONSTRUCTION. The shim also has to
+# survive an options object that carries only `max_range`, and a sensor that
+# exposes no options at all — branches this machine's engine never takes.
+
+class _Options:
+    """A raycaster options object; omit a field to model the other shape."""
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+class _Sensor:
+    def __init__(self, options=None):
+        if options is not None:
+            self._options = options
+
+
+def test_sensor_miss_value_reads_no_hit_value():
+    s = _Sensor(_Options(no_hit_value=20.0, max_range=20.0))
+    assert sensor_miss_value(s) == 20.0
+
+
+def test_sensor_miss_value_prefers_no_hit_value_over_max_range():
+    s = _Sensor(_Options(no_hit_value=50.0, max_range=10.0))
+    assert sensor_miss_value(s) == 50.0
+
+
+def test_sensor_miss_value_falls_back_to_max_range():
+    """An options shape with no `no_hit_value` field at all, and one where it is
+    still None (the pre-`model_post_init` state)."""
+    assert sensor_miss_value(_Sensor(_Options(max_range=7.5))) == 7.5
+    assert sensor_miss_value(
+        _Sensor(_Options(no_hit_value=None, max_range=7.5))) == 7.5
+
+
+def test_sensor_miss_value_keeps_a_zero_sentinel():
+    """`is None`, not `or` — 0.0 is falsy but legitimate, and must NOT fall
+    through to max_range (that would silently mark every miss a hit)."""
+    assert sensor_miss_value(_Sensor(_Options(no_hit_value=0.0,
+                                              max_range=10.0))) == 0.0
+
+
+def test_sensor_miss_value_is_none_when_the_engine_exposes_nothing():
+    assert sensor_miss_value(_Sensor()) is None
+    assert sensor_miss_value(_Sensor(_Options())) is None

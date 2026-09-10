@@ -29,6 +29,8 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
+from .raycast import is_ray_hit_corrected
+
 
 # Defaults used when the control_dofs_position path is taken.
 _SUSP_VIS_KP = 1.0e7
@@ -45,16 +47,25 @@ _SUSP_VIS_KV = 1.0e5
 _SUSP_VIS_MAX_RATE = 2.0
 
 
-def _susp_visual_target(d, mesh_radius, l_susp, clamp, prev, dt):
+def _susp_visual_target(d, mesh_radius, l_susp, clamp, prev, dt, miss=None):
     """Shared susp visual-joint target for both writer paths and the batched
-    writer: ``mesh_radius - d``; ray MISS (>= 19.9) or exact-zero
-    (unpopulated sensor) -> fully extended ``-l_susp``; clamped to the
-    stroke bound; slew-rate-limited against ``prev`` (pass None to skip).
+    writer: ``mesh_radius - d``; a ray MISS -> fully extended ``-l_susp``;
+    clamped to the stroke bound; slew-rate-limited against ``prev`` (pass None
+    to skip).
+
+    Air is ``raycast.is_ray_hit_corrected`` negated — the SAME predicate
+    ``core._susp_visual_offset`` uses, tested against the sensor's OWN miss
+    sentinel ``miss`` (``None`` = the deprecated ``RAY_MISS_THRESHOLD``
+    fallback, correct only at the default ``max_range=20.0``). ``d`` is a
+    CORRECTED distance (the high-cast offset already removed), so the
+    unpopulated-sensor zero is NOT detectable here and is not tested for; this
+    helper only runs inside a full step, past the first-step protection.
 
     NB a NEGATIVE ``d`` is a valid deep-over-compression reading under the
     high-cast ray scheme (raycast.RAY_UP_OFFSET), NOT air — the old
-    ``d <= 1e-6`` air test would have misclassified it."""
-    air = (d >= 19.9) | (d == 0.0)
+    ``d <= 1e-6`` air test would have misclassified it, and so would a
+    ``d != 0.0`` term on a hit landing exactly at the offset."""
+    air = ~is_ray_hit_corrected(d, miss)
     jp = mesh_radius - d
     jp = torch.where(air, torch.full_like(jp, -l_susp), jp)
     if clamp is not None:
@@ -126,6 +137,10 @@ class WheelJointInternalSync:
         self.dtype = dtype
         self.wheels = resolved.wheels
         self.n_wheels = len(self.wheels)
+        # Ray-miss sentinel of the sensor feeding `distances`; VehiclePhysics
+        # sets it (and keeps it current through set_ray_miss_value). None =
+        # RAY_MISS_THRESHOLD fallback.
+        self.ray_miss = None
         self.spin_enabled = bool(getattr(resolved, "visual_spin_enabled", True))
 
         # Visual mesh radius for suspension positioning. Default = avg wheel radius.
@@ -293,7 +308,7 @@ class WheelJointInternalSync:
             d = distances[:, self._susp_set_idx]
             jp = _susp_visual_target(d, self.wheel_mesh_radius, self.l_susp,
                                      self._susp_set_clamp,
-                                     self._susp_set_prev, dt)
+                                     self._susp_set_prev, dt, self.ray_miss)
             self._susp_set_prev = jp
             susp_joint_pos = jp
             parts.append(jp)
@@ -329,7 +344,8 @@ class WheelJointInternalSync:
             # ground jump cannot inject a large impulse into the chassis.
             joint_pos = _susp_visual_target(d, self.wheel_mesh_radius,
                                             self.l_susp, None,
-                                            self._susp_ctrl_prev, dt)
+                                            self._susp_ctrl_prev, dt,
+                                            self.ray_miss)
             self._susp_ctrl_prev = joint_pos
             self.entity.control_dofs_position(
                 joint_pos, dofs_idx_local=self._susp_ctrl_dofs,
@@ -427,7 +443,8 @@ class KindVisualBatch:
             clamp = (v0._susp_set_clamp.unsqueeze(0)
                      if v0._susp_set_clamp is not None else None)
             jp = _susp_visual_target(d, v0.wheel_mesh_radius, v0.l_susp,
-                                     clamp, self._susp_set_prev, dt)
+                                     clamp, self._susp_set_prev, dt,
+                                     v0.ray_miss)
             self._susp_set_prev = jp
             parts.append(jp)
             susp_written = True
@@ -447,7 +464,8 @@ class KindVisualBatch:
         if self._susp_ctrl_g is not None:
             d = dist_NK[:, :, v0._susp_ctrl_idx]
             jp = _susp_visual_target(d, v0.wheel_mesh_radius, v0.l_susp,
-                                     None, self._susp_ctrl_prev, dt)
+                                     None, self._susp_ctrl_prev, dt,
+                                     v0.ray_miss)
             self._susp_ctrl_prev = jp
             self.solver.control_dofs_position(
                 jp.reshape(N, -1), self._susp_ctrl_g)

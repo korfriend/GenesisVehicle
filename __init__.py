@@ -163,12 +163,22 @@ _GENESIS_LAZY = {
     "single_scene_up_offset": ("genesis_vehicle.raycast", "single_scene_up_offset"),
     "set_sensor_up_offset": ("genesis_vehicle.raycast", "set_sensor_up_offset"),
     "sensor_up_offset": ("genesis_vehicle.raycast", "sensor_up_offset"),
+    "is_ray_hit": ("genesis_vehicle.raycast", "is_ray_hit"),
+    "is_ray_hit_corrected": ("genesis_vehicle.raycast", "is_ray_hit_corrected"),
+    "sensor_miss_value": ("genesis_vehicle.raycast", "sensor_miss_value"),
+    "set_sensor_miss_value": ("genesis_vehicle.raycast", "set_sensor_miss_value"),
+    "set_sensor_fan": ("genesis_vehicle.raycast", "set_sensor_fan"),
+    "sensor_fan": ("genesis_vehicle.raycast", "sensor_fan"),
+    "fan_height_offsets": ("genesis_vehicle.raycast", "fan_height_offsets"),
+    "fan_longitudinal_offsets": ("genesis_vehicle.raycast", "fan_longitudinal_offsets"),
+    "fan_ray_positions": ("genesis_vehicle.raycast", "fan_ray_positions"),
     "self_collision_ceiling": ("genesis_vehicle.urdf", "self_collision_ceiling"),
     "get_link_transforms": ("genesis_vehicle.kinematics", "get_link_transforms"),
     "LinkTransforms": ("genesis_vehicle.kinematics", "LinkTransforms"),
     "VisualPartsTransforms": ("genesis_vehicle.core", "VisualPartsTransforms"),
     "add_vehicle": ("genesis_vehicle.scene_helpers", "add_vehicle"),
     "make_wheel_raycaster": ("genesis_vehicle.scene_helpers", "make_wheel_raycaster"),
+    "WHEEL_CONTACT_MODES": ("genesis_vehicle.vehicle_scene", "WHEEL_CONTACT_MODES"),
     "VehicleScene": ("genesis_vehicle.vehicle_scene", "VehicleScene"),
     "Vehicle": ("genesis_vehicle.vehicle_scene", "Vehicle"),
     "StaticBody": ("genesis_vehicle.vehicle_scene", "StaticBody"),
@@ -199,6 +209,10 @@ __all__ = [
     # Sensor / raycast (lazy)
     "WheelRayPattern", "read_distances",
     "single_scene_up_offset", "set_sensor_up_offset", "sensor_up_offset",
+    "is_ray_hit", "is_ray_hit_corrected",
+    "sensor_miss_value", "set_sensor_miss_value",
+    "set_sensor_fan", "sensor_fan",
+    "fan_height_offsets", "fan_longitudinal_offsets", "fan_ray_positions",
     "self_collision_ceiling",
     # Kinematics — per-link transforms (lazy)
     "get_link_transforms", "LinkTransforms",
@@ -208,6 +222,8 @@ __all__ = [
     "add_vehicle", "make_wheel_raycaster",
     # Unified high-level API (lazy) — VehicleScene is the center of the SDK
     "VehicleScene", "Vehicle", "StaticBody", "DynamicBody", "Camera",
+    # Legal values of add_vehicle/make_wheel_raycaster's wheel_contact (lazy)
+    "WHEEL_CONTACT_MODES",
     # (WheelJointInternalSync was removed from the public API in v1.1.18 — wheel
     # visuals are auto-managed by VehicleScene via the solver-free
     # InstancedWheelRenderer; the legacy joint-sync path survives only as

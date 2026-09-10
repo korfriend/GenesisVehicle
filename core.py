@@ -20,7 +20,9 @@ from .config import ResolvedConfig, VehicleConfig, resolve
 from ._gs_compat import apply_links_wrench
 from ._pipeline import compute_wheel_step
 from .inputs import VehicleInputs, VehicleStepInputs
-from .raycast import read_distances
+from .raycast import (
+    check_miss_supported, is_ray_hit_corrected, ray_miss_value, read_distances,
+)
 from .urdf import estimate_spin_inertia_from_genesis
 from .visual import WheelJointInternalSync
 
@@ -62,7 +64,7 @@ def _quat_mul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 def _susp_visual_offset(distance: torch.Tensor, mesh_radius: float,
-                        l_susp: float, clamp=0.19) -> torch.Tensor:
+                        l_susp: float, clamp=0.19, miss=None) -> torch.Tensor:
     """Vertical wheel-mesh offset (chassis +z) from ray hit distance.
 
     Mirror of the suspension command in ``visual.WheelJointInternalSync.step`` (joint_pos =
@@ -74,13 +76,23 @@ def _susp_visual_offset(distance: torch.Tensor, mesh_radius: float,
     ``clamp`` bounds the offset to ±clamp. It should be the **per-wheel
     suspension stroke** (so a vehicle whose travel exceeds the old fixed 0.19 m
     is not visually muted) — pass a ``(n_wheels,)`` / broadcastable tensor.
-    A scalar is also accepted (the helper's unit-test default is 0.19)."""
-    # Miss (>= 19.9) or exact-zero (unpopulated sensor) = air. A NEGATIVE
-    # distance is a valid deep-over-compression reading under the high-cast
-    # ray scheme (raycast.RAY_UP_OFFSET), not air — the clamp below bounds
-    # it. (WheelJointInternalSync additionally slew-rate-limits its target; this
+    A scalar is also accepted (the helper's unit-test default is 0.19).
+
+    ``miss`` is the sensor's ray-miss sentinel; ``None`` falls back to the
+    deprecated ``raycast.RAY_MISS_THRESHOLD`` (correct only at the default
+    ``max_range=20.0``)."""
+    # Air = ray MISS, i.e. the sensor's own sentinel. ONE definition, shared
+    # with visual._susp_visual_target: raycast.is_ray_hit_corrected — the
+    # CORRECTED-distance predicate, because `distance` here is post-offset
+    # (last_distances). It carries no unpopulated-sensor term; callers reach
+    # this either inside a full step, or from wheel_visual_transforms whose
+    # result is masked back to rest for any env with _stepped_once False.
+    # A NEGATIVE distance is a valid
+    # deep-over-compression reading under the high-cast ray scheme
+    # (raycast.RAY_UP_OFFSET), not air — the clamp below bounds it.
+    # (WheelJointInternalSync additionally slew-rate-limits its target; this
     # closed-form mirror is stateless and does not.)
-    air = (distance >= 19.9) | (distance == 0.0)
+    air = ~is_ray_hit_corrected(distance, miss)
     jp = mesh_radius - distance
     jp = torch.where(air, torch.full_like(jp, -l_susp), jp)
     if torch.is_tensor(clamp):
@@ -261,6 +273,12 @@ class VehiclePhysics:
         self.scene = scene
         self.entity = entity
         self.sensor = sensor
+        # The distance a wheel ray reports when it hit NOTHING. Read off the
+        # sensor (raycast.ray_miss_value → the engine's no_hit_value, which
+        # defaults to max_range). None when this instance was built WITHOUT a
+        # sensor — VehicleScene's dual_scene mode does exactly that and injects
+        # the raycast-scene sensor's value via set_ray_miss_value().
+        self._ray_miss = None if sensor is None else ray_miss_value(sensor)
         self.solver = scene.sim.rigid_solver
         self.n_envs = n_envs
         self.dev = gs.device
@@ -331,6 +349,14 @@ class VehiclePhysics:
         self._prev_init = False
 
         self.last_distances = torch.zeros(n_envs, n_wheels, device=self.dev, dtype=self.fdt)
+        # (n_envs, n_wheels) bool — "this wheel's ray found ground", aligned with
+        # last_distances. CARRIED from read_distances(return_hit=True) (evaluated
+        # on the RAW distances, the only place raycast.is_ray_hit's
+        # unpopulated-zero term is meaningful) when this driver owns a sensor;
+        # derived with raycast.is_ray_hit_corrected when distances are INJECTED
+        # (dual_scene), where only corrected values exist. The two agree except
+        # on the pre-first-step zero buffer, which _stepped_once gates. v1.5.2.
+        self.last_hit = torch.zeros(n_envs, n_wheels, device=self.dev, dtype=torch.bool)
         self.last_compression = torch.zeros(n_envs, n_wheels, device=self.dev, dtype=self.fdt)
         self.last_N = torch.zeros(n_envs, n_wheels, device=self.dev, dtype=self.fdt)
         self.last_F_long = torch.zeros(n_envs, n_wheels, device=self.dev, dtype=self.fdt)
@@ -346,6 +372,10 @@ class VehiclePhysics:
                 entity=entity, resolved=self.resolved,
                 n_envs=n_envs, device=self.dev, dtype=self.fdt,
             )
+            # Same ray-miss sentinel the read layer uses, so the visual air
+            # pose and the physics air mask cannot disagree (set_ray_miss_value
+            # keeps them in sync when the scene injects it later).
+            self.visual.ray_miss = self._ray_miss
 
         self._up_world = torch.tensor(
             [0.0, 0.0, 1.0], device=self.dev, dtype=self.fdt,
@@ -364,8 +394,11 @@ class VehiclePhysics:
         self.wheel_spin_angle = torch.zeros(
             n_envs, n_wheels, device=self.dev, dtype=self.fdt)
         # True only after a FULL step (not the first-step early-return, where
-        # WheelJointInternalSync is skipped). Gates wheel_visual_transforms' deltas.
-        self._stepped_once = False
+        # WheelJointInternalSync is skipped). Gates wheel_visual_transforms'
+        # deltas and wheels_grounded. PER ENV (n_envs,) since v1.5.2: a partial
+        # reset(env_ids=...) zeroes only those envs' last_distances, so a single
+        # scalar flag would report their stale zeros as a valid reading.
+        self._stepped_once = torch.zeros(n_envs, device=self.dev, dtype=torch.bool)
         radii = [float(w.radius) for w in self.resolved.wheels if w.radius is not None]
         self._mesh_radius = float(sum(radii) / len(radii)) if radii else 0.35
         strokes = [float(w.rest_stroke) for w in self.resolved.wheels
@@ -410,17 +443,101 @@ class VehiclePhysics:
     # Public API
     # -----------------------------------------------------------------
 
+    def _stepped_any(self) -> bool:
+        """True if ANY env has taken a full physics step.
+
+        This is ONLY the cheap all-or-nothing shortcut for the batch-wide
+        rest-pose fallbacks (``wheel_visual_transforms`` and the two in
+        ``MultiVehicleKindPhysics``): False means NO env has stepped, so the
+        whole batch is at rest and no deltas need computing at all.
+
+        It is NOT a substitute for the per-env flag. A partial
+        ``reset(env_ids=...)`` un-steps SOME envs, and ``.any()`` is then True
+        while those envs' ``last_distances`` are zeros — which
+        ``_susp_visual_offset`` would read as a fully-compressed suspension.
+        Callers must therefore mask per env with ``_stepped_once`` after the
+        shortcut (``wheel_visual_transforms`` does; see v1.5.2). ``.any()``
+        alone was bit-identical only for a batch that steps uniformly."""
+        return bool(self._stepped_once.any())
+
+    def set_ray_miss_value(self, miss: Optional[float], *,
+                           sensor: Optional[Any] = None) -> None:
+        """Tell this driver which distance means "the ray hit NOTHING".
+
+        Normally read off ``sensor`` at construction. It has to be injectable
+        because ``VehicleScene``'s ``dual_scene`` mode builds ``VehiclePhysics``
+        with ``sensor=None`` (the rays live in a SEPARATE scene) and feeds
+        ``step(distances=...)`` from there; the scene injects that sensor's
+        value here. ``None`` falls back to the deprecated
+        ``raycast.RAY_MISS_THRESHOLD``.
+
+        VALIDATED, not merely stored (v1.5.2 — it used to keep ``float(miss)``
+        unchecked while its docstring pointed at the stamp path's rule, so
+        ``set_ray_miss_value(0.0)`` reopened the launch-the-vehicle failure
+        mode through ``_susp_visual_offset`` / ``is_ray_hit_corrected``).
+        Exactly what is enforced:
+
+        * against ``sensor`` (the keyword, for the injected ``dual_scene``
+          case where this driver owns none) or else ``self.sensor``, through
+          the same :func:`genesis_vehicle.raycast.check_miss_supported` the
+          stamp and read paths use: a sentinel below that raycaster's
+          ``max_range`` raises ``ValueError``;
+        * with no sensor on either side there is no ``max_range`` to compare
+          with, so only that function's unconditional stage holds: a sentinel
+          that cannot be a distance AT ALL (non-finite, or ``<= 0``) raises.
+
+        Both stages live in ``check_miss_supported`` since v1.5.2 — this method
+        used to carry its own copy of the unconditional one, which meant the
+        stamp/read paths did NOT have it (a stub sensor accepted ``0.0``, a real
+        one accepted ``nan`` because ``nan < max_range`` is False).
+
+        See :func:`genesis_vehicle.raycast.set_sensor_miss_value` for why a
+        sentinel below the raycaster's ``max_range`` is unsupported."""
+        if miss is None:
+            self._ray_miss = None
+        else:
+            src = sensor if sensor is not None else self.sensor
+            self._ray_miss = check_miss_supported(src, float(miss))
+        if self.visual is not None:
+            self.visual.ray_miss = self._ray_miss
+
+    @property
+    def wheels_grounded(self) -> torch.Tensor:
+        """``(n_envs, n_wheels)`` bool — did each wheel's ray find ground on the
+        last step?
+
+        ``last_hit`` — the mask the read layer produced alongside
+        ``last_distances`` (see that attribute) — AND'ed with the per-env "has
+        stepped" flag, so an env that has never stepped (or was just ``reset``)
+        reports all-False instead of passing vacuously on the zero tensor
+        ``last_distances`` starts out as. The gate is not decoration: the
+        corrected-distance predicate that feeds ``last_hit`` on the injected
+        path cannot recognise that zero buffer by itself.
+
+        This is a READ-LAYER diagnostic, not the physics air mask: the pipeline
+        decides air from ``compression <= 0`` and never looks at the sentinel.
+        The two agree except within the suspension's rest gap, where a ray can
+        hit ground that is still too far away to compress the spring."""
+        return self.last_hit & self._stepped_once.unsqueeze(1)
+
+    @property
+    def all_wheels_grounded(self) -> torch.Tensor:
+        """``(n_envs,)`` bool — True where EVERY wheel of that env found ground.
+        The question "is this vehicle actually on the terrain?"."""
+        return self.wheels_grounded.all(dim=1)
+
     def reset(self, env_ids: Optional[torch.Tensor] = None) -> None:
         if env_ids is None:
             self.omega.zero_()
             self.prev_compression.zero_()
             self._prev_init = False
-            self.last_distances.zero_(); self.last_compression.zero_()
+            self.last_distances.zero_(); self.last_hit.zero_()
+            self.last_compression.zero_()
             self.last_N.zero_(); self.last_F_long.zero_(); self.last_F_lat.zero_()
             self.last_T_drive.zero_(); self.last_T_brake.zero_()
             self.last_kappa.zero_(); self.last_alpha.zero_()
             self.last_steer_per_wheel.zero_(); self.wheel_spin_angle.zero_()
-            self._stepped_once = False
+            self._stepped_once.zero_()
             if self.visual is not None:
                 self.visual.reset_visual_state()
             return
@@ -429,11 +546,16 @@ class VehiclePhysics:
             idx = torch.nonzero(idx, as_tuple=False).flatten()
         self.omega[idx] = 0.0
         self.prev_compression[idx] = 0.0
-        self.last_distances[idx] = 0.0; self.last_compression[idx] = 0.0
+        self.last_distances[idx] = 0.0; self.last_hit[idx] = False
+        self.last_compression[idx] = 0.0
         self.last_N[idx] = 0.0; self.last_F_long[idx] = 0.0; self.last_F_lat[idx] = 0.0
         self.last_T_drive[idx] = 0.0; self.last_T_brake[idx] = 0.0
         self.last_kappa[idx] = 0.0; self.last_alpha[idx] = 0.0
         self.last_steer_per_wheel[idx] = 0.0; self.wheel_spin_angle[idx] = 0.0
+        # These envs' last_distances are now zeros again, so they have NOT
+        # stepped as far as any reader is concerned (v1.5.2 — a scalar flag left
+        # a stale True here and wheels_grounded reported the zeros as ground).
+        self._stepped_once[idx] = False
         if self.visual is not None:
             self.visual.reset_visual_state(idx)
 
@@ -525,8 +647,11 @@ class VehiclePhysics:
             self._capture_rest_wheel_pose(self.entity)
 
         # Before the first FULL step (the first-step early-return skips the
-        # pipeline AND WheelJointInternalSync), wheels are at the rest pose. Apply no deltas.
-        if not self._stepped_once:
+        # pipeline AND WheelJointInternalSync), wheels are at the rest pose.
+        # Apply no deltas. `_stepped_any()` is the batch-wide shortcut for
+        # "nobody has stepped"; envs that a PARTIAL reset un-stepped are
+        # masked back to the rest pose below.
+        if not self._stepped_any():
             rest_pos = self._rest_wheel_pos_local.unsqueeze(0).expand(
                 self.n_envs, -1, 3).contiguous()
             rest_quat = self._rest_wheel_quat_local.unsqueeze(0).expand(
@@ -550,7 +675,7 @@ class VehiclePhysics:
         steer_z = -self.last_steer_per_wheel                                 # (N, n)
         susp_off = _susp_visual_offset(
             self.last_distances, self._mesh_radius, self._l_susp,
-            self._susp_clamp)                                               # (N, n)
+            self._susp_clamp, self._ray_miss)                               # (N, n)
         spin = (self.wheel_spin_angle if self._visual_spin_enabled
                 else torch.zeros_like(self.wheel_spin_angle))                # (N, n)
 
@@ -566,6 +691,19 @@ class VehiclePhysics:
             rest_quat,
             _quat_mul(_quat_axis_angle("z", steer_z), _quat_axis_angle("y", spin)),
         )                                                                   # (N, n, 4)
+
+        # PER-ENV rest-pose fallback (v1.5.2). `_stepped_once` is per env, so a
+        # partial reset(env_ids=...) leaves those envs un-stepped with zeroed
+        # last_distances; feeding that zero to _susp_visual_offset renders them
+        # FULLY COMPRESSED (a corrected 0.0 is a legitimate contact at exactly
+        # RAY_UP_OFFSET, not air — see raycast.is_ray_hit_corrected). Give them
+        # the same rest pose the all-unstepped branch above returns. Skipped
+        # entirely — bit-identical, no extra kernels — when every env has
+        # stepped, which is the steady state.
+        if not bool(self._stepped_once.all()):
+            m = self._stepped_once.view(-1, 1, 1)
+            local_pos = torch.where(m, local_pos, rest_pos.expand_as(local_pos))
+            local_quat = torch.where(m, local_quat, rest_quat.expand_as(local_quat))
 
         if frame == "local":
             return local_pos, local_quat
@@ -671,10 +809,19 @@ class VehiclePhysics:
                     "instance was built with sensor=None, so pass distances= "
                     "(shape (n_envs, n_wheels)) from your raycast source."
                 )
-            distances = read_distances(self.sensor, n_envs)
+            # Carry the sensor's own RAW-evaluated hit mask out with the
+            # corrected distances; it is the only one that can tell an
+            # unpopulated zero buffer from a hit at exactly the high-cast offset.
+            distances, hit = read_distances(self.sensor, n_envs,
+                                            miss=self._ray_miss, return_hit=True)
         else:
             distances = self._coerce_distances(distances)
+            # Injected (dual_scene): only CORRECTED distances exist here, so the
+            # sentinel test is the whole predicate and _stepped_once is the
+            # guard for the pre-first-step zeros. See raycast.is_ray_hit_corrected.
+            hit = is_ray_hit_corrected(distances, self._ray_miss)
         self.last_distances = distances.detach().clone()
+        self.last_hit = hit.detach().clone()
         if not self._prev_init and torch.all(distances < 1e-6):
             self._prev_init = True
             return
@@ -732,7 +879,7 @@ class VehiclePhysics:
         apply_links_wrench(self.solver, total_F.unsqueeze(1), total_T.unsqueeze(1),
                            self.base_idx_list)
         self._prev_init = True
-        self._stepped_once = True
+        self._stepped_once[:] = True
 
         # [VISUAL]
         if self.visual is not None:

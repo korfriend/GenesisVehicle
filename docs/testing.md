@@ -8,8 +8,9 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-291 tests, almost all pure-Python. Runs in ~30s on CPU. The reference URDFs the
-parsing tests read live in `tests/data/` (self-contained since v1.2.0).
+375 tests, almost all pure-Python. Runs in ~100s on CPU (v1.6.0; the handful of
+real-`VehicleScene` rollouts dominate — collection alone is ~5s). The reference
+URDFs the parsing tests read live in `tests/data/` (self-contained since v1.2.0).
 
 A handful build a real `VehicleScene` on the CPU backend (the batched-visual /
 proxy-sync / to-host parity tests, and the one ray pattern that allocates
@@ -61,6 +62,17 @@ CI without GPU.
 | plan / finish split | `test_differentiable_plant.py` | `plan()` then `finish()` reproduces `step()` exactly, including `last_mode`; a decided plan (DONE / cusp brake) needs no inversion |
 | `FleetFollower` | `test_differentiable_plant.py` | drives every member off one solve, reports each command to its own plant row, matches independent followers, rejects a count mismatch or an unbatched plant |
 | Plant / PathFollower wiring | `test_differentiable_plant.py` | plant vs sweep-table dispatch, `.sweep` back-compat alias, steer range tightened to `steer_cap`, applied command reported on early-return exits, bad plant rejected |
+| Ray-MISS sentinel | `test_ray_miss_and_grounded.py` | the engine's `no_hit_value` defaults to `max_range` and an explicit `0.0` is kept (not coerced); a real `VehicleScene` raycaster reports its OWN range; equality is exact for an unrepresentable sentinel (19.9, 0.1); `read_distances` leaves a non-default-range miss alone; the raw predicate is wrong when applied to corrected distances |
+| Miss-sentinel validation, all three entry points | `test_ray_miss_and_grounded.py` | a sentinel below `max_range` raises at the stamp, at the read, and at `VehiclePhysics.set_ray_miss_value`; non-finite and non-positive rejected; a stamped `nan` cannot survive the read path; `VehiclePhysics` refuses a hand-built bad sensor at construction |
+| `wheels_grounded` / `grounded_list` | `test_ray_miss_and_grounded.py` | all-False before the first step and on the unpopulated zero buffer; True after settling; False over a hole; the carried mask is used, not a recomputed one; batched `grounded_list()` matches per-vehicle |
+| Partial reset renders at rest, not full compression | `test_ray_miss_and_grounded.py` | per-env `_stepped_once` on both `VehiclePhysics.wheel_visual_transforms` and the batched kind path, in both raycast modes; read layer / core / visual agree at a non-default range; the susp helpers keep their legacy positional signature |
+| Swept-envelope fan geometry | `test_swept_envelope.py` | `s_j` spans `±r*fan_span` and centres exactly on 0; `c_j = r - sqrt(r^2 - s_j^2)` with `c_0 == 0` exactly and `c(±r) == r`; each wheel uses its OWN radius; even M refused with the flat-ground bias measurement in the message; M=1 needs no geometry; radii required and count-matched |
+| Swept-envelope read layer | `test_swept_envelope.py` | `read_distances` collapses `(n_envs, n_wheels, M)` to `(n_envs, n_wheels)`; M=1 keeps a genuinely RANK-1 return shape (not a width-1 fan); misses pushed to `+inf` and an all-miss wheel reports the sentinel; the unpopulated buffer reads all-miss; `d_eff <= d_center` over 2000 randomised profiles (1784 mixed hit/miss) |
+| Swept-envelope `single_scene` ceiling | `test_swept_envelope.py` | `self_collision_ceiling` / `single_scene_up_offset` take a per-RAY minimum, and both registration entry points (`VehicleScene.add_vehicle`, `make_wheel_raycaster`) hand them the whole fan rather than the wheel centres. Proved on a synthetic URDF — the reference car plus a low sill outboard of the front wheels — where the two caps actually disagree (0.28 m vs 0.12 m); a guard test asserts that discriminator still discriminates, since the reference car alone cannot make these tests fail |
+| Wheel-contact mode selection | `test_swept_envelope.py` | `wheel_contact` / `contact_samples` on `VehicleScene.add_vehicle` and `make_wheel_raycaster`; `"swept_envelope"` with `contact_samples=1` refused; unknown mode refused; `check_fan_uniformity` rejects a kind with mixed M |
+| The defect the envelope addresses (analytic harness) | `test_swept_envelope.py` | a wheel crossing a 0.130 m lip at 3.3 m/s through the real `read_distances` + `suspension_normal_force`: point contact takes the whole lip in one `dt` (`85,120 N`); M=9 spreads it (`49,978 N`, ratio 1.703); **M is not an accuracy dial** — ratios 1.703 / 1.906 / 2.039 / 1.959 at M = 9 / 15 / 31 / 101, non-monotone; M=3 at full span IS the point contact; the envelope never RAISES the peak, at any M or span |
+| Swept-envelope in a real scene | `test_swept_envelope.py` | `single_scene` + M=9 does not self-hit and does not launch: same ride height and wheel distances as the point contact on flat ground, raw read `(1, 4, 9)` vs `(1, 4)` |
+| The DEFAULT path did not move by one bit | `test_fan_default_identity.py` | a 200-step Genesis rollout of the reference car in the default configuration compared with `torch.equal` — **not `allclose`** — against wheel distances and the final pose captured from the pre-v1.5.1 tree (commit `20f7380`). Skips itself off genesis-world 1.4.0, because the baseline is a bit-pattern: re-capture, do not loosen. Also drives the M > 1 branch through a stub sensor, so the file witnesses the branch the rollout does not take |
 | Server subpackage import + steer-key mapping | `test_server_import.py` | `genesis_vehicle.server` imports; `steerScale`/`maxSteerRad` mapping-key resolution (auto-skips without genesis/pythonosc) |
 
 ## Public-surface import smoke check
@@ -83,7 +95,7 @@ and that the lazy names (`VehiclePhysics`, `WheelRayPattern`,
 | `inputs.py` | `VehicleInputs`, `VehicleStepInputs`, typed inputs |
 | `urdf.py` | `parse_urdf()`, `URDFParsedConfig`, `estimate_spin_inertia_from_genesis` |
 | `dynamics.py` | `brake_torque_signed`, `suspension_normal_force` — pure helpers |
-| `raycast.py` | `WheelRayPattern`, `read_distances()` |
+| `raycast.py` | `WheelRayPattern`, `read_distances()`, the ray-MISS sentinel (`is_ray_hit` / `is_ray_hit_corrected` / `ray_miss_value` / `check_miss_supported`), high-cast offset helpers, the swept-envelope fan (`fan_longitudinal_offsets` / `fan_height_offsets` / `fan_ray_positions` / `set_sensor_fan` / `sensor_fan`, v1.6.0) |
 | `kinematics.py` | `get_link_transforms`, `LinkTransforms` — per-link transforms (world / base / parent frame) |
 | `visual.py` | `InstancedWheelRenderer` (solver-free wheel visuals), `WheelJointInternalSync` (legacy joint-sync fallback), `patch_viewer_atomic_update` |
 | `tire_models/` | `TireModel` ABC + `PacejkaAnisotropic`, `CoulombIsotropic` |
