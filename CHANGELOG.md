@@ -10,6 +10,141 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.5.1] — 2026-09-08
+
+**`samples/dual_scene_terrain.py` had been driving its car off the edge of the
+world, and the dual-scene speedup tables in `docs/dual-scene-raycast.md` were
+measured on that falling run.** The sample is fixed and now fails loudly; the
+published figures are **retracted, not replaced** — a second, independent defect
+means no trustworthy replacement can be produced from the current harness. No
+SDK source changed; no public API changed.
+
+| abbr | meaning |
+|---|---|
+| BVH | Bounding Volume Hierarchy (the acceleration structure the wheel rays are cast against) |
+| `d0` | the four wheel ray distances read on the first settled step, in metres |
+| `dual_scene` / `single_scene` | the two `raycast_mode` values: separate static-BVH raycast scene / one shared scene |
+| L3 / `n_envs` | the parallel-scenario batching axis |
+| `z_settle` / `z_end` | chassis height after the settle phase / at the end of the drive, in metres |
+| `RAY_MISS_THRESHOLD` | the sentinel distance a wheel ray reports when it hits nothing |
+
+### Fixed: `gs.morphs.Terrain`'s origin is a CORNER, and the sample spawned off the mesh
+
+`gs.morphs.Terrain(n_subterrains=(1, 1), subterrain_size=(40, 40))` lays its mesh
+over `x, y in [0, 40]` — the morph's origin is the terrain's **corner**, not its
+centre. The sample spawned its car at `pos=(0, 0, 3)`, which is that corner: only
+the wheels on the `+x/+y` side were over the mesh, three of four rays missed, and
+the run ended at `x=-1.62, z=-84.16` — the car fell past the edge and kept
+falling. It nevertheless shipped as a "passing" sample because it printed no
+FINAL block, asserted nothing, and always exited `0`.
+
+Not a backend regression: it reproduces identically on genesis-world 1.3.3 and
+1.4.0, so it has been broken for every release the sample has existed in. The
+v1.5.0 CHANGELOG quotes `x=-1.62 z=-84.16 speed=2.17` as evidence the dual-scene
+terrain path "reproduces its 1.3.3 result exactly" — that statement is true and
+was the wrong thing to be reproducing; it was a faithful reproduction of a car
+in free fall.
+
+The fix centres the terrain (`pos=(-Lx/2, -Ly/2, 0)`), raises `settle_s` from
+1.0 s to 3.0 s, and adds four self-checks with a non-zero exit.
+
+| measurement (CPU, genesis-world 1.4.0, `dual_scene`, `n_envs=1`) | before | after |
+|---|---|---|
+| `d0` (four wheel rays) | 3 of 4 missed | `[0.411, 0.411, 0.412, 0.412]` |
+| `z_settle` | — (already falling) | `0.112` |
+| `z_end` | `-84.16` | `0.111` |
+| `x_end` | `-1.62` | `+10.342` |
+| final speed | `2.17` (free-fall artifact) | `4.83 m/s` |
+| exit code | `0` (always) | `0` on pass, `1` on failure |
+
+Negative control — the `pos=` argument removed again, everything else kept:
+`d0 = [20.0, 20.0, 20.0, 20.0]` (all four at the miss sentinel), `z_settle =
+-17.837`, `z_end = -185.125`, criteria (a)(b)(c) FAIL, exit `1`. The sample can
+no longer regress silently.
+
+`settle_s` moved for a measurable reason, not for luck: at 1.0 s the car is
+still bouncing from its 3 m drop (`z=0.479` against the settled `0.112`), so a
+z-stability criterion would have carried ~0.13 m of margin and become its own
+noise source. At 3.0 s the residual drift over the last ten steps is `0.0004 m`.
+
+The four criteria, each carrying its rationale in-source:
+
+| # | criterion | why it is written that way |
+|---|---|---|
+| a | `d0_max < RAY_MISS_THRESHOLD` **and** `d0_min > 0.0` | the `min > 0` half exists because a pre-step sensor read is a zero tensor (`core.py:333`), which would satisfy the max check vacuously. Valid only at the default `raycaster_max_range=20.0` |
+| b | `0 < z < 1.0` and `abs(z_end - z_settle) < 0.25` | on the terrain and not drifting vertically |
+| c | `x > 2.0` | it actually drove |
+| d | `abs(x), abs(y) < 18.0` | still inside the 40 m plate. Cannot fire at default arguments; it exists for users who raise `--drive-s` |
+
+(b), (c) and (d) are judged over an **all-env envelope**, so a bad env cannot
+hide behind env 0.
+
+Pose equivalence between the two raycast modes still holds on the corrected
+scene: `single_scene` matches `dual_scene` to three decimals on `d0`, `z_end`
+and `x_end`, `|dx| = 0.000`.
+
+### Retracted: the dual-scene speedup figures in `docs/dual-scene-raycast.md`
+
+The numbers in that doc's three performance tables — `2.79x` full-step at 51 k
+faces, `5.49x` at 205 k, `~3.4x` at 256 envs on GPU, `~1x` at `n_envs=1` — are
+**annotated as invalid and left in place** so the retraction is visible; they are
+not silently replaced. Two independent reasons, either of which alone is
+disqualifying:
+
+1. **They were measured on the falling configuration above.** The car was off the
+   terrain with three of four rays missing, so neither the raycast load nor the
+   contact state was that of a driving vehicle.
+2. **The harness that produced them is order-biased.** `dual_scene_terrain.py
+   --compare` runs both modes in ONE process in a fixed order (single first), so
+   the second mode is not measured under the conditions of the first. Measured
+   with `run()` called directly, 3 repeats per order, CPU, `n_envs=1`,
+   `horizontal_scale=0.25`, 51,212 faces: full-step ratio median **1.10** with
+   single-then-dual, **1.28** with dual-then-single. Order alone moves the
+   answer by that much. An independent verifier reproduced the direction and
+   magnitude on separate runs.
+
+The mechanism behind the order effect is **not** settled and no cause is claimed:
+the obvious "the second run is cache-warmed" story predicts slot 1 being the
+slower one, but both parties measured `single_scene` running slower in slot 1.
+The established fact — the only one asserted in the doc — is that run order
+changes the result, which makes any single-process A/B from this harness
+unusable as a published figure.
+
+**What is NOT retracted** is the structural argument, which stands on the
+mechanism rather than on the timings: `single_scene` re-fits the collision BVH —
+terrain faces included — every step because the vehicle in that solver is
+physics-movable, while `dual_scene`'s raycast scene holds nothing movable, so its
+BVH is built once. Raycast cost therefore stops scaling with face count and with
+`n_envs` under `dual_scene`. `dual_scene` remains the default and remains the
+right mode for heavy terrain and for batched (`n_envs >> 1`) rollouts.
+
+A trustworthy replacement needs per-mode **fresh processes**, alternating order,
+and repeated medians — a benchmark harness of the `perf_vectorization.py` kind,
+not an API demo. Until one exists the doc quotes no speedup.
+
+`dual_scene_terrain.py` is accordingly re-described everywhere it is cited: it is
+an **API and pose-equivalence demo**, and it no longer prints a speedup verdict.
+
+### Docs
+
+- `docs/dual-scene-raycast.md` — retraction banners over all four measurement
+  tables; measurement conditions (engine version, backend, settle duration)
+  stated above them; the `gs.morphs.Terrain` corner-origin fact added to the
+  `add_static` example; the `--compare` demo line re-described as pose
+  equivalence.
+- `docs/api-reference.md` — `add_static` gains the corner-origin note with the
+  `pos=(-Lx/2, -Ly/2, 0)` centring recipe, next to where a user places terrain.
+- `docs/index.md` — sample count corrected 15 -> 20.
+- `CLAUDE.md` (outside the SDK repo) — corner-origin gotcha added.
+
+### Tests
+
+Suite unchanged at **291 pass** — the fix is confined to a sample and to
+documentation, and no unit test covered either.
+
+Still open: there is no order-free raycast-mode benchmark. `docs/dual-scene-raycast.md`
+will carry the retraction banners until one is written.
+
 ## [1.5.0] — 2026-09-08
 
 **Genesis backbone 1.3.3 -> 1.4.0.** The engine renamed or moved five APIs the

@@ -174,6 +174,17 @@ targets (`add_dynamic`).
 | `material` / `surface` / `vis_mode` | `None` | passed to `add_entity` |
 | `name` | `None` | handle label |
 
+> ⚠️ **`gs.morphs.Terrain`'s origin is a CORNER, not its centre.** With
+> `n_subterrains=(1, 1)` and `subterrain_size=(Lx, Ly)` the mesh spans
+> `x in [0, Lx]`, `y in [0, Ly]`. A vehicle spawned at the usual `pos=(0, 0, z)`
+> therefore sits ON the corner: most of its wheel rays miss into empty space, the
+> suspension gets no normal force, and the vehicle falls off the world. Centre
+> the plate — `gs.morphs.Terrain(..., pos=(-Lx/2, -Ly/2, 0.0))` — or spawn the
+> vehicle over the mesh. This silently broke `samples/dual_scene_terrain.py` for
+> several releases (CHANGELOG 1.5.1); centred, the reference car reads
+> `d0 = [0.411, 0.411, 0.412, 0.412]` and settles at `z = 0.112`. `Plane` and
+> mesh morphs are unaffected — this is specific to `Terrain`.
+
 **`add_dynamic(morph, *, …)`** — a moving body; **collide-only by default**.
 
 | param | default | meaning |
