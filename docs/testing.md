@@ -8,8 +8,9 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-375 tests, almost all pure-Python. Runs in ~100s on CPU (v1.6.0; the handful of
-real-`VehicleScene` rollouts dominate — collection alone is ~5s). The reference
+436 tests, almost all pure-Python. Runs in ~88s on CPU (measured at v1.6.1 with
+`python -m pytest tests/ -q`; the handful of real-`VehicleScene` rollouts
+dominate — collection alone is ~5s). The reference
 URDFs the parsing tests read live in `tests/data/` (self-contained since v1.2.0).
 
 A handful build a real `VehicleScene` on the CPU backend (the batched-visual /
@@ -73,6 +74,7 @@ CI without GPU.
 | The defect the envelope addresses (analytic harness) | `test_swept_envelope.py` | a wheel crossing a 0.130 m lip at 3.3 m/s through the real `read_distances` + `suspension_normal_force`: point contact takes the whole lip in one `dt` (`85,120 N`); M=9 spreads it (`49,978 N`, ratio 1.703); **M is not an accuracy dial** — ratios 1.703 / 1.906 / 2.039 / 1.959 at M = 9 / 15 / 31 / 101, non-monotone; M=3 at full span IS the point contact; the envelope never RAISES the peak, at any M or span |
 | Swept-envelope in a real scene | `test_swept_envelope.py` | `single_scene` + M=9 does not self-hit and does not launch: same ride height and wheel distances as the point contact on flat ground, raw read `(1, 4, 9)` vs `(1, 4)` |
 | The DEFAULT path did not move by one bit | `test_fan_default_identity.py` | a 200-step Genesis rollout of the reference car in the default configuration compared with `torch.equal` — **not `allclose`** — against wheel distances and the final pose captured from the pre-v1.5.1 tree (commit `20f7380`). Skips itself off genesis-world 1.4.0, because the baseline is a bit-pattern: re-capture, do not loosen. Also drives the M > 1 branch through a stub sensor, so the file witnesses the branch the rollout does not take |
+| Raycast-mode benchmark harness | `test_bench_raycast_mode.py` | 61 tests, all pure Python: the shipped entry point `main(argv, runner=fake)` is driven with a STUB runner, so the whole schedule (even/adjacent pairing, alternating slot order), the validity + x-margin gates, the cross-worker invariants, `paired_ratios` / `split_groups` and the fail-closed publication rule run without spawning a process. The only test in the suite that patches `genesis.init` — to RAISE, proving the PARENT path never calls it; that is NOT a claim that genesis is absent from the parent (`__init__.py` imports it eagerly via `control/plant.py`). Also pins `verdicts()` backward compatibility: no `terrain_half` key -> bound 18.0 and "±20 m", `terrain_half=(320, 320)` -> 318.0 |
 | Server subpackage import + steer-key mapping | `test_server_import.py` | `genesis_vehicle.server` imports; `steerScale`/`maxSteerRad` mapping-key resolution (auto-skips without genesis/pythonosc) |
 
 ## Public-surface import smoke check

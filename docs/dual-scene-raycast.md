@@ -149,12 +149,22 @@ because no trustworthy replacement exists yet.
 >    `run()` called directly, 3 repeats per order, CPU, `n_envs=1`,
 >    `horizontal_scale=0.25`, 51,212 faces: full-step ratio median **1.10** with
 >    single-then-dual, **1.28** with dual-then-single. Order alone moves the
->    answer by that much, and it was reproduced independently.
+>    answer by that much, and it was reproduced independently. (Since v1.6.1 the
+>    order-free measurement lives in
+>    [`samples/bench_raycast_mode.py`](../samples/bench_raycast_mode.py);
+>    `--compare` is still not a benchmark and still prints no ratio.)
 >
 > The mechanism behind the order effect is **not** settled and none is claimed
-> here: the obvious "the second run is cache-warmed" story predicts slot 1 being
-> faster, yet both parties measured `single_scene` running *slower* in slot 1.
-> The established fact is only that run order changes the result.
+> here. **Correction (v1.6.1): the sentence that stood here said both parties
+> measured `single_scene` running slower in SLOT 1. That was backwards — it is
+> slot 2.** The measurement itself is unchanged and says so: the single/dual
+> ratio median is `1.10` with single-then-dual (single in slot 1) and `1.28`
+> with dual-then-single (single in slot 2), i.e. `single_scene` looks WORSE when
+> it runs second. `dual_scene_terrain.py` and `samples/README.md` had it right;
+> only this restatement (and the matching line in the v1.5.1 CHANGELOG entry,
+> left as history) was inverted. What that does to the "the second run is
+> cache-warmed" story is left open, exactly as before: the established fact is
+> only that run order changes the result.
 >
 > **What still stands** is the structural argument, which does not depend on any
 > timing: `single_scene` re-fits the collision BVH — terrain faces included —
@@ -167,8 +177,13 @@ because no trustworthy replacement exists yet.
 >
 > A trustworthy replacement needs per-mode **fresh processes**, alternating
 > order, and repeated medians — a benchmark harness of the
-> `perf_vectorization.py` kind, not an API demo sample. None exists yet; when
-> one does, these tables get re-measured, not patched.
+> `perf_vectorization.py` kind, not an API demo sample. **That harness exists as
+> of v1.6.1: [`samples/bench_raycast_mode.py`](../samples/bench_raycast_mode.py)**
+> (see "What the harness measured" below). It has NOT replaced these tables and
+> they stay retracted: it measures the full step on CPU only, it publishes a
+> ratio only when its fail-closed rule allows, and on this machine it declined to
+> publish in two of its first four runs. These tables get re-measured, not
+> patched — and nothing here has been re-measured.
 
 Measurement conditions, for the record. **Retracted tables** (all four below):
 CPU / GPU as labelled, `n_envs=1` except the L3 table, 1.0 s settle before
@@ -254,6 +269,57 @@ retracted run — treat the exact number as indicative only). Genesis #2914
 dual_scene also helps independent of speed via (a) very-high-poly terrain on GPU and
 (b) **accuracy** on non-convex mesh terrain (see below).
 
+### What the harness measured (v1.6.1) — still no publishable figure
+
+[`samples/bench_raycast_mode.py`](../samples/bench_raycast_mode.py) is the
+order-free replacement the retraction above asked for: a fresh process per
+measurement, an alternating slot order, a paired ratio
+`r_k = ms(single_scene, k) / ms(dual_scene, k)` inside each repeat, and a
+**fail-closed** rule that prints a ratio only if (i) each slot-order group's
+median lies inside the other group's `[min, max]` and (ii) `1.0` lies outside
+the pooled `[min, max]`. It is a heuristic disclosure rule, not a statistical
+test, and it is allowed to answer "not measurable here".
+
+Conditions, identical for all four runs below: genesis-world **1.4.0**, CPU
+(WSL2), SDK 1.6.1, 640 x 640 m flat plate at `horizontal_scale=4.0` (**51,212
+faces**, the same face count as the sample's 40 m / hs 0.25 plate), `dt=0.025` /
+`substeps=10`, `n_envs=1`, 3 s brake settle, then a timed constant-throttle
+window at throttle 0.6 / steer 0.0 — an ACCELERATION, so the vehicle state
+changes across it (at the 20 s default the window covers **v = 0.33 .. 18.86
+m/s**). One discarded warm-up worker. Both modes drive the same distance
+(x_end 208.148712 m dual vs 208.148788 m single at the defaults).
+
+| run | settings | pooled `r_k` median [min .. max] n | verdict |
+|---|---|---|---|
+| 1 | defaults (6 repeats, 20 s window) | 1.169 [0.979 .. 1.251] n=6 | **NO RATIO** — failed (i) (median(B)=1.138 outside A=[1.151 .. 1.235]) and (ii) (1.0 inside) |
+| 2 | defaults, same session | 1.208 [1.034 .. 1.409] n=6 | published `single/dual = median 1.208 [1.034 .. 1.409] n=6` |
+| 3 | `--repeats 4 --drive-s 8` | 1.193 [1.118 .. 1.302] n=4 | published `single/dual = median 1.193 [1.118 .. 1.302] n=4` |
+| 4 | `--repeats 4 --drive-s 4` | 1.171 [1.006 .. 1.217] n=4 | **NO RATIO** — failed (i): median(A)=1.205 vs B=[1.006 .. 1.149], the groups separated |
+
+Absolute per-step cost at the defaults, for orientation only — not a ratio:
+dual_scene median 9.062 [8.414 .. 10.994] and 9.025 [8.748 .. 10.034] ms/step
+(runs 1 and 2, n=6 each); single_scene 10.710 [10.503 .. 11.026] and 10.669
+[10.350 .. 12.442].
+
+**Two of four runs declined to publish, so this doc publishes nothing.** The
+flip is a result about this machine's noise, not about the modes: plan-review
+simulated the rule against the measured run-to-run spread of 5 fresh dual_scene
+processes (9.438, 8.620, 8.597, 10.065, 7.799 ms/step — a range of 26% of the
+median) and found P(publish) = 17.1% at a true 1.13x with 6 repeats, meaning two
+honest runs disagree about publishability roughly 28% of the time even with a
+perfect rule. Run it on your own machine and quote what it prints, with its
+interval, its n and its conditions block; do not quote a median from a run that
+printed NO RATIO.
+
+Two limits of the harness bear on how far these numbers go. It times the **full
+step** — raycast + the 5-step wheel pipeline + `scene.step` — because
+`single_scene`'s BVH refit happens inside the engine step and there is no
+symmetric hook to time the raycast alone; a raycast-only effect is diluted here,
+and `r_k` near 1.0 does not mean the two raycasters cost the same. And it is
+**CPU-only**: `--gpu` runs the same code path but every default and number in it
+was measured on CPU, so the retracted GPU tables above cannot be re-measured
+here and stay retracted.
+
 ## API
 
 ```python
@@ -290,8 +356,9 @@ for t in range(N):
 `raycast_mode="single_scene"` uses one scene with the classic per-vehicle wheel
 raycaster and reproduces the prior SDK behavior. It is an optional
 micro-optimization for a flat ground at `n_envs=1` that you know will stay that
-way — the SDK publishes no speedup figure for it (see the retraction above), and
-`dual_scene` is the default.
+way — the SDK publishes no speedup figure for it (see the retraction above, and
+"What the harness measured (v1.6.1)" for why the order-free harness has not
+produced one either), and `dual_scene` is the default.
 
 > **Single-scene rays see the vehicle itself.** The one scene's collision BVH
 > contains the chassis box, so the high-cast ray origin
@@ -329,6 +396,14 @@ two `raycast_mode` values are wired and checks that they agree
 absolute cost on your machine, which is useful) but **no ratio and no speedup
 verdict** — see the retraction above for why a single-process A/B from this
 sample cannot produce one.
+
+Runnable benchmark: `python -m genesis_vehicle.samples.bench_raycast_mode`
+(v1.6.1) — one fresh process per measurement, alternating slot order, paired
+ratios, and a fail-closed rule that prints NO ratio when this machine's noise
+cannot carry one. `--json out.json` records every worker payload, gate result
+and aggregate. See "What the harness measured (v1.6.1)" above for what it
+answered here, and `run(terrain_size=...)` in `dual_scene_terrain.py` for the
+plate it drives.
 
 ## Scope & follow-ups
 

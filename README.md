@@ -226,11 +226,14 @@ for your own topology. Every preset takes a keyword-only
 
 ## Samples
 
-Nine runnable scripts under [`samples/`](samples/) cover the most
-common call patterns. Full catalog with descriptions + viewer support
-in [`samples/README.md`](samples/README.md). All run as Python modules
+**20 runnable sample programs** under [`samples/`](samples/) cover the most
+common call patterns (counting basis: every `samples/*.py` with a `__main__`
+entry point, excluding the `_hud.py` / `tank_tuning.py` helpers and the
+deprecated `two_scene_terrain` alias). Full catalog with descriptions + viewer
+support in [`samples/README.md`](samples/README.md). All run as Python modules
 right after `git pull` — they depend only on the SDK and the bundled
-[`samples/urdf/car_4w.urdf`](samples/urdf/car_4w.urdf):
+[`samples/urdf/car_4w.urdf`](samples/urdf/car_4w.urdf); the ten below are the
+most common entry points:
 
 ```bash
 python -m genesis_vehicle.samples.quickstart            # 1. minimum-viable API
@@ -242,11 +245,13 @@ python -m genesis_vehicle.samples.multi_env_render      # 6. all parallel envs i
 python -m genesis_vehicle.samples.perf_multi_vehicle    # 7. L2 scaling bench (headless)
 python -m genesis_vehicle.samples.perf_l2_l3_combined   # 8. L2 × L3 scaling bench (headless)
 python -m genesis_vehicle.samples.city_traffic_ego      # 9. ego + traffic highway (L2 × L3)
+python -m genesis_vehicle.samples.bench_raycast_mode    # 10. raycast_mode benchmark (fail-closed)
 ```
 
-Most scripts accept `--viewer` for an offscreen camera render; the three
-perf benches are intentionally headless (rendering would distort
-throughput numbers). Since v0.7.14 the samples set
+Most scripts accept `--viewer` for an offscreen camera render; the four
+benchmarks (`perf_vectorization`, `perf_multi_vehicle`, `perf_l2_l3_combined`,
+`bench_raycast_mode`) are intentionally headless (rendering would distort the
+numbers). Since v0.7.14 the samples set
 `cfg.enable_wheel_joint_internal_sync = args.viewer` (it defaults to `False` now), so
 headless runs skip the per-step viewer-joint FK and report pure-physics
 timing. The catalog [`samples/README.md`](samples/README.md) has the
@@ -260,7 +265,7 @@ Detailed docs live under [`docs/`](docs/):
 | Page | What's in it |
 |---|---|
 | [`docs/index.md`](docs/index.md) | Documentation home — full TOC |
-| [`samples/README.md`](samples/README.md) | Catalog of all 10 runnable samples + viewer support matrix |
+| [`samples/README.md`](samples/README.md) | Catalog of all 20 runnable samples + viewer support matrix |
 | [`docs/quickstart.md`](docs/quickstart.md) | Minimal example, runnable end-to-end |
 | [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855, hook intuition, batched-by-default |
 | [`docs/batching.md`](docs/batching.md) | The L1 / L2 / L3 vectorization axes — when to use which, measured speedups, the L2 × L3 combined pattern |
@@ -303,13 +308,16 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-375 tests covering URDF parsing, config resolve, suspension sizing, strategy
+436 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity check on
-the DEFAULT contact path), and the server subpackage surface. Almost all
+the DEFAULT contact path), the raycast-mode benchmark harness (schedule,
+gates, pairing and publication rule, driven through an injected runner), and
+the server subpackage surface. Almost all
 pure-Python; a handful build a real `VehicleScene` on the CPU backend, so
-`genesis-world` must be importable. No GPU needed — they run on CPU in ~100 s.
+`genesis-world` must be importable. No GPU needed — they run on CPU in ~90 s
+(measured 88 s at v1.6.1).
 
 ## Releases and Versioning
 
