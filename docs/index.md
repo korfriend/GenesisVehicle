@@ -75,7 +75,7 @@ The right-hand column is where the full story lives.
 | Stability profiles | maps a use-case profile (`"control"` / `"raw"` / `"research"`) to the right stability-hook stack | `stability_hooks_for_profile` | [`stability-profiles.md`](stability-profiles.md) |
 | OSC physics server | runs the SDK as a standalone physics process for an external engine (UE / Unity), L2 and L3 modes | `python -m genesis_vehicle.server` | [`server.md`](server.md) |
 | Server benchmark | official server perf matrix (mock UE client, tanks × terrain × mode × backend) | `python -m genesis_vehicle.server.benchmark` | [`server.md`](server.md) §2.1 |
-| Samples | 15 runnable, self-contained examples with bundled assets | `python -m genesis_vehicle.samples.<name>` | [`../samples/README.md`](../samples/README.md) |
+| Samples | 20 runnable, self-contained examples with bundled assets | `python -m genesis_vehicle.samples.<name>` | [`../samples/README.md`](../samples/README.md) |
 
 **Model preparation & scene assembly**
 
