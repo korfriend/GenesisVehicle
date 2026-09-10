@@ -31,6 +31,13 @@ At a glance, the SDK provides:
 - **Stability profiles** (`"control"` / `"raw"` / `"research"`) that bundle
   the right numerical stabilizers for your use case so MPPI / RL / Real2Sim
   users don't have to assemble hook lists by hand.
+- **Two wheel-contact models.** `wheel_contact="point"` (the default) is one
+  downward ray per wheel — light and stable, but a zero-radius probe that reads
+  ground height as a step function. `wheel_contact="swept_envelope"` (v1.6.0,
+  opt-in) casts M rays per wheel and reduces them with the swept-circle lower
+  envelope, so a wheel starts climbing a kerb about `sqrt(2*r*h)` before it
+  instead of taking the whole obstacle in one `dt`. See
+  [`docs/tire-and-contact.md`](docs/tire-and-contact.md).
 - **Pure-Python tests** (no Genesis runtime needed) that you can run in
   any CI.
 
@@ -126,7 +133,13 @@ for step in range(480):                       # 12 s @ 40 Hz
     vs.step()
 
 print(veh.get_pos()[0].cpu().numpy())
+print(veh.all_wheels_grounded)   # (n_envs,) bool — is it actually on the terrain?
 ```
+
+`veh.wheels_grounded` / `veh.all_wheels_grounded` (v1.5.2) answer "did each
+wheel's ray find ground on the last step?" against the raycaster's own
+miss sentinel. Use them rather than thresholding `veh.distances` yourself — a
+miss reads back as the sensor's `max_range`, which is whatever you configured.
 
 `VehicleScene` is the recommended entry point — it registers vehicles / static /
 dynamic bodies (`add_vehicle` / `add_static` / `add_dynamic`), cameras
@@ -162,6 +175,7 @@ or `side='R'`).
 | **Drivetrain** | `FWD`, `RWD`, `AWD`, `PerSide` |
 | **Coupling** | `Independent`, `SameSideBelt` |
 | **Tire model** | `PacejkaAnisotropic`, `CoulombIsotropic` |
+| **Wheel contact** (via `add_vehicle(wheel_contact=)`, v1.6.0) | `"point"` (default, one ray per wheel), `"swept_envelope"` (M rays reduced by the swept-circle lower envelope) |
 | **Stability hooks** (via `stability=` profile) | `RollingResistance`, `LowSpeedRegularizer`, `StaticFrictionLock` |
 
 Subclass any of the ABCs (`SteeringStrategy`, `DrivetrainStrategy`,
@@ -289,10 +303,13 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-226 pure-Python tests covering URDF parsing, config resolve, suspension
-sizing, strategy math, dynamics primitives, version reporting,
-stability-profile semantics, multi-vehicle grouping/input routing, and the
-server subpackage surface. No Genesis runtime needed — they run on CPU in ~40 s.
+375 tests covering URDF parsing, config resolve, suspension sizing, strategy
+math, dynamics primitives, version reporting, stability-profile semantics,
+multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
+predicates, the swept-envelope wheel contact (including a bit-identity check on
+the DEFAULT contact path), and the server subpackage surface. Almost all
+pure-Python; a handful build a real `VehicleScene` on the CPU backend, so
+`genesis-world` must be importable. No GPU needed — they run on CPU in ~100 s.
 
 ## Releases and Versioning
 

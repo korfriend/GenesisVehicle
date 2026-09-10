@@ -52,6 +52,7 @@ class VehicleScene:
     def add_vehicle(urdf_path, preset=None, *, pos=(0,0,1), quat=None,
                     material=None, surface=None, vis_mode=None,
                     stability="control", name=None, raycaster_max_range=20.0,
+                    wheel_contact="point", contact_samples=9,   # v1.6.0
                     cfg=None, morph=None) -> Vehicle
     #   preset (fn→cfg) OR a pre-built cfg=; and a morph= the VehicleScene
     #   builds into an entity internally (custom material/surface, e.g. the L3
@@ -62,6 +63,13 @@ class VehicleScene:
     #   wheel centre is corrected, missing <inertial>s injected. The original
     #   file is never modified; a compliant URDF is used as-is (no copy).
     #   See physics-contracts.md §7.9 / genesis_vehicle.urdf_prep.
+    #   wheel_contact (v1.6.0): "point" (DEFAULT, one ray per wheel, bit-identical
+    #   to every earlier release) | "swept_envelope" (contact_samples=M rays per
+    #   wheel along body +X, reduced to one distance by the swept-circle lower
+    #   envelope, so the wheel climbs an edge instead of teleporting onto it).
+    #   M must be ODD; it is a DISCRETISATION count, not an accuracy dial.
+    #   contact_samples is ignored entirely when wheel_contact="point".
+    #   See physics-contracts.md §7.11 / tire-and-contact.md.
     def add_static(*, morph=None, wheel_raycast_morph=None, collision_morph=None,
                    collision=True, material=None, surface=None, vis_mode=None,
                    name=None) -> StaticBody
@@ -98,6 +106,10 @@ class Vehicle:                           # handle returned by add_vehicle
     def set_inputs(throttle=0.0, brake=0.0, steer=0.0) -> Vehicle
     def get_pos() / get_quat() / get_vel() / get_ang()   # (n_envs, ...) main-scene truth
     distances                            # property: last (n_envs, n_wheels) wheel-ground d
+                                         #   (n_wheels, not n_wheels x M — read_distances
+                                         #    collapses a swept-envelope fan, v1.6.0)
+    wheels_grounded                      # property: (n_envs, n_wheels) bool — did each ray find ground (v1.5.2)
+    all_wheels_grounded                  # property: (n_envs,) bool — every wheel on ground (v1.5.2)
     entity_main, physics, sensor, cfg, proxy  # underlying objects
 
 class StaticBody:                        # handle returned by add_static
@@ -161,6 +173,8 @@ targets (`add_dynamic`).
 | `material` / `surface` / `vis_mode` | `None` | passed to the main-scene `add_entity` |
 | `stability` | `"control"` | stability profile passed to `preset` |
 | `raycaster_max_range` | `20.0` | wheel ray max length (m) |
+| `wheel_contact` | `"point"` | **v1.6.0.** `"point"` = one downward ray per wheel (the historical behaviour, bit-identical). `"swept_envelope"` = `contact_samples` rays per wheel reduced by the swept-circle lower envelope, so a wheel climbs an edge instead of teleporting onto it. Both raycast modes support it. See [`physics-contracts.md` §7.11](physics-contracts.md) |
+| `contact_samples` | `9` | **v1.6.0.** M, rays per wheel. Must be ODD. **Ignored entirely** when `wheel_contact="point"`. A discretisation count, *not* an accuracy dial — do not compare two runs at different M. M=3 at the default span is exactly the point contact |
 | `name` | `None` | handle label |
 
 **`add_static(*, …)`** — a body that never moves; **always a wheel-raycast target**.
@@ -310,6 +324,9 @@ class VehiclePhysics:
     def __init__(scene, entity, sensor, config: VehicleConfig, n_envs: int = 1)
     def step(inputs: VehicleStepInputs, distances: torch.Tensor | None = None) -> None
     def reset(env_ids: torch.Tensor | None = None) -> None
+    def set_ray_miss_value(miss: float | None, *, sensor=None) -> None   # v1.5.2
+    wheels_grounded      # property: (n_envs, n_wheels) bool             # v1.5.2
+    all_wheels_grounded  # property: (n_envs,) bool                      # v1.5.2
 ```
 
 `step(distances=...)` injects externally-measured wheel-ground distances
@@ -333,7 +350,27 @@ per-vehicle teleport mid-rollout — the loop is still legitimate; see
 class MultiVehiclePhysics:
     def __init__(scene, vehicles: list[tuple[Entity, Sensor, VehicleConfig]])
     def step(inputs_list: list[VehicleStepInputs]) -> None
+    def distances_list() -> list[torch.Tensor]   # per vehicle (n_envs, n_wheels) float
+    def grounded_list()  -> list[torch.Tensor]   # per vehicle (n_envs, n_wheels) bool, v1.5.2
 ```
+
+`MultiVehiclePhysics` groups its vehicles into one `MultiVehicleKindPhysics`
+per kind (same URDF + same `cfg` instance); that class is exported for the rare
+caller that already has K same-kind vehicles and wants the batched driver
+directly:
+
+```python
+class MultiVehicleKindPhysics:
+    def __init__(scene, entities, sensors, config: VehicleConfig, n_envs: int = 1)
+```
+
+Prefer `MultiVehiclePhysics` — it does the grouping and the flat-order
+bookkeeping for you.
+
+`distances_list()` / `grounded_list()` both return one entry per vehicle in
+**caller flat order** (the order `vehicles` was passed in, not kind order), so
+`grounded_list()[i]` is the L2 mirror of `VehiclePhysics.wheels_grounded` for
+vehicle `i`.
 
 Vehicles of the same kind must share the SAME ``cfg`` instance — group
 by passing ``cfg_per_kind[k]`` instead of calling the preset fresh per
@@ -351,8 +388,25 @@ State (read-only, all `(n_envs, n_wheels)`):
 
 - `omega` — wheel angular velocities
 - `last_distances`, `last_compression`, `last_N`
+- `last_hit` — bool, "this wheel's ray found ground", produced by the read layer
+  alongside `last_distances` (v1.5.2). Prefer the `wheels_grounded` property,
+  which additionally applies the per-env has-stepped gate
 - `last_F_long`, `last_F_lat`, `last_kappa`, `last_alpha`
 - `last_T_drive`, `last_T_brake`
+
+### Ray-miss and grounded state (v1.5.2)
+
+| member | shape | meaning |
+|---|---|---|
+| `wheels_grounded` | `(n_envs, n_wheels)` bool | did each wheel's ray find ground on the last step (`last_hit` AND the per-env has-stepped flag) |
+| `all_wheels_grounded` | `(n_envs,)` bool | `wheels_grounded.all(dim=1)` — "is this vehicle actually on the terrain?" |
+| `set_ray_miss_value(miss, *, sensor=None)` | — | inject the sentinel a ray reports when it hit nothing. Needed only when the driver owns no sensor (`VehicleScene`'s `dual_scene` builds it with `sensor=None` and injects the raycast-scene sensor's value). Raises `ValueError` on a sentinel below `sensor`'s `max_range`, or one that is non-finite / non-positive |
+
+An env that has not completed a step — including one just cleared by
+`reset(env_ids=...)` — reports all-`False` and renders its wheels at the REST
+pose. `wheels_grounded` is a READ-LAYER diagnostic and is NOT the physics air
+mask (which is `compression <= 0`); the two disagree inside the suspension's
+rest gap. See [`physics-contracts.md`](physics-contracts.md) §7.6, §7.8, §7.10.
 
 Resolved internals:
 
@@ -641,6 +695,26 @@ Hooks are selected via `stability=` profile in the presets (see
 [`stability-profiles.md`](stability-profiles.md)), not assembled by hand
 in the common path.
 
+A hook receives a `PipelineContext` — the mutable per-step scratch object the
+pipeline hands it, exported for writing your own `StabilityHook`:
+
+```python
+@dataclass
+class PipelineContext:
+    # forces / state, all (n_envs, n_wheels) unless noted
+    F_long; F_lat; N; v_long; v_lat; omega; air_mask; moving
+    omega_override; omega_pull_factor; omega_pull_target
+    throttle; brake                  # commands, (n_envs,) or (n_envs, n_wheels)
+    vel; ang                         # chassis linear / angular velocity, (n_envs, 3)
+    dt: float
+    wheel_meta                       # the cached WheelMeta
+```
+
+Fields are `None` in slots where the pipeline has not produced them yet; a hook
+mutates the ones it owns in place. Which slot a hook runs in
+(`PRE_LOOP` / `POST_TIRE` / …) and what is populated by then is laid out in
+[`pipeline-and-hooks.md`](pipeline-and-hooks.md).
+
 ## 6. Tire models
 
 ```python
@@ -658,20 +732,105 @@ class CoulombIsotropic(TireModel):
 ```python
 class WheelRayPattern(genesis.options.sensors.raycaster.RaycastPattern):
     def __init__(positions: list[tuple[float, float, float]],
-                 up_offset: float = RAY_UP_OFFSET)
+                 up_offset: float = RAY_UP_OFFSET,
+                 *, fan_samples: int = 1,              # M, v1.6.0
+                 wheel_radii: Iterable[float] | None = None,
+                 fan_span: float = FAN_SPAN)           # 1.0
+    # fan_samples == 1 (DEFAULT): one ray per wheel, return_shape (n_wheels,).
+    # fan_samples  > 1 (must be ODD): a swept-envelope fan, return_shape
+    #   (n_wheels, M); wheel_radii is REQUIRED (c_j approximates THAT wheel's
+    #   swept circle, so a mixed-radius vehicle cannot share one scalar).
+    #   The three new args are keyword-with-default — positional callers of
+    #   (positions, up_offset) are untouched.
+    def ray_positions() -> list[tuple[float, float, float]]      # v1.6.0
+    # EVERY ray's chassis-local (x, y, z) in the ATTACHMENT plane (high-cast
+    # lift excluded): the wheel centres at M=1, the whole fan otherwise. This
+    # is what single_scene_up_offset must be capped against.
     @classmethod
-    def from_config(resolved: ResolvedConfig) -> WheelRayPattern
+    def from_config(resolved: ResolvedConfig, up_offset=RAY_UP_OFFSET,
+                    *, fan_samples=1, fan_span=FAN_SPAN) -> WheelRayPattern
+    # positions AND radii straight off resolved.wheels — the only construction
+    # path that supplies a fan's radii without the caller assembling them.
+    # No production caller as of v1.6.0.
 
-read_distances(sensor, n_envs: int, up_offset: float | None = None) -> torch.Tensor
+read_distances(sensor, n_envs: int, up_offset: float | None = None,
+               *, miss: float | None = None, return_hit: bool = False)
     # Returns (n_envs, n_wheels). Handles the n_envs=1 sensor shape quirk and
-    # subtracts the high-cast offset back out. up_offset=None (the default)
-    # takes it off the sensor — see set_sensor_up_offset.
+    # subtracts the high-cast offset back out of every distance EXCEPT a ray
+    # MISS, which keeps its raw sentinel. up_offset=None / miss=None (the
+    # defaults) take both off the sensor — see set_sensor_up_offset /
+    # set_sensor_miss_value.
+    # return_hit=True -> (distances, hit_mask): the bool mask is evaluated on
+    # the RAW distances, the only place is_ray_hit is correct. CARRY it; do not
+    # re-derive one from the corrected values. (v1.5.2)
+    # A swept-envelope sensor reads back (n_envs, n_wheels, M) and the M axis is
+    # ELIMINATED here: each sample corrected by up_offset AND raised by its own
+    # c_j, misses pushed to +inf, per-wheel result = the MINIMUM (hit mask = OR
+    # over the fan). Because c_0 == 0 exactly, the result is always <= the
+    # single-ray distance, so the envelope can only RAISE the ground it reports.
+    # No consumer downstream ever sees the M axis. (v1.6.0)
+
+# --- Swept-envelope wheel contact, v1.6.0 (see physics-contracts.md §7.11) ---
+FAN_SPAN = 1.0                                       # genesis_vehicle.raycast
+    # Fan half-width as a multiple of the wheel radius; samples cover
+    # [-r*fan_span, +r*fan_span] along body +X.
+fan_longitudinal_offsets(wheel_radii, fan_samples, fan_span=FAN_SPAN)
+    # (n_wheels, M) s_j = (2j/(M-1) - 1) * r * fan_span. M must be 1 or ODD.
+fan_height_offsets(wheel_radii, fan_samples, fan_span=FAN_SPAN)
+    # (n_wheels, M) c_j = r - sqrt(r^2 - s_j^2) — the swept-circle penalty.
+    # c_0 == 0 exactly, which is what makes d_eff <= d_center unconditional.
+fan_ray_positions(wheel_positions, wheel_radii, fan_samples, fan_span=FAN_SPAN)
+    # Flat list of EVERY ray's chassis-local (x, y, z). Hand THIS — not the
+    # wheel centres — to self_collision_ceiling / single_scene_up_offset.
+set_sensor_fan(sensor, fan_c) -> None
+    # Stamp the (n_wheels, M) height offsets on the sensor (M taken from them),
+    # so read_distances can collapse the M axis with no argument from the call
+    # site. fan_c=None (or M=1 geometry) clears it back to the point contact.
+sensor_fan(sensor) -> (M, c | None)
+    # (1, None) for the point contact — what every pre-v1.6.0 sensor reports.
+    # Falls back to the sensor's own WheelRayPattern when nothing was stamped.
+check_fan_uniformity(sensors) -> int   # genesis_vehicle.multi_vehicle
+    # The M shared by a kind's K sensors; raises naming the sizes if they
+    # differ. One kind is one resolved config and one batched pipeline.
+WHEEL_CONTACT_MODES = ("point", "swept_envelope")   # top-level export (defined in vehicle_scene)
+
+# --- Ray-MISS sentinel, v1.5.2 ---
+sensor_miss_value(sensor) -> float | None
+    # The sensor's resolved no_hit_value (Genesis fills it with max_range when
+    # unset). None for a stub sensor exposing no options.
+set_sensor_miss_value(sensor, miss: float | None = None) -> float | None
+    # Validate and stamp it on the sensor. Defaults to the sensor's own value.
+    # make_wheel_raycaster and VehicleScene.add_vehicle do this for you.
+check_miss_supported(sensor, miss: float) -> float   # genesis_vehicle.raycast only
+    # Raises ValueError on a non-finite / non-positive sentinel, or one BELOW
+    # the sensor's max_range — the pipeline reads compression = rest_d - d, so
+    # a sentinel inside the measurable range is maximum compression and the
+    # vehicle launches. Called on every path that OBTAINS a sentinel.
+ray_miss_value(sensor) -> float | None               # genesis_vehicle.raycast only
+    # The stamped value if there is one, else the sensor's own — validated.
+is_ray_hit(d_raw, miss=None) -> bool tensor
+    # RAW distances: (d_raw != miss) & (d_raw != 0.0). The != 0.0 term rejects
+    # the unpopulated pre-step zero buffer and is meaningful ONLY on raw values.
+is_ray_hit_corrected(d, miss=None) -> bool tensor
+    # OFFSET-CORRECTED distances (last_distances): d != miss. NO zero term — a
+    # corrected 0.0 is a real contact at exactly RAY_UP_OFFSET, not air.
+    # Callers must be behind the per-env _stepped_once gate.
+# raycast.RAY_MISS_THRESHOLD (19.9) is unexported, DEPRECATED since v1.5.2
+# (removal targeted v1.7.0): it is pinned to the DEFAULT max_range of 20.0 and
+# survives only as the fallback for a sensor exposing no sentinel at all.
+# Top-level exports: is_ray_hit, is_ray_hit_corrected, sensor_miss_value,
+# set_sensor_miss_value. The two marked above are reached as
+# `from genesis_vehicle.raycast import ...`.
 
 # --- High-cast offset, per vehicle since v1.5.0 ---
-single_scene_up_offset(urdf_path, wheel_positions, name="vehicle") -> float
+single_scene_up_offset(urdf_path, ray_positions, name="vehicle") -> float
     # RAY_UP_OFFSET capped at the vehicle's own collision ceiling. Needed only
     # for single_scene, where the rays are cast in the scene the chassis
     # collides in and an origin above its own collision box self-hits.
+    # ray_positions must be EVERY ray, not the wheel centres, when the vehicle
+    # uses a swept-envelope fan (WheelRayPattern.ray_positions() /
+    # fan_ray_positions): the ceiling is a per-ray MINIMUM, and an outer sample
+    # can sit under a low overhang the wheel centre clears. (v1.6.0)
 self_collision_ceiling(urdf_path, ray_positions, *, margin=0.02) -> float | None
     # The gap from each ray up to the nearest own-collision surface, from the
     # URDF's rest-pose collision AABBs. None = nothing above any ray.
@@ -687,6 +846,13 @@ brake_torque_signed(
 suspension_normal_force(
     compression, comp_rate, k_susp, c_compression, c_extension, air_mask,
 ) -> torch.Tensor
+
+# --- Logging ---
+configure_logging(level=logging.WARNING, *, fmt=..., datefmt="%H:%M:%S",
+                  stream=None, force=False) -> None
+    # Attach a formatted stream handler to the `genesis_vehicle` logger. The SDK
+    # never configures the root logger itself; call this to see its INFO/DEBUG
+    # lines (URDF auto-corrections, sensor stamping, silent-failure guards).
 
 # --- Version ---
 genesis_vehicle.__version__               # str, e.g. "0.6.0"

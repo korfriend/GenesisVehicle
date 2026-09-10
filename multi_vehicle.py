@@ -60,7 +60,7 @@ from .core import (
 from ._gs_compat import apply_links_wrench
 from ._pipeline import compute_wheel_step
 from .inputs import VehicleInputs, VehicleStepInputs
-from .raycast import read_distances
+from .raycast import is_ray_hit_corrected, read_distances, sensor_fan
 from .visual import WheelJointInternalSync
 
 
@@ -74,6 +74,29 @@ def _quat_rotate(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     ry = 2 * (x*y + w*z) * vx + (w*w - x*x + y*y - z*z) * vy + 2 * (y*z - w*x) * vz
     rz = 2 * (x*z - w*y) * vx + 2 * (y*z + w*x) * vy + (w*w - x*x - y*y + z*z) * vz
     return torch.cat([rx, ry, rz], dim=-1)
+
+
+def check_fan_uniformity(sensors: Sequence[Any]) -> int:
+    """The wheel-contact fan size M shared by ``sensors``; raises if they differ.
+
+    A KIND is one resolved config driving ONE batched compute pipeline, and
+    ``_read_distances_batched`` stacks its K raycaster reads into a single
+    tensor. Two vehicles of the same kind registered with different
+    ``wheel_contact`` / ``contact_samples`` would either blow up as a shape
+    error deep in the stack or — when the wheel counts happen to line up —
+    silently mix two contact models in one batch. Reject it at construction,
+    naming the sizes.
+
+    .. versionadded:: 1.6.0"""
+    sizes = [sensor_fan(s)[0] for s in sensors]
+    if len(set(sizes)) > 1:
+        raise ValueError(
+            f"MultiVehicleKindPhysics: the {len(sizes)} vehicles of this kind "
+            f"were built with DIFFERENT wheel-contact fan sizes (M per vehicle: "
+            f"{sizes}). One kind is one resolved config and one batched "
+            f"pipeline, so every vehicle in it must be registered with the same "
+            f"wheel_contact / contact_samples.")
+    return sizes[0] if sizes else 1
 
 
 class MultiVehicleKindPhysics:
@@ -106,6 +129,9 @@ class MultiVehicleKindPhysics:
     ):
         assert len(entities) == len(sensors) and len(entities) >= 1
         assert n_envs >= 1
+        # Before anything is built: every vehicle of this kind must share one
+        # wheel-contact fan size. See check_fan_uniformity.
+        self.fan_samples = check_fan_uniformity(sensors)
         K = len(entities)
         NK = n_envs * K
 
@@ -113,6 +139,10 @@ class MultiVehicleKindPhysics:
         # (omega, prev_compression, _wheel_body_b, _up_world, …) come out at
         # shape (NK, n_wheels) or (NK, n_wheels, 3), which is the flat-batch
         # form the compute pipeline operates on.
+        # sensors[0] also gives the proto its ray-miss sentinel (VehiclePhysics
+        # reads it off the sensor). Same-kind vehicles share a URDF and are all
+        # built by the same code path, so every sensor in `sensors` carries the
+        # same max_range / no_hit_value — the proto's value covers all K.
         self._proto = VehiclePhysics(scene, entities[0], sensors[0], config, n_envs=NK)
 
         self.entities = list(entities)
@@ -152,10 +182,12 @@ class MultiVehicleKindPhysics:
         self._visual_batch = None
         if self._proto.resolved.enable_wheel_joint_internal_sync:
             for ent in entities:
-                self.visuals.append(WheelJointInternalSync(
+                vis = WheelJointInternalSync(
                     entity=ent, resolved=self._proto.resolved,
                     n_envs=n_envs, device=self.dev, dtype=self.fdt,
-                ))
+                )
+                vis.ray_miss = self._proto._ray_miss
+                self.visuals.append(vis)
             # v1.0.15: batch the K writers into ONE solver call per step (same
             # kind → identical dof layouts). Falls back to the per-entity loop
             # (self.visuals) if construction fails.
@@ -212,19 +244,35 @@ class MultiVehicleKindPhysics:
                 vel.reshape(self.NK, 3),
                 ang.reshape(self.NK, 3))
 
-    def _read_distances_batched(self) -> torch.Tensor:
+    def _read_distances_batched(self, return_hit: bool = False):
         """Stack K raycaster reads into a flat ``(NK, n_wheels)`` tensor.
 
         Each sensor returns ``(n_envs, n_wheels)``. We stack across K along
         dim 1 → ``(N, K, n_wheels)`` → flatten → ``(NK, n_wheels)`` with the
-        same env-major / vehicle-minor row ordering as the state reads."""
-        out = []
+        same env-major / vehicle-minor row ordering as the state reads.
+
+        ``return_hit=True`` additionally returns the matching ``(NK, n_wheels)``
+        bool ray-hit mask, stacked the same way. It is evaluated by
+        ``read_distances`` on each sensor's RAW distances — the only place the
+        unpopulated-buffer term is meaningful — so the caller can carry it into
+        ``last_hit`` instead of re-deriving it from corrected values (v1.5.2).
+
+        A swept-envelope sensor (v1.6.0) has already had its M axis collapsed by
+        ``read_distances``, so the stack sees ``(N, n_wheels)`` either way. That
+        every sensor of the kind carries the SAME M is enforced once, in
+        ``__init__`` (``self.fan_samples``) — not per step."""
+        out, hits = [], []
         for s in self.sensors:
-            d = read_distances(s, n_envs=self.n_envs)   # (N, n_wheels)
+            d, hit = read_distances(s, n_envs=self.n_envs,
+                                    return_hit=True)    # (N, n_wheels) each
             out.append(d)
+            hits.append(hit)
         # stack on dim 1 to interleave [N, K, n_wheels] then flatten
         stacked = torch.stack(out, dim=1)               # (N, K, n_wheels)
-        return stacked.reshape(self.NK, -1)
+        d_flat = stacked.reshape(self.NK, -1)
+        if not return_hit:
+            return d_flat
+        return d_flat, torch.stack(hits, dim=1).reshape(self.NK, -1)
 
     def _apply_force_torque_batched(self, total_F: torch.Tensor,
                                      total_T: torch.Tensor) -> None:
@@ -320,8 +368,14 @@ class MultiVehicleKindPhysics:
         # [RAYCAST] — read this kind's own sensors, OR use injected distances
         # (shape (NK, n) — e.g. VehicleScene's dual_scene raycast-scene distances).
         if distances is None:
-            distances = self._read_distances_batched()   # (NK, n)
+            distances, hit = self._read_distances_batched(return_hit=True)
+        else:
+            # Injected (dual_scene): CORRECTED distances only — sentinel test
+            # alone, with p._stepped_once as the pre-first-step guard. Same
+            # split as VehiclePhysics.step; see raycast.is_ray_hit_corrected.
+            hit = is_ray_hit_corrected(distances, p._ray_miss)
         p.last_distances = distances.detach().clone()
+        p.last_hit = hit.detach().clone()
         if not p._prev_init and torch.all(distances < 1e-6):
             p._prev_init = True
             return None
@@ -371,7 +425,7 @@ class MultiVehicleKindPhysics:
         if not defer_apply:
             self._apply_force_torque_batched(total_F, total_T)
         p._prev_init = True
-        p._stepped_once = True
+        p._stepped_once[:] = True
 
         # [VISUAL] — K same-kind WheelJointInternalSync writers. Since v1.0.15 they are
         # batched into ONE solver-level set_dofs_position across all K entities
@@ -424,13 +478,16 @@ class MultiVehicleKindPhysics:
         rest_pos = p._rest_wheel_pos_local.unsqueeze(0)            # (1, n, 3)
         rest_quat = p._rest_wheel_quat_local.unsqueeze(0)          # (1, n, 4)
 
-        if not p._stepped_once:
+        # `_stepped_any()` is only the "nobody stepped" shortcut; envs that a
+        # partial reset un-stepped are masked back to rest below (v1.5.2).
+        if not p._stepped_any():
             local_pos = rest_pos.expand(NK, n, 3).contiguous()
             local_quat = rest_quat.expand(NK, n, 4).contiguous()
         else:
             steer_z = -p.last_steer_per_wheel                      # (NK, n)
             susp_off = _susp_visual_offset(
-                p.last_distances, p._mesh_radius, p._l_susp, p._susp_clamp)  # (NK, n)
+                p.last_distances, p._mesh_radius, p._l_susp, p._susp_clamp,
+                p._ray_miss)                                                 # (NK, n)
             spin = (p.wheel_spin_angle if p._visual_spin_enabled
                     else torch.zeros_like(p.wheel_spin_angle))
             z_off = torch.stack(
@@ -441,6 +498,16 @@ class MultiVehicleKindPhysics:
                 rest_quat,
                 _quat_mul(_quat_axis_angle("z", steer_z), _quat_axis_angle("y", spin)),
             )
+            # PER-ENV(-and-vehicle) rest fallback — same reason as
+            # VehiclePhysics.wheel_visual_transforms: a partial reset zeroes
+            # those rows' last_distances, which _susp_visual_offset would
+            # render as full compression. `p._stepped_once` is (NK,).
+            if not bool(p._stepped_once.all()):
+                m = p._stepped_once.view(NK, 1, 1)
+                local_pos = torch.where(m, local_pos,
+                                        rest_pos.expand_as(local_pos))
+                local_quat = torch.where(m, local_quat,
+                                         rest_quat.expand_as(local_quat))
 
         if frame == "local":
             return local_pos.reshape(N, K, n, 3), local_quat.reshape(N, K, n, 4)
@@ -465,7 +532,7 @@ class MultiVehicleKindPhysics:
         ``(pos (NK,3), quat (NK,4), steer (NK,n), dist (NK,n), spin (NK,n))``.
         ``_stepped_once`` 이전에는 ``None`` (호출측이 rest-pose 폴백)."""
         p = self._proto
-        if not p._stepped_once:
+        if not p._stepped_any():
             return None
         pos, quat, _v, _a = self._read_state_batched()
         spin = (p.wheel_spin_angle if p._visual_spin_enabled
@@ -501,7 +568,8 @@ class MultiVehicleKindPhysics:
         rest_quat = rest_quat_c.unsqueeze(0)                     # (1, n, 4)
 
         steer_z = -steer
-        susp_off = _susp_visual_offset(dist, p._mesh_radius, p._l_susp, clamp_c)
+        susp_off = _susp_visual_offset(dist, p._mesh_radius, p._l_susp, clamp_c,
+                                       p._ray_miss)
         z_off = torch.stack(
             [torch.zeros_like(susp_off), torch.zeros_like(susp_off), susp_off],
             dim=-1)
@@ -765,4 +833,25 @@ class MultiVehiclePhysics:
             d = kp._proto.last_distances              # (NK, n) or None
             if d is not None:
                 out[flat_i] = d.reshape(kp.n_envs, kp.K, -1)[:, slot_idx, :]   # (N, n)
+        return out
+
+    def grounded_list(self) -> list:
+        """Per-vehicle wheel-ray hit mask ``(n_envs, n_wheels)`` bool, caller flat
+        order — the batched mirror of ``VehiclePhysics.wheels_grounded``.
+
+        Reads the kind proto's carried ``last_hit`` (the mask the read layer
+        produced with ``last_distances``), plus the per-env ``_stepped_once``
+        gate reshaped ``(NK,) -> (N, K, 1)`` so an env that has not stepped (or
+        was just reset) reports all-False instead of reading the zero tensor
+        ``last_distances`` starts out as."""
+        out = [None] * self.n_vehicles
+        for flat_i, kind_idx, slot_idx in self._flat_to_kind:
+            kp = self.kinds[kind_idx]
+            p = kp._proto
+            h = p.last_hit                            # (NK, n) or None
+            if h is None:
+                continue
+            hit = h.reshape(kp.n_envs, kp.K, -1)
+            hit = hit & p._stepped_once.reshape(kp.n_envs, kp.K, 1)
+            out[flat_i] = hit[:, slot_idx, :]                               # (N, n)
         return out

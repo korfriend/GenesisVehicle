@@ -181,6 +181,19 @@ the 1.5 kg·m² default spins up unrealistically fast. An explicit
 > `dual_scene` (the default) raycasts a scene holding no vehicle collision
 > geometry and is unaffected. See
 > [`physics-contracts.md` §7.8](physics-contracts.md#78-high-cast-rays-and-over-compression-v1116).
+>
+> **Leave that clearance across the whole wheel footprint, not just at the wheel
+> centre** (v1.6.0). With `wheel_contact="swept_envelope"` the rays are a fan
+> spread along body +X over `[-r, +r]` around each attachment point, and the cap
+> is the MINIMUM gap over every ray. A URDF whose low collision geom sits only
+> at the OUTER edge — a bumper, a fender lip, a sponson — will cap the whole
+> vehicle's offset at that edge's clearance even though the wheel centre is
+> clear. Measured on the reference car plus a low sill at `z=0.44` hanging
+> outboard of the front wheels: centre-only `0.28 m` (from the chassis box at
+> `z=0.60`), M=9 fan `0.12 m`. That is the cap doing its job; a centre-only cap
+> would leave those outer rays starting at `z=0.58` — inside the sill — and
+> reproduce the v1.1.16 launch one sample at a time. See
+> [`physics-contracts.md` §7.11](physics-contracts.md).
 
 > **Wheel links usually need no `<collision>` at all.** Contact comes from the
 > raycast pipeline, not the rigid solver's wheel collision — a visual-only wheel

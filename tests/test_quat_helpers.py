@@ -59,13 +59,15 @@ def test_quat_mul_noncommutative():
 
 def test_susp_offset_grounded_and_air():
     mesh_r, l_susp = 0.4, 0.1
-    d = torch.tensor([0.4, 0.5, 0.0, 20.0], dtype=torch.float64)  # touch, droop, air(0), air(far)
+    # touch, droop, air(sentinel). `d` is an OFFSET-CORRECTED distance, so air
+    # is the sensor's miss sentinel — the legacy default RAY_MISS_THRESHOLD
+    # branch is taken here (miss=None).
+    d = torch.tensor([0.4, 0.5, 20.0], dtype=torch.float64)
     off = _susp_visual_offset(d, mesh_r, l_susp)
     # grounded at d=mesh_r → 0 ; d=0.5 → -0.1 ; air → -l_susp
     assert abs(float(off[0]) - 0.0) < 1e-7
     assert abs(float(off[1]) - (-0.1)) < 1e-7
     assert abs(float(off[2]) - (-l_susp)) < 1e-7
-    assert abs(float(off[3]) - (-l_susp)) < 1e-7
 
 
 def test_susp_offset_clamped():
@@ -81,6 +83,11 @@ def test_susp_offset_negative_distance_is_overcompression_not_air():
     # (-l_susp): the old d <= 1e-6 air test misclassified it.
     off = _susp_visual_offset(torch.tensor([-0.3], dtype=torch.float64), 0.4, 0.1)
     assert abs(float(off[0]) - 0.19) < 1e-7      # clamped up, not -l_susp
-    # exact 0.0 (unpopulated sensor) is still air:
+    # An exact 0.0 is likewise a REAL reading here (v1.5.2): a hit at exactly
+    # the high-cast offset corrects to 0.0. The `!= 0.0` term that used to make
+    # this air belongs to raycast.is_ray_hit, which is only valid on RAW
+    # distances; on corrected ones it reported a fully compressed wheel as
+    # airborne. The unpopulated-sensor case it exists for is gated by
+    # VehiclePhysics._stepped_once instead — see raycast.is_ray_hit_corrected.
     off0 = _susp_visual_offset(torch.tensor([0.0], dtype=torch.float64), 0.4, 0.1)
-    assert abs(float(off0[0]) - (-0.1)) < 1e-7
+    assert abs(float(off0[0]) - 0.19) < 1e-7     # 0.4 - 0.0, clamped

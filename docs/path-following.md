@@ -258,6 +258,25 @@ from the live state, `horizon=4`, reference 10-wheel tank and 4-wheel car):
 The composite mass properties the planar model uses reproduce the entity's
 own 6×6 mass matrix to six digits.
 
+**A `swept_envelope` vehicle is still predicted as a point contact (v1.6.0).**
+The frozen snapshot above is the whole story: the plant captures `distances`
+once per control step and holds them over the horizon, so it never re-runs the
+raycast — and therefore never runs the swept-envelope reduction either. The
+SIMULATED vehicle gets the envelope; the controller's internal model does not.
+Over flat or gently varying ground the two agree, because the envelope reduces
+to the point contact there (it reads the same distance to 7 decimals). Over a
+kerb or a step they do not: the plant predicts the wheel teleporting onto the
+obstacle in one `dt` — the very behaviour `wheel_contact="swept_envelope"` was
+added to remove — while the vehicle climbs it.
+
+That is a real limitation for `PathFollower` on rough terrain, not a footnote.
+It does not make the follower unstable (the plant is re-linearised from the live
+state every step, so the error is corrected on the next one), but the *predicted*
+normal loads across an obstacle are wrong in the same direction the point
+contact was always wrong. Nothing in the plant's API exposes M, and closing this
+would mean carrying the fan geometry into the snapshot and re-reducing inside
+the unroll. Not attempted in v1.6.0.
+
 ### Closed-loop, against the sweep table
 
 Same course, same vehicle, same tuning — `path_follow_demo` (10-wheel tank

@@ -129,7 +129,22 @@ class L3State:
         # and the closed-form wheel pose computation runs **on CPU** via
         # wheel_visual_transforms_host — removes the dozens of small kernel
         # launches GPU-backend capture used to trigger. On the CPU backend the
-        # same math was already on CPU, so behavior/cost is identical.
+        # cost is the same (that math was already on CPU).
+        #
+        # NOT behaviourally identical, though: wheel_visual_transforms_host is
+        # fed 5 tensors and so cannot see the per-env `_stepped_once` flag the
+        # device path masks with. On the first frame after a `physics.reset()`
+        # the device path returns the REST wheel pose while this one reads the
+        # re-zeroed `last_distances` as a fully compressed suspension —
+        # measured on a 2-vehicle batched scene after `kind.reset([0])`: wheel
+        # visual z 0.3000 (device) vs 0.4000 (host), a full suspension stroke.
+        # It self-corrects on the next step. KNOWN GAP, separately ticketed:
+        # closing it costs a 6th device-to-host download plus a signature
+        # change on the host helper, for a one-frame visual artefact. The
+        # SHIPPED server never reaches it — its 'reset' command handler
+        # re-poses via set_pos/set_quat and never calls `physics.reset()` — so
+        # only a user-written RL/host harness that calls reset() directly is
+        # exposed.
         obs_items = [(o_id, ent) for o_id, ent in dynamic_obstacles.items()
                      if o_id not in ue_driven_obstacle_ids]
         mvp = getattr(getattr(self.veh, "_scene", None), "_mvp", None)

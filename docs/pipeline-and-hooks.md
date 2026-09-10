@@ -15,7 +15,15 @@ VehiclePhysics.step(inputs)
     for hook in stability_hooks if PRE_LOOP in hook.slots:
         hook.apply_pre_loop(ctx)                     # e.g. LowSpeedRegularizer
 
-[2] Raycast (read_distances) + first-step protection
+[2] Raycast (read_distances, return_hit=True) + first-step protection
+    # the hit mask is evaluated on the RAW distances (the only place
+    # raycast.is_ray_hit is correct) and carried into last_hit /
+    # wheels_grounded. It is a read-layer diagnostic; the physics AIR MASK
+    # below is compression <= 0, not the sentinel. (physics-contracts.md S7.8, S7.10)
+    # A swept-envelope vehicle (wheel_contact="swept_envelope", v1.6.0) reads
+    # back (n_envs, n_wheels, M) here; read_distances reduces the M axis with
+    # d_eff = min_j(d_j + c_j) BEFORE anything below sees it, so no step of the
+    # pipeline and no hook changes shape. (physics-contracts.md S7.11)
 
 [3] Chassis state read
 

@@ -36,7 +36,7 @@ user-facing knob — using `VehiclePhysics` at all gets you L1.
 The compute steps all operate on `(*, n_wheels)`:
 
 ```
-raycast       → distances     (n_envs, n_wheels)
+raycast       → distances     (n_envs, n_wheels)   # M axis, if any, already reduced
 suspension N  → N             (n_envs, n_wheels)
 slip κ, α     → kappa, alpha  (n_envs, n_wheels)
 tire force    → F_long, F_lat (n_envs, n_wheels)
@@ -46,6 +46,11 @@ chassis force → total_F       (n_envs, 3)
 
 The Pacejka tire model, all stability hooks, and the omega-coupling
 strategy all process every wheel in one call. Nothing to tune.
+
+A swept-envelope vehicle (`wheel_contact="swept_envelope"`, v1.6.0) adds a
+fourth axis M *before* this pipeline — its raw sensor read is
+`(n_envs, n_wheels, M)` — but `read_distances` reduces M away, so every row
+above is unchanged. M is not a batching axis you can address.
 
 ### When L1 matters
 

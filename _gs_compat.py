@@ -24,7 +24,8 @@ from typing import Any, NamedTuple, Optional
 
 import numpy as np
 
-__all__ = ["apply_links_wrench", "has_wrench_api", "link_inertial", "LinkInertialProps"]
+__all__ = ["apply_links_wrench", "has_wrench_api", "link_inertial",
+           "LinkInertialProps", "sensor_miss_value"]
 
 
 def has_wrench_api(solver: Any) -> bool:
@@ -94,3 +95,35 @@ def link_inertial(link: Any) -> Optional[LinkInertialProps]:
     quat = None if quat is None else np.asarray(quat, dtype=float).reshape(4)
     inertia = None if inertia is None else np.asarray(inertia, dtype=float).reshape(3, 3)
     return LinkInertialProps(mass, pos, quat, inertia)
+
+
+def sensor_miss_value(sensor: Any) -> Optional[float]:
+    """The distance ``sensor`` reports for a ray that hit NOTHING (the "miss
+    sentinel"), or ``None`` if this engine's sensor does not expose one.
+
+    Genesis (every version the SDK supports, 1.3.3 … 1.4.0) resolves the value
+    onto the sensor's own options object: ``Raycaster.no_hit_value``, which
+    ``model_post_init`` fills with ``max_range`` when the user leaves it unset.
+    That happens at sensor CONSTRUCTION, so this read is valid both before and
+    after ``scene.build()`` — which matters because the SDK stamps it at
+    ``add_sensor`` time. An engine shape that only carries ``max_range``
+    (a hypothetical older/other raycaster) falls back to it; a stub sensor with
+    neither returns ``None`` and callers keep the legacy threshold.
+
+    The ``is None`` test below is deliberate and must not become ``or``: a
+    ``no_hit_value`` of ``0.0`` is legitimate and would otherwise silently fall
+    through to ``max_range``.
+
+    NOT sourced from ``sensor._shared_metadata.no_hit_values``: that tensor is
+    empty before ``build()`` and is a scene-wide concatenation over EVERY
+    raycaster in the scene, so indexing it correctly needs the sensor's slot.
+    """
+    options = getattr(sensor, "_options", None)
+    if options is None:
+        return None
+    value = getattr(options, "no_hit_value", None)
+    if value is None:
+        value = getattr(options, "max_range", None)
+    if value is None:
+        return None
+    return float(value)

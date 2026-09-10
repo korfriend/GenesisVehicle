@@ -11,6 +11,7 @@ Landing page. Pick the document that matches what you're doing.
 | Pick the right batching axis (L1 / L2 / L3) for your workflow | [`batching.md`](batching.md) |
 | Decide CPU vs GPU physics (measured crossover, `init_backend`, `--gpu`) | [`backends.md`](backends.md) |
 | Choose a tire model (Pacejka vs Coulomb) and understand the ground-contact mechanism | [`tire-and-contact.md`](tire-and-contact.md) |
+| Stop a wheel taking a whole kerb in one step (`wheel_contact="swept_envelope"`, v1.6.0) | [`tire-and-contact.md`](tire-and-contact.md#axis-a-upgrade--the-swept-envelope-wheel_contactswept_envelope-v160) |
 | Drive from one unified `VehicleScene` object, and cut the wheel-raycast cost on heavy static terrain | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
 | Make a vehicle follow a waypoint path (path → Steer/Throttle) | [`path-following.md`](path-following.md) |
 | Run the OSC physics server for an external client (Unreal / Unity), or look up the wire schema | [`server.md`](server.md) |
@@ -84,7 +85,9 @@ The right-hand column is where the full story lives.
 | URDF parsing | discovers wheels/axle order, steer-axis sign, and per-wheel geometry from any URDF; the default source of `WheelConfig` | `parse_urdf`, `estimate_spin_inertia_from_genesis` | [`api-reference.md`](api-reference.md) §4 |
 | URDF auto-repair | makes an arbitrary URDF ray-wheel ready: wheel colliders become render-only, a suspension origin sitting off the wheel centre is folded back onto it, missing `<inertial>`s injected. Runs automatically inside `add_vehicle` and the OSC server; the original file is never modified | `prepare_vehicle_urdf` | [`physics-contracts.md` §7.9](physics-contracts.md#79-urdf-contracts-for-ray-wheels-auto-corrected-since-v1122) |
 | Scene helpers | one-call vehicle + wheel-raycaster insertion for a raw `gs.Scene` (the low-level path; prefer `VehicleScene`) | `add_vehicle`, `make_wheel_raycaster` | [`api-reference.md`](api-reference.md) §0/§9 |
-| Raycast helpers | wheel ray pattern definition and shape-normalized sensor reads (`(n_envs, N_WHEELS)` both for 1 and N envs) | `WheelRayPattern`, `read_distances` | [`tire-and-contact.md`](tire-and-contact.md) |
+| Raycast helpers | wheel ray pattern definition and shape-normalized sensor reads — `read_distances` returns `(n_envs, n_wheels)` for 1 and N envs AND for a swept-envelope fan, whose raw read is `(n_envs, n_wheels, M)` (v1.6.0) | `WheelRayPattern`, `read_distances`, `fan_height_offsets` | [`tire-and-contact.md`](tire-and-contact.md) |
+| Wheel contact model | `wheel_contact="point"` (DEFAULT, one ray per wheel) or `"swept_envelope"` (M rays reduced by the swept-circle lower envelope, so a wheel climbs an edge instead of teleporting onto it). Opt-in; the default is bit-identical to earlier releases | `VehicleScene.add_vehicle(wheel_contact=, contact_samples=)`, `WheelRayPattern(fan_samples=)` | [`tire-and-contact.md`](tire-and-contact.md), [`physics-contracts.md` §7.11](physics-contracts.md) |
+| Ray-MISS / grounded | "did this wheel's ray find ground?", against the raycaster's OWN miss sentinel rather than a fixed threshold | `Vehicle.wheels_grounded`, `all_wheels_grounded`, `MultiVehiclePhysics.grounded_list`, `is_ray_hit`, `is_ray_hit_corrected` | [`physics-contracts.md`](physics-contracts.md) §7.8, §7.10 |
 
 **Telemetry & rendering feed**
 

@@ -10,6 +10,480 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.6.0] — 2026-09-09
+
+**A wheel is a circle, and the SDK was reading the ground with a point.** One
+zero-radius downward ray per wheel makes ground height a STEP FUNCTION: the
+wheel is at road level on one step and 0.13 m into a kerb on the next, so the
+whole obstacle height arrives as compression in a single `dt`, the damper term
+sees a rate no tire can produce, and it dominates the spring. `wheel_contact=
+"swept_envelope"` casts M rays per wheel along body +X instead and reduces them
+to one effective distance with the swept-circle lower envelope, so the wheel
+begins climbing a step of height `h` about `sqrt(2*r*h)` before it — where a
+real tire touches it. **It is OPT-IN and the default did not move by one bit:**
+a 200-step rollout of the reference car in the default configuration is
+`torch.equal`-identical to a baseline captured from the pre-change tree.
+
+| abbr | meaning |
+|---|---|
+| M | `contact_samples` — rays per wheel in a swept-envelope fan; 1 is the point contact |
+| `s_j` | sample `j`'s longitudinal (body +X) offset from the wheel centre, in metres |
+| `c_j` | sample `j`'s swept-circle height penalty, `r - sqrt(r^2 - s_j^2)` — how far above the wheel's lowest point the tire surface sits at `s_j` |
+| `d_eff` | the one distance per wheel the fan reduces to, `min_j(d_j + c_j)` |
+| `d_center` | what the single centre ray alone would have reported |
+| `r` / `h` | wheel radius / obstacle (step) height, metres |
+| `fan_span` | half-width of the fan as a multiple of `r`; default 1.0, so samples cover `[-r, +r]` |
+| `rest_d` | suspension rest length; the pipeline computes `compression = max(rest_d - d, 0)` |
+| `k` | suspension spring rate (N/m) |
+| `N` | wheel normal force (N) |
+| `dual_scene` / `single_scene` | the two `raycast_mode` values: separate static-BVH raycast scene / one shared scene |
+| kind | one resolved config + one batched pipeline inside `MultiVehiclePhysics` |
+| BVH | Bounding Volume Hierarchy (the acceleration structure rays are cast against) |
+| AABB | Axis-Aligned Bounding Box |
+| OSC | Open Sound Control — the wire protocol `genesis_vehicle.server` speaks to a UE / Unity client |
+
+### New public surface
+
+All of it is inert unless `wheel_contact="swept_envelope"` is passed.
+
+| symbol | where | what it does |
+|---|---|---|
+| `wheel_contact="point" \| "swept_envelope"` | `VehicleScene.add_vehicle`, `scene_helpers.make_wheel_raycaster`, `scene_helpers.add_vehicle` | selects the contact model. **Default `"point"`** |
+| `contact_samples=9` | same three | M. Must be 1 or ODD; ignored entirely when `wheel_contact="point"` |
+| `WheelRayPattern(..., fan_samples=1, wheel_radii=None, fan_span=1.0)` | `raycast` | the three new args are keyword-with-default, so existing positional callers (`positions`, `up_offset`) are untouched |
+| `WheelRayPattern.from_config(resolved, ...)` | `raycast` | revived — the only construction path that can supply per-wheel radii straight off a `ResolvedConfig`. **No production caller** (both registration paths assemble the radii themselves) |
+| `WheelRayPattern.ray_positions()` | `raycast` | every ray's chassis-local `(x, y, z)` in the attachment plane — the wheel centres at M=1, the full fan otherwise |
+| `fan_longitudinal_offsets(radii, M, span=1.0)` | `raycast` | `(n_wheels, M)` `s_j` |
+| `fan_height_offsets(radii, M, span=1.0)` | `raycast` | `(n_wheels, M)` `c_j` |
+| `fan_ray_positions(positions, radii, M, span=1.0)` | `raycast` | the flat ray list to hand `self_collision_ceiling` / `single_scene_up_offset` |
+| `set_sensor_fan(sensor, fan_c)` / `sensor_fan(sensor) -> (M, c)` | `raycast` | stamp / read the fan geometry ON the sensor, the same way `set_sensor_up_offset` carries the high-cast offset. `None` clears it back to the point contact |
+| `check_fan_uniformity(sensors) -> int` | `multi_vehicle` | every vehicle of one kind must share one M; raises naming the sizes |
+| `WHEEL_CONTACT_MODES` | `vehicle_scene` | `("point", "swept_envelope")` |
+
+The `raycast` names above and `WHEEL_CONTACT_MODES` are lazy-exported from
+`genesis_vehicle` and listed in `__all__`; `check_fan_uniformity` is reached as
+`from genesis_vehicle.multi_vehicle import check_fan_uniformity`.
+
+### How the envelope is built
+
+M rays per wheel, uniformly spaced over `[-r*fan_span, +r*fan_span]` along body
++X, using **each wheel's own radius** (a mixed-radius vehicle cannot share one
+scalar). Sample `j` is penalised by the height its tire surface stands off the
+wheel's lowest point:
+
+```
+s_j = (2j/(M-1) - 1) * r * fan_span          j = 0 .. M-1
+c_j = r - sqrt(r^2 - s_j^2)                  c at |s| = r is exactly r
+d_eff = min_j (d_j + c_j)                    misses pushed to +inf
+```
+
+```mermaid
+flowchart LR
+    P["M rays down<br/>at x + s_j"] --> D["d_j (raw)"]
+    D --> O["- up_offset"]
+    O --> C["+ c_j<br/>swept-circle penalty"]
+    C --> MIN["min over j<br/>(misses -> +inf)"]
+    MIN --> E["d_eff, one per wheel"]
+    E --> PIPE["the unchanged 5-step pipeline"]
+```
+
+Three properties are load-bearing:
+
+- **`c_0 = 0` exactly**, so `d_eff <= d_center` always. The envelope can only
+  RAISE the ground it reports, never lower it — a sinking regression is
+  structurally impossible, not merely untested. Verified across 2000 randomised
+  profiles including 1784 mixed hit/miss cases: zero violations.
+- **M must be ODD.** An even fan has no centre sample, loses that guarantee, and
+  reads even FLAT ground biased: measured on `r=0.35`, `-0.020017 m` at M=4 and
+  `-0.350000 m` at M=2, against exactly `0.000000` for any odd M. Even counts
+  raise, with that measurement in the message.
+- **The M axis is eliminated inside `read_distances`.** The RAW sensor read is
+  rank-3 `(n_envs, n_wheels, M)`, but every consumer downstream — the pipeline,
+  `last_distances`, `wheels_grounded`, the visual mirrors, `distances_list()` —
+  still sees `(n_envs, n_wheels)`. The hit mask is the OR over the fan, and
+  `d_eff` is clamped just under the miss sentinel so "the mask says hit" and
+  "the value is not the sentinel" cannot disagree.
+
+The model is a DISCRETE approximation of the swept-circle lower envelope, and
+discretisation is conservative in the safe direction: M samples of the
+continuum can only see a contact LATE, never invent one. Its real limitation is
+that the rays are VERTICAL and therefore blind to terrain slope — not the size
+of `c_j`. An intermediate `s_j` winning the minimum with a smaller penalty than
+the outermost sample is the model working, not a leak.
+
+### Before / after — one wheel across a 0.130 m lip at 3.3 m/s
+
+Deterministic harness: the wheel is carried across a vertical step at constant
+height and speed, distances go through the real `read_distances`, force through
+the SDK's own `suspension_normal_force` with the reference car's constants
+(`r=0.358`, `rest_d=0.458`, `k=70,000`, `c_comp=14,000`, `c_ext=4,000`,
+`dt=0.025`). Only the contact model changes between runs.
+
+| | point (M=1, default) | swept envelope, M=9 |
+|---|---|---|
+| compression delivered in ONE step | `0.1300 m` — the whole lip | `0.0732 m` |
+| raw compression rate | `5.200 m/s` | `2.930 m/s` |
+| peak wheel `N` | `85,120 N` | `49,978 N` |
+| ratio (point / fan) | — | **1.703** |
+
+### M is not an accuracy dial
+
+M is a discretisation COUNT. The peak force does not converge monotonically in
+it — it oscillates as which sample wins the minimum changes:
+
+| M | peak `N` | ratio vs point |
+|---|---|---|
+| 9 | `49,978 N` | 1.703 |
+| 15 | `44,670 N` | 1.906 |
+| 31 | `41,745 N` | **2.039** |
+| 101 | `43,455 N` | 1.959 — *below* M=31 |
+
+Convergence needs M around 101; across M ∈ [9, 31] the peak still swings by
+roughly ±20%. The measured ratios all sit near 2, and none of them grows with
+M, because what the fan removes is the DAMPER spike, not the step: the spring
+term alone still contributes `k*h = 70,000 * 0.130 = 9,100 N` however the
+compression is spread. Do not expect a larger M to buy a larger reduction.
+
+Two consequences, both of which cost time during this work:
+
+- **Do not compare two runs at different M.** Pick M for cost, and read the
+  result as "no longer a step function", not as a converged force.
+- **"Zero phase spread" and "accurate" are different claims.** Conflating them
+  produced a bogus acceptance bar (`ratio >= 2.0` at M=9) that the physics never
+  owed anyone: M=9 gives 1.703 in this scenario and 2.039 is not reached until
+  M=31. The shipped test asserts `>= 1.5` and asserts the four ratios above
+  individually, non-monotonicity included.
+
+**M=3 at the default `fan_span=1.0` is EXACTLY the point contact** — its only
+off-centre samples sit at `|s| = r`, where `c = r`, so for any obstacle shorter
+than the wheel radius they can never win the minimum (measured: `85,120 N`,
+identical to M=1). That is not a bug and M=3 is not forbidden: at `fan_span=0.6`
+the same three rays land where they can see the lip (`52,416 N`). Documented
+rather than rejected; M=9 is the default because it is the smallest count that
+does useful work at the default span.
+
+### `single_scene` is supported, and the ceiling is measured per RAY
+
+`single_scene` casts the wheel rays in the same scene the chassis collides in,
+which is how v1.1.16–v1.4.1 shipped a car whose high-cast ray origins sat above
+its own roof: every ray self-hit, read `-0.80 m`, and the vehicle launched.
+v1.5.0 fixed that by capping the offset at the vehicle's own collision ceiling.
+A fan re-opens the same hole one sample at a time — an OUTER fan origin can sit
+under a low overhang the wheel centre clears — so the cap is now measured
+against **every fan ray** (`fan_ray_positions`), not the wheel centre, and takes
+the minimum gap.
+
+For the reference car the answer happens to be the same either way (its chassis
+AABB spans `x ∈ [-2.15, 2.15]` and covers every fan origin uniformly) — which
+is a property of that URDF, not of the function, and is why the tests build a
+synthetic variant with a low sill hanging outboard of the front wheels. On that
+URDF the centre-only cap measures **0.28 m** (the chassis box at `z=0.60`, less
+the margin) and the M=9 fan **0.12 m** (the sill at `z=0.44`). Passing wheel
+centres there would lift the outer rays to `z=0.58`, inside the sill.
+
+Integration check, `single_scene`, M=9, reference car, 60 braked steps on flat
+ground: the fan settles at `z = 0.111`, the same ride height as the point
+contact to `1e-3`, with wheel distances agreeing to `1e-4` and every wheel
+grounded — i.e. it does NOT launch, and on flat ground the envelope reads
+exactly what a point contact reads. The raw sensor read is `(1, 4, 9)` against
+the point contact's `(1, 4)`. Only an integration run can prove the ceiling cap
+holds; the unit tests can only prove the function computes it.
+
+### The default path is bit-identical, and that is the headline
+
+`wheel_contact` defaults to `"point"`, M=1 keeps a genuinely rank-1 return shape
+(NOT a width-1 fan, which Genesis reads back with a trailing axis the rank-1
+pattern does not have), and only M > 1 resolves the config for per-wheel radii —
+so the default path does not even change WHEN `resolve` runs.
+
+The proof is a real 200-step Genesis rollout, not an inspection: reference car,
+genesis-world 1.4.0, CPU, `n_envs=1`, `dual_scene`, `dt=0.025`, `substeps=10`,
+spawned at `z=1.0` on a friction-1.0 plane, 60 steps of `brake=1` then 140 of
+`throttle=0.5`. Wheel distances at steps 49/99/149/199 and the final chassis
+position are compared with `torch.equal` — **bit-identical, not `allclose`** —
+against a baseline captured from the tree as it stood BEFORE any of this work
+(commit `20f7380` plus the then-uncommitted v1.5.1 and v1.5.2 changes). Final
+position `(5.92042875289917, 0.03004419431090355, 0.1114146038889885)`.
+
+Because that baseline predates 1.5.1 and 1.5.2 as well, the same comparison
+simultaneously witnesses **all three releases physics-inert on the default
+path**. (Physics-inert, not behaviour-inert: v1.5.2 deliberately changed what
+`wheels_grounded` and the visual mirrors report. It changed no force.)
+
+The test skips itself if `genesis.__version__` is not `1.4.0`, and says so: the
+baseline is a bit-pattern, so a backend or backend-version change means
+RE-CAPTURING against the pre-change tree, not loosening a tolerance. It is not a
+tolerance knob.
+
+### Numbers deliberately NOT published here
+
+An end-to-end Genesis run of a car crossing a kerb was measured during this
+work and its absolute newtons and ratio are **withheld**. The implementer
+measured a 1.53× peak-force reduction; an independent re-run of the same
+scenario got 1.45 (`single_scene`) and 1.23 (`dual_scene`). The DIRECTION held
+in all four combinations — the fan never raised the peak — but the magnitude is
+phase-sensitive to exactly where in a step the wheel meets the lip, so no single
+run is a characteristic value.
+
+This is the second time this repo has been bitten by quoting one run: v1.5.1
+retracted the `--compare` dual-scene speedup tables for the same class of
+reason. Every force figure in this entry therefore comes from the analytic
+harness above, which is deterministic and reproduces to the digit.
+
+### Interactions and limits
+
+- **`DifferentiablePlant` cannot benefit.** The plant snapshots `distances` once
+  and holds them frozen over the horizon (`control/plant.py`), so a
+  `swept_envelope` vehicle's kerb crossing is still PREDICTED as if it were a
+  point contact. The simulated vehicle gets the envelope; the controller's
+  internal model does not. This is a real limitation for `PathFollower` users on
+  rough terrain, recorded in `docs/path-following.md`.
+- **One kind, one M.** `MultiVehicleKindPhysics` stacks its K raycaster reads
+  into one tensor, so two vehicles of the same kind registered with different
+  `wheel_contact` / `contact_samples` would either blow up deep in the stack or
+  — when the wheel counts line up — silently mix two contact models in one
+  batch. `check_fan_uniformity` rejects it once, at construction, naming the
+  sizes. Not per step.
+- **`make_wheel_raycaster` sizes the fan from URDF geometry**, because it sees
+  no `VehicleConfig`; a `WheelConfig(radius=...)` override is invisible to it.
+  `VehicleScene.add_vehicle` resolves the config and matches radii by wheel
+  NAME, so the override wins there. Use `add_vehicle` when the two differ.
+- **A wheel with no radius raises**, naming the wheel and both escapes
+  (`wheel_contact="point"`, or build the pattern yourself with explicit
+  `wheel_radii`).
+- **The OSC server does not expose it.** Both server registration paths
+  (`server/vehicle_builder.py`, `server/l3_runtime.py`) call `add_vehicle`
+  without `wheel_contact`, so a UE/Unity client gets the point contact and has
+  no wire field to change it. Deliberate for this release — the server's
+  vehicle schema is a client-facing contract — but it means the mode is
+  reachable only from Python.
+- **Cost** is M raycasts per wheel per step where there was 1, plus one
+  `min` reduction. Nothing else in the pipeline changes shape.
+
+### Corrected: a contract doc stated the wrong sensor shape
+
+`docs/physics-contracts.md` §7.8 and `docs/index.md` described
+`sensor.read().distances` as `(n_envs, N_WHEELS)` (or `(N_WHEELS,)` at
+`n_envs == 1`) full stop. At M > 1 the RAW read is **rank 3**,
+`(n_envs, n_wheels, M)` with M as the LAST axis. The corrected text states both
+ranks and states that `read_distances` collapses M so the `(n_envs, n_wheels)`
+guarantee holds for every downstream consumer — which is the invariant readers
+actually depend on. Same correction in the root `CLAUDE.md`.
+
+`docs/tire-and-contact.md` listed "shapecast (sweep) wheel" as a possible FUTURE
+upgrade to Axis A ("if you later need higher accuracy over curbs"). As of this
+release the SDK ships one; the doc now says so and describes it.
+
+### Verification
+
+- **375 tests pass**, up from **333** (`pytest --collect-only`, same tree;
+  ~100 s wall clock on CPU). `tests/test_swept_envelope.py` contributes
+  **39** — the fan geometry (odd M,
+  `c_0 = 0`, per-wheel radii), `read_distances`' collapse of the M axis
+  including the miss and unpopulated-buffer cases and the `d_eff <= d_center`
+  randomised sweep, the single-scene ceiling measured against every fan ray AND
+  that both registration entry points really hand it the fan (proved on a
+  synthetic outer-sill URDF where the centre-only and fan ceilings actually
+  disagree — 0.28 m vs 0.12 m — since the reference car cannot distinguish
+  them), mode selection and its refusals at both entry points, and the
+  step-crossing harness above.
+  `tests/test_fan_default_identity.py` contributes **3** — the bit-identical
+  rollout, plus the M > 1 stub-sensor branch, so the file also witnesses that
+  the branch the rollout does not take is live.
+- **Physics on the default path: bit-identical** (`torch.equal`), as above.
+- Flat ground: the fan reads the point contact to **7 decimals**; ride height
+  identical.
+
+### Still open
+
+- The OSC server has no wire field for `wheel_contact`, above.
+- `WheelRayPattern.from_config` has no production caller. It exists because it
+  is the only path that can take radii straight off a `ResolvedConfig`.
+- `DifferentiablePlant`'s frozen-distance snapshot, above.
+- The host capture path divergence carried over from v1.5.2
+  (`MultiVehicleKindPhysics.wheel_visual_transforms_host` still gates
+  batch-wide after a partial reset).
+- `RAY_MISS_THRESHOLD` remains as the stub-sensor fallback until 1.7.0.
+
+---
+
+## [1.5.2] — 2026-09-09
+
+**"Did this wheel's ray find ground?" was decided by a hardcoded `19.9`, and
+that constant was pinned to the raycaster's DEFAULT range.** Build a raycaster
+with any other `max_range` and a MISS came back inside the threshold, so the
+read layer subtracted the high-cast offset from a distance that measured
+nothing. The predicate is now an equality against the sensor's OWN miss
+sentinel, the three divergent copies of it are one function, and "is this
+vehicle on the terrain?" gets a supported public answer instead of every
+caller re-deriving one. Physics is unchanged — bit-identical, `maxabsdiff 0.0`.
+
+| abbr | meaning |
+|---|---|
+| `no_hit_value` | the Genesis `Raycaster` option holding the distance a ray reports when it hit nothing; defaults to `max_range` |
+| `max_range` | the raycaster's maximum ray length (m); `raycaster_max_range` at the `VehicleScene` level, default 20.0 |
+| miss sentinel | the value `no_hit_value` resolves to — what a ray that hit nothing writes into the distance buffer |
+| RAW / CORRECTED distance | straight off `sensor.read().distances` / after `read_distances` subtracts the high-cast offset |
+| `rest_d` | suspension rest length; the pipeline computes `compression = max(rest_d - distance, 0)` |
+| L2 / L3 | the two batching axes: K vehicles in one scene (`MultiVehiclePhysics`) / `n_envs` parallel scenarios |
+| `NK` | the flat `n_envs x K` row count `MultiVehicleKindPhysics` operates on |
+| `dual_scene` / `single_scene` | the two `raycast_mode` values: separate static-BVH raycast scene / one shared scene |
+| RL | reinforcement learning (the partial-reset rollout pattern) |
+| maxabsdiff | max absolute elementwise difference between two trajectories |
+
+### New public surface
+
+| symbol | shape / returns | what it answers |
+|---|---|---|
+| `Vehicle.wheels_grounded` | `(n_envs, n_wheels)` bool, `None` before `build()` | did each wheel's ray find ground on the last step |
+| `Vehicle.all_wheels_grounded` | `(n_envs,)` bool, `None` before `build()` | is this vehicle actually on the terrain |
+| `VehiclePhysics.wheels_grounded` / `.all_wheels_grounded` | same, never `None` | the driver-level equivalents |
+| `MultiVehiclePhysics.grounded_list()` | `list[(n_envs, n_wheels) bool]`, caller flat order | the L2 batched mirror, alongside `distances_list()` |
+| `VehiclePhysics.set_ray_miss_value(miss, *, sensor=None)` | — | inject the sentinel when the driver owns no sensor (`dual_scene`) |
+| `is_ray_hit(d_raw, miss=None)` | bool tensor | the RAW-distance predicate: `(d_raw != miss) & (d_raw != 0.0)` |
+| `is_ray_hit_corrected(d, miss=None)` | bool tensor | the CORRECTED-distance predicate: `d != miss` |
+| `sensor_miss_value(sensor)` / `set_sensor_miss_value(sensor, miss=None)` | `float \| None` | read / stamp-and-validate a sensor's sentinel |
+
+All lazy-exported from `genesis_vehicle` and listed in `__all__`.
+`raycast.RAY_MISS_THRESHOLD` stays **unexported** and is **deprecated since
+1.5.2**, removal targeted **1.7.0**; it survives only as the fallback for a
+stub sensor that exposes no `_options` at all.
+
+### Fixed: the miss threshold was pinned to one range
+
+`RAY_MISS_THRESHOLD = 19.9` is `20.0 - 0.1`, i.e. the DEFAULT
+`raycaster_max_range` less a margin. `no_hit_value` defaults to `max_range` and
+the SDK never set it, so the threshold only ever matched the default:
+
+| `raycaster_max_range` | a MISS reads | old `d >= 19.9` verdict | `read_distances` returned | now |
+|---|---|---|---|---|
+| 20.0 (default) | 20.0 | miss — correct | 20.0 (sentinel kept) | 20.0 |
+| 10.0 | 10.0 | **hit** — wrong | **9.0** (offset subtracted from nothing) | **10.0** |
+| 50.0 | 50.0 | miss — correct | 50.0 | 50.0 |
+
+A 9.0 m "hit" is far outside any suspension's `rest_d`, so it clamped to zero
+compression and the vehicle did not misbehave; what broke was every consumer
+that asked the distance whether the wheel was airborne — the visual air pose
+and any user-side grounded check — and it broke silently, in the direction of
+claiming ground where there was none.
+
+### Fixed: the predicate is an equality, on the RAW distance, in one place
+
+- **Equality, not a threshold.** Genesis writes the sentinel VERBATIM into the
+  distance buffer on a miss and its own test is likewise
+  `distances != self._options.no_hit_value`, so `==` is exact even for a value
+  with no float32 representation (19.9 and 0.1 were probed; both round-trip).
+  A threshold cannot work at all once the caller chooses `max_range`.
+- **On the RAW distance.** `is_ray_hit` must see the value before the high-cast
+  offset comes off, for two independent reasons: with `no_hit_value = 0.0` a
+  genuine hit at exactly the offset corrects to `0.0` and would collide with
+  the sentinel; and the `d_raw != 0.0` term — which rejects the UNPOPULATED
+  buffer Genesis allocates as zeros and only fills inside `scene.step()` — is
+  meaningless once that zero has been shifted to `-up_offset`.
+  `read_distances(..., return_hit=True)` therefore evaluates the mask at the
+  only place it can be evaluated correctly and CARRIES it out to
+  `VehiclePhysics.last_hit`, instead of leaving each consumer to re-derive one.
+- **One definition.** `raycast.py`, `core._susp_visual_offset` and
+  `visual._susp_visual_target` each carried their own `(d >= 19.9) | (d == 0.0)`.
+  They now all call `is_ray_hit_corrected`, and the two visual ones dropped the
+  `== 0.0` term, which was a live defect on its own: a corrected `0.0` is a
+  legitimate contact at exactly `RAY_UP_OFFSET`, and both mirrors were rendering
+  it as fully-extended air.
+
+### Fixed: `no_hit_value < max_range` now raises instead of launching the vehicle
+
+The SDK leaves a miss at its raw sentinel and the pipeline computes
+`compression = max(rest_d - distance, 0)`. A sentinel inside the measurable
+range is therefore read as a very close HIT — with `no_hit_value = 0.0`,
+`compression = rest_d`, maximum compression, and the vehicle launches.
+`check_miss_supported` rejects that configuration with a `ValueError` naming the
+failure mode, and rejects a non-finite or non-positive sentinel unconditionally
+(`nan < max_range` is False, so a `nan` sentinel passed the range test and then
+made `d != nan` report every miss as a hit).
+
+The check runs wherever the sentinel is **obtained**, not only where the SDK
+stamps it — `set_sensor_miss_value` (the stamp), `ray_miss_value` (the read,
+which `VehiclePhysics.__init__` goes through) and
+`VehiclePhysics.set_ray_miss_value` (the `dual_scene` injection) share it. The
+documented "build your own `gs.sensors.Raycaster` and hand it to
+`VehiclePhysics(scene, entity, sensor, cfg)`" path never stamps, so a
+stamp-only guard would have been exactly the kind of guarantee that holds on
+the paths the SDK controls and nowhere else.
+
+### Fixed: `_stepped_once` is per env, so a partial reset stops lying
+
+`VehiclePhysics._stepped_once` was a Python `bool`. `reset(env_ids=...)` zeroes
+only those envs' `last_distances` but left the flag `True` for the whole batch,
+so the reset envs' zeros were read as a valid measurement. It is now an
+`(n_envs,)` bool tensor cleared per index, `_stepped_any()` is the explicitly
+batch-wide "nobody has stepped" shortcut, and both closed-form visual paths
+(`VehiclePhysics.wheel_visual_transforms`,
+`MultiVehicleKindPhysics.wheel_visual_transforms`) mask un-stepped rows back to
+the REST pose after it. The mask branch is skipped entirely when every env has
+stepped — the steady state — so the common path adds no kernels.
+
+| after `reset(env_ids=[1])`, wheel z-offset of env 1 | before | after |
+|---|---|---|
+| `wheel_visual_transforms` (device path) | fully compressed | rest pose |
+| `wheels_grounded` | `True` (read off zeros) | all-`False` |
+
+### Known: the host capture path still gates batch-wide
+
+`MultiVehicleKindPhysics.wheel_visual_reads` / `wheel_visual_transforms_host`
+— the split device-read / host-compute pair — still test `_stepped_any()` and
+have no per-row mask, so for ONE frame after a partial reset they render the
+reset vehicles' wheels fully compressed where the device path renders them at
+rest: measured **device `0.3000` vs host `0.4000`** — a full suspension stroke — on a
+2-vehicle batched scene after `kind.reset([0])`. It self-corrects on the next
+step. Closing it costs a sixth device-to-host download plus a signature change
+on the host helper, so it is separately ticketed and NOT fixed here; the
+source comment that claimed the host path was "behavior/cost identical" to the
+device path is corrected in place.
+
+Who is exposed: user-written RL and host-side render harnesses that call the
+host pair AND use partial reset. The shipped OSC server is not — its L3 reset
+restores the initial pose with `set_pos` / `set_quat` and never calls
+`physics.reset()` (`server/l3_runtime.py:539-542`), so no env is ever
+un-stepped.
+
+### First consumer
+
+`samples/dual_scene_terrain.py` criterion (a) was
+`d0_max < RAY_MISS_THRESHOLD and d0_min > 0.0` — a hand-rolled predicate valid
+only at the default `raycaster_max_range=20.0`, exactly as the 1.5.1 entry's
+criterion table warned. It is now `veh.all_wheels_grounded`. This is what the
+new surface is for: the sample was writing the SDK's private threshold because
+the SDK offered nothing else.
+
+### Verification
+
+- **333 tests pass**, up from **291** at HEAD (both counts collected with
+  `pytest --collect-only` on the same tree). `tests/test_ray_miss_and_grounded.py`
+  is new and contributes **37**: the sentinel read on a real `VehicleScene`
+  raycaster, the raw-vs-corrected predicate split, exact equality on an
+  unrepresentable sentinel, all three validation entry points, grounded
+  before/after settling and over a hole, partial-reset rest pose on both the
+  per-vehicle and batched kind paths, and read-layer/core/visual agreement at a
+  non-default range. The remaining **5** are `sensor_miss_value` coverage in
+  `test_gs_compat.py` and `test_quat_helpers.py`.
+- **Physics bit-identical**: `maxabsdiff 0.0` on chassis pose over 120 steps at
+  `n_envs=2` against a `git archive HEAD` baseline, in BOTH `dual_scene` and
+  `single_scene`. Nothing in this release touches the force path — the miss
+  sentinel feeds the read layer and the visual mirrors only; the physics air
+  mask has always been `compression <= 0` and still is.
+
+### Still open
+
+- The host capture divergence above.
+- `RAY_MISS_THRESHOLD` remains as the stub-sensor fallback until 1.7.0.
+- `wheels_grounded` is a READ-LAYER diagnostic, not the physics air mask. The
+  two disagree inside the suspension's rest gap, where a ray hits ground that is
+  still too far to compress the spring: grounded says True, the pipeline still
+  applies no normal force. Documented in `docs/physics-contracts.md` §7.10;
+  unifying them would be an observable behaviour change and is not attempted here.
+
+---
+
 ## [1.5.1] — 2026-09-08
 
 **`samples/dual_scene_terrain.py` had been driving its car off the edge of the

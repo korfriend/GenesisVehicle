@@ -76,7 +76,8 @@ import genesis as gs
 from .core import VehiclePhysics
 from .inputs import VehicleInputs
 from .raycast import (
-    WheelRayPattern, read_distances, set_sensor_up_offset,
+    WheelRayPattern, fan_height_offsets, fan_ray_positions, ray_miss_value,
+    read_distances, set_sensor_fan, set_sensor_miss_value, set_sensor_up_offset,
     single_scene_up_offset,
 )
 from .urdf import parse_urdf
@@ -94,6 +95,64 @@ _PRIMITIVE_MORPHS = frozenset({"Box", "Sphere", "Cylinder", "Capsule", "Plane"})
 # face — spikes memory/compute and can crash the process; under WSL it takes the
 # whole VM down.
 _MAX_NONCONVEX_COLLISION_FACES = 1000
+
+#: ``add_vehicle(wheel_contact=...)`` values. "point" is the default and the
+#: historical single-ray contact; "swept_envelope" is the opt-in ray fan.
+WHEEL_CONTACT_MODES = ("point", "swept_envelope")
+
+
+def _fan_samples(wheel_contact: str, contact_samples: int) -> int:
+    """Rays per wheel (M) for a ``wheel_contact`` selection: 1 for ``"point"``,
+    ``contact_samples`` for ``"swept_envelope"``.
+
+    ``contact_samples`` is ignored (not validated) for ``"point"``, so its
+    default is free to be the recommended fan size rather than 1."""
+    if wheel_contact not in WHEEL_CONTACT_MODES:
+        raise ValueError(
+            f"wheel_contact must be one of {WHEEL_CONTACT_MODES}, got "
+            f"{wheel_contact!r}.")
+    if wheel_contact == "point":
+        return 1
+    from .raycast import _check_fan_samples
+    M = _check_fan_samples(contact_samples)
+    if M == 1:
+        raise ValueError(
+            "wheel_contact='swept_envelope' with contact_samples=1 is the "
+            "point contact; pass wheel_contact='point' if that is what you "
+            "want, or an odd contact_samples >= 3.")
+    return M
+
+
+def _wheel_radii(cfg: Any, parsed: Any, name: str) -> list:
+    """Per-wheel radii for the swept-envelope fan, in the SAME order as
+    ``parsed.wheels`` (which is the order the ray positions are built in).
+
+    Taken from the RESOLVED config — the fan's ``c_j`` claims to approximate
+    each wheel's own swept circle, so a per-wheel override must win over the
+    URDF geometry and a mixed-radius vehicle must not be collapsed to one
+    scalar. Matched by wheel NAME, because a hand-built ``VehicleConfig`` may
+    list its wheels in a different order than the URDF; a resolved wheel with
+    no URDF counterpart falls back to positional order.
+
+    Only reached when M > 1 — the default point contact never resolves the
+    config here (``VehiclePhysics`` does that at build), so it cannot change
+    when or how often ``resolve`` runs for existing vehicles."""
+    from .config import resolve
+    resolved = resolve(cfg)
+    by_name = {w.name: w for w in resolved.wheels if w.name is not None}
+    radii = []
+    for i, w in enumerate(parsed.wheels):
+        rw = by_name.get(w.name)
+        if rw is None:
+            rw = resolved.wheels[i] if i < len(resolved.wheels) else None
+        r = getattr(rw, "radius", None)
+        if r is None:
+            raise ValueError(
+                f"add_vehicle({name!r}): wheel {w.name!r} has no radius, so the "
+                f"swept-envelope fan cannot be built for it. Give it one in the "
+                f"WheelConfig or use wheel_contact='point'.")
+        radii.append(float(r))
+    return radii
 
 
 def _guard_collision_mesh(morph: Any, where: str) -> None:
@@ -475,6 +534,28 @@ class Vehicle:
         if self._scene is not None and self._scene._mvp is not None:
             return self._scene._mvp.distances_list()[self._slot]
         return None
+
+    @property
+    def wheels_grounded(self):
+        """``(n_envs, n_wheels)`` bool — did each wheel's ray find ground on the
+        last step? ``None`` before ``build()``.
+
+        Tested against the raycaster's OWN miss sentinel and gated on the
+        per-env "has stepped" flag, so it never passes vacuously on the zero
+        tensor ``distances`` starts out as (v1.5.2)."""
+        if self.physics is not None:
+            return self.physics.wheels_grounded
+        if self._scene is not None and self._scene._mvp is not None:
+            return self._scene._mvp.grounded_list()[self._slot]
+        return None
+
+    @property
+    def all_wheels_grounded(self):
+        """``(n_envs,)`` bool — True where EVERY wheel found ground. ``None``
+        before ``build()``. The supported answer to "is this vehicle actually on
+        the terrain?"."""
+        g = self.wheels_grounded
+        return None if g is None else g.all(dim=1)
 
     @property
     def resolved(self):
@@ -933,6 +1014,8 @@ class VehicleScene:
         stability: str = "control",
         name: Optional[str] = None,
         raycaster_max_range: float = 20.0,
+        wheel_contact: str = "point",
+        contact_samples: int = 9,
         cfg: Any = None,
         morph: Any = None,
     ) -> Vehicle:
@@ -955,6 +1038,29 @@ class VehicleScene:
         :mod:`genesis_vehicle.urdf_prep` and ``docs/physics-contracts.md``
         §7.9. The prepared path is used for the entity, the parse AND the ray
         pattern — they must agree, which is why this is not a knob.
+
+        ``wheel_contact`` selects the wheel-ground contact model (v1.6.0):
+
+        * ``"point"`` (DEFAULT, and bit-identical to every earlier release) —
+          ONE downward ray per wheel. A zero-radius probe: ground height is a
+          step function, so crossing a vertical edge delivers the whole obstacle
+          height of compression in one ``dt`` and the damper term dominates.
+        * ``"swept_envelope"`` — ``contact_samples`` (M) rays per wheel spread
+          along body +X over the wheel's own radius, collapsed back to one
+          distance per wheel inside ``read_distances`` (see
+          :class:`genesis_vehicle.raycast.WheelRayPattern`). A wheel of radius
+          ``r`` starts climbing a step of height ``h`` about ``sqrt(2rh)``
+          before it, as a real tire does. M must be ODD.
+          **M is not an accuracy dial** — it is a discretisation count; the
+          peak contact force moves NON-monotonically with M and spans about 20%
+          across M ∈ [9, 31] (measured by ``tests/test_swept_envelope.py::
+          test_M_is_not_an_accuracy_dial``). Take the result as "no longer a
+          step function", not as a converged force.
+
+        Both raycast modes support the fan. In ``single_scene`` the high-cast
+        offset is capped against EVERY fan ray, not just the wheel centres, so
+        an outer sample under a low overhang cannot start inside the vehicle's
+        own body.
         """
         self._require_not_built()
         if cfg is None and preset is None:
@@ -986,6 +1092,12 @@ class VehicleScene:
             cfg = preset(urdf_path, stability=stability)
         parsed = parse_urdf(urdf_path)
         wheel_positions = [w.position for w in parsed.wheels]
+        # Wheel-contact model. M == 1 is the historical single-ray point contact
+        # and takes the exact same code path it always did; only M > 1 resolves
+        # the config (for the per-wheel radii the swept-envelope offsets need).
+        fan_m = _fan_samples(wheel_contact, contact_samples)
+        fan_radii = _wheel_radii(cfg, parsed, name) if fan_m > 1 else None
+        fan_c = fan_height_offsets(fan_radii, fan_m) if fan_m > 1 else None
 
         veh = Vehicle(name, urdf_path, cfg, wheel_positions, pos, quat, material)
         veh._dual_scene = self._dual_scene
@@ -1028,9 +1140,19 @@ class VehicleScene:
                               fixed=True, collision=False),
                 material=gs.materials.Rigid())
             veh.sensor = self._raycast_scene.add_sensor(gs.sensors.Raycaster(
-                pattern=WheelRayPattern(wheel_positions),
+                pattern=WheelRayPattern(wheel_positions, fan_samples=fan_m,
+                                        wheel_radii=fan_radii),
                 entity_idx=veh.proxy.idx,
                 max_range=raycaster_max_range, min_range=0.0, return_world_frame=True))
+            # Record (and validate) the ray-MISS sentinel this raycaster
+            # reports, so read_distances / wheels_grounded test against the
+            # sensor's own value instead of a threshold pinned to the DEFAULT
+            # max_range. Raises if it sits below max_range (see
+            # raycast.set_sensor_miss_value).
+            set_sensor_miss_value(veh.sensor)
+            # ... and the swept-envelope geometry, so read_distances can collapse
+            # the M axis without the call site passing anything (M == 1 clears it).
+            set_sensor_fan(veh.sensor, fan_c)
         else:
             # single_scene: the rays are cast in the SAME scene the chassis
             # collides in, so a high-cast origin lifted above the vehicle's own
@@ -1042,8 +1164,15 @@ class VehicleScene:
             # and the chassis box bottom at z=0.60, so 1.0 m was 0.7 m too
             # high). dual_scene raycasts a scene with no vehicle collision
             # geometry in it and keeps the full RAY_UP_OFFSET.
-            up_offset = single_scene_up_offset(urdf_path, wheel_positions, name)
-            pattern = WheelRayPattern(wheel_positions, up_offset=up_offset)
+            # The cap is measured against EVERY ray, not the wheel centres: an
+            # outer swept-envelope sample can sit under a low overhang the wheel
+            # centre clears, and capping on the centre alone would leave that ray
+            # starting inside the body (the same launch, one sample at a time).
+            ray_positions = (fan_ray_positions(wheel_positions, fan_radii, fan_m)
+                             if fan_m > 1 else wheel_positions)
+            up_offset = single_scene_up_offset(urdf_path, ray_positions, name)
+            pattern = WheelRayPattern(wheel_positions, up_offset=up_offset,
+                                      fan_samples=fan_m, wheel_radii=fan_radii)
             veh.sensor = self._main_scene.add_sensor(gs.sensors.Raycaster(
                 pattern=pattern,
                 entity_idx=veh.entity_main.idx,
@@ -1051,6 +1180,8 @@ class VehicleScene:
             # read_distances subtracts the offset back out, and it is per-vehicle
             # now, so tell the sensor rather than every call site.
             set_sensor_up_offset(veh.sensor, up_offset)
+            set_sensor_miss_value(veh.sensor)          # see the dual_scene branch
+            set_sensor_fan(veh.sensor, fan_c)          # see the dual_scene branch
 
         self._vehicles.append(veh)
         return veh
@@ -1179,6 +1310,13 @@ class VehicleScene:
                 sensor = None if self._dual_scene else veh.sensor
                 veh.physics = VehiclePhysics(
                     self._main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
+                if sensor is None and veh.sensor is not None:
+                    # dual_scene: the rays live in the OTHER scene, so the driver
+                    # was built without a sensor and cannot read the miss
+                    # sentinel itself. Inject it from the raycast-scene sensor
+                    # whose distances step() will be fed.
+                    veh.physics.set_ray_miss_value(ray_miss_value(veh.sensor),
+                                                   sensor=veh.sensor)
 
         # Wire the instanced wheel renderer now that physics exists: one unit
         # per KIND in batched mode (ONE closed-form call per kind per step —

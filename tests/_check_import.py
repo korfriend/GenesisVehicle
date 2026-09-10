@@ -29,8 +29,16 @@ print("eager surface imports OK")
 
 lazy_names = ["VehiclePhysics", "WheelMeta", "PipelineContext",
               "WheelRayPattern", "read_distances",
+              "is_ray_hit", "is_ray_hit_corrected",
+              "sensor_miss_value", "set_sensor_miss_value",
+              "set_sensor_fan", "sensor_fan", "fan_height_offsets",
+              "fan_longitudinal_offsets", "fan_ray_positions",
               "VisualPartsTransforms",
-              "add_vehicle", "make_wheel_raycaster"]
+              "add_vehicle", "make_wheel_raycaster",
+              # the legal values of the user-facing wheel_contact argument;
+              # check_fan_uniformity stays internal on purpose (it is an
+              # invariant check MultiVehicleKindPhysics.__init__ makes for you)
+              "WHEEL_CONTACT_MODES"]
 for name in lazy_names:
     assert name in genesis_vehicle.__all__, f"{name} missing from __all__"
 print(f"lazy names registered (deferred until first access): {lazy_names}")

@@ -302,6 +302,14 @@ way — the SDK publishes no speedup figure for it (see the retraction above), a
 > headroom on a hard landing, which `dual_scene` — raycasting a scene with no
 > vehicle collision geometry in it — does not pay. See
 > [`physics-contracts.md` §7.8](physics-contracts.md#78-high-cast-rays-and-over-compression-v1116).
+>
+> Since v1.6.0 the cap is measured against **every** wheel ray, so a
+> `wheel_contact="swept_envelope"` vehicle is supported in `single_scene` too:
+> an outer fan sample can sit under a low overhang the wheel centre clears, and
+> capping on the centre alone would leave that ray starting inside the body.
+> Verified end to end — `single_scene` with M=9 settles at the same ride height
+> as the point contact on flat ground, wheel distances agreeing to `1e-4`.
+> ([`physics-contracts.md` §7.11](physics-contracts.md))
 
 > **`gs.morphs.Terrain` places its origin at a CORNER.** With
 > `n_subterrains=(1, 1)` and `subterrain_size=(Lx, Ly)` the mesh spans
