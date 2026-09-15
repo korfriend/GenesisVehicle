@@ -92,7 +92,11 @@ above is unchanged. M is not a batching axis you can address.
 > **When the manual loop is still legitimate:** you need per-vehicle
 > solver operations the batched path doesn't expose the same way —
 > independent per-vehicle external forces / impulses, or per-vehicle
-> teleport+reset mid-rollout. (This is exactly why
+> teleport+reset mid-rollout. (The RESET half of that is available on the
+> batched path since v1.6.2 — `MultiVehiclePhysics.reset(vehicle_ids=[...])`
+> resets those vehicles across every env; the teleport still goes through the
+> entity. See [`physics-contracts.md` §7.12](physics-contracts.md) for what a
+> partial reset leaves alone.) (This is exactly why
 > `genesis_vehicle.server`'s default L2 (per-entity) mode still loops: the OSC
 > protocol must apply `target_forces` / `AddWorldImpulse` to individual
 > vehicles.) If you don't need those, prefer `MultiVehiclePhysics`.

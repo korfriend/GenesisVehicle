@@ -1464,8 +1464,22 @@ class VehicleScene:
         Inline mode: each vehicle reads its own sensor.
         """
         self._require_built()
-        if self.solver == "batched" and self._vehicles and self._ensure_grouped():
-            self._build_mvp()   # config changed since last group → regroup + rebuild
+        if self.solver == "batched" and self._vehicles:
+            prev_grouped = self._grouped_version
+            if self._ensure_grouped():
+                try:
+                    self._build_mvp()   # config changed → regroup + rebuild
+                except Exception:
+                    # A failed rebuild must not CONSUME the dirty flag:
+                    # _ensure_grouped already stamped _grouped_version, so
+                    # without this the broken configuration would be reported
+                    # once and then silently accepted (the old driver kept
+                    # running under a config the user believes took effect).
+                    # Roll back and re-raise — the next step retries and
+                    # reports the same error. _ensure_grouped's only other
+                    # effect, veh._group_cfg, recomputes deterministically.
+                    self._grouped_version = prev_grouped
+                    raise
         dists = self._measure_distances()   # dual: {veh:(N,n)} ; single: {veh:None}
         if self.solver == "batched":
             if self._mvp is not None:       # None → no vehicles; just advance the scene
@@ -1495,9 +1509,27 @@ class VehicleScene:
             self._main_scene.step()
 
     def reset(self) -> None:
-        """Reset per-vehicle physics state and re-sync proxies. (Full scene
-        re-randomization is out of scope for this first cut.)"""
+        """Reset vehicle physics state (wheel ``omega``, suspension history,
+        spin accumulators, ray state) and re-sync the raycast proxies. Chassis
+        POSE is not touched — place vehicles with ``Vehicle.set_pos`` /
+        ``set_quat``. (Full scene re-randomization is still out of scope.)
+
+        Through 1.6.1 this reset NOTHING on the default ``solver="batched"``
+        scene: ``veh.physics`` is None there (the state lives in the shared
+        ``MultiVehiclePhysics``), so only the ``_sync_proxy()`` call ran and
+        ``omega`` came out of the call unchanged — measured. Fixed in v1.6.2 by
+        dispatching to the batched driver as well.
+
+        NOTE (``docs/physics-contracts.md`` §7.6): a reset zeroes
+        ``last_distances`` and ``_stepped_once``, and the HOST capture pair
+        (``wheel_visual_reads`` / ``wheel_visual_transforms_host``) still gates
+        batch-wide, so a host-side render harness can see one frame of
+        full compression after a partial reset. The device-side path and the
+        shipped OSC server are unaffected (the server resets with
+        ``set_pos``/``set_quat``, never through here)."""
         self._require_built()
+        if self._mvp is not None:
+            self._mvp.reset()
         for veh in self._vehicles:
             if veh.physics is not None:
                 veh.physics.reset()
@@ -1529,12 +1561,173 @@ class VehicleScene:
         return True
 
     def _build_mvp(self) -> None:
-        """(Re)construct the batched MultiVehiclePhysics from the current groups."""
+        """(Re)construct the batched MultiVehiclePhysics from the current groups,
+        CARRYING the runtime state of the driver it replaces (v1.6.2).
+
+        Through 1.6.1 a rebuild (the only user-reachable trigger is
+        ``mark_config_dirty()`` + ``step()``) constructed a fresh driver and
+        dropped everything the old one held: wheel ``omega``,
+        ``prev_compression``, the spin accumulators, the ray state — and it
+        re-captured the wheel REST pose off a vehicle whose suspension had
+        sagged, permanently biasing the visual reference. What is carried is
+        listed in ``core.RUNTIME_STATE_ATTRS`` / ``REST_POSE_ATTRS``; what is
+        deliberately NOT is in ``docs/physics-contracts.md`` §7.12.
+
+        Ordering matters and is load-bearing:
+
+        1. snapshot the old driver,
+        2. build the new one into a LOCAL,
+        3. validate it against the snapshot (a per-vehicle wheel-count change
+           RAISES ``ValueError`` — the sensor's ray count is fixed at build,
+           so such a scene dies one step later anyway),
+        4. import the state, re-point the instanced wheel renderer,
+        5. and only THEN publish it as ``self._mvp``.
+
+        So a rebuild that fails leaves the previous driver installed and
+        untouched rather than a half-built zombie. ``step()`` pairs this with a
+        rollback of ``_grouped_version``, so the next step retries and reports
+        the same error."""
         from .multi_vehicle import MultiVehiclePhysics
-        self._mvp = MultiVehiclePhysics(
+        old = getattr(self, "_mvp", None)
+        snap = old.export_state() if old is not None else None
+
+        if snap is not None:
+            # Cheap pre-check from the cfgs, BEFORE anything is constructed:
+            # building a MultiVehiclePhysics is not side-effect free even when
+            # the result is discarded (WheelJointInternalSync.__init__ writes
+            # kp/kv onto the LIVE entity's suspension dofs). The authoritative
+            # check against the built kinds still runs below.
+            self._precheck_wheel_counts(snap)
+
+        mvp = MultiVehiclePhysics(
             self._main_scene,
             [(veh.entity_main, veh.sensor, veh._group_cfg) for veh in self._vehicles],
             n_envs=self.n_envs)
+
+        if snap is not None:
+            self._check_rebuild_shapes(mvp, snap)
+            mvp.import_state(snap)
+            self._rebind_wheel_renderer(mvp)
+        self._mvp = mvp
+
+    def _wheel_count_error(self, flat_i: int, old_n: int, new_n: int,
+                           where: str) -> ValueError:
+        """``where`` names WHICH of the two checks fired, so a test (and a bug
+        report) can tell the cheap cfg precheck from the authoritative one."""
+        name = (self._vehicles[flat_i].name
+                if flat_i < len(self._vehicles) else f"slot {flat_i}")
+        return ValueError(
+            f"vehicle '{name}' (slot {flat_i}): wheel count changed "
+            f"{old_n} -> {new_n} across a config rebuild [{where}]. The wheel "
+            f"count is fixed at build() — the raycast sensor still has {old_n} "
+            f"rays, so the rebuilt scene would fail on its next step. Rebuild "
+            f"the VehicleScene instead of changing cfg.wheels after build().")
+
+    def _wheel_order_error(self, flat_i: int, old_names, new_names,
+                           where: str) -> ValueError:
+        name = (self._vehicles[flat_i].name
+                if flat_i < len(self._vehicles) else f"slot {flat_i}")
+        return ValueError(
+            f"vehicle '{name}' (slot {flat_i}): wheel order / identity changed "
+            f"across a config rebuild [{where}]: {list(old_names)} -> "
+            f"{list(new_names)}. Per-wheel state (omega, prev_compression, "
+            f"wheel_spin_angle, last_steer_per_wheel, the ray state and the "
+            f"rest pose) is carried by COLUMN INDEX, so a reordered wheel list "
+            f"would land every one of them on the wrong physical wheel — and "
+            f"the raycast sensor's ray order is fixed at build() anyway. Keep "
+            f"cfg.wheels in its build-time order, or rebuild the VehicleScene.")
+
+    @staticmethod
+    def _wheel_names(wheels) -> Optional[list]:
+        """``[w.name, ...]``, or None if any wheel is unnamed (nothing to
+        compare — an unnamed wheel list carries no identity)."""
+        names = [getattr(w, "name", None) for w in (wheels or ())]
+        return None if (not names or any(n is None for n in names)) else names
+
+    def _precheck_wheel_counts(self, snap: list) -> None:
+        """Wheel count AND wheel identity, straight off the (grouped) cfgs — no
+        construction, so it fires before a replacement driver exists.
+
+        This is the one that fires in practice; ``_check_rebuild_shapes`` is
+        the authoritative backstop behind it."""
+        for flat_i, veh in enumerate(self._vehicles):
+            st = snap[flat_i] if flat_i < len(snap) else None
+            if st is None:
+                continue
+            wheels = getattr(veh._group_cfg, "wheels", None)
+            if not wheels:
+                continue
+            new_n, old_n = len(wheels), int(st.get("n_wheels", len(wheels)))
+            if new_n != old_n:
+                raise self._wheel_count_error(flat_i, old_n, new_n,
+                                              "config precheck")
+            old_names, new_names = st.get("wheel_names"), self._wheel_names(wheels)
+            if (old_names and new_names and None not in old_names
+                    and list(old_names) != list(new_names)):
+                raise self._wheel_order_error(flat_i, old_names, new_names,
+                                              "config precheck")
+
+    def _check_rebuild_shapes(self, mvp, snap: list) -> None:
+        """Reject a rebuild that would change a vehicle's wheel count.
+
+        The raycast sensor is created with one ray per wheel at ``build()`` and
+        is NOT rebuilt here, so a vehicle whose ``cfg.wheels`` shrank produces a
+        driver that raises ``RuntimeError: The size of tensor a (3) must match
+        the size of tensor b (4)`` on its very next step. Raising here, before
+        ``self._mvp`` is replaced, keeps the working scene instead. This is the
+        authoritative check (it reads the BUILT kind's ``wheel_meta``);
+        ``_precheck_wheel_counts`` catches the same thing earlier, off the cfg,
+        to avoid constructing a driver that would only be discarded.
+
+        DEFENCE IN DEPTH: with the precheck in front of it, no user-reachable
+        input gets this far — every wheel-count change shows up in
+        ``len(cfg.wheels)`` first. It stays because it is the check that reads
+        what was actually BUILT (``resolve()`` could in principle drop or add a
+        wheel), and because the precheck skips a cfg with no ``wheels`` list.
+        The message says which one fired; the unit test drives this one
+        directly (``test_minor1_...``)."""
+        for flat_i, kind_idx, slot_idx in mvp._flat_to_kind:
+            st = snap[flat_i] if flat_i < len(snap) else None
+            if st is None:
+                continue
+            kind = mvp.kinds[kind_idx]
+            new_n = int(kind.wheel_meta.n_wheels)
+            old_n = int(st.get("n_wheels", new_n))
+            if new_n != old_n:
+                raise self._wheel_count_error(flat_i, old_n, new_n,
+                                              "rebuilt driver")
+            old_names = st.get("wheel_names")
+            new_names = self._wheel_names(kind.resolved.wheels)
+            if (old_names and new_names and None not in old_names
+                    and list(old_names) != list(new_names)):
+                raise self._wheel_order_error(flat_i, old_names, new_names,
+                                              "rebuilt driver")
+
+    def _rebind_wheel_renderer(self, mvp) -> None:
+        """Re-point the instanced wheel renderer at the NEW driver's kinds.
+
+        The renderer holds bound-method pose providers
+        (``kind.wheel_visual_transforms``). Through 1.6.1 a rebuild left them
+        bound to the discarded kind, which is never stepped again — the
+        rendered wheels stop turning permanently while the physics keeps
+        running. Raises ``ValueError`` (from ``InstancedWheelRenderer.rebind``)
+        if the kind count / K / wheel count moved, which is why it runs BEFORE
+        ``self._mvp`` is published."""
+        r = self._wheel_renderer
+        if r is None or self.solver != "batched":
+            return
+        # Units are matched to kinds POSITIONALLY (they were created in this
+        # same `mvp.kinds` order at build). That is sound only because kind
+        # ORDER is derived from the immutable vehicle list on both sides:
+        # `_ensure_grouped` buckets by `veh._kind_key` (set once, in
+        # add_vehicle, which is build-time only) in first-seen vehicle order,
+        # and MultiVehiclePhysics groups by cfg identity in that same order.
+        # If a future API ever lets `_kind_key` change after build, this must
+        # carry a kind identity on the unit instead — K and n alone would not
+        # notice two same-shaped kinds swapping places.
+        providers = [(kind.wheel_visual_transforms, kind.K,
+                      int(kind.wheel_meta.n_wheels)) for kind in mvp.kinds]
+        r.rebind(providers)
 
     # ---- accessors ----
     @property

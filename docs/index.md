@@ -21,6 +21,7 @@ Landing page. Pick the document that matches what you're doing.
 | Verify what the SDK promises about brake sign / N clamp / `i_wheel` truth / steering convention | [`physics-contracts.md`](physics-contracts.md) |
 | Author a vehicle URDF by type (naming/axes the parser needs, per-preset topology, where suspension comes from when the URDF is silent, `<dynamics>` overrides) | [`urdf-guide.md`](urdf-guide.md) |
 | Author a URDF the ray-wheel model accepts (no wheel colliders, suspension origin = wheel centre, every link inertial) | [`physics-contracts.md` §7.9](physics-contracts.md#79-urdf-contracts-for-ray-wheels-auto-corrected-since-v1122) |
+| Change a cfg AFTER `build()`, or reset a vehicle mid-rollout, without restarting its dynamics | [`physics-contracts.md` §7.12](physics-contracts.md) |
 | See what's tested and where things live | [`testing.md`](testing.md) |
 | Track what changed between versions | [`../CHANGELOG.md`](../CHANGELOG.md) |
 
@@ -89,6 +90,7 @@ The right-hand column is where the full story lives.
 | Raycast helpers | wheel ray pattern definition and shape-normalized sensor reads — `read_distances` returns `(n_envs, n_wheels)` for 1 and N envs AND for a swept-envelope fan, whose raw read is `(n_envs, n_wheels, M)` (v1.6.0) | `WheelRayPattern`, `read_distances`, `fan_height_offsets` | [`tire-and-contact.md`](tire-and-contact.md) |
 | Wheel contact model | `wheel_contact="point"` (DEFAULT, one ray per wheel) or `"swept_envelope"` (M rays reduced by the swept-circle lower envelope, so a wheel climbs an edge instead of teleporting onto it). Opt-in; the default is bit-identical to earlier releases | `VehicleScene.add_vehicle(wheel_contact=, contact_samples=)`, `WheelRayPattern(fan_samples=)` | [`tire-and-contact.md`](tire-and-contact.md), [`physics-contracts.md` §7.11](physics-contracts.md) |
 | Ray-MISS / grounded | "did this wheel's ray find ground?", against the raycaster's OWN miss sentinel rather than a fixed threshold | `Vehicle.wheels_grounded`, `all_wheels_grounded`, `MultiVehiclePhysics.grounded_list`, `is_ray_hit`, `is_ray_hit_corrected` | [`physics-contracts.md`](physics-contracts.md) §7.8, §7.10 |
+| Config rebuild / reset | re-resolve a cfg after `build()` while the vehicle keeps its runtime state, and reset per vehicle rather than per flat row. A wheel-count or wheel-order change raises; a failed rebuild keeps the previous driver and re-raises on the next step (v1.6.2) | `VehicleScene.mark_config_dirty`, `VehicleScene.reset`, `MultiVehiclePhysics.reset(vehicle_ids=)`, `MultiVehicleKindPhysics.reset(rows=)` | [`physics-contracts.md` §7.12](physics-contracts.md) |
 
 **Telemetry & rendering feed**
 

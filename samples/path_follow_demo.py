@@ -156,6 +156,14 @@ def main():
     # cfg overrides BEFORE build — with the default batched solver, cfg
     # mutations after build are ignored unless vs.mark_config_dirty() is
     # called (the resolved config is baked at build time).
+    #
+    # mark_config_dirty() REBUILDS the batched driver on the next step. From
+    # v1.6.2 that rebuild carries the vehicle's runtime state and the plant
+    # behind a PathFollower re-binds to the new driver; a structural change
+    # (wheel count / order) raises. On <= 1.6.1 it silently zeroed omega and
+    # left the follower reading a driver that is never stepped again — see
+    # docs/physics-contracts.md 7.12. Overriding before build, as here, avoids
+    # the question entirely.
     TankTuning.apply_config(tank.cfg)
     vs.build()
 

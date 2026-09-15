@@ -511,6 +511,28 @@ dt/substeps change** — the table is only valid for that exact quadruple.
 > `vehicle.physics` is `None` under the batched solver, so guarding on it
 > silently skips your overrides). The bundled demo shows the correct
 > sequence.
+>
+> **`mark_config_dirty()` under a live follower.** That call replaces the
+> batched driver on the next `step()`. From **v1.6.2** the replacement carries
+> the vehicle's runtime state (`omega`, suspension history, spin, ray state,
+> the wheel rest pose — `docs/physics-contracts.md` §7.12), and the plant
+> behind the follower re-binds itself to the new driver at the entry of
+> `predict` / `jacobian` / `solve`. A **structural** change (wheel count, K,
+> `n_envs`, member count) raises `RuntimeError` naming `mark_config_dirty`
+> instead — the unroll's tensors and the warm start are sized for the old
+> shape, so build a new `DifferentiablePlant` and a new `PathFollower` /
+> `FleetFollower` around it. Re-binding happens only at those entry points, so
+> calling `mark_config_dirty()` from another thread while the controller is
+> solving is outside the contract (you get a `RuntimeError` from the unroll's
+> freshness assertion, not a defined result).
+>
+> **On ≤ 1.6.1 this flow was broken in two ways at once**: the rebuild zeroed
+> the integrator state (measured: wheel `omega` `[-17.4207, -16.7303,
+> -17.3659, -14.2479]` → `[-8.5504, -8.1484, -6.2335, -5.8315]` in one step,
+> reference car, CPU, `dt` 0.02), and the plant kept reading the DISCARDED
+> driver, which is never stepped again — so the follower steered off a frozen
+> state. If you are pinned to an older SDK, make every cfg change before
+> `vs.build()`.
 
 ## 3. How the follower works
 
