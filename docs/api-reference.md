@@ -88,8 +88,8 @@ class VehicleScene:
     #   scene first + the main scene (viewer, if any) last so the native viewer's
     #   GL context stays current.
     def step() -> None
-    def reset() -> None
-    def mark_config_dirty() -> None      # force the batched solver to re-group next step
+    def reset() -> None                  # v1.6.2: actually resets the BATCHED driver too
+    def mark_config_dirty() -> None      # re-resolve the cfg + REBUILD the batched driver next step
 
     # --- accessors (the raw Genesis scenes are PRIVATE — not exposed) ---
     viewer                               # native viewer | None  (property)
@@ -123,6 +123,26 @@ class DynamicBody:                       # handle returned by add_dynamic
     entity_raycast                       # synced raycast target in the raycast scene (dual_scene)
     def set_pose(pos=None, quat=None)    # move a user-controlled body (raycast target follows)
 ```
+
+`reset()` zeroes the vehicles' physics state (wheel `omega`, suspension history,
+spin accumulators, ray state) and re-syncs the raycast proxies; the chassis POSE
+is not touched (place vehicles with `Vehicle.set_pos` / `set_quat`). **Through
+1.6.1 it was a no-op on the default batched solver** — `veh.physics` is `None`
+there, so only the proxy sync ran and `omega` came out of the call unchanged
+(measured `[3.0921, 3.0967, 3.0921, 3.0967]` before and after). v1.6.2
+dispatches to `MultiVehiclePhysics.reset()` as well; the same measurement now
+gives `0.0` with `_stepped_once` all False.
+
+`mark_config_dirty()` marks the vehicle/cfg configuration changed, so the next
+`step()` re-groups the vehicles into kinds and **rebuilds the batched driver**
+from the re-resolved config (an int compare when nothing changed). The rebuild
+CARRIES the runtime state of the driver it replaces — v1.6.2; through 1.6.1 it
+silently zeroed the integrator state, re-captured the wheel rest pose off a
+sagging vehicle, froze the instanced wheel renderer permanently and orphaned any
+`DifferentiablePlant`. A post-build wheel-count or wheel-order change now raises
+`ValueError`, and a failed rebuild re-raises and keeps the previous driver
+installed. Full contract:
+[`physics-contracts.md` §7.12](physics-contracts.md).
 
 `raycast_mode="dual_scene"` (default) raycasts static terrain in a separate scene
 (BVH built once, shared across envs); `"single_scene"` is the classic one scene.
@@ -325,9 +345,21 @@ class VehiclePhysics:
     def step(inputs: VehicleStepInputs, distances: torch.Tensor | None = None) -> None
     def reset(env_ids: torch.Tensor | None = None) -> None
     def set_ray_miss_value(miss: float | None, *, sensor=None) -> None   # v1.5.2
+    def export_runtime_state(rows=None) -> dict                         # v1.6.2
+    def load_runtime_state(state: dict, rows=None) -> None              # v1.6.2
     wheels_grounded      # property: (n_envs, n_wheels) bool             # v1.5.2
     all_wheels_grounded  # property: (n_envs,) bool                      # v1.5.2
 ```
+
+`export_runtime_state` / `load_runtime_state` are the state-carry pair a
+`VehicleScene` config rebuild runs through (v1.6.2). `rows` indexes the FLAT
+batch (`env * K + slot` for a kind's proto, `env` for a plain driver); `None`
+takes every row; every tensor is cloned. The snapshot holds the integrator
+state, the ray state, the read-layer diagnostics and the wheel rest pose — the
+lists are `core.RUNTIME_STATE_ATTRS` / `RUNTIME_STATE_ROW_ATTRS` /
+`RUNTIME_STATE_SCALARS` / `REST_POSE_ATTRS` — and NOT anything re-derived from
+the config. A wheel-count or row-count mismatch raises `ValueError`
+(§7.12 in [`physics-contracts.md`](physics-contracts.md)).
 
 `step(distances=...)` injects externally-measured wheel-ground distances
 (shape `(n_envs, n_wheels)`) instead of reading `self.sensor` — the hook
@@ -352,7 +384,19 @@ class MultiVehiclePhysics:
     def step(inputs_list: list[VehicleStepInputs]) -> None
     def distances_list() -> list[torch.Tensor]   # per vehicle (n_envs, n_wheels) float
     def grounded_list()  -> list[torch.Tensor]   # per vehicle (n_envs, n_wheels) bool, v1.5.2
+    def reset(vehicle_ids=None) -> None          # per-VEHICLE reset (v1.6.2)
+    build_id: int                                # bumped on every construction (staleness key)
 ```
+
+`reset(vehicle_ids=...)` (new in v1.6.2) takes **flat vehicle indices** — the
+order `vehicles` was passed in — and `None` resets every vehicle. Each vehicle is
+expanded to its own kind's rows (`env * K + slot` over every env) before the kind
+is reset, so every env's copy of the named vehicles is reset. This is the
+per-vehicle API; `MultiVehicleKindPhysics.reset` is the row-level primitive
+below. It resets physics state plus the spin accumulators of both visual
+writers; the batched writer's suspension slew origin is kind-wide and is
+deliberately left alone on a partial reset, so a reset vehicle SLEWS there and
+SNAPS on the per-entity fallback path (§7.12). Chassis pose is never touched.
 
 `MultiVehiclePhysics` groups its vehicles into one `MultiVehicleKindPhysics`
 per kind (same URDF + same `cfg` instance); that class is exported for the rare
@@ -362,7 +406,16 @@ directly:
 ```python
 class MultiVehicleKindPhysics:
     def __init__(scene, entities, sensors, config: VehicleConfig, n_envs: int = 1)
+    def reset(rows=None) -> None    # FLAT env*K+slot rows, NOT vehicle indices (v1.6.2)
 ```
+
+**Migration (v1.6.2):** `reset`'s parameter is now `rows`. It was called
+`vehicle_ids` through 1.6.1 while always meaning flat `env * K + slot` rows, so
+a "per-vehicle" reset at `n_envs > 1` only reset env 0's copy (measured at
+K=2 / `n_envs`=2: `_stepped_once` `[True, False, True, True]` for
+`reset([1])`). Passing `vehicle_ids=` by keyword now raises `TypeError` naming
+the replacement rather than quietly running wrong-meaning code; use
+`MultiVehiclePhysics.reset(vehicle_ids=...)` for per-vehicle semantics.
 
 Prefer `MultiVehiclePhysics` — it does the grouping and the flat-order
 bookkeeping for you.

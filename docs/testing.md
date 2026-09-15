@@ -8,9 +8,10 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-436 tests, almost all pure-Python. Runs in ~88s on CPU (measured at v1.6.1 with
-`python -m pytest tests/ -q`; the handful of real-`VehicleScene` rollouts
-dominate — collection alone is ~5s). The reference
+450 tests, almost all pure-Python. Runs in ~116s on CPU (measured at v1.6.2 with
+`python -m pytest tests/ -q`, WSL2, genesis-world 1.4.0; it was ~88s at v1.6.1 —
+the 14 real-`VehicleScene` rebuild tests added in v1.6.2 account for the
+difference, since those rollouts dominate; collection alone is ~5s). The reference
 URDFs the parsing tests read live in `tests/data/` (self-contained since v1.2.0).
 
 A handful build a real `VehicleScene` on the CPU backend (the batched-visual /
@@ -75,6 +76,7 @@ CI without GPU.
 | Swept-envelope in a real scene | `test_swept_envelope.py` | `single_scene` + M=9 does not self-hit and does not launch: same ride height and wheel distances as the point contact on flat ground, raw read `(1, 4, 9)` vs `(1, 4)` |
 | The DEFAULT path did not move by one bit | `test_fan_default_identity.py` | a 200-step Genesis rollout of the reference car in the default configuration compared with `torch.equal` — **not `allclose`** — against wheel distances and the final pose captured from the pre-v1.5.1 tree (commit `20f7380`). Skips itself off genesis-world 1.4.0, because the baseline is a bit-pattern: re-capture, do not loosen. Also drives the M > 1 branch through a stub sensor, so the file witnesses the branch the rollout does not take |
 | Raycast-mode benchmark harness | `test_bench_raycast_mode.py` | 61 tests, all pure Python: the shipped entry point `main(argv, runner=fake)` is driven with a STUB runner, so the whole schedule (even/adjacent pairing, alternating slot order), the validity + x-margin gates, the cross-worker invariants, `paired_ratios` / `split_groups` and the fail-closed publication rule run without spawning a process. The only test in the suite that patches `genesis.init` — to RAISE, proving the PARENT path never calls it; that is NOT a claim that genesis is absent from the parent (`__init__.py` imports it eagerly via `control/plant.py`). Also pins `verdicts()` backward compatibility: no `terrain_half` key -> bound 18.0 and "±20 m", `terrain_half=(320, 320)` -> 318.0 |
+| Config rebuild carries the runtime state | `test_rebuild_state_carry.py` | 14 tests, all on a real CPU `VehicleScene` (`samples/urdf/car_4w.urdf`, `dt = cfg.recommended_dt`, substeps 10, friction 1.0); two of them add a 160×120 offscreen camera, which is what turns the wheel-visual path on headless. Nothing skips. Covers: `torch.equal` copy fidelity of every carried attribute; 40-step continuity against a control scene built in the same process; the wheel rest pose (a regression reproduces z `0.3000` → `0.1499`); `VehicleScene.reset()` actually resetting the batched driver; a post-build wheel-count change and a wheel-ORDER change both raising `ValueError` with `_grouped_version` rolled back so the next step raises the same thing; the authoritative post-construction check driven directly; `MultiVehicleKindPhysics.reset(rows=)` vs `MultiVehiclePhysics.reset(vehicle_ids=)` semantics at K=2 / `n_envs`=2 and the `TypeError` on `vehicle_ids=`; a per-vehicle reset not wiping another vehicle's visuals; the instanced renderer rebind, including that the FIRST frame after it does not raise; plant freshness by identity AND by solve equality, plus `RuntimeError` on a structural change; the whole carry again under `raycast_mode="single_scene"`; and that one `mark_config_dirty()` rebuilds exactly ONCE over the next 10 steps |
 | Server subpackage import + steer-key mapping | `test_server_import.py` | `genesis_vehicle.server` imports; `steerScale`/`maxSteerRad` mapping-key resolution (auto-skips without genesis/pythonosc) |
 
 ## Public-surface import smoke check

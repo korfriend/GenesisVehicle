@@ -10,6 +10,276 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.6.2] — 2026-09-15
+
+**`VehicleScene.mark_config_dirty()` — the documented way to make a post-`build()`
+cfg change take effect — silently restarted the vehicle.** One call reached
+seven distinct defects: it zeroed the integrator state mid-drive (wheel `omega`
+lost 51–60 % in one step), re-captured the wheel REST pose off a vehicle whose
+suspension had sagged (a permanent 0.150 m visual reference error), left the
+instanced wheel renderer bound to a kind that is never stepped again (**the
+rendered wheels stop turning permanently**), left `DifferentiablePlant` reading
+that same dead driver, and consumed the dirty flag even when the rebuild failed.
+Separately, `VehicleScene.reset()` reset **nothing** on the default batched
+solver, and `MultiVehicleKindPhysics.reset`'s `vehicle_ids` parameter had always
+taken flat rows, so a per-vehicle reset at `n_envs > 1` only half-worked. All
+seven are fixed here, and the last two carry API changes — see **Migration**.
+
+| abbr | meaning |
+|---|---|
+| MVP | `MultiVehiclePhysics` — the batched multi-vehicle driver a `VehicleScene(solver="batched")` owns |
+| K | vehicles of one kind in one scene (the L2 batch axis) |
+| NK | flat batch rows, `n_envs * K`, env-major / vehicle-minor (`env * K + slot`) |
+| n_envs / L3 | the parallel-scenario batching axis |
+| proto | the single `VehiclePhysics` instance a kind batches all its vehicles through |
+| SFL | `StaticFrictionLock` — the hold-at-rest stability hook |
+| PD | proportional-derivative controller (the `visual_susp_mode="control"` joint path) |
+| rest pose | `_rest_wheel_pos_local` / `_rest_wheel_quat_local`, the wheel-visual reference captured at construction |
+| `comp_rate` | suspension compression rate, `(compression - prev_compression)/dt` |
+
+**Measurement conditions for every number below**, unless stated otherwise:
+CPU / WSL2, genesis-world 1.4.0, `dt` 0.02, `substeps=10`, `raycast_mode="dual_scene"`,
+`car_4w_rwd_ackermann(stability="control")` on `samples/urdf/car_4w.urdf`,
+friction 1.0 ground, `n_envs=1`, 60 steps at throttle 0.5 / steer 0.1, then
+`mark_config_dirty()` + one step. Equality comparisons are `torch.equal`, not a
+tolerance: re-resolving the same config was measured bit-identical, and two
+`VehicleScene`s built in one process match bit-for-bit over 40 steps.
+
+### The seven defects
+
+**1. The rebuild zeroed the integrator state.** `_build_mvp()` constructed a
+fresh `MultiVehiclePhysics` and dropped everything the old one held: `omega`,
+`prev_compression`, `_prev_init`, `_stepped_once`, `wheel_spin_angle`,
+`last_steer_per_wheel` and the ray state. Measured wheel `omega`
+`[-17.4207, -16.7303, -17.3659, -14.2479]` → `[-8.5504, -8.1484, -6.2335,
+-5.8315]` (51–60 % lost in one step) with a wheel-spin jump of up to 2.08 rad.
+The stability hooks survived the rebuild (same object) while the physics under
+them was zeroed. **Now**: the old driver is snapshotted per vehicle, and the
+state is written back into the new one matched by flat vehicle slot
+(`VehicleScene._build_mvp` → `MultiVehiclePhysics.import_state` →
+`MultiVehicleKindPhysics.import_slot` → `VehiclePhysics.load_runtime_state`).
+The same run continues to `[-17.3417, -16.6906, -14.8659, -16.6363]` and the
+spin delta is `|omega| * dt`.
+
+**2. The wheel rest pose was re-captured from a SAGGING vehicle.** The rest pose
+is the wheel-visual reference and is meant to be captured once, at construction,
+before the suspension settles. A rebuild re-ran that capture against the live
+link pose of a vehicle whose suspension dof had already sagged −0.1501 m:
+`_rest_wheel_pos_local` z `0.3000` → `0.14989` (Δ 0.150 m, permanent) and the
+rest quaternion picked up a tilt (`(1, 0, 0, 0)` → `(0.99999982, -6.0e-8,
+8.17e-5, 7.38e-4)`). Headless-reproducible. **Now** carried, not recaptured:
+z back to `0.3000` with an identity quaternion. A snapshot whose own capture had
+FAILED holds `None` and is skipped, so it cannot overwrite a good capture.
+
+**3. `VehicleScene.reset()` did not reset physics state on the batched solver.**
+Not a complete no-op — `veh._sync_proxy()` did run — but `veh.physics` is `None`
+under `solver="batched"` (the state lives in the shared MVP), so the physics
+reset loop had nothing to call: `omega` `[3.0921, 3.0967, 3.0921, 3.0967]`
+unchanged across the call, `_stepped_once` still `True`. And
+`MultiVehiclePhysics` had no `reset` method at all, so there was nothing to
+dispatch to. Its docstring had promised a reset since it was written. **Now**
+`VehicleScene.reset()` dispatches to `self._mvp.reset()` and the new
+`MultiVehiclePhysics.reset(vehicle_ids=None)` exists: the same measurement gives
+`0.0` and `_stepped_once` all False. This was the release's own corrected
+promise — see **Wrong statements corrected**.
+
+**4. The instanced wheel renderer stayed bound to the dead kind, so the rendered
+wheels froze PERMANENTLY.** The renderer holds bound-method pose providers
+(`kind.wheel_visual_transforms`). A rebuild left them pointing at the discarded
+kind, which is never stepped again, while the physics kept running — so the car
+drives and its wheels do not turn, for the rest of the process. Reproduced
+headless with one offscreen camera (the render path turns on for
+`show_viewer or any camera`): 10 steps after the rebuild the old proto's spin
+was frozen at `[0.3005, 0.3005, 0.5585, 0.5585]` against the live kind's
+`[0.3867, 0.3864, 0.6415, 0.6420]`. **Now** `VehicleScene._rebind_wheel_renderer`
+re-points each unit through the new `InstancedWheelRenderer.rebind(providers)`,
+which validates K and the wheel count for EVERY unit before assigning any of
+them and raises `ValueError` otherwise — `update()` reshapes each read to the
+unit's `(K, n)` fixed at `add_unit`, so a changed wheel count would turn the
+freeze into a reshape error one frame later. Nodes are not recreated; only the
+pose buffers are rewritten, and the first frame after a rebind is asserted to
+complete without raising.
+
+**5. `DifferentiablePlant` / `PathFollower` kept reading the dead driver.**
+`_StateSource` caches the proto, the kind, the entities, the row indices,
+`resolved`, `wheel_meta` and `dt` at construction; after a rebuild all of them
+belonged to the discarded driver (`plant.physics is <new proto>` → False,
+likewise kind and `resolved`). The follower then steered off a frozen state.
+This one is not hypothetical: `docs/path-following.md` recommends exactly the
+flow that triggers it, which is why that section is rewritten in this release.
+**Now** the source re-binds at the ENTRY of `predict`, `jacobian` and `solve` —
+before their `_snapshot()`, which already reads `wheel_meta` / `omega` /
+`chassis`. It is deliberately NOT re-bound from inside a solve: `_sync_hooks`
+only ASSERTS `build_id` did not move and raises `RuntimeError` if it did,
+because re-binding mid-Newton would mix an old snapshot with new indices and
+produce one silently wrong inverse. A structural change (wheel count, K,
+`n_envs`, member count) raises `RuntimeError` naming `mark_config_dirty` and
+telling you to build a new plant. On a re-bind the prediction hook copies are
+re-taken, so a changed stability-hook set is followed. Cost on the normal path:
+one int compare against `MultiVehiclePhysics.build_id`.
+
+**6. `MultiVehicleKindPhysics.reset(vehicle_ids)` actually took FLAT NK ROWS.**
+It forwarded straight to `VehiclePhysics.reset(env_ids)`, whose argument is a
+flat `env * K + slot` row. At `n_envs > 1` a caller resetting "vehicle 1" reset
+env 0's copy only: K=2, `n_envs`=2, `reset([1])` left `_stepped_once`
+`[True, False, True, True]`. The repo's own test already documented the flat
+meaning; the parameter NAME was the lie. The visual side was worse in the other
+direction — the per-entity and batched visual resets ran with NO index, so
+resetting one row wiped every vehicle of the kind (vehicle 0's batched spin
+accumulator `[0.4316, 0.3281, -2.7312, 2.6947]` → all zeros while only vehicle 1
+was asked for, K=2 / `n_envs`=2). **Now** the parameter is `rows=`, the visual
+resets follow the same rows via the new `KindVisualBatch.reset_slot_visual_state`,
+and per-vehicle semantics live in `MultiVehiclePhysics.reset(vehicle_ids=)`.
+
+**7. A FAILED rebuild consumed the dirty flag.** `_ensure_grouped()` stamps
+`_grouped_version` before `_build_mvp()` runs, so a rebuild that raised was
+reported once and then silently accepted: the old driver kept running under a
+config the user believed had taken effect, with no retry and no second error.
+**Now** `step()` rolls `_grouped_version` back and re-raises, so the next step
+retries and reports the same error. The new driver is also built into a local
+and published to `self._mvp` only after validation, the state import and the
+renderer rebind all succeed — a failed rebuild leaves the PREVIOUS driver
+installed and stepping, not a half-built zombie.
+
+### Before / after
+
+| quantity | ≤ 1.6.1 after `mark_config_dirty()` + 1 step | v1.6.2 |
+|---|---|---|
+| wheel `omega` (rad/s) | `[-8.5504, -8.1484, -6.2335, -5.8315]` | `[-17.3417, -16.6906, -14.8659, -16.6363]` (continues from `[-17.4207, -16.7303, -17.3659, -14.2479]`) |
+| wheel spin jump | up to 2.08 rad in one step | `abs(omega) * dt` |
+| rest pose z (m) | `0.14989` (Δ 0.150 from truth) | `0.3000`, identity quaternion |
+| rendered wheel spin, +10 steps | frozen `[0.3005, 0.3005, 0.5585, 0.5585]` | `[0.3867, 0.3864, 0.6415, 0.6420]` (tracks the live kind) |
+| `plant.src.physics is` live proto | False | True |
+| `omega` across `VehicleScene.reset()` | `[3.0921, 3.0967, 3.0921, 3.0967]` unchanged | `0.0`, `_stepped_once` all False |
+| `_stepped_once` after "reset vehicle 1", K=2 / `n_envs`=2 | `[True, False, True, True]` | `[True, False, True, False]` |
+| a failed rebuild | dirty flag consumed, old driver runs on silently | `_grouped_version` rolled back, error re-raised each step |
+
+### This release did not cause it — v1.5.0 is affected identically
+
+The field team's deployed **v1.5.0 has the same defect**. Release commit
+`8916b18` was extracted with `git archive` into a scratch tree (the checkout and
+`.git` untouched, no worktree metadata), its `[genesis_vehicle] v1.5.0` banner
+confirmed, and the same probe run against it — only the `_stepped_once` line
+adapted, since it was a scalar bool before v1.5.2. The `omega` loss is
+**bit-identical** to 1.6.1: before
+`[-17.420734405517578, -16.730289459228516, -17.36590576171875, -14.24789047241211]`,
+after `[-8.550352096557617, -8.14843463897705, -6.233464241027832,
+-5.831526279449463]`. Not everything is identical — the rest-pose z differs in
+the seventh decimal (`0.1498817` on v1.5.0 vs `0.1498868` on 1.6.1) — so read
+this as "the same defect with the same magnitude", not "the same numbers
+everywhere".
+
+**Workaround for anyone pinned below 1.6.2:** never call `mark_config_dirty()`
+while the vehicle is driving; make every cfg change before `vs.build()`. And do
+not rely on `VehicleScene.reset()` under `solver="batched"` — it does nothing
+there.
+
+### Migration — MANDATORY reading if you call any of these
+
+- **`mark_config_dirty()` no longer resets state.** If your code used it as a
+  reset (plausible, since `VehicleScene.reset()` was dead on the batched
+  solver), it will now keep driving through the rebuild. Call `vs.reset()` —
+  which actually works from this release.
+- **`MultiVehicleKindPhysics.reset`'s parameter is now `rows=`**, a flat
+  `env * K + slot` row index. Passing `vehicle_ids=` by keyword raises
+  `TypeError` naming the replacement. There is deliberately NO deprecation
+  alias: the old name meant rows, the sibling class's `vehicle_ids` means
+  vehicles, and shipping two same-named parameters with different meanings is
+  what caused the defect. Positional calls are unaffected — the meaning did not
+  change, only the name.
+- **Per-vehicle resets go through the new
+  `MultiVehiclePhysics.reset(vehicle_ids=...)`**, which expands each vehicle to
+  all of its `env * K + slot` rows.
+- **A post-build wheel-count OR wheel-order change now raises `ValueError`**
+  from a config precheck that runs before any replacement driver is constructed
+  (so it has no `set_dofs_kp` / `set_dofs_kv` side effect on the live entity).
+  The raycast sensor's ray count and order are fixed at `build()`, so such a
+  scene used to die one step later with a tensor-size `RuntimeError` anyway.
+  Note the guard compares wheel NAMES, so a pure rename also raises
+  (fail-closed, intended), and it is skipped entirely when any
+  `cfg.wheels[i].name` is `None` — an unnamed wheel list carries no identity to
+  compare. Rebuild the `VehicleScene` instead.
+- **A structural change under a live `DifferentiablePlant` raises
+  `RuntimeError`** naming `mark_config_dirty`. Build a new plant (and a new
+  `PathFollower` / `FleetFollower` around it).
+
+### Wrong statements corrected
+
+- **`WheelJointInternalSync.reset_visual_state`**'s comment said the per-env
+  branch would "forget only those rows" of the suspension slew origin. The code
+  never did that — it set `_susp_set_prev` / `_susp_ctrl_prev` to `None`, i.e.
+  dropped the origin WHOLE, because "no origin" is the tensor being `None` and
+  is not expressible per row. The comment now says so, and names the scope
+  (that one vehicle's own writer; other vehicles of the kind are untouched
+  either way).
+- **`VehicleScene.reset()`'s docstring** promised a reset of per-vehicle physics
+  state. On the default batched solver it performed none (defect 3). The
+  docstring now states what the method does, and states plainly that through
+  1.6.1 it did not.
+- **`docs/physics-contracts.md` §7.6** described the one-frame
+  full-compression host-capture gap as reachable only from user-written RL and
+  host render harnesses. That was true when written and is no longer: the
+  revived `VehicleScene.reset()` and the new
+  `MultiVehiclePhysics.reset(vehicle_ids=)` are top-level SDK APIs that reach
+  it. The shipped OSC server remains exempt — both `reset` command handlers
+  re-pose with `set_pos` / `set_quat` and never call `physics.reset()` or
+  `VehicleScene.reset()`, verified at this release. The claim is corrected in
+  place in §7.6 and in the comment at `server/l3_runtime.py`.
+
+### New contract — `docs/physics-contracts.md` §7.12
+
+What a rebuild preserves and what it refuses, naming the enforcing path.
+Also recorded there, because the carry cannot cover them:
+
+- Instance attribute patches on the driver are lost. The OSC server
+  monkey-patches `vs.physics.step` on the instance
+  (`server/physics_server.py:709-732`, `server/l3_runtime.py:417-440`);
+  unreachable today because the server never marks dirty, but user code that
+  patches the driver must re-apply.
+- A post-build `set_aero_drag` on a HAND-WRITTEN `ChassisConfig(mass=None)` is
+  lost — `resolve()` copies the chassis in that one branch. Every bundled preset
+  fills `mass`, so the branch does not fire on the supported path (measured).
+- **Partial-reset visual contract.** Per vehicle: the spin accumulators of both
+  writers. Kind-wide and deliberately left alone: the batched writer's
+  suspension slew origin, because dropping it would snap every OTHER vehicle of
+  the kind — a real joint PD transient under `visual_susp_mode="control"`, not a
+  cosmetic jump. A reset vehicle therefore SLEWS on the batched path and SNAPS
+  on the per-entity fallback path; a full reset snaps on either.
+- **Changing suspension constants across a rebuild.** `k_susp`,
+  `c_compression`, `c_extension` are unconditionally clean: the carried
+  `prev_compression` feeds a purely kinematic rate that the new coefficients
+  simply multiply. Changing `radius` or `rest_stroke` shifts `rest_d` and yields
+  ONE step of spurious `comp_rate ≈ Δrest_d/dt`, bounded by
+  `wheel_meta.comp_rate_clamp` (30.0 in the car and tank presets and in `DEFAULT_COMP_RATE_CLAMP`) and
+  self-correcting on the next step. **No test covers a constant change across a
+  rebuild** — that paragraph is reasoning from the formula, not a measurement.
+- **Known gap, separately ticketed:** `StaticFrictionLock`'s contact anchors
+  (`_d_long` / `_d_lat` / `_was_active`) live on the hook instance and are
+  therefore kind-wide. NO reset path touches them, so a
+  reset-then-reposition-then-brake sequence can reuse a stale anchor for a
+  moment.
+- The renderer's unit↔kind positional matching rests on `_kind_key` being
+  immutable after build (it is: `add_vehicle` is build-time only). K and the
+  wheel count are validated on rebind, but they would not notice two
+  same-shaped kinds swapping places.
+
+### Tests
+
+**436 → 450.** The 14 new tests are `tests/test_rebuild_state_carry.py`, which
+builds real CPU `VehicleScene`s (two of them add a 160×120 offscreen camera to
+turn the wheel-visual path on headless) and skips nothing: copy fidelity of
+every carried attribute, 40-step continuity against a control scene built in the
+same process, the rest pose, a working `VehicleScene.reset()`, both structural
+refusals plus the authoritative backstop check, the row-vs-vehicle reset
+semantics in both classes, the visual locality of a per-vehicle reset, the
+renderer rebind (including that the first frame after it does not raise), plant
+freshness by both identity and solve equality, the whole carry again under
+`raycast_mode="single_scene"`, and that one `mark_config_dirty()` causes exactly
+ONE rebuild over the following 10 steps — after the fix the symptom is gone, so
+a "rebuilds every step" regression would otherwise be invisible.
+
+---
+
 ## [1.6.1] — 2026-09-10
 
 **The order-free raycast-mode benchmark the v1.5.1 retraction asked for now

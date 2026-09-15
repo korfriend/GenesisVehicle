@@ -147,6 +147,15 @@ See [`stability-profiles.md`](stability-profiles.md) for the why and the how.
 Every state tensor is `(n_envs, n_wheels)` or `(n_envs, 3/4)`. Single-env
 (`n_envs=1`) is just a special case. Scalar OR `(n_envs,)` tensor inputs are
 both accepted. Use `physics.reset(env_ids=...)` for partial reset (RL / MPPI).
+Under a `VehicleScene(solver="batched")` scene the state lives in the shared
+`MultiVehiclePhysics` instead (`veh.physics` is `None`), so reset through
+`vs.reset()` — every vehicle — or `vs.physics.reset(vehicle_ids=[...])` — those
+vehicles, all envs. `MultiVehicleKindPhysics.reset(rows=...)` is the row-level
+primitive underneath, and its argument is a FLAT `env * K + slot` row, not a
+vehicle index. Both APIs are v1.6.2; see
+[`physics-contracts.md` §7.12](physics-contracts.md) for what a partial reset
+does and does not touch (the batched writer's suspension slew origin is
+kind-wide and is deliberately left alone).
 
 There are three orthogonal batching axes:
 

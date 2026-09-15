@@ -251,6 +251,37 @@ class VisualPartsTransforms:
     wheel_quat: torch.Tensor         # (n_envs, n_wheels, 4)  wxyz
 
 
+#: Per-wheel runtime tensors carried across a config rebuild, all shaped
+#: ``(batch, n_wheels)`` and allocated together in ``VehiclePhysics.__init__``.
+#: The first four are INTEGRATOR state (dropping them restarts the wheel
+#: dynamics mid-drive — the v1.6.2 defect); the rest are read-layer
+#: diagnostics carried in the same loop because they cost one clone each and a
+#: reader between the rebuild and the next step would otherwise see zeros.
+#: Used by :meth:`VehiclePhysics.export_runtime_state` /
+#: :meth:`VehiclePhysics.load_runtime_state`.
+RUNTIME_STATE_ATTRS = (
+    "omega", "prev_compression",
+    "last_distances", "last_hit",
+    "wheel_spin_angle", "last_steer_per_wheel",
+    "last_compression", "last_N", "last_F_long", "last_F_lat",
+    "last_T_drive", "last_T_brake", "last_kappa", "last_alpha",
+)
+
+#: ``(batch,)``-shaped runtime state (one entry per flat batch row).
+RUNTIME_STATE_ROW_ATTRS = ("_stepped_once",)
+
+#: Batch-wide scalars carried with the tensors.
+RUNTIME_STATE_SCALARS = ("_prev_init",)
+
+#: Rest-pose constants captured ONCE at construction, while the suspension is
+#: still at zero. A rebuild re-captures them from a SAGGING vehicle, which is
+#: why they are carried rather than recomputed (measured: z 0.3000 → 0.1499).
+#: ``load_runtime_state`` SKIPS a ``None`` source: ``__init__`` leaves these
+#: None when ``_capture_rest_wheel_pose`` raised, and overwriting the new
+#: instance's good capture with that None would break the visual getters.
+REST_POSE_ATTRS = ("_rest_wheel_pos_local", "_rest_wheel_quat_local")
+
+
 class VehiclePhysics:
     """Top-level vehicle physics driver. One instance per vehicle entity."""
 
@@ -558,6 +589,108 @@ class VehiclePhysics:
         self._stepped_once[idx] = False
         if self.visual is not None:
             self.visual.reset_visual_state(idx)
+
+    # -----------------------------------------------------------------
+    # Runtime-state carry (config rebuild) — v1.6.2
+    # -----------------------------------------------------------------
+    def _row_index(self, rows: Optional[Any]) -> Optional[torch.Tensor]:
+        if rows is None:
+            return None
+        idx = torch.as_tensor(rows, device=self.dev)
+        if idx.dtype == torch.bool:
+            idx = torch.nonzero(idx, as_tuple=False).flatten()
+        return idx.to(dtype=torch.long)
+
+    def export_runtime_state(self, rows: Optional[Any] = None) -> dict:
+        """Snapshot the runtime state a config rebuild must carry over.
+
+        ``rows`` is an index into the FLAT batch (``env * K + slot`` for a
+        multi-vehicle kind's proto, ``env`` for a plain driver); ``None`` takes
+        every row. Every tensor is cloned, so the snapshot survives the old
+        driver being discarded.
+
+        What is in it: :data:`RUNTIME_STATE_ATTRS`,
+        :data:`RUNTIME_STATE_ROW_ATTRS`, :data:`RUNTIME_STATE_SCALARS` and
+        :data:`REST_POSE_ATTRS`, plus ``n_wheels`` / ``n_rows`` so
+        :meth:`load_runtime_state` can reject a mismatched target. NOT in it:
+        anything re-derived from the config (``resolved``, ``wheel_meta``,
+        hooks, ``dt``, the ray-miss sentinel) — re-resolution is the point of a
+        rebuild."""
+        idx = self._row_index(rows)
+
+        def _g(t):
+            return (t.detach().clone() if idx is None
+                    else t.detach()[idx].clone())
+
+        state = {name: _g(getattr(self, name)) for name in RUNTIME_STATE_ATTRS}
+        for name in RUNTIME_STATE_ROW_ATTRS:
+            state[name] = _g(getattr(self, name))
+        for name in RUNTIME_STATE_SCALARS:
+            state[name] = bool(getattr(self, name))
+        for name in REST_POSE_ATTRS:
+            v = getattr(self, name, None)
+            state[name] = None if v is None else v.detach().clone()
+        state["n_wheels"] = int(self.wheel_meta.n_wheels)
+        state["n_rows"] = int(self.n_envs if idx is None else int(idx.numel()))
+        # Wheel IDENTITY, in column order. Every per-wheel tensor above is
+        # carried by COLUMN INDEX, so a destination whose wheels are the same
+        # COUNT in a different ORDER would silently land omega / compression /
+        # spin / rest pose on the wrong physical wheel. The consumer
+        # (VehicleScene._precheck_wheel_counts) compares this and refuses.
+        state["wheel_names"] = [getattr(w, "name", None)
+                                for w in self.resolved.wheels]
+        return state
+
+    def load_runtime_state(self, state: dict, rows: Optional[Any] = None) -> None:
+        """Write a :meth:`export_runtime_state` snapshot back into this driver.
+
+        ``rows`` selects the destination rows of the FLAT batch, exactly as on
+        export. Raises ``ValueError`` when the wheel count or the row count
+        differs — the per-wheel tensors would not line up, and the wheel count
+        is fixed at build time by the raycast sensor anyway (see
+        ``docs/physics-contracts.md`` §7.12).
+
+        The rest pose is copied only when the snapshot HAS one: a source whose
+        ``_capture_rest_wheel_pose`` failed carries ``None``, which must not
+        overwrite this instance's good capture."""
+        n = int(self.wheel_meta.n_wheels)
+        src_n = int(state.get("n_wheels", n))
+        if src_n != n:
+            raise ValueError(
+                f"runtime-state wheel count {src_n} != this driver's {n}; the "
+                f"wheel count is fixed at build time (the raycast sensor's ray "
+                f"count is), so the state cannot be carried")
+        idx = self._row_index(rows)
+        want = int(self.n_envs if idx is None else int(idx.numel()))
+        src_rows = int(state.get("n_rows", want))
+        if src_rows != want:
+            raise ValueError(
+                f"runtime-state row count {src_rows} != destination {want} "
+                f"(batch rows are env * K + slot)")
+
+        for name in RUNTIME_STATE_ATTRS + RUNTIME_STATE_ROW_ATTRS:
+            src = state.get(name)
+            if src is None:
+                continue
+            dst = getattr(self, name)
+            src = src.to(device=dst.device, dtype=dst.dtype)
+            if idx is None:
+                dst.copy_(src)
+            else:
+                dst[idx] = src
+        if idx is None:
+            self._prev_init = bool(state.get("_prev_init", self._prev_init))
+        else:
+            # Partial load: _prev_init is batch-wide ("distances have been
+            # populated"), so ANY carried row that had stepped initialises it.
+            self._prev_init = bool(self._prev_init) or bool(
+                state.get("_prev_init", False))
+        for name in REST_POSE_ATTRS:
+            src = state.get(name)
+            if src is None:
+                continue
+            setattr(self, name, src.detach().clone().to(device=self.dev,
+                                                        dtype=self.fdt))
 
     def link_transforms(self, frame: str = "parent", *, envs_idx: Optional[Any] = None):
         """Per-link transforms of this vehicle's entity in ``frame``.

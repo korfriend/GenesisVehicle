@@ -254,7 +254,24 @@ class _StateSource:
             raise ValueError("DifferentiablePlant needs at least one vehicle")
         envs = ([int(env_idx)] if np.ndim(env_idx) == 0
                 else [int(e) for e in env_idx])
+        self._sources = sources
+        self._envs_arg = envs
+        # The VehicleScene behind these handles, if any: it is what can REPLACE
+        # the driver under us (VehicleScene._build_mvp). A bare VehiclePhysics
+        # source has no scene and no staleness concept.
+        self._scene = next((getattr(s, "_scene", None) for s in sources
+                            if getattr(s, "_scene", None) is not None), None)
+        self._bound_build_id = None
+        self._bind()
 
+    # -- binding / freshness ---------------------------------------------------
+    def _bind(self) -> None:
+        """(Re)resolve the live driver objects for this source's members.
+
+        Everything here is derived from the CURRENT scene state, so calling it
+        again after a rebuild re-points the source at the new kind/proto. The
+        member set (which vehicles, which envs) is fixed at construction."""
+        sources, envs = self._sources, self._envs_arg
         parts = [self._resolve(s) for s in sources]
         physics = parts[0][0]
         if any(p[0] is not physics for p in parts):
@@ -288,6 +305,70 @@ class _StateSource:
         self.env_idx = int(self.envs[0])
         self.row = int(rows[0])
         self.entity = self.entities[0]
+        self._bound_build_id = self._current_build_id()
+
+    def _current_build_id(self):
+        """The scene's current batched-driver id, or ``None`` when there is
+        nothing that can go stale: a bare ``VehiclePhysics`` source, or a
+        ``VehicleScene(solver="per_vehicle")`` (whose ``_mvp`` is None and whose
+        per-vehicle drivers are never rebuilt)."""
+        scene = self._scene
+        if scene is None:
+            return None
+        mvp = getattr(scene, "_mvp", None)
+        if mvp is None:
+            return None
+        return getattr(mvp, "build_id", None)
+
+    def ensure_fresh(self) -> bool:
+        """Re-bind to the scene's CURRENT driver if it was rebuilt; return True
+        iff anything was re-bound.
+
+        ``VehicleScene.mark_config_dirty()`` + ``step()`` replaces the batched
+        driver, and everything this source caches (proto, kind, entities, row
+        indices, ``resolved``, ``wheel_meta``, ``dt``) belongs to the DISCARDED
+        one — through 1.6.1 the plant kept predicting off a driver that is
+        never stepped again. The check is one int compare on the normal path.
+
+        Raises ``RuntimeError`` when the rebuild changed the SHAPE of the
+        problem (wheel count, K, n_envs, member count): the unroll's tensors
+        and the warm start are sized for the old shape, so re-binding would be
+        a silent lie. Build a new plant."""
+        bid = self._current_build_id()
+        if bid is None or bid == self._bound_build_id:
+            return False
+        before = (int(self.wheel_meta.n_wheels), int(self.K),
+                  int(self.n_envs), int(self.n_members))
+        parts = [self._resolve(s) for s in self._sources]
+        physics = parts[0][0]
+        after = (int(physics.wheel_meta.n_wheels), int(parts[0][4]),
+                 int(getattr(physics, "n_envs", 1)),
+                 len(self._envs_arg) * len(parts))
+        if after != before:
+            raise RuntimeError(
+                "the vehicle's structure changed across a VehicleScene config "
+                "rebuild (mark_config_dirty): (n_wheels, K, n_envs, members) "
+                f"{before} -> {after}. This plant's unroll and warm start are "
+                "sized for the old shape — build a new DifferentiablePlant "
+                "(and a new PathFollower / FleetFollower around it).")
+        self._bind()
+        return True
+
+    def assert_fresh(self) -> None:
+        """Raise if the driver was rebuilt since this source last bound.
+
+        Second line of defence for the unroll internals (``_sync_hooks``):
+        re-binding is only legal at an ENTRY boundary (``predict`` /
+        ``jacobian`` / ``solve``), because a rebind mid-Newton would mix the
+        old snapshot with new indices and produce one silently wrong inverse."""
+        bid = self._current_build_id()
+        if bid is not None and bid != self._bound_build_id:
+            raise RuntimeError(
+                "the VehicleScene rebuilt its batched driver in the middle of a "
+                "plant unroll (build_id "
+                f"{self._bound_build_id} -> {bid}); re-binding is only done at "
+                "predict/jacobian/solve entry. Do not call mark_config_dirty() "
+                "from a hook or another thread while a controller is solving.")
 
     @staticmethod
     def _resolve(source):
@@ -541,6 +622,31 @@ class DifferentiablePlant:
         self._pending_a: Optional[float] = None
         self._has_solved = False
 
+    # -- freshness -------------------------------------------------------------
+
+    def _refresh_source(self) -> None:
+        """Re-bind the state source if the scene rebuilt its driver (v1.6.2).
+
+        Called at the ENTRY of the three public unroll entry points
+        (:meth:`predict`, :meth:`jacobian`, :meth:`solve`) and nowhere else —
+        before their ``_snapshot()``, which already reads
+        ``src.wheel_meta`` / ``src.omega`` / ``src.chassis``. Doing it any
+        later (inside ``_sync_hooks``, say) would build the snapshot from the
+        DEAD driver and then mix it with new indices. The nested calls
+        (solve → jacobian → predict) see an unchanged ``build_id`` and cost one
+        int compare.
+
+        On a re-bind the prediction hook copies are re-taken from the new
+        driver's hooks, so a rebuild that changed the stability-hook set is
+        followed instead of silently predicting with the old one."""
+        fresh = getattr(self.src, "ensure_fresh", None)
+        if fresh is None:              # custom state source: nothing to rebind
+            return
+        if fresh():
+            p = self.src.physics
+            self._pred_pre_hooks = copy.deepcopy(list(p.pre_loop_hooks))
+            self._pred_post_hooks = copy.deepcopy(list(p.post_tire_hooks))
+
     # -- introspection ---------------------------------------------------------
 
     @property
@@ -599,7 +705,14 @@ class DifferentiablePlant:
         plant's members and then widened to the ``M * cands`` rows the unroll
         will run at, because a hook that re-allocates on a shape mismatch
         (StaticFrictionLock does) would silently zero its anchors instead.
+
+        It does NOT re-bind a stale source: that happens at the entry points
+        (:meth:`_refresh_source`), before the snapshot this runs against. Here
+        we only ASSERT that the driver did not move under an in-flight unroll.
         """
+        assert_fresh = getattr(self.src, "assert_fresh", None)
+        if assert_fresh is not None:
+            assert_fresh()
         rows = self.src.rows if hasattr(self.src, "rows") else None
         n_total = getattr(self.src, "n_rows_total", None)
         for live, pred in ((self.src.physics.pre_loop_hooks, self._pred_pre_hooks),
@@ -769,6 +882,7 @@ class DifferentiablePlant:
         ``cands`` is inferred from the input length when omitted, so a
         single-member plant can be swept with a plain list of commands.
         """
+        self._refresh_source()
         if snap is None:
             snap = self._snapshot()
         M = self.n_members
@@ -815,6 +929,7 @@ class DifferentiablePlant:
         members are independent in the unroll, so ``d(sum_i a_i)/d(thr_j)`` is
         exactly member j's own gradient, and M members cost what one does.
         """
+        self._refresh_source()
         if snap is None:
             snap = self._snapshot()
         M = self.n_members
@@ -948,6 +1063,7 @@ class DifferentiablePlant:
         the live speed and attitude off the vehicles themselves, which is
         strictly more information than those three scalars carry.
         """
+        self._refresh_source()
         M = self.n_members
         snap = self._snapshot()
         target = np.stack([

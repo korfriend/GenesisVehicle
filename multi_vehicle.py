@@ -64,6 +64,22 @@ from .raycast import is_ray_hit_corrected, read_distances, sensor_fan
 from .visual import WheelJointInternalSync
 
 
+#: Monotonic MODULE-GLOBAL build counter stamped onto every
+#: ``MultiVehiclePhysics`` as ``build_id``. Global, not per-instance, on
+#: purpose: consumers (``control.plant._StateSource``) detect staleness by
+#: comparing the id they bound to against the scene's CURRENT one, and a
+#: per-instance counter would hand the replacement the same value the discarded
+#: driver had. Consequence for tests: another scene built in the same process
+#: moves it, so assert a DELTA captured from the same scene, never an absolute.
+_NEXT_BUILD_ID = 0
+
+
+def _next_build_id() -> int:
+    global _NEXT_BUILD_ID
+    _NEXT_BUILD_ID += 1
+    return _NEXT_BUILD_ID
+
+
 def _quat_rotate(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     """Active rotation of `vec` by unit quaternion `quat` (w,x,y,z).
     Both tensors flat-batched (N, 4) and (N, 3)."""
@@ -212,18 +228,150 @@ class MultiVehicleKindPhysics:
     def resolved(self):
         return self._proto.resolved
 
-    def reset(self, vehicle_ids=None) -> None:
-        self._proto.reset(vehicle_ids)
+    def slot_rows(self, slot: int) -> list:
+        """The flat proto rows belonging to vehicle ``slot``: ``env * K + slot``
+        for every env (env-major / vehicle-minor — the same ordering
+        ``_read_state_batched`` produces)."""
+        slot = int(slot)
+        if not 0 <= slot < self.K:
+            raise ValueError(f"slot {slot} out of range for K={self.K}")
+        return [env * self.K + slot for env in range(self.n_envs)]
+
+    def export_slot(self, slot: int) -> dict:
+        """Snapshot one vehicle's runtime + visual state (see
+        :meth:`VehiclePhysics.export_runtime_state`).
+
+        The physics rows are this slot's ``env * K + slot`` rows. The visual
+        accumulators travel with them: this slot's ``WheelJointInternalSync``
+        spin angle and slew state, and its column of the batched writer's spin
+        accumulator. The batched writer's slew tensors are kind-wide (one row
+        block per env spanning all K), so they ride along on slot 0 only and
+        are re-imported whole when the shape still matches."""
+        state = self._proto.export_runtime_state(rows=self.slot_rows(slot))
+        state["K"] = int(self.K)
+        state["n_envs"] = int(self.n_envs)
+        vis = self.visuals[slot] if slot < len(self.visuals) else None
+        state["visual_angle"] = (None if vis is None
+                                 else vis.wheel_visual_angle.detach().clone())
+        state["visual_susp_set_prev"] = (
+            None if vis is None or vis._susp_set_prev is None
+            else vis._susp_set_prev.detach().clone())
+        state["visual_susp_ctrl_prev"] = (
+            None if vis is None or vis._susp_ctrl_prev is None
+            else vis._susp_ctrl_prev.detach().clone())
+        vb = getattr(self, "_visual_batch", None)
+        state["batch_angle"] = (None if vb is None
+                                else vb._angle[:, slot].detach().clone())
+        if vb is not None and slot == 0:
+            state["batch_susp_set_prev"] = (
+                None if vb._susp_set_prev is None
+                else vb._susp_set_prev.detach().clone())
+            state["batch_susp_ctrl_prev"] = (
+                None if vb._susp_ctrl_prev is None
+                else vb._susp_ctrl_prev.detach().clone())
+        return state
+
+    def import_slot(self, slot: int, state: dict) -> None:
+        """Write an :meth:`export_slot` snapshot into this kind's ``slot``.
+
+        Raises ``ValueError`` on a wheel-count or row-count mismatch (from
+        :meth:`VehiclePhysics.load_runtime_state`). Visual accumulators are
+        restored only where the shapes still agree — they are render state, and
+        a mismatch there must not abort a physics carry."""
+        rows = self.slot_rows(slot)
+        self._proto.load_runtime_state(state, rows=rows)
+        vis = self.visuals[slot] if slot < len(self.visuals) else None
+        if vis is not None:
+            ang = state.get("visual_angle")
+            if ang is not None and tuple(ang.shape) == tuple(vis.wheel_visual_angle.shape):
+                vis.wheel_visual_angle = ang.to(
+                    device=vis.wheel_visual_angle.device,
+                    dtype=vis.wheel_visual_angle.dtype).clone()
+            for key, attr in (("visual_susp_set_prev", "_susp_set_prev"),
+                              ("visual_susp_ctrl_prev", "_susp_ctrl_prev")):
+                t = state.get(key)
+                if t is not None:
+                    setattr(vis, attr, t.clone())
+        vb = getattr(self, "_visual_batch", None)
+        if vb is not None:
+            ang = state.get("batch_angle")
+            if ang is not None and tuple(ang.shape) == tuple(vb._angle[:, slot].shape):
+                vb._angle[:, slot] = ang.to(device=vb._angle.device,
+                                            dtype=vb._angle.dtype)
+            for key, attr in (("batch_susp_set_prev", "_susp_set_prev"),
+                              ("batch_susp_ctrl_prev", "_susp_ctrl_prev")):
+                t = state.get(key)
+                cur = getattr(vb, attr, None)
+                if t is not None and (cur is None or tuple(cur.shape) == tuple(t.shape)):
+                    setattr(vb, attr, t.clone())
+
+    def reset(self, rows=None, **kwargs) -> None:
+        """Reset the physics + visual state of the given FLAT proto rows.
+
+        ``rows`` is a flat ``env * K + slot`` row index (or a bool mask of
+        length ``NK``), NOT a vehicle index — one vehicle at ``n_envs > 1``
+        owns ``n_envs`` rows. ``None`` resets everything. Use
+        :meth:`MultiVehiclePhysics.reset` if you want per-VEHICLE semantics; it
+        expands each vehicle to its rows.
+
+        The parameter was named ``vehicle_ids`` through 1.6.1 while always
+        meaning rows; passing it by keyword now raises ``TypeError`` rather
+        than quietly running wrong-meaning code (v1.6.2).
+
+        Visual state follows the SAME rows (v1.6.2): each requested row maps
+        back to ``(env, slot)`` and only that vehicle's spin accumulators are
+        cleared — in the per-entity writer and in the batched one. Through
+        1.6.2-pre the visual resets ran with no index at all, so resetting one
+        row wiped every vehicle of the kind (measured at K=2/n_envs=2: vehicle
+        0's batch angle ``[0.4316, 0.3281, -2.7312, 2.6947]`` → all zeros while
+        only vehicle 1 was asked for). The ONE thing that stays kind-wide on a
+        partial reset is the batched writer's susp SLEW origin, which is not
+        expressible per vehicle — see
+        ``KindVisualBatch.reset_slot_visual_state`` for why dropping it would
+        kick every other vehicle on the control path."""
+        if kwargs:
+            if "vehicle_ids" in kwargs:
+                raise TypeError(
+                    "MultiVehicleKindPhysics.reset's parameter was renamed to "
+                    "rows=; it is a flat NK row index (env*K+slot), not a "
+                    "vehicle index. For per-vehicle semantics call "
+                    "MultiVehiclePhysics.reset(vehicle_ids=...).")
+            raise TypeError(
+                f"reset() got unexpected keyword argument(s): {sorted(kwargs)}")
+        if rows is not None:
+            if not torch.is_tensor(rows):
+                rows = torch.as_tensor(rows, device=self.dev)
+            if rows.dtype == torch.bool:
+                rows = torch.nonzero(rows, as_tuple=False).flatten()
+            rows = rows.reshape(-1).to(dtype=torch.long)
+        self._proto.reset(rows)
+
+        visuals = getattr(self, "visuals", None) or []
+        vb = getattr(self, "_visual_batch", None)
         # proto.visual is None in kind mode — clear the per-vehicle visual
         # syncs (and the batched writer) explicitly: spin accumulators AND
         # the v1.1.16 susp slew state (a stale slew origin would inject a
         # transient PD force on the first post-reset steps).
-        for vis in getattr(self, "visuals", None) or []:
-            if vis is not None:
-                vis.reset_visual_state()
-        vb = getattr(self, "_visual_batch", None)
-        if vb is not None:
-            vb.reset_visual_state()
+        if rows is None:
+            for vis in visuals:
+                if vis is not None:
+                    vis.reset_visual_state()
+            if vb is not None:
+                vb.reset_visual_state()
+            return
+
+        # Partial reset: row -> (env, slot), env-major / vehicle-minor.
+        per_slot: dict = defaultdict(list)
+        for r in rows.tolist():
+            per_slot[int(r) % self.K].append(int(r) // self.K)
+        for slot, envs in per_slot.items():
+            env_idx = torch.as_tensor(sorted(set(envs)), dtype=torch.long,
+                                      device=self.dev)
+            full = int(env_idx.numel()) == self.n_envs
+            if slot < len(visuals) and visuals[slot] is not None:
+                visuals[slot].reset_visual_state(None if full else env_idx)
+            if vb is not None:
+                vb.reset_slot_visual_state(slot, None if full else env_idx)
 
     # ------------------------------------------------------------------
     # Batched I/O — replaces the per-entity reads/writes in VehiclePhysics.step
@@ -695,6 +843,100 @@ class MultiVehiclePhysics:
         # in wheel count and strategy code by definition.)
         self._all_base_idx = (torch.cat([k.base_idx_tensor for k in self.kinds])
                               if len(self.kinds) > 1 else None)
+
+        #: Identity of THIS driver instance, from a process-global monotonic
+        #: counter (see :func:`_next_build_id`). Anything that caches a
+        #: reference into the kinds — the differentiable plant's state source,
+        #: the instanced wheel renderer's providers — compares it to detect
+        #: that ``VehicleScene`` rebuilt the driver under it (v1.6.2).
+        self.build_id = _next_build_id()
+
+    # ------------------------------------------------------------------
+    # State carry across a rebuild (v1.6.2) + per-vehicle reset
+    # ------------------------------------------------------------------
+    def export_state(self) -> list:
+        """One :meth:`MultiVehicleKindPhysics.export_slot` snapshot per vehicle,
+        in FLAT vehicle order (the order ``vehicles`` was passed in).
+
+        The flat slot is the identity key across a rebuild:
+        ``VehicleScene.add_vehicle`` is build-time only, so the vehicle list is
+        immutable after ``build()`` and old slot *i* is new slot *i* — only the
+        kind/row placement can move."""
+        out: list = [None] * len(self.vehicles)
+        for flat_i, kind_idx, slot_idx in self._flat_to_kind:
+            out[flat_i] = self.kinds[kind_idx].export_slot(slot_idx)
+        return out
+
+    def import_state(self, states) -> None:
+        """Write an :meth:`export_state` list back, matched by flat vehicle
+        slot. A ``None`` entry is skipped; a wheel-count or row-count mismatch
+        raises ``ValueError`` (see ``docs/physics-contracts.md`` §7.12)."""
+        states = list(states)
+        if len(states) != len(self.vehicles):
+            raise ValueError(
+                f"import_state got {len(states)} snapshots for "
+                f"{len(self.vehicles)} vehicles")
+        for flat_i, kind_idx, slot_idx in self._flat_to_kind:
+            st = states[flat_i]
+            if st is None:
+                continue
+            try:
+                self.kinds[kind_idx].import_slot(slot_idx, st)
+            except ValueError as e:
+                raise ValueError(
+                    f"vehicle slot {flat_i}: {e}") from e
+
+    def reset(self, vehicle_ids=None) -> None:
+        """Reset per-VEHICLE: ``vehicle_ids`` are flat vehicle indices (the
+        order passed to ``__init__``), ``None`` resets every vehicle.
+
+        Each vehicle is expanded to its own kind's rows
+        (``env * K + slot`` over every env) before the kind is reset, so every
+        env's copy of the named vehicles is reset — calling
+        ``MultiVehicleKindPhysics.reset`` with a vehicle index instead resets
+        only env 0's copy (that parameter is a flat ROW index).
+
+        What this reset touches, exactly. PER VEHICLE: all physics state of
+        those rows (``core.RUNTIME_STATE_ATTRS``, ``_stepped_once``,
+        ``_prev_init``) and the visual spin accumulators of those vehicles
+        only, in both the per-entity writer and the batched one. KIND-WIDE,
+        and left ALONE on a partial reset: the batched writer's susp slew
+        origin (``KindVisualBatch._susp_set_prev`` / ``_susp_ctrl_prev``),
+        because "no origin" is the whole tensor being None — dropping it would
+        snap every other vehicle of the kind, a real joint PD transient under
+        ``visual_susp_mode="control"``. On that path the reset vehicles' susp
+        visuals therefore slew (rate-limited) rather than snap. When the
+        batched writer is absent (``_visual_batch is None``, so the per-entity
+        ``WheelJointInternalSync`` is the live writer) the reset vehicle's own
+        slew origin IS dropped and it snaps instead. A full reset
+        (``vehicle_ids=None``) snaps on either path. Chassis POSE is never touched by
+        any of these — place vehicles with ``Vehicle.set_pos`` / ``set_quat``."""
+        if vehicle_ids is None:
+            for kind in self.kinds:
+                kind.reset()
+            return
+        if torch.is_tensor(vehicle_ids):
+            if vehicle_ids.dtype == torch.bool:
+                vehicle_ids = torch.nonzero(vehicle_ids, as_tuple=False).flatten()
+            ids = [int(v) for v in vehicle_ids.tolist()]
+        elif isinstance(vehicle_ids, int):
+            ids = [int(vehicle_ids)]
+        else:
+            ids = [int(v) for v in vehicle_ids]
+        n = len(self.vehicles)
+        bad = [i for i in ids if not 0 <= i < n]
+        if bad:
+            raise ValueError(
+                f"vehicle_ids {bad} out of range for {n} vehicles")
+        wanted = set(ids)
+        per_kind: dict = defaultdict(list)
+        for flat_i, kind_idx, slot_idx in self._flat_to_kind:
+            if flat_i in wanted:
+                per_kind[kind_idx].append(slot_idx)
+        for kind_idx, slots in per_kind.items():
+            kind = self.kinds[kind_idx]
+            rows = sorted({r for s in slots for r in kind.slot_rows(s)})
+            kind.reset(rows=rows)
 
     @property
     def n_vehicles(self) -> int:

@@ -140,11 +140,17 @@ class L3State:
         # visual z 0.3000 (device) vs 0.4000 (host), a full suspension stroke.
         # It self-corrects on the next step. KNOWN GAP, separately ticketed:
         # closing it costs a 6th device-to-host download plus a signature
-        # change on the host helper, for a one-frame visual artefact. The
-        # SHIPPED server never reaches it — its 'reset' command handler
-        # re-poses via set_pos/set_quat and never calls `physics.reset()` — so
-        # only a user-written RL/host harness that calls reset() directly is
-        # exposed.
+        # change on the host helper, for a one-frame visual artefact.
+        #
+        # REACH, corrected in v1.6.2: this used to say only a user-written
+        # RL/host harness could reach it. A TOP-LEVEL SDK API now can —
+        # `VehicleScene.reset()` actually resets the batched driver from 1.6.2
+        # (it reset nothing there through 1.6.1) and
+        # `MultiVehiclePhysics.reset(vehicle_ids=...)` is new in the same
+        # release. See docs/physics-contracts.md §7.6. The SHIPPED server is
+        # still exempt: its 'reset' command handler re-poses via
+        # set_pos/set_quat (:550-553) and never calls `physics.reset()` or
+        # `VehicleScene.reset()`.
         obs_items = [(o_id, ent) for o_id, ent in dynamic_obstacles.items()
                      if o_id not in ue_driven_obstacle_ids]
         mvp = getattr(getattr(self.veh, "_scene", None), "_mvp", None)

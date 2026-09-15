@@ -24,7 +24,7 @@ otherwise (dynamics=0) we use set_dofs_position directly.
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
 import torch
@@ -267,11 +267,15 @@ class WheelJointInternalSync:
             self._susp_ctrl_prev = None
         else:
             self.wheel_visual_angle[env_ids] = 0.0
-            # Per-env slew snap: forget only those rows.
-            if self._susp_set_prev is not None:
-                self._susp_set_prev = None
-            if self._susp_ctrl_prev is not None:
-                self._susp_ctrl_prev = None
+            # The spin accumulator is cleared for THOSE envs only. The slew
+            # origin is not per-env clearable: "no origin" is the tensor being
+            # None, not a row value, so it is dropped WHOLE — this vehicle's
+            # other envs snap their susp visual target once as well. (The
+            # comment here used to claim "forget only those rows", which the
+            # code never did.) Scope: one vehicle's own visual writer; other
+            # vehicles of the kind are untouched either way.
+            self._susp_set_prev = None
+            self._susp_ctrl_prev = None
 
     def step(
         self,
@@ -411,13 +415,35 @@ class KindVisualBatch:
 
     def reset_visual_state(self, env_ids=None) -> None:
         """Mirror of ``WheelJointInternalSync.reset_visual_state`` for the batched
-        writer (spin accumulator + slew snap)."""
+        writer (spin accumulator + slew snap). Kind-WIDE: it clears every
+        vehicle's column. For a per-vehicle reset use
+        :meth:`reset_slot_visual_state`."""
         if env_ids is None:
             self._angle.zero_()
         else:
             self._angle[env_ids] = 0.0
         self._susp_set_prev = None
         self._susp_ctrl_prev = None
+
+    def reset_slot_visual_state(self, slot: int, env_ids=None) -> None:
+        """Clear ONE vehicle's spin accumulator column (``env_ids`` = those envs,
+        ``None`` = all envs of that vehicle).
+
+        The slew tensors are deliberately NOT dropped here. They are kind-wide
+        — one row block per env spanning all K vehicles — and "no slew origin"
+        is the tensor being None, so clearing them for one vehicle is not
+        expressible; dropping them would snap the susp visual target of every
+        OTHER vehicle of the kind too, which on the control path
+        (``visual_susp_mode="control"``) is a real joint PD transient, not a
+        cosmetic jump. The reset vehicle therefore slews to its new target at
+        ``_SUSP_VIS_MAX_RATE`` instead of snapping — bounded motion, and the
+        only way to keep a partial reset local. A FULL reset
+        (:meth:`reset_visual_state`) still snaps, as before."""
+        slot = int(slot)
+        if env_ids is None:
+            self._angle[:, slot] = 0.0
+        else:
+            self._angle[env_ids, slot] = 0.0
 
     def step(self, steer_NK: torch.Tensor, dist_NK: torch.Tensor,
              omega_NK: torch.Tensor, dt: float) -> None:
@@ -590,6 +616,38 @@ class InstancedWheelRenderer:
         physics) or ``(n_envs, n, 3/4)`` (single VehiclePhysics, K == 1)."""
         self._units.append(dict(meshes=meshes, provider=provider,
                                 K=int(K), n=len(meshes), nodes=None))
+
+    def rebind(self, providers: Sequence) -> None:
+        """Re-point the units' pose providers, in unit order.
+
+        ``providers`` is one ``(provider, K, n)`` per unit, matched
+        POSITIONALLY — unit *i* takes ``providers[i]``. The caller
+        (``VehicleScene._rebind_wheel_renderer``) owns that ordering
+        assumption and documents why it holds. Used when
+        ``VehicleScene`` rebuilds its batched driver: the old providers are
+        bound methods of the DISCARDED kind, which is never stepped again, so
+        leaving them in place freezes the rendered wheels permanently while the
+        physics keeps running (v1.6.2 fix).
+
+        ``K`` and ``n`` must both still match: :meth:`update` reshapes each
+        read to the unit's ``(K, n)`` — fixed when the meshes were harvested in
+        :meth:`add_unit` — so a changed wheel count would turn the freeze into
+        a reshape error one frame later. Raises ``ValueError`` on any mismatch
+        and leaves EVERY unit untouched (validated in full before the first
+        assignment), so the caller can keep the previous driver. The nodes
+        themselves are not recreated: :meth:`update` only writes pose buffers,
+        which do not depend on where the poses came from."""
+        if len(providers) != len(self._units):
+            raise ValueError(
+                f"rebind got {len(providers)} providers for "
+                f"{len(self._units)} render units (the vehicle kinds changed)")
+        for u, (_, K, n) in zip(self._units, providers):
+            if int(K) != int(u["K"]) or int(n) != int(u["n"]):
+                raise ValueError(
+                    f"rebind shape mismatch: unit has K={u['K']}, n={u['n']}; "
+                    f"new provider has K={int(K)}, n={int(n)}")
+        for u, (provider, _, _) in zip(self._units, providers):
+            u["provider"] = provider
 
     # -- per-step update -------------------------------------------------------
 
