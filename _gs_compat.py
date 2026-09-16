@@ -16,6 +16,13 @@ Currently shimmed:
     wrench kernel's moment arm ``(link.pos - root_COM) x force`` is exactly what
     the old force kernel added. The wrench form is also one kernel launch
     instead of two.
+
+``scene_sim_options``
+    Genesis <= 1.3.3 assigned ``Scene.sim_options`` in ``Scene.__init__``.
+    Genesis 1.4.0 dropped that attribute and nests the same object under
+    ``Scene.options.sim`` (a ``SceneOptions`` field) — the constructor still
+    ACCEPTS ``sim_options=``, so scene construction is unaffected and the
+    breakage is read-side only.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ from typing import Any, NamedTuple, Optional
 import numpy as np
 
 __all__ = ["apply_links_wrench", "has_wrench_api", "link_inertial",
-           "LinkInertialProps", "sensor_miss_value"]
+           "LinkInertialProps", "scene_sim_options", "sensor_miss_value"]
 
 
 def has_wrench_api(solver: Any) -> bool:
@@ -95,6 +102,41 @@ def link_inertial(link: Any) -> Optional[LinkInertialProps]:
     quat = None if quat is None else np.asarray(quat, dtype=float).reshape(4)
     inertia = None if inertia is None else np.asarray(inertia, dtype=float).reshape(3, 3)
     return LinkInertialProps(mass, pos, quat, inertia)
+
+
+def scene_sim_options(scene: Any) -> Any:
+    """The ``SimOptions`` object a ``gs.Scene`` was CONSTRUCTED with.
+
+    Genesis <= 1.3.3 assigned it to ``Scene.sim_options``
+    (``genesis/engine/scene.py`` ``self.sim_options = sim_options``). Genesis
+    1.4.0 removed that attribute and nests the very same object under
+    ``Scene.options.sim`` — measured on 1.4.0:
+    ``gs.Scene(sim_options=so).options.sim is so`` → True, and
+    ``hasattr(gs.Scene, "sim_options")`` → False. The constructor keyword
+    ``sim_options=`` is unchanged on both, so only READS had to be branched.
+
+    Probe order is 1.4.0-first (``options.sim``), then the <= 1.3.3 name. If
+    neither exists this raises an ``AttributeError`` naming BOTH spellings —
+    a silent ``None`` here would resurface as an unreadable
+    ``'NoneType' has no attribute 'dt'`` far from the engine that changed.
+
+    NOTE the object is the AUTHORED options: writing to it after
+    ``scene.build()`` does NOT change the simulation on either version
+    (``Simulator.__init__`` snapshots ``dt``/``substeps``). See
+    ``docs/physics-contracts.md`` §7.14.
+    """
+    opts = getattr(scene, "options", None)               # genesis >= 1.4.0
+    sim = getattr(opts, "sim", None) if opts is not None else None
+    if sim is not None:
+        return sim
+    sim = getattr(scene, "sim_options", None)            # genesis <= 1.3.3
+    if sim is not None:
+        return sim
+    raise AttributeError(
+        f"{type(scene).__name__} exposes neither 'options.sim' (genesis >= "
+        "1.4.0) nor 'sim_options' (genesis <= 1.3.3); this genesis version's "
+        "scene options are not recognized by genesis_vehicle._gs_compat."
+        "scene_sim_options")
 
 
 def sensor_miss_value(sensor: Any) -> Optional[float]:

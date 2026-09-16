@@ -91,6 +91,7 @@ The right-hand column is where the full story lives.
 | Wheel contact model | `wheel_contact="point"` (DEFAULT, one ray per wheel) or `"swept_envelope"` (M rays reduced by the swept-circle lower envelope, so a wheel climbs an edge instead of teleporting onto it). Opt-in; the default is bit-identical to earlier releases | `VehicleScene.add_vehicle(wheel_contact=, contact_samples=)`, `WheelRayPattern(fan_samples=)` | [`tire-and-contact.md`](tire-and-contact.md), [`physics-contracts.md` §7.11](physics-contracts.md) |
 | Ray-MISS / grounded | "did this wheel's ray find ground?", against the raycaster's OWN miss sentinel rather than a fixed threshold | `Vehicle.wheels_grounded`, `all_wheels_grounded`, `MultiVehiclePhysics.grounded_list`, `is_ray_hit`, `is_ray_hit_corrected` | [`physics-contracts.md`](physics-contracts.md) §7.8, §7.10 |
 | Live vs derived config | which post-`build()` config writes take effect on the next step (steering geometry, driven axles, brake bias, AWD weights, the drive-omega cap, `eps_v`, a hook's `v_thr`) and which need a rebuild (anything per-wheel, read off `WheelMeta`). Derived once at build, re-derived when a source moves (v1.6.4) | `_hotset.HOT_DEPENDENTS`, `VehicleScene.mark_config_dirty` | [`physics-contracts.md` §7.13](physics-contracts.md) |
+| Simulation time / gravity | `dt` and `substeps` are FIXED at `build()` on both supported engines — post-build `sim_options` writes are inert (and raise on genesis 1.4.0, where `Scene.sim_options` is gone). READ the engine, do not echo the ctor args; `set_gravity` is the one live knob (v1.6.5) | `VehicleScene.effective_dt`, `VehicleScene.substeps`, `VehicleScene.set_gravity` | [`physics-contracts.md` §7.14](physics-contracts.md) |
 | Config rebuild / reset | re-resolve a cfg after `build()` while the vehicle keeps its runtime state, and reset per vehicle rather than per flat row. A wheel-count or wheel-order change raises; a failed rebuild keeps the previous driver and re-raises on the next step (v1.6.2) | `VehicleScene.mark_config_dirty`, `VehicleScene.reset`, `MultiVehiclePhysics.reset(vehicle_ids=)`, `MultiVehicleKindPhysics.reset(rows=)` | [`physics-contracts.md` §7.12](physics-contracts.md) |
 
 **Telemetry & rendering feed**
@@ -113,9 +114,11 @@ prints a one-line banner with the version on first construction in a process:
 Release history lives in
 [`../CHANGELOG.md`](../CHANGELOG.md).
 
-**Backend compatibility:** validated against the Genesis physics backend
-`genesis-world ≥ 1.0.0`; smoke-tested on `1.4.0`, and the same source also
-runs on `1.3.3` — the APIs that moved between the two are branched at runtime
+**Backend compatibility:** the supported Genesis physics backends are
+`genesis-world` **1.3.3 and 1.4.0** — the only two the source branches on.
+1.4.0 is what the tests and published measurements run on; 1.3.3 still works
+(the `≥ 1.0.0` claim printed here through v1.6.4 was never enforced by any
+branch or test) — the APIs that moved between the two are branched at runtime
 in `genesis_vehicle/_gs_compat.py` (force/torque -> wrench, link inertial
 accessors) and in `vehicle_scene.py` (`RigidOptions.dt`, terrain raycast
 mirror). The instanced-wheel renderer likewise branches on the 1.3.x buffer

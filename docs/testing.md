@@ -1,5 +1,15 @@
 # Testing
 
+| abbr | meaning |
+|---|---|
+| AST | Abstract Syntax Tree (Python's `ast` module — used as a source-level tripwire) |
+| L2 | per-entity batching axis (K vehicles in one scene) |
+| L3 | `n_envs` batching axis (same-URDF fleet) |
+| M | swept-envelope contact samples per wheel (`contact_samples`) |
+| SFL | `StaticFrictionLock` — the hold-at-rest stability hook |
+| dt | one simulation STEP duration (s) |
+| substeps | solver iterations per step; internal interval is `dt / substeps` |
+
 ## Running the tests
 
 From the repo root:
@@ -8,14 +18,18 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-507 tests, almost all pure-Python. Runs in ~170s on CPU (measured at v1.6.4 with
-`python -m pytest tests/ -q`, WSL2, genesis-world 1.4.0: `507 passed in 170.53s`;
-it was ~116s / 450 tests at v1.6.2-v1.6.3 and ~88s at v1.6.1 — the 14
-real-`VehicleScene` rebuild tests added in v1.6.2 dominate the second jump, and
-v1.6.4's 57 new pure-Python tests the third; collection alone is ~6s). The count
-breaks down as v1.6.3's 450 + 57 for v1.6.4's build-time hoists. The reference
-URDFs the parsing tests read live in `tests/data/` (self-contained since
-v1.2.0).
+519 tests, almost all pure-Python. Measured on the v1.6.5 tree:
+`519 passed in 144.33s` (`python -m pytest tests/ -q`, CPU/WSL2, genesis-world
+1.4.0, one run, no warm cache control). Earlier figures on the same machine:
+`507 passed in 170.53s` at v1.6.4, ~116s / 450 tests at v1.6.2-v1.6.3, ~88s at
+v1.6.1. **Runtime is not a stable metric here** — v1.6.5 added 12 tests and
+measured 26s FASTER than v1.6.4, so the run-to-run spread on this machine
+exceeds the difference a release makes; read the count, not the seconds. The
+count breaks down as v1.6.3's 450 + 57 for v1.6.4's build-time hoists + 12 for
+v1.6.5 (7 in `test_sim_options_and_timing.py`, 3 engine-shape stubs in
+`test_gs_compat.py`, 2 `sim_options` write-guard cases in
+`test_server_import.py`). Collection alone is ~6s. The reference URDFs the
+parsing tests read live in `tests/data/` (self-contained since v1.2.0).
 
 A handful build a real `VehicleScene` on the CPU backend (the batched-visual /
 proxy-sync / to-host parity tests, and the one ray pattern that allocates
@@ -84,7 +98,8 @@ CI without GPU.
 | `eps_v` is live on both tire models | `test_tire_coulomb_eps.py` | 11 tests (v1.6.4). Same characterisation shape for `CoulombIsotropic._eps2` and the Pacejka arm; also the file that gives `tire_models/coulomb.py` its first behavioural coverage (it had none) |
 | Per-wheel broadcast rank convention | `test_rank_helpers.py` | 6 tests (v1.6.4). `_pipeline.pw` / `pw3` return `unsqueeze(0)` at rank 1 and pass a rank-2/3 field through unchanged. The rank-2 branch is not taken anywhere in this tree yet, so it is exercised explicitly rather than left to the promotion step |
 | The bump-stop/`dt` warning names the vehicle | `test_bump_stop_dt_warning.py` | 3 tests (v1.6.4). RED before the change — the old message carried no vehicle name, URDF name or slot index. Scope: one driver = one config, so "per vehicle" means "per config, named after the vehicle it was registered as"; a per-SLOT ratio inside a fused group is not this test |
-| Server subpackage import + steer-key mapping | `test_server_import.py` | `genesis_vehicle.server` imports; `steerScale`/`maxSteerRad` mapping-key resolution (auto-skips without genesis/pythonosc) |
+| Server subpackage import + steer-key mapping + the `sim_options` write guard | `test_server_import.py` | `genesis_vehicle.server` imports; `steerScale`/`maxSteerRad` mapping-key resolution (auto-skips without genesis/pythonosc). **v1.6.5: an AST source guard** — any `Assign`/`AugAssign`/`AnnAssign` in `server/*.py` whose target attribute chain mentions `sim_options`, plus a literal `setattr`, fails the suite, with a second test proving the guard catches the shapes its docstring claims (`=`, `+=`, subscripted target, `setattr(getattr(...))`). It is a LITERAL-form tripwire, not runtime proof: aliasing, dynamic `setattr`, `exec`, and three literal forms named in the docstring (tuple-unpacking target, `for x.sim_options.dt in ...`, `with ... as x.sim_options.dt`) all escape it — the runtime facts live in `test_sim_options_and_timing.py` |
+| Simulation time is fixed at `build()` | `test_sim_options_and_timing.py` | 7 cases (v1.6.5), on a real CPU `VehicleScene`. The `[genesis_vehicle] timing:` line is asserted to be EMITTED (`capsys` + regex) and its parsed dt / substeps must equal `effective_dt` / `substeps` — the line printed zero times for eight releases inside an `except Exception: pass`, so "the code path exists" is exactly what does not count here. Also: `sim_options` returns the AUTHORED object; post-build writes to `sim_options.dt` / `.gravity` are pinned INERT (a tripwire on the ENGINE — a future genesis that makes them live turns this test red instead of rotting the contract); `set_gravity` is pinned LIVE; `substeps` / `effective_dt` must equal `scene.sim.*`; `set_gravity` before `build()` raises; `envs_idx` passes through at `n_envs > 1` |
 
 ## Public-surface import smoke check
 

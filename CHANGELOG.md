@@ -10,6 +10,225 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.6.5] — 2026-09-16
+
+**Hotfix: the L2 OSC server died on the first client connection, and had done
+so since v1.5.0 — eight releases (v1.5.0 … v1.6.4).** genesis-world 1.4.0 removed
+`Scene.sim_options` (the same object now lives at `Scene.options.sim`), and
+`VehicleScene.sim_options` was the one engine attribute the SDK read without a
+compatibility branch. `server/physics_server.py`'s `vs.sim_options.dt = sim_dt`
+sits on the L2 startup path outside any `try`, so the server process exited
+with `AttributeError` the moment a client connected. The identical drift hid
+itself in `VehicleScene.build()`, where the `[genesis_vehicle] timing:` line
+sat inside `except Exception: pass` — it printed **zero times** for the same
+eight releases.
+
+Fixing the accessor alone would have removed the crash and left a false claim
+standing, so this release also withdraws that claim: **post-`build()` writes to
+the sim options are inert on both supported engine versions**, and always were.
+
+| abbr | meaning |
+|---|---|
+| L2 | per-entity batching axis (K vehicles in one scene; the OSC server's default mode) |
+| L3 | `n_envs` batching axis (`--multi-env`) |
+| UE | Unreal Engine (the OSC client) |
+| dt | simulation STEP duration (s) |
+| substeps | solver iterations per step; internal interval is `dt / substeps` |
+| AST | Abstract Syntax Tree (Python's `ast` module) |
+
+### 1. The crash
+
+`_gs_compat.scene_sim_options(scene)` is new and is now the single place the
+engine's options object is read: `scene.options.sim` on genesis >= 1.4.0,
+`scene.sim_options` on <= 1.3.3, and an `AttributeError` naming **both**
+spellings if neither exists (a silent `None` would resurface far away as
+`'NoneType' object has no attribute 'dt'`). `VehicleScene.sim_options` calls it.
+
+Measured end to end, server driven by a mock OSC client, tank URDF, CPU/WSL2,
+genesis-world 1.4.0:
+
+| | before (v1.6.4) | after (v1.6.5) |
+|---|---|---|
+| child process | `AttributeError: 'Scene' object has no attribute 'sim_options'`, exit code **1** | alive, `[STATS] [L2]` lines collected |
+| last output before death | `[PROFILE] 스텝 구간별: …` | `[OK] [Determinism] …` then the main loop |
+
+### 2. Post-build writes to the sim options are INERT — the old `[Determinism]` line was false on L2
+
+`Simulator.__init__` snapshots `_dt` / `_substep_dt` / `_substeps` at
+construction and `Simulator.dt` is read-only, on genesis 1.3.3 and 1.4.0
+alike. So the server's write never set anything even on the engine where it did
+not raise. Measured (CPU/WSL2, genesis-world 1.4.0, `dt=0.02`, box dropped from
+z = 5.0):
+
+| write after `build()` | effect |
+|---|---|
+| `options.sim.dt = 0.2` | none — 10 steps still advanced `sim.cur_t` to 0.2 (= 10 × 0.02) |
+| `options.sim.gravity = (0,0,0)` | none — the box still fell, 5.0 → 4.793989658 m |
+| `sim.set_gravity((0,0,0))` | **live** — Δz over the next 10 steps was −0.392398834 m (constant velocity) |
+
+`[OK] [Determinism] 물리 해상도(sim_dt)가 표준 …로 설정되었습니다` therefore
+claimed something that never happened, in v1.5.0 … v1.6.4. It now reports the
+engine's own numbers and says they are fixed at build. **This correction is
+scoped to L2**: `server/l3_runtime.py` prints a near-identical line, performs no
+write, and says `고정` ("fixed") — that wording was, and remains, true. So is
+the FIX scoped to L2: L3's line still prints the `dt` it was handed
+(`sim_dt = ue_dt`, `server/l3_runtime.py:455-456`) and no substeps, where L2
+now prints what the engine reports. True today — the L3 scene is built with
+exactly that `dt` — and listed as deferred in §8.
+
+**The `/Reset` handler was a SECOND crash site, not just a dead knob.** At
+HEAD it ran `vs.sim_options.gravity = ...` and `vs.sim_options.dt = ...`
+(`server/physics_server.py:911-912` at `6b5dd50`), on the same removed
+accessor as the startup write — so on genesis 1.4.0 a client that reached
+`/Reset` would have taken the same `AttributeError`, had the startup write not
+already killed the process first. On 1.3.3 both lines ran and did nothing. The
+gravity restore now goes through the live knob (`vs.set_gravity`, one call at
+`server/physics_server.py:935`); the `dt` restore is deleted outright — it was
+re-writing the value the scene was already built with, and there is no path
+that could have changed it.
+
+Consequence, stated exactly: the gravity restore is now a REAL write for the
+first time — but nothing in the server changes gravity at runtime (the
+`/Genesis/Config/Physics` payload is stored and never applied, §4), so today
+it restores the value already in effect. It becomes load-bearing the moment
+that endpoint is consumed.
+
+### 3. New public surface on `VehicleScene`
+
+| member | what it is |
+|---|---|
+| `effective_dt` | the dt the ENGINE integrates with (`scene.sim.dt`). `VehicleScene.dt` is the caller's authored argument and is never reconciled with the engine |
+| `substeps` | the EFFECTIVE substep count (`scene.sim.substeps`). `VehicleScene` cannot itself diverge here — it always passes `substeps=` and 1.4.0 RAISES on a conflict with the solver `dt` — but a caller that supplies its own `sim_options` WITHOUT `substeps` next to a `rigid_options(dt=)` gets a silently re-derived count: measured **authored 1, effective 4** on a raw `gs.Scene` (`SimOptions(dt=0.02)` + `RigidOptions(dt=0.005)` + Plane + Box, genesis-world 1.4.0, CPU/WSL2). So the authored argument is not the answer in that case |
+| `set_gravity(gravity, envs_idx=None)` | the one live post-build physics knob (`sim.set_gravity`), `envs_idx` passed through for per-env gravity at `n_envs > 1` |
+
+`sim_options` still exists and still returns the authored object; its docstring
+now states plainly that writes to it after `build()` are inert, and points at
+`effective_dt` / `substeps` / `set_gravity` instead. The old docstring offered
+it "for the runtime physics tweaks the server makes (dt / gravity)" — that
+guarantee was never enforced by anything and is withdrawn.
+
+The build timing line is rebuilt on those two properties and its
+`try`/`except` is **removed**: if the SDK cannot read the engine's time axis,
+`build()` should die, not print nothing for eight releases.
+
+### 4. `/Genesis/Config/Physics` is received and never consumed (separate ticket)
+
+`server/osc_manager.py` maps `/Genesis/Config/Physics/` and its slash-less twin
+to a handler that stores UE's `gravity` / `dt` / `friction` / `viscosity` /
+`restitution` in `received_data['physics_settings']`. **Nothing reads that
+dict.** A client that pushes runtime physics settings is silently ignored. Of
+those fields only `gravity` could be honoured today (`set_gravity`); `dt`
+cannot be, per §2. Consume / reject loudly / remove is a separate ticket and is
+NOT decided here.
+
+### 5. Four swallowed exceptions got louder (no behaviour change)
+
+All four remain non-fatal; only logging was added.
+
+| site | what it swallowed | why it matters |
+|---|---|---|
+| `vehicle_scene._normalize_rigid_dt` | the whole normalisation, at `_logger.debug` | invisible by default; a pydantic/options drift would stop normalising and resurface as an unrelated `GenesisException` out of `build()` |
+| `vehicle_scene._clone_morph` | a failed `model_copy` → returns the **ORIGINAL** morph | the caller's flags are then not applied: in the MAIN scene a static obstacle (`fixed=not physics`) becomes a falling dynamic body, and the raycast mirror (`fixed=True, collision=True`) can stop matching the scene it mirrors |
+| `vehicle_scene.build` instanced-wheel `get_link` | skipped disabling that wheel's URDF vgeom | the wheel is then drawn twice (URDF mesh + instanced copy) — a silent visual defect |
+| `core._resolve_dt_from_scene` | `scene.sim.dt` unreadable → falls back to `recommended_dt` | unreachable on a real `Scene` (the read works pre-build on both engines), so reaching it means the SDK is integrating at a dt the solver does not use |
+
+The timing-log guard was removed outright (§3), and `core.py`'s
+`entity.base_link_idx` guard was narrowed from `except Exception` to
+`(AttributeError, TypeError, ValueError)` — its fallback (look the base link up
+by name) is a defined behaviour, so it stays silent, but it must not absorb
+unrelated failures. The remaining guards in those two files were reviewed and
+kept, each for a stated reason; `core.py`'s wheel-spin-MOI `except: pass` is
+knowingly left for its own ticket.
+
+### 6. Tests
+
+`tests/test_sim_options_and_timing.py` (new, 7 cases, real CPU scene):
+
+* **the timing line is asserted to be EMITTED** — `capsys`, regex match on
+  stdout, and its parsed dt / substeps must equal `effective_dt` / `substeps`.
+  "The code path exists" is precisely what failed here for eight releases;
+* post-build `sim_options` writes are pinned as **ineffective**, as a tripwire
+  on the ENGINE: a future genesis that makes them live fails this test and
+  sends the reader back to the contract instead of letting the docs rot;
+* `set_gravity` is pinned as live (drop per 10-step window becomes constant);
+* `substeps` / `effective_dt` must equal `scene.sim.*`.
+
+`tests/test_gs_compat.py` gains three stub cases so BOTH engine shapes are
+covered on a machine that only has one: a 1.4.0-shaped fake (`options.sim`), a
+1.3.3-shaped fake (`sim_options`), and one with neither, whose `AttributeError`
+must name both spellings.
+
+`tests/test_server_import.py` gains an **AST** source guard: any `Assign` /
+`AugAssign` / `AnnAssign` in `server/*.py` whose target attribute chain mentions
+`sim_options`, plus literal `setattr`, fails the suite. Its docstring states the
+scope honestly — this is a tripwire for the literal forms (`=`, `+=`,
+subscripted targets, `setattr(getattr(...))`), **not** proof that nothing writes
+at runtime; aliasing through a dict/argument, dynamic `setattr` and `exec`
+escape it, and the runtime facts are pinned by the tests above instead.
+
+Three further LITERAL forms escape it and are now named in that docstring
+rather than left to be inferred from "narrow scope": a tuple-unpacking target
+(`a, vs.sim_options.dt = 1, 0.02`), `for vs.sim_options.dt in [...]`, and
+`with ... as vs.sim_options.dt`. The walk only inspects `Assign` / `AugAssign`
+/ `AnnAssign` targets that are themselves an `Attribute` or `Subscript`, so a
+`Tuple` target, a `For.target` and a `withitem.optional_vars` all return empty
+(checked directly against `_sim_options_writes_in` on a file containing all
+three). None occurs in this tree; widening the target check is the fix if one
+ever does.
+
+Suite: **507 → 519 passed** — `519 passed in 144.33s` on this tree
+(CPU/WSL2, genesis-world 1.4.0, `python -m pytest tests/ -q`, one run;
+v1.6.4 measured `507 passed in 170.53s` on the same machine, so the wall time
+is dominated by run-to-run spread, not by the 12 added cases). The 12: 7 in
+`test_sim_options_and_timing.py`, 3 engine-shape stubs in `test_gs_compat.py`,
+2 write-guard cases in `test_server_import.py`.
+
+### 7. Docs
+
+* `docs/physics-contracts.md` **§7.14 "Simulation time is fixed at `build()`"** —
+  the snapshot mechanism on both engines, the measurement table above, the one
+  live knob, the explicit L2-scoped correction of the `[Determinism]` claim, and
+  the unconsumed `/Genesis/Config/Physics` endpoint.
+* `docs/server.md` §2.3 — a subsection saying `--override_dt` only reaches the
+  simulation before `build()` and there is no runtime path.
+* `docs/api-reference.md` — `sim_options` relabelled as AUTHORED-and-inert;
+  `substeps` / `effective_dt` / `set_gravity` added.
+* `README.md`, `docs/quickstart.md`, `docs/index.md` — the advertised backend
+  requirement `genesis-world ≥ 1.0.0` is replaced by **1.3.3 or 1.4.0**, the
+  only two versions the source branches on. The `≥ 1.0.0` claim was not
+  enforced by any branch or test.
+
+### 8. Not in this release
+
+No physics path was touched; no numerical result moves. Runtime-variable `dt`
+is not added (the engine does not support it).
+
+Open on their own tickets, unchanged here:
+
+* the wheel-spin-MOI `except: pass` in `core.py` and the
+  `RigidJoint.child_link` dead code that starves it;
+* the unconsumed `/Genesis/Config/Physics` endpoint (§4);
+* `server/benchmark.py`'s poor diagnosis when a child dies during the stats
+  wait (it burns the full timeout and reports "no N [STATS] within Ns");
+* **`vehicle_scene._clone_morph`'s silent field filter** —
+  `valid = {k: v for k, v in updates.items() if k in type(morph).model_fields}`
+  (`vehicle_scene.py:379-380`) DROPS any requested flag the morph class does not
+  declare, with no warning. Same failure class as the `model_copy` fallback
+  this release made loud (the caller's flags are not applied), on a different
+  path: the filter succeeds, so the new `except` branch and its warning are
+  never reached, and the new docstring describes the fallback risk only.
+  **Pre-existing — not introduced here, and not fixed here.** In today's tree
+  both call sites pass `fixed` / `collision`, which every morph used declares;
+  a future flag on a morph that lacks it would vanish silently;
+* **`server/l3_runtime.py:455-456` still reports the ARGUMENT, not the
+  engine** — `sim_dt = ue_dt`, and no substeps in the line at all. This
+  release's "the engine is the truth" rewrite is therefore **scoped to L2**.
+  The L3 line is TRUE as written today (the L3 scene is built with that same
+  `ue_dt` and nothing can change it after `build()`), so this is an asymmetry
+  to tidy, not a falsehood. See `docs/physics-contracts.md` §7.14.
+
+---
+
 ## [1.6.4] — 2026-09-16
 
 **Everything the step path used to re-derive from config on every call is now

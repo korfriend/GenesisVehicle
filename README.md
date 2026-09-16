@@ -84,11 +84,14 @@ Visual demos (with `--viewer`):
 ## Installation
 
 Requires Python 3.12+ and
-[Genesis](https://genesis-embodied-ai.github.io/) (`genesis-world ≥ 1.0.0`)
-with a CUDA-enabled `torch`. The SDK is validated against the Genesis
-`1.0.0` backend and smoke-tested on `1.4.0`; the same source also runs on
-`1.3.3`, since the APIs that moved between the two are branched at runtime
-(see the 1.5.0 entry, and 1.2.7 for the renderer API split). On
+[Genesis](https://genesis-embodied-ai.github.io/) — **`genesis-world` 1.3.3 or
+1.4.0**, which are the only two versions the source actually branches on
+(`_gs_compat.py`, `vehicle_scene.py`). 1.4.0 is what the test suite and every
+published measurement run on; 1.3.3 is kept working for the deployed clones
+that have not upgraded yet. Earlier releases are NOT supported — the old
+`≥ 1.0.0` claim printed here through v1.6.4 was never enforced by any branch
+or test. See the 1.5.0 entry (and 1.2.7 for the renderer API split) for what
+moved between the two. On
 `genesis-world >= 1.4.0`, ask for the solver rate with
 `VehicleScene(substeps=...)` and do **not** pass `dt=` to `RigidOptions` —
 that field now means the substep interval. See
@@ -314,7 +317,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-507 tests covering URDF parsing, config resolve, suspension sizing, strategy
+519 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity check on
@@ -322,11 +325,14 @@ the DEFAULT contact path), the config-rebuild state carry and the reset
 semantics (v1.6.2), the raycast-mode benchmark harness (schedule,
 gates, pairing and publication rule, driven through an injected runner), the
 build-time config derivations staying live under a post-`build()` write
-(v1.6.4), and the server subpackage surface. Almost all
+(v1.6.4), simulation time being fixed at `build()` and the server's
+`sim_options` write guard (v1.6.5), and the server subpackage surface. Almost all
 pure-Python; a handful build a real `VehicleScene` on the CPU backend, so
-`genesis-world` must be importable. No GPU needed — they run on CPU in ~170 s
-(measured at v1.6.4: `507 passed in 170.53s`; 116 s / 450 tests at v1.6.2-v1.6.3,
-88 s at v1.6.1).
+`genesis-world` must be importable. No GPU needed — measured on the v1.6.5 tree,
+`519 passed in 144.33s` (CPU/WSL2, genesis-world 1.4.0, `pytest tests/ -q`, one
+run). Earlier: `507 passed in 170.53s` at v1.6.4, 116 s / 450 tests at
+v1.6.2-v1.6.3, 88 s at v1.6.1 — the wall time swings more between runs than
+between releases, so treat it as an order of magnitude, not a metric.
 
 ## Releases and Versioning
 

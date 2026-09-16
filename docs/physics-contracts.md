@@ -844,3 +844,95 @@ and broadcast the wrong axis. **13 sites are NOT yet converted** — 4 in
 `strategies/stability.py`, 8 in `tire_models/pacejka.py`, 1 in
 `tire_models/coulomb.py` — so do not read the helpers as a completed
 invariant: `WheelMeta` fields are per-wheel-only until every site uses them.
+
+## 7.14 Simulation time is fixed at `build()` (v1.6.5)
+
+| abbr | meaning |
+|---|---|
+| dt | simulation STEP duration (s) |
+| substeps | solver iterations per step; internal interval is `dt / substeps` |
+| L2 | per-entity batching axis (K vehicles in one scene) |
+| L3 | `n_envs` batching axis (same-URDF fleet) |
+| UE | Unreal Engine (the OSC client) |
+
+`VehicleScene.sim_options` is the **authored** `SimOptions` object — the one the
+scene was constructed with. **Writing to it after `build()` changes nothing**,
+on every genesis version this SDK supports.
+
+Why: `Simulator.__init__` snapshots `_dt` / `_substep_dt` / `_substeps` at
+construction and copies them into each solver at build; `Simulator.dt` is a
+read-only property. This is true of genesis 1.3.3 (`genesis/engine/simulator.py`,
+`self._dt = options.dt`) and of 1.4.0 alike. The engine's own accessors
+(`scene.sim.dt`, `scene.sim.substeps`, `scene.sim.set_gravity`) exist on both.
+
+Measured (CPU/WSL2, genesis-world 1.4.0, `dt=0.02`, a box dropped from z = 5.0):
+
+| write after `build()` | effect |
+|---|---|
+| `options.sim.dt = 0.2` | none — 10 steps still advanced `sim.cur_t` to 0.2 (= 10 × 0.02) |
+| `options.sim.gravity = (0,0,0)` | none — the box still fell, 5.0 → 4.793989658 m |
+| `sim.set_gravity((0,0,0))` | **live** — Δz over the next 10 steps was −0.392398834 m, i.e. constant velocity |
+
+So there is exactly one live knob, and the SDK exposes it as
+`VehicleScene.set_gravity(gravity, envs_idx=None)`. To change `dt` or
+`substeps` you must build a new scene. To READ what the engine is actually
+integrating with, use `VehicleScene.effective_dt` and `VehicleScene.substeps`,
+which read `scene.sim.*` — **not** the authored `VehicleScene(dt=, substeps=)`
+arguments, which are never reconciled with the engine.
+
+**When the authored and effective substeps can actually diverge — the
+conditions, which an earlier draft of this section omitted.**
+`VehicleScene` itself cannot reach the divergence: it always passes
+`substeps=` explicitly (`_scene_kw`), and genesis 1.4.0 RAISES rather than
+re-derives when an authored `substeps` conflicts with the solver `dt`
+(`GenesisException: RigidSolver dt=... implies N substep(s) per step,
+conflicting with the requested substeps=...`). The divergence is reachable
+only when a caller supplies its **own** `sim_options` WITHOUT `substeps`
+alongside a `rigid_options(dt=)` — then 1.4.0 derives
+`substeps = round(SimOptions.dt / RigidOptions.dt)` and never tells the
+caller. Harness for the number quoted below: a raw `gs.Scene`
+(`SimOptions(dt=0.02)` + `RigidOptions(dt=0.005)` + `Plane` + `Box`),
+genesis-world 1.4.0, CPU/WSL2 — **authored 1, effective 4**. The unqualified
+phrasing ("genesis 1.4.0 can re-derive substeps") was too broad: read on its
+own it suggests a default `VehicleScene(substeps=4)` might silently run at
+something else, which it cannot. `VehicleScene.substeps` exists so that the
+reachable case reads back honestly instead of echoing the argument; the same
+conditions are on the property's docstring.
+
+### Correction: the server's L2 `[Determinism]` line was false (v1.5.0 … v1.6.4)
+
+`server/physics_server.py` printed
+`[OK] [Determinism] 물리 해상도(sim_dt)가 표준 …로 설정되었습니다` immediately
+after `vs.sim_options.dt = sim_dt`. That write never set anything. On genesis
+1.3.3 it was silently inert; on 1.4.0 it raised `AttributeError` — because
+`Scene.sim_options` was removed in favour of `Scene.options.sim` — and **killed
+the L2 server on the first client connection**, for eight releases
+(v1.5.0, 1.5.1, 1.5.2, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4). Both the
+write and the claim are gone as of v1.6.5; the line now reports
+`effective_dt` / `substeps` and says the values are fixed at build. The
+accessor itself is branched once, in `_gs_compat.scene_sim_options`.
+
+`server/l3_runtime.py` prints a near-identical line, but it performs **no
+write** and says `고정` ("fixed") — that wording was, and is, true. The
+correction above is scoped to L2.
+
+**So is the fix. "Report the engine, not the argument" is applied to L2 only.**
+`server/physics_server.py`'s line now reads `VehicleScene.effective_dt` /
+`VehicleScene.substeps`; `server/l3_runtime.py:455-456` still prints
+`sim_dt = ue_dt` — its own `--override_dt`/UE argument — and prints no substeps
+at all. That is TRUE as written today, because the L3 scene is built with
+exactly that `ue_dt` and nothing can change it afterwards (this section). It is
+an asymmetry to tidy, not a falsehood: if the L3 build path ever stops passing
+the argument straight through, the L3 line goes stale silently the way the L2
+one did. Deferred, listed in the v1.6.5 CHANGELOG §8.
+
+### `/Genesis/Config/Physics` is received and never consumed
+
+`server/osc_manager.py` maps `/Genesis/Config/Physics/` (and the slash-less
+twin) to a handler that stores UE's `gravity` / `dt` / `friction` / `viscosity`
+/ `restitution` into `received_data['physics_settings']`. **Nothing reads that
+dict** — grep finds only the writes inside `osc_manager.py`. A UE client that
+sends runtime physics settings is silently ignored. Of those fields only
+`gravity` could be honoured today (via `VehicleScene.set_gravity`); `dt` cannot
+be, per this section. Deciding between consuming, rejecting loudly, and
+removing the endpoint is a separate ticket — it is NOT fixed in v1.6.5.

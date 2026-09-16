@@ -344,6 +344,37 @@ the run-to-run spread of a single setting, so this machine cannot resolve them.
 The v1.6.2 help text's "cost is usually negligible at n_envs=1" was never
 backed by a measurement and has been dropped rather than restated.
 
+### `dt` and `substeps` are fixed at build — there is no runtime path (v1.6.5)
+
+`--override_dt` (and the `dt` UE sends in the init handshake) reaches the
+simulation only by being passed to `VehicleScene(dt=...)` **before**
+`build()`. After that, nothing can change it: the engine snapshots
+`dt`/`substeps` in `Simulator.__init__` on both genesis 1.3.3 and 1.4.0, and
+`Simulator.dt` is read-only. Assigning `sim_options.dt` post-build is inert —
+see [`physics-contracts.md`](physics-contracts.md) §7.14 for the measurement.
+
+Through v1.6.4 the L2 path did exactly that assignment and then printed
+`[OK] [Determinism] … 설정되었습니다`; the claim was false on 1.3.3 and the
+assignment raised `AttributeError` on 1.4.0, killing the L2 server on the
+first client connection. It now prints the engine's `effective_dt` /
+`substeps` and says they are fixed at build. The L2 startup write was not the
+only one: the `/Reset` handler assigned `vs.sim_options.gravity` and
+`vs.sim_options.dt` too, so it was a SECOND `AttributeError` site on 1.4.0 —
+unreachable in practice only because the startup write killed the process
+first. Its `dt` restore is deleted and its gravity restore now goes through
+`VehicleScene.set_gravity`.
+
+L3's near-identical line never performed a write and was already accurate — but
+note the fix is **L2-only** in the other direction too: `l3_runtime.py` prints
+the `dt` it was HANDED (`sim_dt = ue_dt`) and no substeps, where L2 now prints
+what the engine reports. True today, since the L3 scene is built with exactly
+that `dt`; an asymmetry to tidy, tracked in the v1.6.5 CHANGELOG §8.
+
+Gravity is the one exception: `VehicleScene.set_gravity()` IS live post-build,
+and the `/Reset` handler uses it to restore the initial value. Note that
+`/Genesis/Config/Physics`, which UE may use to push `gravity`/`dt`/`friction`
+at runtime, is received and stored but **never consumed** — a separate ticket.
+
 ---
 
 ## 2.4 What the `[STATS]` line measures — and what it leaves out
