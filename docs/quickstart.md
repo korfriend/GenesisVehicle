@@ -1,7 +1,9 @@
 # Quickstart
 
 The shortest working program. Drop a car, drive 10 seconds, print the final
-position. Requires Genesis (`genesis-world` 1.3.3 or 1.4.0 — the only two the source branches on) installed and a 4-wheel-car URDF whose
+position. Requires Genesis (`genesis-world` **1.4.0** — the supported floor since SDK
+v1.6.6; older versions are not tested and not supported, though nothing in
+the code refuses them) installed and a 4-wheel-car URDF whose
 suspension joints follow the SDK's naming convention (see
 [`api-reference.md`](api-reference.md#4-urdf-utilities)).
 
