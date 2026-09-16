@@ -52,6 +52,17 @@ fourth axis M *before* this pipeline — its raw sensor read is
 `(n_envs, n_wheels, M)` — but `read_distances` reduces M away, so every row
 above is unchanged. M is not a batching axis you can address.
 
+**Per-wheel constants are rank 1 and shared by every row.** `WheelMeta` fields
+(`k_susp`, `radius`, `i_wheel`, `mu_long`, …) are `(n_wheels,)` — one value per
+wheel, the same for all `n_envs` rows — and are broadcast against the
+`(n_envs, n_wheels)` pipeline. Since v1.6.4 that broadcast goes through
+`_pipeline.pw` / `pw3` at 16 of the 29 sites, which `unsqueeze(0)` a rank-1
+field and pass a rank-2 (`pw`) / rank-3 (`pw3`) one through unchanged. Today
+every field is rank 1, so the helpers are exactly the `unsqueeze(0)` they
+replace; they exist so that a future per-ROW field cannot silently broadcast
+the wrong axis. Nothing in `WheelMeta` is per-row yet — do not write code that
+assumes it can be (`physics-contracts.md` §7.13).
+
 ### When L1 matters
 
 - Always. Even a single vehicle benefits — for a tank with 10 wheels,

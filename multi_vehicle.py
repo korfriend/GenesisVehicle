@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 import torch
 import genesis as gs
@@ -115,6 +115,21 @@ def check_fan_uniformity(sensors: Sequence[Any]) -> int:
     return sizes[0] if sizes else 1
 
 
+def _kind_name(names: Optional[Sequence[str]], K: int) -> Optional[str]:
+    """Identifier for a kind's shared config, for messages about that config.
+
+    ``None`` when the caller supplied no names (a direct
+    ``MultiVehiclePhysics(scene, [(entity, sensor, cfg), ...])`` does not know
+    them) — ``VehiclePhysics`` then falls back to the URDF file name. With
+    K > 1 the name is slot 0's PLUS the count, because the config is shared by
+    the whole kind and a message that named only slot 0 would read as though
+    the others were unaffected."""
+    if not names:
+        return None
+    first = names[0]
+    return first if K <= 1 else f"{first} (+{K - 1} more of the same kind)"
+
+
 class MultiVehicleKindPhysics:
     """Batched physics driver for K vehicles of the SAME URDF / cfg, optionally
     across N parallel Genesis envs.
@@ -142,6 +157,7 @@ class MultiVehicleKindPhysics:
         sensors: Sequence[Any],
         config: VehicleConfig,
         n_envs: int = 1,
+        names: Optional[Sequence[str]] = None,
     ):
         assert len(entities) == len(sensors) and len(entities) >= 1
         assert n_envs >= 1
@@ -159,7 +175,13 @@ class MultiVehicleKindPhysics:
         # reads it off the sensor). Same-kind vehicles share a URDF and are all
         # built by the same code path, so every sensor in `sensors` carries the
         # same max_range / no_hit_value — the proto's value covers all K.
-        self._proto = VehiclePhysics(scene, entities[0], sensors[0], config, n_envs=NK)
+        # One config per kind today, so ONE name identifies whose config the
+        # proto carries; where K vehicles share the kind they share the cfg,
+        # and the suffix says so rather than implying the message is only
+        # about slot 0. Used by the dt-stability warning.
+        self._proto = VehiclePhysics(
+            scene, entities[0], sensors[0], config, n_envs=NK,
+            name=_kind_name(names, K))
 
         self.entities = list(entities)
         self.sensors = list(sensors)
@@ -813,7 +835,8 @@ class MultiVehiclePhysics:
 
     def __init__(self, scene: Any,
                  vehicles: Sequence[tuple],    # list of (entity, sensor, cfg)
-                 n_envs: int = 1):
+                 n_envs: int = 1,
+                 names: Optional[Sequence[str]] = None):
         if not vehicles:
             raise ValueError("MultiVehiclePhysics needs at least one vehicle.")
         # Group by cfg identity (same Python object → same kind). Callers
@@ -825,16 +848,32 @@ class MultiVehiclePhysics:
         group_order, groups, self._flat_to_kind = group_vehicles_by_cfg(vehicles)
 
         self.vehicles = list(vehicles)   # preserve caller's order
+        # Optional per-vehicle display names, in the caller's FLAT order, for
+        # messages about a kind's config. Re-ordered to kind/slot order below
+        # through _flat_to_kind so a kind gets its OWN vehicles' names.
+        if names is not None and len(names) != len(self.vehicles):
+            raise ValueError(
+                f"names has {len(names)} entries for "
+                f"{len(self.vehicles)} vehicles")
+        self.names = list(names) if names is not None else None
+        kind_names: dict[int, dict[int, str]] = defaultdict(dict)
+        if self.names is not None:
+            for flat_i, kind_idx, slot_idx in self._flat_to_kind:
+                kind_names[kind_idx][slot_idx] = self.names[flat_i]
         self.n_envs = n_envs
         self.kinds = []                  # list of MultiVehicleKindPhysics
         self.kind_slices: list[slice] = []  # per-kind slice into flat inputs
-        for key in group_order:
+        for k_i, key in enumerate(group_order):
             kind_vehicles = groups[key]
             entities = [v[0] for v in kind_vehicles]
             sensors  = [v[1] for v in kind_vehicles]
             cfg      = kind_vehicles[0][2]
+            slot_names = kind_names.get(k_i)
             self.kinds.append(
-                MultiVehicleKindPhysics(scene, entities, sensors, cfg, n_envs=n_envs))
+                MultiVehicleKindPhysics(
+                    scene, entities, sensors, cfg, n_envs=n_envs,
+                    names=([slot_names[i] for i in range(len(kind_vehicles))]
+                           if slot_names else None)))
 
         # [v1.0.15] Cross-kind I/O batching: concatenated base-link indices of
         # every kind (kind-major), so a multi-kind step does ONE state read

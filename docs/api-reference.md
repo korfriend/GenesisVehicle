@@ -341,15 +341,26 @@ solver — otherwise prefer `VehicleScene`. (See the two-API-layers guide in
 
 ```python
 class VehiclePhysics:
-    def __init__(scene, entity, sensor, config: VehicleConfig, n_envs: int = 1)
+    def __init__(scene, entity, sensor, config: VehicleConfig, n_envs: int = 1,
+                 name: str | None = None)                               # name: v1.6.4
     def step(inputs: VehicleStepInputs, distances: torch.Tensor | None = None) -> None
     def reset(env_ids: torch.Tensor | None = None) -> None
     def set_ray_miss_value(miss: float | None, *, sensor=None) -> None   # v1.5.2
     def export_runtime_state(rows=None) -> dict                         # v1.6.2
     def load_runtime_state(state: dict, rows=None) -> None              # v1.6.2
+    vehicle_name         # attribute: str, identifies THIS driver's config  # v1.6.4
     wheels_grounded      # property: (n_envs, n_wheels) bool             # v1.5.2
     all_wheels_grounded  # property: (n_envs,) bool                      # v1.5.2
 ```
+
+`name` / `vehicle_name` (v1.6.4) exist so a warning about a driver's config can
+say which vehicle it is about — currently only the bump-stop/`dt` stability
+warning, whose text gained a `vehicle '<name>':` prefix. `VehicleScene` passes
+the `Vehicle.name` from `add_vehicle` — the one you gave it, or the
+auto-generated `vehicle_<i>` when you gave none. A direct `VehiclePhysics(...)`
+call that passes no name falls back to the URDF file basename, then
+`"<unnamed>"`.
+It is a display string only — nothing looks a vehicle up by it.
 
 `export_runtime_state` / `load_runtime_state` are the state-carry pair a
 `VehicleScene` config rebuild runs through (v1.6.2). `rows` indexes the FLAT
@@ -380,7 +391,8 @@ per-vehicle teleport mid-rollout — the loop is still legitimate; see
 
 ```python
 class MultiVehiclePhysics:
-    def __init__(scene, vehicles: list[tuple[Entity, Sensor, VehicleConfig]])
+    def __init__(scene, vehicles: list[tuple[Entity, Sensor, VehicleConfig]],
+                 n_envs: int = 1, names: list[str] | None = None)   # names: v1.6.4
     def step(inputs_list: list[VehicleStepInputs]) -> None
     def distances_list() -> list[torch.Tensor]   # per vehicle (n_envs, n_wheels) float
     def grounded_list()  -> list[torch.Tensor]   # per vehicle (n_envs, n_wheels) bool, v1.5.2
@@ -405,9 +417,18 @@ directly:
 
 ```python
 class MultiVehicleKindPhysics:
-    def __init__(scene, entities, sensors, config: VehicleConfig, n_envs: int = 1)
+    def __init__(scene, entities, sensors, config: VehicleConfig, n_envs: int = 1,
+                 names: list[str] | None = None)                     # names: v1.6.4
     def reset(rows=None) -> None    # FLAT env*K+slot rows, NOT vehicle indices (v1.6.2)
 ```
+
+`names` (v1.6.4) is optional and display-only: per-vehicle names in the
+CALLER's flat order, re-ordered to kind/slot order internally so each kind gets
+its own vehicles' names. A length that does not match the vehicle count raises
+`ValueError`. `None` (the default, and what a direct construction gives) leaves
+each driver on the URDF-basename fallback. Because one kind shares one config,
+a kind of K > 1 reports slot 0's name plus `(+K-1 more of the same kind)` — a
+message naming only slot 0 would read as though the others were unaffected.
 
 **Migration (v1.6.2):** `reset`'s parameter is now `rows`. It was called
 `vehicle_ids` through 1.6.1 while always meaning flat `env * K + slot` rows, so
@@ -712,6 +733,17 @@ class PerSide(DrivetrainStrategy):
                  throttle_gear_cap=1.0, use_per_side_taper=True)
 ```
 
+`driven_axles`, `brake_bias`, `drive_weights` and `omega_max_drive` are **hot
+sources** (v1.6.4): the vectors derived from them — the driven-axle share, the
+brake-bias vector, the normalised AWD weights, the drive-omega cap — are built
+once at `VehiclePhysics` construction instead of on every `distribute_torque`,
+and re-derived on the next call if you write the source afterwards. An in-place
+edit of a list (`drivetrain.brake_bias[0] = 0.9`) counts, because the sources
+are keyed by value. The derived vectors are not attributes of the strategy;
+they live in `_hotset._CACHES` (`physics-contracts.md` §7.13). The
+`ConfigError`s for a wrong-length `brake_bias` / `drive_weights` are unchanged
+and still raise from the step path.
+
 ### 5.3 Coupling
 
 ```python
@@ -779,6 +811,12 @@ class CoulombIsotropic(TireModel):
     def __init__(eps_v=0.5)
     # F = -mu * N * v_slip / |v_slip|, isotropic.
 ```
+
+`eps_v` is a **hot source** (v1.6.4): `CoulombIsotropic` squares it once at
+build (in double, then cast to the working dtype — squaring in float32 moves
+the threshold) rather than on every call, and a post-`build()` write to
+`tire.eps_v` is picked up on the next call. `physics-contracts.md` §7.13;
+gate `tests/test_tire_coulomb_eps.py`.
 
 ## 7. Sensor / dynamics utilities
 
@@ -1116,7 +1154,13 @@ veh.set_omega_max_drive(90.0)                        # rad/s directly; None clea
 ```
 
 Equivalent to mutating `veh.resolved.chassis` / `resolved.drivetrain` yourself;
-`dynamics.aero_drag_force` is the pure force helper.
+`dynamics.aero_drag_force` is the pure force helper. These writes stay live
+after `build()`: `omega_max_drive` is a declared hot source, so the derived cap
+is re-computed on the next call (`physics-contracts.md` §7.13). **v1.6.4:**
+`set_omega_max_drive(None)` on a `PerSide` (skid-steer) vehicle now means "no
+taper", consistently with RWD/FWD/AWD. Through 1.6.3 it raised
+`TypeError: unsupported operand type(s) for /: 'Tensor' and 'NoneType'` from the
+per-side taper on the next step.
 
 **Bump-stop spring (v1.2.6).** `WheelConfig.k_bump` (N/m, default 0 = off) adds
 `N += k_bump·max(compression − rest_stroke, 0)` — a progressive rate beyond the
@@ -1127,8 +1171,14 @@ rim stops sinking visibly below the ground (measured on the tracked preset:
 enables it at `TANK_BUMP_FACTOR = 2.0 ×` the derived spring. **Stability
 bound:** the suspension force updates once per `dt`, so keep
 `(k_susp + k_bump)·dt²/m_share` well under ~0.7 (measured: 0.61 chatters,
-≥ 0.86 diverges) — `VehiclePhysics` warns past 0.7. OSC:
-`wheelOverrides.bumpStiffness`; sweep CLI: `--k-bump`.
+≥ 0.86 diverges) — `VehiclePhysics` warns past 0.7, and since v1.6.4 the
+warning names the vehicle (`vehicle '<name>': bump-stop is too stiff …`; for a
+kind of K > 1 it is slot 0's name plus `(+K-1 more of the same kind)`, since
+one kind shares one config). Whether the bump-stop term runs at all is the
+build-time bool `WheelMeta.has_bump_stop` — an OR over `k_bump > 0` since
+v1.6.4, which differs from the old `max()` form only under a NaN rate
+(`physics-contracts.md` §7.13). OSC: `wheelOverrides.bumpStiffness`; sweep CLI:
+`--k-bump`.
 
 **Top-speed governor (v1.2.3).** Every drivable preset takes `top_speed` (m/s),
 converted to the drive-omega cap via `top_speed / mean_wheel_radius`, so the

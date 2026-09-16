@@ -25,6 +25,25 @@ from genesis.utils.geom import transform_by_quat
 from .dynamics import brake_torque_signed
 
 
+def pw(t: torch.Tensor) -> torch.Tensor:
+    """Broadcast a PER-WHEEL array against a ``(B, n)`` batch.
+
+    ``(n,)`` — one value per wheel, shared by every row — becomes ``(1, n)``.
+    ``(B, n)`` — one value per row per wheel — is returned unchanged.
+
+    The rank test is what makes it safe to promote a ``WheelMeta`` field to
+    per-row later: ``.unsqueeze(0)`` on an already-``(B, n)`` field would
+    silently produce ``(1, B, n)`` and broadcast the WRONG axis. At rank 1 this
+    is exactly ``t.unsqueeze(0)``, so it is value-identical today."""
+    return t.unsqueeze(0) if t.dim() == 1 else t
+
+
+def pw3(t: torch.Tensor) -> torch.Tensor:
+    """:func:`pw` for per-wheel VECTORS: ``(n, k)`` -> ``(1, n, k)``,
+    ``(B, n, k)`` unchanged."""
+    return t.unsqueeze(0) if t.dim() == 2 else t
+
+
 def _rotate_by_quat(v: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
     """``transform_by_quat`` that also works under ``torch.autograd``.
 
@@ -98,28 +117,34 @@ def compute_wheel_step(
                    .reshape(B, n, 3) + pos.unsqueeze(1))
 
     # (A) Compression / asymmetric damper / N.
-    compression = torch.clamp(wm.rest_d.unsqueeze(0) - distances, min=0.0)
+    compression = torch.clamp(pw(wm.rest_d) - distances, min=0.0)
     air_mask = compression <= 0
     if prev_init:
         raw_rate = (compression - prev_compression) / DT
-        rc = wm.comp_rate_clamp.unsqueeze(0)
+        rc = pw(wm.comp_rate_clamp)
         comp_rate = torch.clamp(raw_rate, -rc, rc)
     else:
         comp_rate = torch.zeros_like(compression)
 
     c_damp = torch.where(
         comp_rate > 0.0,
-        wm.c_compression.unsqueeze(0).expand_as(comp_rate),
-        wm.c_extension.unsqueeze(0).expand_as(comp_rate),
+        pw(wm.c_compression).expand_as(comp_rate),
+        pw(wm.c_extension).expand_as(comp_rate),
     )
-    N = wm.k_susp.unsqueeze(0) * compression + c_damp * comp_rate
+    N = pw(wm.k_susp) * compression + c_damp * comp_rate
     # Bump-stop (v1.2.6): progressive extra rate beyond rest_stroke, bounding
     # the transient over-compression a penalty contact needs on a slope hit /
-    # landing. `has_bump_stop` is a build-time bool — zero cost when off.
+    # landing.
+    # `has_bump_stop` is a build-time python bool — zero cost when off, and no
+    # per-step device->host sync. It is the OR over every row and wheel of
+    # `k_bump > 0` (core.py `_build_wheel_meta_impl`), so it is a BRANCH for
+    # the whole batch, not a per-row flag: one wheel with a bump stop makes
+    # every row take the branch. That is exact, because `bump_stop_force`
+    # returns 0 wherever `k_bump == 0` — a row without a bump stop adds zero.
     if getattr(wm, "has_bump_stop", False):
         from .dynamics import bump_stop_force
         N = N + bump_stop_force(
-            compression, (wm.rest_d - wm.radius).unsqueeze(0), wm.k_bump.unsqueeze(0))
+            compression, pw(wm.rest_d - wm.radius), pw(wm.k_bump))
     N = torch.clamp(N, min=0.0)
     N = torch.where(air_mask, torch.zeros_like(N), N)
 
@@ -141,7 +166,7 @@ def compute_wheel_step(
     v_hit = vel.unsqueeze(1) + torch.cross(ang_b, r_vec, dim=-1)
     v_long = (v_hit * wheel_fwd_world).sum(dim=-1)
     v_lat = (v_hit * wheel_lat_world).sum(dim=-1)
-    v_roll = wm.radius.unsqueeze(0) * omega
+    v_roll = pw(wm.radius) * omega
 
     # (C) Tire force — single batched call.
     F_long, F_lat, kappa, alpha = resolved.tire(v_long, v_lat, v_roll, N, wm)
@@ -158,9 +183,9 @@ def compute_wheel_step(
     F_long, F_lat = ctx.F_long, ctx.F_lat
 
     # (D) Omega update. brake torque clamped against single-step overshoot.
-    i_w = wm.i_wheel.unsqueeze(0)
+    i_w = pw(wm.i_wheel)
     T_brake_eff = brake_torque_signed(T_brake_pw, omega, dt=DT, i_wheel=i_w)
-    radius_b = wm.radius.unsqueeze(0)
+    radius_b = pw(wm.radius)
 
     # [Overshoot Clamp] Cap F_long so the resulting friction torque cannot
     # reverse the tire slip direction in one step.

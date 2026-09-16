@@ -14,6 +14,8 @@ from typing import Any
 
 import torch
 
+from .._hotset import derived, row_tensor, square_f64
+
 
 class StabilityHook(ABC):
     """Base class. Subclasses set ``slots`` to a subset of
@@ -205,6 +207,26 @@ class StaticFrictionLock(StabilityHook):
         self._d_lat: torch.Tensor | None = None
         self._was_active: torch.Tensor | None = None
 
+    def _prime_derived(self, wheel_meta: Any, device: Any, dtype: Any) -> None:
+        """Build-time hook (``_hotset.prime_derived``): derive ``_v_thr_sq``
+        now, so the threshold is fixed AFTER every documented pre-build write
+        (``TankTuning.apply_config`` sets ``v_thr = 5.0`` on the constructed
+        hook) and before the first step."""
+        self._v_thr_squared(torch.zeros((), device=device, dtype=dtype))
+
+    def _v_thr_squared(self, ref: torch.Tensor) -> torch.Tensor:
+        """``v_thr ** 2`` as a ``(1, 1)`` tensor on ``ref``'s device/dtype.
+
+        Hoisted out of the step path (it was ``self.v_thr * self.v_thr`` on
+        every call). Squared in python DOUBLE and only then cast — see
+        ``_hotset.square_f64``. Per-ROW rather than a python scalar so a fused
+        group can carry one threshold per vehicle; a write to ``v_thr`` still
+        lands on the next step (the cache key carries it)."""
+        return derived(
+            self, "_v_thr_sq", None, (self.v_thr, ref.device, ref.dtype),
+            lambda: row_tensor(square_f64(self.v_thr), ref),
+        )
+
     def _ensure_state(self, ref: torch.Tensor) -> None:
         if self._d_long is None or self._d_long.shape != ref.shape:
             self._d_long = torch.zeros_like(ref)
@@ -217,7 +239,7 @@ class StaticFrictionLock(StabilityHook):
         # sync per step.
         active_brake = (ctx.brake > self.brake_thr).unsqueeze(-1)      # (n_envs, 1)
         v_planar_sq  = ctx.v_long * ctx.v_long + ctx.v_lat * ctx.v_lat  # (n_envs, n_wheels)
-        active_v     = v_planar_sq < (self.v_thr * self.v_thr)
+        active_v     = v_planar_sq < self._v_thr_squared(v_planar_sq)
         active       = active_brake & active_v                          # (n_envs, n_wheels)
 
         self._ensure_state(ctx.v_long)

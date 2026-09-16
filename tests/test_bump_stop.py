@@ -95,3 +95,39 @@ def test_sweep_cli_k_bump_override():
     cfg = tank_skid_belt(TANK_URDF)
     apply_plant_overrides(cfg, TANK_URDF, k_bump=0.0, log=lambda *_: None)
     assert all(w.k_bump == 0.0 for w in cfg.wheels)   # explicit off wins
+
+
+def test_has_bump_stop_is_an_or_and_differs_from_the_old_max_under_nan():
+    """``has_bump_stop`` is the build-time branch flag. It is now
+    ``bool((k_bump > 0).any())`` — an OR over every element — so that it stays
+    a single whole-batch branch when ``k_bump`` becomes per-ROW for a fused
+    group, instead of a max over one vehicle's wheels.
+
+    The two forms agree on every ordinary value, ``-0.0`` and ``±inf``
+    included. They do NOT agree under NaN: ``torch.max`` propagates it, so the
+    old form answered False for the whole vehicle as soon as one wheel carried
+    a NaN rate — disabling the bump stop on the wheels that had one. This pins
+    the exception rather than letting the change claim an unconditional
+    identity."""
+    import torch
+    from genesis_vehicle.core import build_wheel_meta
+
+    def _old(k):
+        return bool(float(k.max()) > 0.0)
+
+    def _new(k):
+        return bool((k > 0.0).any())
+
+    for k in ([0.0, 0.0], [0.0, 5.0], [-0.0, 0.0],
+              [float("inf"), 0.0], [float("-inf"), 5.0]):
+        t = torch.tensor(k)
+        assert _old(t) == _new(t), k
+
+    nan = torch.tensor([float("nan"), 5.0])
+    assert _old(nan) is False and _new(nan) is True
+
+    # ... and the flag really is built that way.
+    resolved = resolve(tank_skid_belt(TANK_URDF))
+    resolved.wheels[0].k_bump = float("nan")
+    wm = build_wheel_meta(resolved, torch.device("cpu"), torch.float32)
+    assert wm.has_bump_stop is True

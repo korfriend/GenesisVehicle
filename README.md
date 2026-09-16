@@ -314,17 +314,19 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-450 tests covering URDF parsing, config resolve, suspension sizing, strategy
+507 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity check on
 the DEFAULT contact path), the config-rebuild state carry and the reset
 semantics (v1.6.2), the raycast-mode benchmark harness (schedule,
-gates, pairing and publication rule, driven through an injected runner), and
-the server subpackage surface. Almost all
+gates, pairing and publication rule, driven through an injected runner), the
+build-time config derivations staying live under a post-`build()` write
+(v1.6.4), and the server subpackage surface. Almost all
 pure-Python; a handful build a real `VehicleScene` on the CPU backend, so
-`genesis-world` must be importable. No GPU needed — they run on CPU in ~116 s
-(measured at v1.6.2; 88 s at v1.6.1, before the 14 real-scene rebuild tests).
+`genesis-world` must be importable. No GPU needed — they run on CPU in ~170 s
+(measured at v1.6.4: `507 passed in 170.53s`; 116 s / 450 tests at v1.6.2-v1.6.3,
+88 s at v1.6.1).
 
 ## Releases and Versioning
 

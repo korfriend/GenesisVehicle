@@ -10,6 +10,275 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.6.4] — 2026-09-16
+
+**Everything the step path used to re-derive from config on every call is now
+derived once at BUILD time and re-derived only when its source moves, and the
+per-wheel broadcasts it feeds go through rank-checked helpers — preparation for
+the fused multi-kind driver, with no fusion and no new feature.** Every
+configuration that exists today is value-equal to 1.6.3: 7 rollout arms × 17
+observables × 200 steps compared with `torch.equal` against captures taken from
+the pre-change tree (details below). Four behaviours DID move — none of them on
+a path that gate can reach — and they are enumerated in §5 rather than hidden
+behind "no behaviour change".
+
+| abbr | meaning |
+|---|---|
+| STEP 0 | the first stage of the kind-fusion plan: build-time preparation only, no fused driver |
+| GATE 0 | STEP 0's acceptance gate: a pre-change vs post-change rollout compared observable-by-observable with `torch.equal` |
+| hot set | config fields the step path reads LIVE, i.e. a post-`build()` write to them must still take effect |
+| derived value | a value computed from hot-set sources and cached until one of them moves (`_hotset.derived`) |
+| cold set | config the driver reads ONCE at build; changing it needs `VehicleScene.mark_config_dirty()` |
+| `pw` / `pw3` | `_pipeline.pw` / `pw3` — rank-checked per-wheel broadcast helpers |
+| SFL | `StaticFrictionLock` — the hold-at-rest stability hook |
+| `v_thr` | SFL's activation speed threshold (m/s) |
+| `eps_v` | `CoulombIsotropic`'s slip-magnitude floor |
+| NV | rows of a fused group: V vehicles × `n_envs` |
+| dt | one physics step duration (s) |
+| K | vehicles of one kind in one scene |
+
+### 1. What moved to build time
+
+`_hotset.py` (new) holds the mechanism and the table. `VehiclePhysics.__init__`
+calls `_hotset.prime_derived(resolved, wheel_meta, dev, fdt)` after `resolve()`
+and after the `WheelMeta` exists (`core.py:391`), which computes each value once
+before the first step:
+
+| derived slot | owner | what it replaces per step |
+|---|---|---|
+| `_geom` | `Ackermann` / `PartialAckermann` | `_resolve_geometry` — four tensor reductions over wheel positions on every `per_wheel_steer` |
+| `_driven`, `_drive_share` | `RWD` / `FWD` | the driven-axle tuple, the axle mask, the `n_driven` count (a device→host `.item()` sync) and the division, on every `distribute_torque` |
+| `_brake_bias` | `RWD` / `FWD` / `AWD` | the brake-bias vector, incl. the 60/40 default build |
+| `_drive_weights` | `AWD` | the drive-weight normalisation |
+| `_omega_cap` | every `DrivetrainStrategy` | `omega_max_drive`'s `None` test at the read site |
+| `_v_thr_sq` | `StaticFrictionLock` | `self.v_thr * self.v_thr` on every `apply_post_tire` |
+| `_eps2` | `CoulombIsotropic` | `self.eps_v * self.eps_v` on every tire call |
+
+RWD/FWD and AWD carried byte-identical copies of the 60/40 brake-bias default;
+they now share `drivetrain._default_brake_bias` / `_brake_bias_tensor`. The
+`ConfigError` messages and their trigger conditions are unchanged.
+
+### 2. It is a dependent cache, NOT a snapshot — and that distinction is the whole design
+
+A plain "compute it in `__init__`" hoist would have been a silent behaviour
+change, and the tree contains the caller that proves it:
+`samples/tank_tuning.py:35-37` writes `hook.v_thr = 5.0` onto the CONSTRUCTED
+hook, and `:47-48` writes `drivetrain.omega_max_drive` / `t_brake_max` AFTER
+`vs.build()`. Those writes take effect on the next step today, and they still
+do.
+
+What is guaranteed, and by which guard:
+
+- A write to any source listed in `_hotset.HOT_DEPENDENTS` is picked up on the
+  next call. Enforced by `_hotset.derived`, which re-runs the compute whenever
+  its key moves; the key holds every source the compute reads.
+- That includes an **in-place** edit of a LIST source (`brake_bias[0] = 0.9`):
+  list sources enter the key as tuples, i.e. by value
+  (`drivetrain._axles_key` / `_bias_key`).
+- A change of `wheel_meta` IDENTITY — a rebuilt driver, or the
+  `DifferentiablePlant`'s own meta — is picked up: `ref` is compared by `is`
+  and held weakly.
+- **NOT** guaranteed: an in-place mutation of a `WheelMeta` TENSOR. That is the
+  cold set and always was — the pipeline reads `wm.*`, never
+  `resolved.wheels[i].*`, so re-resolving wheel config after `build()` has
+  needed `mark_config_dirty()` since v1.6.2 (§7.12). Nothing in the SDK writes
+  into a built `WheelMeta`.
+- A `wheel_meta` that cannot be weakly referenced is never cached — the duck
+  type `strategies.steering._WheelMetaProto` accepts a `SimpleNamespace`, a
+  `namedtuple` and a `__slots__` class, all of which refuse `weakref.ref`.
+  Those callers get the pre-hoist behaviour (derive every call), not a wrong
+  answer. Same for an owner that cannot be weakly referenced.
+
+Gates: `tests/test_build_time_hoists.py` (23 tests) and
+`tests/test_tire_coulomb_eps.py` (11). Each is written the strict way round —
+derive first, THEN write the source, then assert the next call moved — because
+a snapshot implementation passes any test that writes the source before the
+first call. The reviewer confirmed the direction by replacing the cache with a
+snapshot: 16 tests went red.
+
+### 3. The cache lives OFF the owner, and that is load-bearing three times over
+
+`_hotset._CACHES` is a module-level `id(owner) -> {slot: (weakref, key, value)}`
+map with a `weakref.finalize` eviction, not an attribute on the strategy:
+
+1. **The config stays picklable.** A cache entry holds a weak reference to the
+   `wheel_meta`; a `weakref` in an instance `__dict__` makes the object
+   unpicklable — and only AFTER its first derive, so a config would pickle
+   right after `build()` and fail one step later. RL vector-env workers and
+   `torch.save(cfg)` do pickle configs; the SDK itself never does, which is why
+   no existing test would have caught it.
+2. **Two generic attribute sweeps stay correct with no name list.** The
+   structural fusion predicate (a diagnostic that ships in its own release, not
+   this one) is fail-closed over every non-dunder attribute of every role
+   object, so a visible cache slot would become part of the fusion key and
+   split vehicles that must fuse — observed as real failures in that
+   workstream's tests while this change was being written. And
+   `control/plant._sync_hooks` (in this tree) copies every
+   TENSOR attribute of a live hook, row-slicing it by the flat batch and
+   `repeat_interleave`-ing it by the candidate count — correct for the
+   stick-slip integrator state it was written for, wrong for a `(1, 1)` config
+   tensor. An off-instance cache is invisible to both by construction, which is
+   stronger than a dunder name.
+3. **A copy gets its own entry.** `copy.copy` (the per-group copy a fused driver
+   will take) and `copy.deepcopy` (the plant's prediction hooks) produce a new
+   object, hence a new id and an empty cache, so a copy can never serve its
+   original's derived value.
+
+Keyed by `id`, not by the object: a `WeakKeyDictionary` hashes the owner, and a
+user strategy written as an `eq=True` dataclass is either unhashable or — worse
+— EQUAL to a different instance, which would hand one strategy another's
+geometry.
+
+### 4. Rank-checked per-wheel broadcasts: 16 sites converted, 13 left
+
+`_pipeline.pw(t)` returns `t.unsqueeze(0)` for a `(n_wheels,)` field and `t`
+unchanged for a `(B, n_wheels)` one; `pw3` is the same test for per-wheel
+vectors (`(n, k)` → `(1, n, k)`). At rank 1 — every field today — this is
+exactly the `unsqueeze(0)` it replaces, so it is value-identical; the point is
+that a later per-row promotion cannot silently produce `(1, B, n)` and broadcast
+the wrong axis.
+
+Converted: 10 sites in `_pipeline.compute_wheel_step` (`rest_d`,
+`comp_rate_clamp`, `c_compression`, `c_extension`, `k_susp`, `rest_d - radius`,
+`k_bump`, `radius` twice, `i_wheel`) and 6 in `core.py` (`_wheel_body_b`,
+`_susp_clamp`, and the rest pos/quat pairs on both visual paths). **Not**
+converted, and left for the promotion step: 4 in `strategies/stability.py`
+(`rolling_resistance_cr`, `radius`, `mu_long`, `mu_lat`), 8 in
+`tire_models/pacejka.py` (`mu_long`, `mu_lat`, `pb_x`, `pc_x`, `pe_x`, `pb_y`,
+`pc_y`, `pe_y`) and 1 in `tire_models/coulomb.py` (`mu_long`) — 16 + 13 = 29
+sites in total. Counted by `grep -n "unsqueeze(0)"` over those files at this
+commit. Gate: `tests/test_rank_helpers.py` (6 tests).
+
+Two numeric forms changed with them, both value-identical today and both
+chosen because the naive form stops being so under a per-row tensor:
+
+- **Squares are taken in double.** `_hotset.square_f64` computes `v_thr**2` /
+  `eps_v**2` in float64 and casts once, because `float32(s) * float32(s)` and
+  `float32(double(s)**2)` differ on 6 of 10 values sampled during
+  implementation — squaring in the storage precision moves the threshold.
+- **Reciprocal reassociation** in `Ackermann` / `PartialAckermann`:
+  `safe_tan.reciprocal() * wb` instead of `wb / safe_tan`. With `wb` a python
+  float torch's CPU path already evaluates it that way (recorded during
+  implementation: 0 of 24,000 sampled values differ); with `wb` a per-row
+  tensor the naive form is a different number (6,665 of 24,000 differ). The
+  steering write-back now carries `(n_envs, 1)` internally and squeezes on
+  assignment, for the same reason — `(NV,) / (NV, 1)` would broadcast to
+  `(NV, NV)`.
+
+`Ackermann._compute_geometry`'s degenerate-geometry check is now
+`torch.as_tensor(wb).le(0).any()` rather than `wb <= 0.0 or tw <= 0.0`, which
+raises "Boolean value of Tensor … is ambiguous" on a per-row input. It is a
+build-time check since the geometry was hoisted, so the wrap costs nothing per
+step. The function still returns python floats — a per-row wheelbase is a later
+step.
+
+### 5. What actually changed behaviour (this release caused these)
+
+| site | before | after | why |
+|---|---|---|---|
+| `WheelMeta.has_bump_stop` (`core.py:1124`) | `float(k_bump.max()) > 0.0` | `bool((k_bump > 0.0).any())` | the OR survives a per-row `k_bump` as one whole-batch branch. Exact for every ordinary value **including `-0.0` and `±inf`** — but NOT under NaN: `torch.max` propagates, so the old form disabled the bump stop for the WHOLE vehicle as soon as one wheel carried a NaN rate, even with real bump stops on the others; the OR is True there. A NaN rate is a broken config, and silently disabling every wheel's bump stop is the worse of the two answers. Pinned in `tests/test_bump_stop.py`. |
+| `PerSide._cap_torque_batched` via `_drive_omega_cap` (`strategies/drivetrain.py:432-437`) | `omega_max_drive=None` raised `TypeError: unsupported operand type(s) for /: 'Tensor' and 'NoneType'` | no taper (`+inf` cap) | **declared scope deviation**: the plan scoped the derived cap to `DrivetrainStrategy._rev_limit` only, and `PerSide`'s own per-side taper was routed through it as well. Every non-`None` setting is bit-identical; the `None` case turns a crash into the same "uncapped" meaning `_rev_limit` has always had. `Vehicle.set_omega_max_drive(None)` on a `PerSide` vehicle therefore no longer raises. |
+| `MultiVehiclePhysics.__init__` (`multi_vehicle.py:854-857`) | — | `names=` whose length ≠ the vehicle count raises `ValueError` | new keyword; the mismatch would otherwise mis-attribute names through `_flat_to_kind` |
+| the bump-stop/dt warning (`core.py:_warn_bump_stop_dt`) | `"bump-stop is too stiff for this timestep: …"` | `"vehicle '<name>': bump-stop is too stiff …"` | a fleet could not tell which vehicle the warning was about. Log-string change — anything grepping for the old prefix must update. |
+
+New public surface: **`VehiclePhysics.vehicle_name`** (str), plus the `name=` /
+`names=` keywords on `VehiclePhysics` / `MultiVehicleKindPhysics` /
+`MultiVehiclePhysics`. `VehicleScene` passes the `Vehicle.name` from
+`add_vehicle` — the caller's, or the auto-generated `vehicle_<i>`; a direct
+driver construction supplies no name and falls back to the URDF file basename,
+then `"<unnamed>"`. For a kind of K > 1 the name is slot
+0's plus `"(+K-1 more of the same kind)"`, because the config is shared by the
+whole kind and a message naming only slot 0 would read as though the others were
+unaffected (`multi_vehicle._kind_name`). Scope, exactly: the ratio the warning
+prints mixes `sprung_mass` with the MAXIMUM `k_susp + k_bump` over the wheels —
+worst wheel against the average wheel's mass share, the intended conservative
+reading WITHIN one vehicle. It becomes a per-slot mix-up only once one
+`wheel_meta` carries several vehicles' rows, which is a later step; the method
+is the single site that will then have to loop. Gates:
+`tests/test_bump_stop_dt_warning.py` (the message, the name, the fallback) and
+`tests/test_multi_vehicle_grouping.py::test_names_length_mismatch_is_refused_before_anything_is_built`.
+
+**Already broken before this release, fixed here:**
+`VehiclePhysics._rest_capture_err` was only ASSIGNED on the rest-pose capture
+failure path, so reading it after a healthy build raised `AttributeError` — an
+attribute that exists only when something went wrong cannot be used as a health
+check. It is now initialised to `None` unconditionally (`core.py:486-491`).
+
+**Neutral rewrites worth knowing about** (value-identical today, changed so a
+per-row value does not crash): `core._susp_visual_offset` uses
+`torch.broadcast_to` instead of `torch.full_like`, and so does
+`CoulombIsotropic.__call__`'s `denom`. `full_like`'s `fill_value` must be a
+Number and raises `TypeError: fill_value must be Number, not Tensor` the moment
+the operand arrives as a tensor.
+
+### 6. Performance: no figure is published
+
+End-to-end it is **not measurable on this machine**. Harness: `l2l3_minimal`,
+one fresh process per measurement, alternating slot order, paired per repeat,
+`r = ms(STEP 0)/ms(pre)` — median **0.982, range [0.920, 1.094], n=7**. Against
+`samples/bench_raycast_mode.py`'s publication rule (v1.6.1), condition (i)
+(mutual inclusion of the two slot-order groups' medians) is SATISFIED and
+supports publishing, and condition (ii) REJECTS, because 1.0 sits inside the
+pooled range. An isolated micro of the only touched path — the per-step
+`per_wheel_steer` + `distribute_torque` pair, 2,000 calls × 7 repeats per
+process — declines on the same rule at **0.991 [0.844, 1.235], n=12**.
+
+No regression is visible in either, and the paired median is below 1.0 in both.
+That is the whole claim. Two earlier readings are **withdrawn**: a "~4% slower"
+that came from comparing per-tree medians instead of paired ratios, and a much
+larger speedup from a second harness that disagreed with the first in absolute
+terms. Neither showed a regression, and neither survives the rule, so no figure
+from either is quoted here. The hoists are justified structurally (work that is
+constant across steps stops being step work, and one device→host `.item()` sync
+per `distribute_torque` disappears) and by what they enable, not by a measured
+speedup.
+
+### 7. GATE 0 — how "no behaviour change" was checked
+
+| property | value |
+|---|---|
+| arms | 7: `car_4w_rwd_ackermann` and `tank_skid_belt` × `dual_scene`/`single_scene`; `car_4w_awd_ackermann` at `n_envs=2` with per-env-DIFFERING throttle/brake/steer; `car_4w_fwd_ackermann`; the RWD car with `CoulombIsotropic(eps_v=0.35)` |
+| observables | 17 per step: chassis `pos`/`quat`/`vel`/`ang` plus `omega`, `last_distances`, `last_compression`, `last_N`, `last_F_long`, `last_F_lat`, `last_T_drive`, `last_T_brake`, `last_kappa`, `last_alpha`, `last_steer_per_wheel`, `wheel_spin_angle`, `prev_compression` |
+| steps | 200, on a fixed input schedule that accelerates, steers both ways, brakes to a stop (SFL + brake bias), applies reverse throttle (rev limiter in both directions) and accelerates again |
+| comparison | `torch.equal` per observable — value equality, not bit-pattern identity (`-0.0 == +0.0`) |
+| conditions | CPU/WSL2, genesis-world 1.4.0, `dt = cfg.recommended_dt`, substeps 4, ground plane at friction 1.0, spawn `(0, 0, 0.8)`, `stability="control"`, one arm per process |
+| result | **PASS**, all 7 arms, every observable |
+
+The harness is a scratchpad script (`gate0.py` / `gate0_cmp.py`), not shipped —
+its reference is a capture of a tree that no longer exists, so it cannot be
+re-run from the repo. An independent reviewer re-captured its own reference from
+a `git archive HEAD` export and reached the same verdict. GATE 0 deliberately
+never mutates config, which is exactly why §2's live-write gates exist
+separately.
+
+Test suite: **`507 passed in 170.53s`** (`python -m pytest tests/ -q`, CPU/WSL2,
+genesis-world 1.4.0, measured on this release's tree — v1.6.3's 450 plus this
+change's 57). This change's 57: `test_build_time_hoists.py` 23,
+`test_tire_coulomb_eps.py` 11, `test_strategies_unit.py` +7, `test_rank_helpers.py`
+6, `test_multi_vehicle_grouping.py` +4, `test_bump_stop_dt_warning.py` 3,
+`test_bump_stop.py` +1, `test_quat_helpers.py` +1,
+`test_rebuild_state_carry.py` +1.
+
+### 8. Still open
+
+- **13 per-wheel broadcast sites remain** (§4). Promoting `WheelMeta` fields to
+  per-row requires them first; until then a fused group cannot carry differing
+  tire coefficients.
+- **A promoted SOURCE still has to answer `control/plant._sync_hooks`.**
+  `hook.v_thr`, `brake_thr`, `k_spring`, `k_damp` are user-facing config and
+  must stay public attributes, so they remain subject to that function's
+  undeclared shape heuristic: it row-slices every tensor attribute by the flat
+  batch, which happens to be correct for a `(NV, 1)` source only because the
+  leading dimension equals `n_total`, and raises for a `(1, 1)` one. The
+  DERIVED values no longer meet it at all, because the cache is off-instance —
+  the source side is not solved, only deferred. A comment at
+  `control/plant.py:721-729` marks the site.
+- **`prime_derived` swallows a raising role** (debug log, no re-raise) so that
+  deriving early can never change WHETHER a config is accepted; the step path
+  re-raises the real error on the first call. The cost is that a broken
+  Ackermann still reports at step time, not build time.
+- The bump-stop/dt warning is per driver, not per slot (§5).
+
 ## [1.6.3] — 2026-09-15
 
 **Three shipped documentation defects, corrected in place: `--substeps` carried

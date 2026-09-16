@@ -76,3 +76,43 @@ def test_single_vehicle():
     group_order, groups, flat_to_kind = group_vehicles_by_cfg([_veh(cfg)])
     assert flat_to_kind == [(0, 0, 0)]
     assert rebucket_inputs(["x"], flat_to_kind, [1]) == [["x"]]
+
+
+# --- the per-kind display name used by config-level warnings ------------------
+
+def test_kind_name_is_none_without_caller_supplied_names():
+    """A direct ``MultiVehiclePhysics(scene, [(entity, sensor, cfg), ...])``
+    knows no names; ``VehiclePhysics`` then falls back to the URDF file name."""
+    from genesis_vehicle.multi_vehicle import _kind_name
+    assert _kind_name(None, 1) is None
+    assert _kind_name([], 3) is None
+
+
+def test_kind_name_is_the_vehicles_own_name_at_k_one():
+    from genesis_vehicle.multi_vehicle import _kind_name
+    assert _kind_name(["ego"], 1) == "ego"
+
+
+def test_kind_name_says_how_many_vehicles_share_the_config():
+    """K vehicles of one kind SHARE the cfg object
+    (``vehicle_scene._ensure_grouped``), so a message about that config applies
+    to all of them; naming only slot 0 would read as though the rest were fine."""
+    from genesis_vehicle.multi_vehicle import _kind_name
+    assert _kind_name(["ego", "npc1", "npc2"], 3) == (
+        "ego (+2 more of the same kind)")
+
+
+def test_names_length_mismatch_is_refused_before_anything_is_built():
+    """``names`` is optional, but a WRONG-LENGTH list would silently mis-label
+    kinds (the flat index is the identity key). It is refused up front —
+    before the first ``MultiVehicleKindPhysics`` is constructed, which is why
+    this test can pass ``scene=None``."""
+    import pytest
+    from genesis_vehicle.multi_vehicle import MultiVehiclePhysics
+
+    cfg = object()
+    vehicles = [_veh(cfg), _veh(cfg)]
+    with pytest.raises(ValueError, match="names has 3 entries for 2 vehicles"):
+        MultiVehiclePhysics(None, vehicles, n_envs=1, names=["a", "b", "c"])
+    with pytest.raises(ValueError):
+        MultiVehiclePhysics(None, vehicles, n_envs=1, names=["a"])
