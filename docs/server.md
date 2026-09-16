@@ -66,10 +66,10 @@ python -m genesis_vehicle.server --override_dt 0.01  # 100 Hz physics (finer)
 python -m genesis_vehicle.server --no-floor --vis_mode visual -v
 
 # internal substeps (v1.1.25; default 4, both modes): internal step = dt/substeps.
-# A stiff suspension spring rings at a coarse internal step; the cost of more
-# substeps is usually negligible at n_envs=1 (raycast + per-step overhead
-# dominate). Lower it only to reproduce coarse-step instability.
-python -m genesis_vehicle.server --substeps 1        # coarse: rings stiff springs
+# It refines the CHASSIS rigid-body/contact integration, NOT the ray-wheel
+# suspension, and it CHANGES THE TRAJECTORY - it is not a free perf knob.
+# Read 2.3 before touching it.
+python -m genesis_vehicle.server --substeps 1        # coarser chassis contact integration
 python -m genesis_vehicle.server --substeps 10       # extra-fine internal step
 
 # viewer follow camera (v1.1.25): track one target with the viewer's own
@@ -105,7 +105,11 @@ python -m genesis_vehicle.server --pacing-profile
   (X steps/loop, Y ms/step)` every 50 loops. `Physics Avg` is the SUM of the
   loop's catch-up steps — read the per-step value from the parenthesis;
   `steps/loop` pinned at the cap (default 5.0) means the server cannot hold
-  real-time (permanent slow-motion), ~1.0 means it can.
+  real-time (permanent slow-motion), ~1.0 means it can. **`Physics Avg` /
+  `ms/step` cover `vs.step()` and nothing else** — state capture, interpolation
+  and the OSC send are inside the loop but outside that timer, so they show up
+  only in `Loop Avg`. Compare `Loop Avg`, not `ms/step`, against the real-time
+  budget; the exact boundaries are in §2.4.
 
 ## 2.1 Official server benchmark
 
@@ -286,6 +290,101 @@ into the same venv as `genesis-world` + `torch`.
 
 ---
 
+## 2.3 What `--substeps` actually changes (correction, v1.6.3)
+
+| abbr | meaning |
+|---|---|
+| dt | one server/physics step duration (s) — `--override_dt`, client-sent otherwise |
+| substep | one genesis internal integration step; internal step = `dt / substeps` |
+| wrench | the force + torque pair the SDK applies to the chassis link each step |
+
+**The old justification was wrong.** Through v1.6.2 the `--substeps` help text
+and this document said "a stiff suspension spring needs a small internal step
+or it rings" and told you to lower it "only to reproduce coarse-step
+instability". That is false for the ray-wheel path. The SDK's suspension spring
+and damper never pass through genesis substep integration at all:
+`_pipeline.compute_wheel_step` computes the wrench once per `vs.step()`, it is
+applied once through `_gs_compat.apply_links_wrench`, and genesis holds it
+CONSTANT for every substep — `clear_external_force()` sits OUTSIDE the substep
+loop (`genesis/engine/simulator.py:349-363`, installed genesis-world 1.4.0).
+So the SDK spring/damper always integrate at `dt`, whatever `--substeps` says.
+
+What `substeps` does refine is the **chassis rigid-body / contact integration**
+inside genesis: chassis-vs-world contacts, the constraint solve, and above all
+**contact transients** — the peak normal force of a drop or a kerb strike.
+
+Measured (CPU/WSL2, genesis-world 1.4.0, one `car_4w_rwd_ackermann`, plane,
+`dt` 0.02, 600 open-loop steps; scratchpad harness `m_substeps_fidelity.py`,
+re-run independently by a reviewer — not shipped in the repo):
+
+| substeps | settled ride height z (m) | peak contact normal force, 0.5 m drop (N) |
+|---|---|---|
+| 1 | 0.11145 | 39,094 |
+| 2 | 0.11143 | 53,481 |
+| 4 | 0.111422 | 60,561 |
+| 8 | 0.111422 | 63,302 |
+
+Ride height spans 0.03 mm across the whole range and z peak-to-peak is 1.4e-4
+at every setting — the suspension is unmoved, exactly as the mechanism above
+predicts. The drop force is not: it grows 1.6× from substeps 1 to 8.
+
+**Lowering `substeps` is NOT trajectory-neutral, so do not treat it as a free
+performance knob.** Same harness, 12 s of driving: substeps 2 ends at
+`(30.267, -19.900)`, substeps 4 at `(30.365, -19.707)` — **0.217 m apart, yaw
+0.26° apart**, and convergence is NOT monotone (8 is further from 2 than 4 is).
+Any recorded scenario, regression baseline or replay is only valid at the
+`substeps` it was captured with.
+
+There was also no measurable speed to buy here at `n_envs=1`: one fresh process
+per measurement, forward and reverse order, 300 timed steps after 60 warm-up
+(CPU/WSL2, genesis-world 1.4.0, dual_scene, plane, same car, `dt` 0.02) gave
+median `vs.step()` of 10.08/10.49 ms (substeps 1), 10.43/11.25 (2),
+10.92/12.62 (4), 11.44/11.82 (8) — the between-setting differences sit inside
+the run-to-run spread of a single setting, so this machine cannot resolve them.
+The v1.6.2 help text's "cost is usually negligible at n_envs=1" was never
+backed by a measurement and has been dropped rather than restated.
+
+---
+
+## 2.4 What the `[STATS]` line measures — and what it leaves out
+
+The `[STATS]` line is **not** a full per-step cost. Only `vs.step()` is inside
+the timer; everything else the server does per loop is outside it.
+
+| quantity | includes | excludes |
+|---|---|---|
+| `Physics Avg` | the SUM over this loop's catch-up steps of `vs.step()` only — raycast + SDK wheel math + genesis solve | state capture, interpolation, OSC send, the OSC receive/parse at the top of the loop, the follow-cam update |
+| `ms/step` | `Physics Avg / steps-per-loop` — same scope, per step | same as above |
+| `Loop Avg` | the WHOLE loop body: receive/parse, every catch-up step, every `capture_state`, interpolation, both OSC bulk sends, the pacer | nothing inside the loop |
+
+Boundaries, so you can check them in the source:
+
+| path | timer opens | timer closes | outside but in-loop |
+|---|---|---|---|
+| L2 (`server/physics_server.py`) | `:1081` `physics_start` | `:1083` `physics_end` (`+=` at `:1085`) | `capture_state` `:1095`, GPU sync `:1154`, `lerp_state` `:1160`, OSC sends `:1167` / `:1177`; loop span `:814` → `:1188` |
+| L3 (`server/l3_runtime.py`) | `:677` `physics_start` | `:692` (`torch.cuda.synchronize()` at `:689-691` is INSIDE) | `st.capture` `:694`, `lerp_state` `:714`, OSC sends `:715-720`; loop span `:499` → `:722` |
+
+Two consequences worth knowing:
+
+- **State capture is the big excluded cost, and it grows with the fleet.**
+  Measured (CPU/WSL2, genesis-world 1.4.0, `n_envs=1`, `dt` 0.02, substeps 4,
+  dual_scene, plane; scratchpad harness `bench_l2.py`, not shipped):
+  `capture_state` costs **1.74 ms at 3 vehicle kinds and 5.56 ms at 12 kinds** —
+  none of it inside the reported `ms/step`. A server that reports a comfortable
+  `ms/step` can still miss real-time.
+- **On GPU the two paths differ.** L3 synchronizes inside the timer, L2
+  synchronizes after the whole catch-up loop, so an L2 GPU `Physics Avg`
+  under-reports by whatever kernel tail lands after `:1083`. CPU runs are
+  unaffected.
+
+**So: compare `Loop Avg` against the `dt` budget** (the real-time verdict in
+§2.1 uses `Loop Avg` ≤ 25 ms at `dt` = 0.025 for exactly this reason). Use
+`ms/step` only to attribute cost *within* the physics step. The `[PROFILE]`
+line's `raycast/proxy | SDK compute | genesis solver | 기타` breakdown is also a
+decomposition of `vs.step()` alone, on the same scope.
+
+---
+
 ## 3. Mode selection
 
 The two server modes are the SDK's L2 / L3 batching axes (see
@@ -328,6 +427,32 @@ main-scene road collider (no CoACD / chassis-vs-road narrow-phase). The
 pre-v1.0.12 L2 behavior — one scene, rays hit the rigid colliders
 themselves — remains available as `--single-scene` (L2 mode only;
 incompatible with `--road-raycast-only`, ignored by `--multi-env`).
+
+> **`--single-scene` cannot carry a real road mesh (documented v1.6.3 — this
+> limitation shipped undocumented).** In `single_scene` the wheel rays only hit
+> RIGID COLLISION geometry, so a CARLA-style town mesh has no working route in:
+>
+> - as a rigid collider with `convexify=False`, any mesh over 1000 faces is
+>   refused outright by the mesh guard
+>   (`vehicle_scene.py:158-217`, limit `_MAX_NONCONVEX_COLLISION_FACES` at
+>   `:97`): `[genesis_vehicle:mesh-guard] add_static('road_mesh'): refusing to
+>   build a 5120-face non-convex mesh as a rigid collision/raycast body with
+>   convexify=False (limit 1000)…` (verified on a 5,120-face mesh, SDK 1.6.2);
+> - the documented workaround, a kinematic raycast surface, is
+>   `dual_scene`-ONLY and raises at `vehicle_scene.py:817-833`:
+>   `add_static('road_mesh'): collision=False requires
+>   raycast_mode='dual_scene'; single_scene cannot host a no-collision
+>   wheel-raycast surface.` `add_raycast_surface()` routes to the same call and
+>   raises the same error;
+> - `--road-raycast-only`, which is how the server loads a road as a raycast
+>   surface, is rejected with `--single-scene` at arg-parse time
+>   (`server/physics_server.py:436-439`).
+>
+> What is left is `convexify=True`: the road builds, but CoACD replaces the
+> surface with convex hulls and the wheels ride the convex bulge (no kerb
+> lips, no dips), and its BVH re-fits every step. **For any client driving on
+> a real road mesh, `--single-scene` is not an option — use the default
+> `dual_scene` (optionally with `--road-raycast-only`).**
 
 ---
 

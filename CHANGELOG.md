@@ -10,6 +10,144 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.6.3] — 2026-09-15
+
+**Three shipped documentation defects, corrected in place: `--substeps` carried
+a false physical justification, the server's reported `ms/step` excluded work
+the user pays for, and `single_scene`'s inability to carry a real road mesh was
+undocumented.** Docs-only plus one help string; no SDK behaviour changes.
+
+| abbr | meaning |
+|---|---|
+| dt | one physics step duration (s) |
+| substep | one genesis internal integration step; internal step = `dt / substeps` |
+| wrench | the force + torque pair the SDK applies to the chassis link each step |
+| BVH | Bounding Volume Hierarchy (ray/collision acceleration tree) |
+| CoACD | Collision-Aware Convex Decomposition (genesis' `convexify` path for rigid meshes) |
+| SDF | Signed Distance Field (the volumetric collision structure a rigid mesh builds) |
+| OSC | Open Sound Control (the UDP wire protocol the server speaks) |
+| L2 / L3 | batching axes: K interacting vehicles in one scene (L2) / `n_envs` parallel scenarios (L3) |
+| rco | `--road-raycast-only` (road loaded as a raycast-only surface, no chassis collider) |
+
+### 1. `--substeps` — the "stiff spring rings" justification was WRONG
+
+Through v1.6.2, `--substeps`' help (`server/physics_server.py`) and
+`docs/server.md` §2 both said: *"a stiff suspension spring needs a small
+internal step or it rings. Lower this (e.g. 1) only to reproduce coarse-step
+instability."* That is false for the ray-wheel path, and a reader acting on it
+draws the opposite conclusion from the truth.
+
+The SDK's suspension spring and damper never pass through genesis substep
+integration. `_pipeline.compute_wheel_step` computes the wrench once per
+`vs.step()`; it is applied once via `_gs_compat.apply_links_wrench`; genesis
+holds it CONSTANT across every substep, because `clear_external_force()` sits
+OUTSIDE the substep loop (`genesis/engine/simulator.py:349-363`, installed
+genesis-world 1.4.0). The SDK spring/damper therefore always integrate at `dt`,
+whatever `--substeps` is set to.
+
+What `substeps` does refine is the chassis rigid-body / contact integration —
+contact transients above all. Measured (CPU/WSL2, genesis-world 1.4.0, one
+`car_4w_rwd_ackermann`, plane, `dt` 0.02, 600 open-loop steps; scratchpad
+harness `m_substeps_fidelity.py`, re-run independently by a reviewer; not
+shipped in the repo):
+
+| substeps | settled ride height z (m) | peak contact normal force, 0.5 m drop (N) |
+|---|---|---|
+| 1 | 0.11145 | 39,094 |
+| 2 | 0.11143 | 53,481 |
+| 4 | 0.111422 | 60,561 |
+| 8 | 0.111422 | 63,302 |
+
+Ride height spans 0.03 mm over the whole range (z peak-to-peak 1.4e-4 at every
+setting) — the suspension is untouched, as the mechanism predicts. The drop
+force grows 1.6× from substeps 1 to 8.
+
+It is also **not trajectory-neutral**, so it must not be presented as a free
+performance knob: same harness, 12 s of driving, substeps 2 ends at
+`(30.267, -19.900)` and substeps 4 at `(30.365, -19.707)` — **0.217 m apart,
+yaw 0.26° apart**, with non-monotone convergence (8 is further from 2 than 4
+is). A recorded baseline is only valid at its own `substeps`.
+
+The v1.6.2 help also claimed "cost is usually negligible at `n_envs=1`". That
+was never measured. Re-measured here (one fresh process per measurement,
+forward and reverse order, 300 timed steps after 60 warm-up; CPU/WSL2,
+genesis-world 1.4.0, dual_scene, plane, same car, `dt` 0.02) the median
+`vs.step()` was 10.08/10.49 ms at substeps 1, 10.43/11.25 at 2, 10.92/12.62 at
+4, 11.44/11.82 at 8 — between-setting differences fall inside one setting's own
+run-to-run spread, so this machine cannot resolve them. The claim is dropped,
+not restated.
+
+New `docs/server.md` §2.3 holds all of the above; the `--substeps` help string
+now points at it and states that the old justification was wrong.
+
+### 2. The server's `ms/step` excludes work the loop pays for — now documented
+
+`docs/server.md` explained that `Physics Avg` is a sum over catch-up steps but
+never said what the timer covers. It covers `vs.step()` and nothing else:
+
+| path | timer opens | timer closes | in-loop but OUTSIDE the timer |
+|---|---|---|---|
+| L2 `server/physics_server.py` | `:1081` | `:1083` (accumulated `:1085`) | `capture_state` `:1095`, GPU sync `:1154`, `lerp_state` `:1160`, OSC sends `:1167` / `:1177`; loop `:814` → `:1188` |
+| L3 `server/l3_runtime.py` | `:677` | `:692` (`torch.cuda.synchronize()` `:689-691` is INSIDE) | `st.capture` `:694`, `lerp_state` `:714`, OSC sends `:715-720`; loop `:499` → `:722` |
+
+State capture is the large excluded cost and it scales with the fleet:
+measured (CPU/WSL2, genesis-world 1.4.0, `n_envs=1`, `dt` 0.02, substeps 4,
+dual_scene, plane; scratchpad harness `bench_l2.py`, not shipped)
+`capture_state` costs **1.74 ms at 3 vehicle kinds and 5.56 ms at 12 kinds**,
+none of it inside the reported `ms/step`. A server reporting a comfortable
+`ms/step` can still miss real-time. `Loop Avg` is the number to compare against
+the `dt` budget — which is what §2.1's real-time verdict already uses. On GPU
+the two paths also differ: L3 syncs inside the timer, L2 syncs after the whole
+catch-up loop, so an L2 GPU `Physics Avg` under-reports the kernel tail.
+
+New `docs/server.md` §2.4; the `[STATS]` bullet in §2 now states the scope
+inline.
+
+### 3. `single_scene` cannot carry a real road mesh — the gap was undocumented
+
+The mode comparison in `docs/dual-scene-raycast.md` was framed entirely as a
+COST tradeoff. It is also a CAPABILITY gap: in `single_scene` the wheel rays
+hit only rigid collision geometry, so a CARLA-style town mesh has no working
+route in. Verified against the current tree (SDK 1.6.2, a 5,120-face mesh):
+
+| route | `single_scene` |
+|---|---|
+| rigid mesh, `convexify=False` | refused above 1000 faces by the mesh guard (`vehicle_scene.py:158-217`; limit `_MAX_NONCONVEX_COLLISION_FACES` at `:97`) — `refusing to build a 5120-face non-convex mesh as a rigid collision/raycast body with convexify=False (limit 1000)` |
+| kinematic raycast surface (`add_static(collision=False)`, `add_raycast_surface`) | raises at `vehicle_scene.py:817-833` — `add_static('road_mesh'): collision=False requires raycast_mode='dual_scene'; single_scene cannot host a no-collision wheel-raycast surface.` |
+| rigid mesh, `convexify=True` | builds, but the wheels ride CoACD convex hulls (bulge instead of kerbs/dips) and the BVH re-fits every step |
+
+On the server the same gap appears one level up: `--single-scene` and
+`--road-raycast-only` are mutually exclusive at arg-parse time
+(`server/physics_server.py:436-439`), and rco is how the server loads a road as
+a raycast surface. Documented in `docs/server.md` §3 (the `--single-scene`
+paragraph) and in a new section of `docs/dual-scene-raycast.md` placed before
+the cost discussion.
+
+### Files
+
+| file | change |
+|---|---|
+| `server/physics_server.py` | `--substeps` help string rewritten (the ONLY code change in this release; no behaviour change) |
+| `docs/server.md` | §2 CLI block + `[STATS]` bullet corrected; new §2.3 (substeps) and §2.4 (STATS scope); §3 gains the `--single-scene` road-mesh limitation |
+| `docs/dual-scene-raycast.md` | new section "`single_scene` cannot carry a high-poly road mesh"; abbr table gains CoACD, SDF |
+| `docs/api-reference.md` | the `substeps` row says it does not refine the ray-wheel suspension, and links §2.3 |
+| `README.md` | the getting-started example no longer opts into the non-default `single_scene`, and no longer calls `dt=0.025` an SDK default |
+
+### Still open
+
+- The measurements quoted here come from scratchpad harnesses
+  (`m_substeps_fidelity.py`, `bench_l2.py`) that are NOT in the repo, so they
+  cannot be re-run from a clean checkout. A shipped fidelity/cost harness for
+  `substeps` (fresh process per setting, alternating order, like
+  `samples/bench_raycast_mode.py`) is not written.
+- The server reports no capture/serve breakdown at runtime; `Loop Avg` minus
+  `Physics Avg` is still the only way to see the excluded cost.
+- `--single-scene`'s own `--help` text still describes only the cost/convexity
+  tradeoff, not the road-mesh refusal (this release was scoped to the
+  `--substeps` string).
+
+---
+
 ## [1.6.2] — 2026-09-15
 
 **`VehicleScene.mark_config_dirty()` — the documented way to make a post-`build()`
