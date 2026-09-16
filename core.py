@@ -112,6 +112,8 @@ def _susp_visual_offset(distance: torch.Tensor, mesh_radius: float,
 # about. Keeps the warning to one line per distinct mismatch per process,
 # instead of spamming on every VehiclePhysics construction.
 _DT_MISMATCH_WARNED: set[tuple[float, float]] = set()
+# One-shot flag for the `scene.sim.dt` read failing outright (see below).
+_DT_FALLBACK_WARNED = False
 
 
 def _resolve_dt_from_scene(scene: Any, recommended_dt: float) -> float:
@@ -129,8 +131,21 @@ def _resolve_dt_from_scene(scene: Any, recommended_dt: float) -> float:
     try:
         scene_dt = float(scene.sim.dt)
     except (AttributeError, TypeError):
-        # scene not built yet / no .sim.dt — fall back to preset's value
-        # (best we can do until scene.build is called).
+        # Fall back to the preset's value — but say so. On every genesis the
+        # SDK supports (1.3.3, 1.4.0) ``scene.sim.dt`` reads fine even BEFORE
+        # build(), so on a real Scene this branch is unreachable; reaching it
+        # means the caller passed something that is not a Scene, or the engine
+        # moved the time axis again. Either way the vehicle would then
+        # integrate at a dt the solver does not use. Warn once per process.
+        global _DT_FALLBACK_WARNED
+        if not _DT_FALLBACK_WARNED:
+            _DT_FALLBACK_WARNED = True
+            import logging
+            logging.getLogger("genesis_vehicle").warning(
+                "could not read scene.sim.dt (scene=%r); falling back to the "
+                "preset's recommended_dt=%g. The SDK's per-step integrators "
+                "will use that value even if the solver steps at another.",
+                type(scene).__name__, float(recommended_dt), exc_info=True)
         return float(recommended_dt)
     if abs(scene_dt - recommended_dt) > 1e-9:
         key = (round(recommended_dt, 9), round(scene_dt, 9))
@@ -353,7 +368,12 @@ class VehiclePhysics:
         base_name = self.resolved.chassis.base_link_name
         try:
             base_idx = int(entity.base_link_idx)
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
+            # Narrow (v1.6.5): `base_link_idx` exists on genesis 1.3.3 and
+            # 1.4.0, so this is a fallback for an entity shape that lacks it or
+            # returns something non-int — not a catch-all. The fallback is a
+            # DEFINED behaviour (look the base link up by name), so it stays
+            # silent; anything else must propagate.
             base_link = [l for l in entity.links if l.name == base_name][0]
             base_idx = int(base_link.idx)
         self.base_idx_list = [base_idx]

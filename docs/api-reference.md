@@ -94,7 +94,10 @@ class VehicleScene:
     # --- accessors (the raw Genesis scenes are PRIVATE — not exposed) ---
     viewer                               # native viewer | None  (property)
     rigid_solver                         # n_geoms / n_links / n_faces (read-only)
-    sim_options                          # runtime dt / gravity tweaks
+    substeps: int                        # EFFECTIVE solver substeps, read from the engine (property)
+    effective_dt: float                  # the dt the engine integrates with, read from the engine (property)
+    def set_gravity(gravity, envs_idx=None) -> None   # the ONE live post-build physics knob
+    sim_options                          # AUTHORED options — post-build writes are INERT (physics-contracts §7.14)
     is_dual_scene: bool                  # raycast_mode == "dual_scene"
     physics                              # batched MultiVehiclePhysics (solver="batched"), else None
     cameras: list[Camera]                # property
@@ -172,7 +175,7 @@ targets (`add_dynamic`).
 | `solver` | `"batched"` | `"batched"` (one `MultiVehiclePhysics`, same-kind vehicles grouped) / `"per_vehicle"` (one `VehiclePhysics` each) |
 | `gravity` | `(0,0,-9.81)` | world gravity |
 | `substeps` | `4` | engine solver substeps per `step()` (internal step = `dt/substeps`). Refines the CHASSIS rigid-body/contact integration only: the SDK's wheel wrench is applied once per step and held constant across substeps, so the ray-wheel spring/damper always integrate at `dt`. Not trajectory-neutral — see [`server.md`](server.md) §2.3 |
-| `sim_options` / `rigid_options` / `vis_options` | `None` | inject Genesis option objects (else built from the args above) |
+| `sim_options` / `rigid_options` / `vis_options` | `None` | inject Genesis option objects (else built from the args above). Injecting a `sim_options` that omits `substeps` alongside a `rigid_options(dt=)` is the ONE way to make the authored and effective substep counts disagree — genesis 1.4.0 then derives the count silently (measured authored 1, effective 4 on a raw `gs.Scene`: `SimOptions(dt=0.02)` + `RigidOptions(dt=0.005)` + Plane + Box, genesis-world 1.4.0, CPU/WSL2). Read `VehicleScene.substeps`, not your argument; see [`physics-contracts.md`](physics-contracts.md) §7.14 |
 | `viewer_options` | `None` | native-viewer config — `gs.options.ViewerOptions(camera_pos, camera_lookat, camera_fov, res, max_FPS, refresh_rate, …)`. Main scene only (the raycast scene is never shown). Needs `view="native"` to actually open a window |
 | `view` | `None` | `None` headless / `"native"` (Genesis viewer) / `"cv2"` (render cameras for a cv2 HUD) |
 | `show_viewer` | `False` | back-compat alias for `view="native"` |

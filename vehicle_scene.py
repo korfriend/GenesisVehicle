@@ -73,6 +73,7 @@ from typing import Any, Callable, Optional
 
 import genesis as gs
 
+from ._gs_compat import scene_sim_options
 from .core import VehiclePhysics
 from .inputs import VehicleInputs
 from .raycast import (
@@ -273,6 +274,9 @@ def _ensure_genesis(backend: Optional[str] = None,
 
 
 _rigid_dt_warned = False
+_rigid_dt_norm_failed_warned = False
+_clone_morph_failed_warned = False
+_wheel_vgeom_link_warned = False
 
 
 def _normalize_rigid_dt(rigid_options, sim_options) -> None:
@@ -312,7 +316,18 @@ def _normalize_rigid_dt(rigid_options, sim_options) -> None:
                 "step duration. Drop it and set VehicleScene(substeps=...) instead.",
                 step_dt)
     except Exception:                               # never fail scene construction
-        _logger.debug("could not normalize RigidOptions.dt", exc_info=True)
+        # Non-fatal by design (a scene must still build), but NOT silent: at
+        # _logger.debug this was invisible by default, so a future pydantic /
+        # RigidOptions drift would stop normalizing here and surface later as an
+        # unrelated GenesisException out of build(). Warn once per process.
+        global _rigid_dt_norm_failed_warned
+        if not _rigid_dt_norm_failed_warned:
+            _rigid_dt_norm_failed_warned = True
+            _logger.warning(
+                "could not normalize RigidOptions.dt — leaving it as authored. "
+                "If RigidOptions(dt=) was set, genesis >= 1.4.0 reads it as the "
+                "solver SUBSTEP interval; prefer VehicleScene(substeps=...).",
+                exc_info=True)
 
 
 def _kinematic_supports_terrain() -> bool:
@@ -351,12 +366,28 @@ def _clone_morph(morph, **updates):
     """Copy a Genesis morph (pydantic model) with fields updated, so the same
     geometry can be added to two scenes with different flags (fixed/collision).
     Only fields the morph actually has are updated; falls back to the original
-    if it cannot be copied."""
+    if it cannot be copied — and that fallback CHANGES PHYSICS, so it warns.
+
+    The fallback returns the morph with the caller's flags NOT applied. Both
+    call sites rely on those flags: the MAIN scene adds obstacles as
+    ``_clone_morph(morph, fixed=not physics)``, so a static obstacle silently
+    becomes a falling dynamic body; the raycast mirror adds
+    ``fixed=True, collision=True``, so the mirror's geometry can differ from
+    the main scene's and the two diverge. Warn once per process rather than
+    swallowing a pydantic ``model_copy`` / ``model_fields`` drift."""
     try:
         valid = {k: v for k, v in updates.items()
                  if k in type(morph).model_fields}
         return morph.model_copy(update=valid, deep=True)
     except Exception:
+        global _clone_morph_failed_warned
+        if not _clone_morph_failed_warned:
+            _clone_morph_failed_warned = True
+            _logger.warning(
+                "could not copy morph %s with %s — using the ORIGINAL morph "
+                "instead. Its flags are unchanged, so a static obstacle may "
+                "behave as dynamic and the raycast mirror may not match the "
+                "main scene.", type(morph).__name__, sorted(updates), exc_info=True)
         return morph
 
 
@@ -1260,6 +1291,17 @@ class VehicleScene:
                     try:
                         link = veh.entity_main.get_link(w.name)
                     except Exception:
+                        # Skipping means this wheel's URDF vgeom stays active
+                        # AND the instanced renderer draws its own copy — the
+                        # wheel is rendered TWICE. Silent visual defect; warn.
+                        global _wheel_vgeom_link_warned
+                        if not _wheel_vgeom_link_warned:
+                            _wheel_vgeom_link_warned = True
+                            _logger.warning(
+                                "wheel_render_mode='instanced': could not get link %r to "
+                                "deactivate its URDF wheel vgeom — that wheel will be "
+                                "drawn twice (URDF mesh + instanced copy).",
+                                w.name, exc_info=True)
                         continue
                     for vg in getattr(link, "vgeoms", None) or []:
                         vg.active_envs_idx = none_active   # renderer skips it
@@ -1372,14 +1414,23 @@ class VehicleScene:
         self._built = True
         # Resolved timing, logged on every run (v1.0.19) — dt is the one value
         # perf reports keep needing; make it impossible to miss.
-        try:
-            _ss = int(self.sim_options.substeps)
-            print(f"[genesis_vehicle] timing: dt={self.dt * 1e3:.1f}ms "
-                  f"({1.0 / self.dt:.0f}Hz) x substeps={_ss} "
-                  f"(internal {self.dt / _ss * 1e3:.2f}ms) | n_envs={self.n_envs} "
-                  f"| raycast_mode={self.raycast_mode}")
-        except Exception:
-            pass
+        #
+        # Read the ENGINE (effective_dt / substeps), not the authored ctor args:
+        # genesis 1.4.0 can re-derive substeps, and only the engine's numbers
+        # describe what is about to be integrated.
+        #
+        # NO try/except here, deliberately. Through v1.6.4 this block sat under
+        # `except Exception: pass` and swallowed the genesis 1.4.0
+        # `Scene.sim_options` removal, so the line printed ZERO times for seven
+        # releases (v1.5.0 … v1.6.4) and nobody noticed. If these two reads ever
+        # fail again the SDK cannot see the engine's time axis and build SHOULD
+        # die loudly. tests/test_sim_options_and_timing.py asserts this line is
+        # actually EMITTED and that its numbers match the engine.
+        _dt, _ss = self.effective_dt, self.substeps
+        print(f"[genesis_vehicle] timing: dt={_dt * 1e3:.1f}ms "
+              f"({1.0 / _dt:.0f}Hz) x substeps={_ss} "
+              f"(internal {_dt / _ss * 1e3:.2f}ms) | n_envs={self.n_envs} "
+              f"| raycast_mode={self.raycast_mode}")
 
     def _measure_distances(self) -> dict:
         """Internal: return ``{vehicle: wheel-ground distances}`` for the step.
@@ -1788,10 +1839,78 @@ class VehicleScene:
         return self._main_scene.sim.rigid_solver
 
     @property
+    def substeps(self) -> int:
+        """The solver's EFFECTIVE substep count, read from the engine
+        (``scene.sim.substeps``) — not the authored ``VehicleScene(substeps=)``
+        argument. Genesis 1.4.0 may RE-DERIVE substeps from the solver options,
+        so the two can disagree; the engine's value is the one physics runs at.
+
+        ``VehicleScene`` itself cannot reach that disagreement: it always passes
+        ``substeps=`` explicitly (see ``_scene_kw``), and 1.4.0 RAISES rather
+        than re-derives when an authored ``substeps`` conflicts with the solver
+        ``dt`` (``GenesisException: RigidSolver dt=... implies N substep(s) per
+        step, conflicting with the requested substeps=...``). The divergence is
+        reachable only when a caller supplies its own ``sim_options`` WITHOUT
+        ``substeps`` alongside a ``rigid_options(dt=)``; measured that way on a
+        raw ``gs.Scene`` (``SimOptions(dt=0.02)`` + ``RigidOptions(dt=0.005)``
+        + Plane + Box, genesis-world 1.4.0, CPU/WSL2): authored 1, effective 4.
+        This property is why that case reads back honestly rather than echoing
+        the argument. Public API on both genesis 1.3.3 and 1.4.0. Valid after
+        ``build()``."""
+        return int(self._main_scene.sim.substeps)
+
+    @property
+    def effective_dt(self) -> float:
+        """The step duration the engine actually integrates with, read from the
+        engine (``scene.sim.dt``). ``VehicleScene.dt`` is the value the CALLER
+        authored and is never reconciled with the engine after ``build()``;
+        this one is the engine's. Public API on both genesis 1.3.3 and 1.4.0."""
+        return float(self._main_scene.sim.dt)
+
+    def set_gravity(self, gravity, envs_idx=None) -> None:
+        """Set gravity on the built simulation — the ONE live knob.
+
+        Writing ``sim_options.gravity`` after ``build()`` is inert on both
+        genesis 1.3.3 and 1.4.0 (see :attr:`sim_options`); ``sim.set_gravity``
+        is not. Measured on 1.4.0: after ``set_gravity((0, 0, 0))`` a falling
+        box's Δz over 10 steps went to −0.392398834 m (constant velocity, i.e.
+        no acceleration), whereas assigning ``options.sim.gravity = (0, 0, 0)``
+        left it falling 5.0 → 4.793989658 m. ``envs_idx`` is passed straight
+        through to the engine for per-env gravity at ``n_envs > 1``.
+        """
+        self._require_built()
+        if envs_idx is None:
+            self._main_scene.sim.set_gravity(gravity)
+        else:
+            self._main_scene.sim.set_gravity(gravity, envs_idx=envs_idx)
+
+    @property
     def sim_options(self):
-        """The main scene's ``sim_options`` — for the runtime physics tweaks the
-        server makes (``dt`` / ``gravity``)."""
-        return self._main_scene.sim_options
+        """The ``SimOptions`` object this scene was CONSTRUCTED with.
+
+        **Post-build writes to this object are INERT** — assigning ``dt`` /
+        ``substeps`` / ``gravity`` here after ``build()`` changes nothing about
+        the running simulation on either supported engine version, because
+        ``Simulator.__init__`` snapshots ``_dt`` / ``_substep_dt`` /
+        ``_substeps`` at construction and ``Simulator.dt`` is read-only
+        (genesis 1.3.3 ``simulator.py`` and 1.4.0 ``simulator.py`` alike).
+        Measured on 1.4.0: after ``options.sim.dt = 0.2``, ten steps still
+        advanced ``sim.cur_t`` to 0.2 (= 10 × 0.02), and after
+        ``options.sim.gravity = (0, 0, 0)`` a box still fell 5.0 →
+        4.793989658 m. An earlier version of this docstring advertised the
+        object "for the runtime physics tweaks the server makes (dt /
+        gravity)" — that guarantee was never enforced by anything and is
+        WITHDRAWN. See ``docs/physics-contracts.md`` §7.14.
+
+        What to use instead: :attr:`effective_dt` / :attr:`substeps` to READ
+        what the engine is running at, :meth:`set_gravity` to change gravity
+        for real, and a fresh ``VehicleScene`` to change ``dt``.
+
+        Accessor is version-branched in ``_gs_compat.scene_sim_options``
+        (``Scene.options.sim`` on genesis >= 1.4.0, ``Scene.sim_options`` on
+        <= 1.3.3).
+        """
+        return scene_sim_options(self._main_scene)
 
     # ---- internals ----
     def _sync_dynamic(self, obs: "DynamicBody") -> None:

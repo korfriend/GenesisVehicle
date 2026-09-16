@@ -10,7 +10,8 @@ import pytest
 import torch
 
 from genesis_vehicle._gs_compat import (
-    apply_links_wrench, has_wrench_api, link_inertial, sensor_miss_value,
+    apply_links_wrench, has_wrench_api, link_inertial, scene_sim_options,
+    sensor_miss_value,
 )
 
 
@@ -321,3 +322,48 @@ def test_sensor_miss_value_keeps_a_zero_sentinel():
 def test_sensor_miss_value_is_none_when_the_engine_exposes_nothing():
     assert sensor_miss_value(_Sensor()) is None
     assert sensor_miss_value(_Sensor(_Options())) is None
+
+
+# --- scene_sim_options: Scene.sim_options (<= 1.3.3) vs options.sim (>= 1.4.0) ---
+
+class _SimOptionsStub:
+    """Stands in for ``gs.options.SimOptions``; identity is what we assert."""
+    def __init__(self, dt=0.02, substeps=2):
+        self.dt, self.substeps = dt, substeps
+
+
+class _NewSceneShape:
+    """genesis >= 1.4.0: ``Scene.options.sim``, no ``Scene.sim_options``."""
+    def __init__(self, sim_options):
+        self.options = type("SceneOptions", (), {"sim": sim_options})()
+
+
+class _OldSceneShape:
+    """genesis <= 1.3.3: ``Scene.sim_options`` assigned in ``Scene.__init__``."""
+    def __init__(self, sim_options):
+        self.sim_options = sim_options
+
+
+class _AlienSceneShape:
+    """Neither spelling — a future engine that moved the options again."""
+
+
+def test_scene_sim_options_reads_the_1_4_0_shape():
+    so = _SimOptionsStub()
+    assert scene_sim_options(_NewSceneShape(so)) is so
+
+
+def test_scene_sim_options_reads_the_1_3_3_shape():
+    so = _SimOptionsStub()
+    assert scene_sim_options(_OldSceneShape(so)) is so
+
+
+def test_scene_sim_options_raises_naming_both_spellings():
+    """A silent ``None`` would resurface as ``'NoneType' has no attribute 'dt'``
+    somewhere else entirely; the error must name both engine spellings so the
+    reader knows which versions were probed."""
+    with pytest.raises(AttributeError) as ei:
+        scene_sim_options(_AlienSceneShape())
+    msg = str(ei.value)
+    assert "options.sim" in msg
+    assert "sim_options" in msg

@@ -753,10 +753,26 @@ def main():
           f"SDK compute {_prof['sdk']/5*1e3:.2f} ms | "
           f"genesis solver {_prof['solver']/5*1e3:.2f} ms | 기타 {_rest:.2f} ms")
     
-    # [CRITICAL FIX] Always keep sim_dt fixed, for consistent physical time flow and dynamics determinism.
+    # sim_dt is the PACING unit (how fast we feed UE / how many catch-up steps
+    # we take), not a knob on the solver. The solver's dt was fixed when
+    # VehicleScene(dt=ue_dt) built the scene and CANNOT be changed afterwards:
+    # Simulator.__init__ snapshots dt/substeps on both genesis 1.3.3 and 1.4.0.
+    #
+    # Through v1.6.4 this block wrote `vs.sim_options.dt = sim_dt`. That write
+    # was inert on 1.3.3 (so the "[Determinism] … 설정되었습니다" line was false
+    # here — note server/l3_runtime.py's near-identical line performs no write
+    # and its "고정" wording is true), and on genesis 1.4.0 it raised
+    # AttributeError and KILLED the L2 server on the first client connection.
+    # See docs/physics-contracts.md §7.14.
     sim_dt = ue_dt
-    vs.sim_options.dt = sim_dt
-    print(f"  [OK] [Determinism] 물리 해상도(sim_dt)가 표준 {sim_dt * 1000.0:.1f}ms ({1.0/sim_dt:.1f}Hz)로 설정되었습니다.")
+    _eff_dt, _eff_ss = vs.effective_dt, vs.substeps
+    if abs(_eff_dt - sim_dt) > 1e-12:
+        print(f"  [WARN] [Determinism] 엔진 dt({_eff_dt * 1000.0:.3f}ms)와 페이싱 "
+              f"dt({sim_dt * 1000.0:.3f}ms)가 다릅니다. 엔진 값이 진실이며 런타임 변경은 "
+              f"불가능합니다 — VehicleScene(dt=...)를 다시 만들어야 합니다.")
+    print(f"  [OK] [Determinism] 물리 해상도(sim_dt) {_eff_dt * 1000.0:.1f}ms "
+          f"({1.0/_eff_dt:.1f}Hz) x substeps={_eff_ss} — build 시점에 고정됨"
+          f"(런타임 변경은 엔진이 지원하지 않음).")
     print("="*50 + "\n")
     
     # Send the fixed sync period to Unreal Engine for confirmation.
@@ -908,8 +924,15 @@ def main():
                 last_frame_id = 0
                 
                 print(f" [Genesis] Physics Resetting to Initial Values...")
-                vs.sim_options.gravity = (0, 0, initial_physics_state['gravity'])
-                vs.sim_options.dt = initial_physics_state['dt']
+                # Gravity restore goes through the LIVE knob (sim.set_gravity).
+                # dt is NOT restorable: it is fixed at build() on every engine
+                # version the SDK supports, and nothing has changed it since
+                # (the scene was built with exactly initial_physics_state['dt']
+                # and the /Genesis/Config/Physics handler stores its payload
+                # without ever applying it). Through v1.6.4 both lines assigned
+                # vs.sim_options.*, which was inert on genesis 1.3.3 and an
+                # AttributeError on 1.4.0. See docs/physics-contracts.md §7.14.
+                vs.set_gravity((0, 0, initial_physics_state['gravity']))
                 
                 accumulated_wheel_angles.clear()
 
