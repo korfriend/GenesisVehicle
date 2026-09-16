@@ -1309,7 +1309,8 @@ class VehicleScene:
                 veh.cfg.enable_wheel_joint_internal_sync = renders   # auto-managed (see above)
                 sensor = None if self._dual_scene else veh.sensor
                 veh.physics = VehiclePhysics(
-                    self._main_scene, veh.entity_main, sensor, veh.cfg, n_envs=self.n_envs)
+                    self._main_scene, veh.entity_main, sensor, veh.cfg,
+                    n_envs=self.n_envs, name=veh.name)
                 if sensor is None and veh.sensor is not None:
                     # dual_scene: the rays live in the OTHER scene, so the driver
                     # was built without a sensor and cannot read the miss
@@ -1602,7 +1603,8 @@ class VehicleScene:
         mvp = MultiVehiclePhysics(
             self._main_scene,
             [(veh.entity_main, veh.sensor, veh._group_cfg) for veh in self._vehicles],
-            n_envs=self.n_envs)
+            n_envs=self.n_envs,
+            names=[veh.name for veh in self._vehicles])
 
         if snap is not None:
             self._check_rebuild_shapes(mvp, snap)

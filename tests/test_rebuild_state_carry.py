@@ -533,3 +533,37 @@ def test_t10_one_mark_config_dirty_rebuilds_exactly_once(cpu_genesis):
     _drive(vs, vehs, 10)
 
     assert vs.physics.build_id == b0 + 1
+
+
+# --- T11: the rest-pose health attribute exists on the HEALTHY path -----------
+
+def test_t11_rest_capture_err_exists_and_is_none_after_a_good_build(cpu_genesis):
+    """``_rest_capture_err`` used to be ASSIGNED only inside
+    ``except Exception`` around the rest-pose capture, so reading it to check
+    whether the capture succeeded raised ``AttributeError`` on every healthy
+    build — an attribute that exists only when something went wrong cannot be
+    used as a health check. It is now initialised to ``None`` next to the two
+    rest-pose attributes it reports on.
+
+    It is deliberately NOT carried across a rebuild: it describes THIS
+    construction's capture, and the new instance does its own."""
+    from genesis_vehicle.core import (
+        REST_POSE_ATTRS, RUNTIME_STATE_ATTRS, RUNTIME_STATE_ROW_ATTRS,
+        RUNTIME_STATE_SCALARS,
+    )
+    vs, vehs, _ = _scene()
+    proto = vs.physics.kinds[0]._proto
+
+    assert "_rest_capture_err" in vars(proto)
+    assert getattr(proto, "_rest_capture_err", "MISSING") is None
+    assert proto._rest_wheel_pos_local is not None
+    assert proto._rest_wheel_quat_local is not None
+
+    for names in (REST_POSE_ATTRS, RUNTIME_STATE_ATTRS,
+                  RUNTIME_STATE_ROW_ATTRS, RUNTIME_STATE_SCALARS):
+        assert "_rest_capture_err" not in names
+
+    vs.mark_config_dirty()
+    _drive(vs, vehs, 2)
+    assert getattr(vs.physics.kinds[0]._proto,
+                   "_rest_capture_err", "MISSING") is None

@@ -91,3 +91,24 @@ def test_susp_offset_negative_distance_is_overcompression_not_air():
     # VehiclePhysics._stepped_once instead — see raycast.is_ray_hit_corrected.
     off0 = _susp_visual_offset(torch.tensor([0.0], dtype=torch.float64), 0.4, 0.1)
     assert abs(float(off0[0]) - 0.19) < 1e-7     # 0.4 - 0.0, clamped
+
+
+def test_susp_offset_accepts_a_per_row_l_susp():
+    """``_susp_visual_offset``'s air branch was ``torch.full_like(jp, -l_susp)``,
+    whose ``fill_value`` must be a Number: it raises ``TypeError: full_like():
+    argument 'fill_value' ... must be Number, not Tensor`` the moment a fused
+    group carries a per-row suspension length. It is ``torch.broadcast_to`` now.
+
+    The float path must be unchanged (it is a value-equality assertion, not an
+    approximation), and the tensor path must give each ROW its own air pose."""
+    mesh_r = 0.4
+    d = torch.tensor([[0.4, 20.0], [0.4, 20.0]], dtype=torch.float64)
+
+    scalar = _susp_visual_offset(d, mesh_r, 0.1)
+    assert torch.equal(
+        scalar, torch.tensor([[0.0, -0.1], [0.0, -0.1]], dtype=torch.float64))
+
+    per_row = _susp_visual_offset(
+        d, mesh_r, torch.tensor([[0.1], [0.05]], dtype=torch.float64))
+    assert torch.equal(
+        per_row, torch.tensor([[0.0, -0.1], [0.0, -0.05]], dtype=torch.float64))

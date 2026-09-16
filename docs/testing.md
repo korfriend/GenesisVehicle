@@ -8,11 +8,14 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-450 tests, almost all pure-Python. Runs in ~116s on CPU (measured at v1.6.2 with
-`python -m pytest tests/ -q`, WSL2, genesis-world 1.4.0; it was ~88s at v1.6.1 —
-the 14 real-`VehicleScene` rebuild tests added in v1.6.2 account for the
-difference, since those rollouts dominate; collection alone is ~5s). The reference
-URDFs the parsing tests read live in `tests/data/` (self-contained since v1.2.0).
+507 tests, almost all pure-Python. Runs in ~170s on CPU (measured at v1.6.4 with
+`python -m pytest tests/ -q`, WSL2, genesis-world 1.4.0: `507 passed in 170.53s`;
+it was ~116s / 450 tests at v1.6.2-v1.6.3 and ~88s at v1.6.1 — the 14
+real-`VehicleScene` rebuild tests added in v1.6.2 dominate the second jump, and
+v1.6.4's 57 new pure-Python tests the third; collection alone is ~6s). The count
+breaks down as v1.6.3's 450 + 57 for v1.6.4's build-time hoists. The reference
+URDFs the parsing tests read live in `tests/data/` (self-contained since
+v1.2.0).
 
 A handful build a real `VehicleScene` on the CPU backend (the batched-visual /
 proxy-sync / to-host parity tests, and the one ray pattern that allocates
@@ -77,6 +80,10 @@ CI without GPU.
 | The DEFAULT path did not move by one bit | `test_fan_default_identity.py` | a 200-step Genesis rollout of the reference car in the default configuration compared with `torch.equal` — **not `allclose`** — against wheel distances and the final pose captured from the pre-v1.5.1 tree (commit `20f7380`). Skips itself off genesis-world 1.4.0, because the baseline is a bit-pattern: re-capture, do not loosen. Also drives the M > 1 branch through a stub sensor, so the file witnesses the branch the rollout does not take |
 | Raycast-mode benchmark harness | `test_bench_raycast_mode.py` | 61 tests, all pure Python: the shipped entry point `main(argv, runner=fake)` is driven with a STUB runner, so the whole schedule (even/adjacent pairing, alternating slot order), the validity + x-margin gates, the cross-worker invariants, `paired_ratios` / `split_groups` and the fail-closed publication rule run without spawning a process. The only test in the suite that patches `genesis.init` — to RAISE, proving the PARENT path never calls it; that is NOT a claim that genesis is absent from the parent (`__init__.py` imports it eagerly via `control/plant.py`). Also pins `verdicts()` backward compatibility: no `terrain_half` key -> bound 18.0 and "±20 m", `terrain_half=(320, 320)` -> 318.0 |
 | Config rebuild carries the runtime state | `test_rebuild_state_carry.py` | 14 tests, all on a real CPU `VehicleScene` (`samples/urdf/car_4w.urdf`, `dt = cfg.recommended_dt`, substeps 10, friction 1.0); two of them add a 160×120 offscreen camera, which is what turns the wheel-visual path on headless. Nothing skips. Covers: `torch.equal` copy fidelity of every carried attribute; 40-step continuity against a control scene built in the same process; the wheel rest pose (a regression reproduces z `0.3000` → `0.1499`); `VehicleScene.reset()` actually resetting the batched driver; a post-build wheel-count change and a wheel-ORDER change both raising `ValueError` with `_grouped_version` rolled back so the next step raises the same thing; the authoritative post-construction check driven directly; `MultiVehicleKindPhysics.reset(rows=)` vs `MultiVehiclePhysics.reset(vehicle_ids=)` semantics at K=2 / `n_envs`=2 and the `TypeError` on `vehicle_ids=`; a per-vehicle reset not wiping another vehicle's visuals; the instanced renderer rebind, including that the FIRST frame after it does not raise; plant freshness by identity AND by solve equality, plus `RuntimeError` on a structural change; the whole carry again under `raycast_mode="single_scene"`; and that one `mark_config_dirty()` rebuilds exactly ONCE over the next 10 steps |
+| Build-time hoists stay LIVE | `test_build_time_hoists.py` | 23 tests (v1.6.4). Every value the step path now derives once — Ackermann geometry, driven-axle share, brake bias, AWD weight normalisation, the drive-omega cap, SFL's `v_thr²` — is derived FIRST, then its source is written, then the next call must move. Written that way round deliberately: a "snapshot at construction" implementation passes any test that writes the source before the first call, and fails these (confirmed by a reviewer who substituted a snapshot: 16 red). Numbers are characterisation baselines captured from the pre-hoist tree |
+| `eps_v` is live on both tire models | `test_tire_coulomb_eps.py` | 11 tests (v1.6.4). Same characterisation shape for `CoulombIsotropic._eps2` and the Pacejka arm; also the file that gives `tire_models/coulomb.py` its first behavioural coverage (it had none) |
+| Per-wheel broadcast rank convention | `test_rank_helpers.py` | 6 tests (v1.6.4). `_pipeline.pw` / `pw3` return `unsqueeze(0)` at rank 1 and pass a rank-2/3 field through unchanged. The rank-2 branch is not taken anywhere in this tree yet, so it is exercised explicitly rather than left to the promotion step |
+| The bump-stop/`dt` warning names the vehicle | `test_bump_stop_dt_warning.py` | 3 tests (v1.6.4). RED before the change — the old message carried no vehicle name, URDF name or slot index. Scope: one driver = one config, so "per vehicle" means "per config, named after the vehicle it was registered as"; a per-SLOT ratio inside a fused group is not this test |
 | Server subpackage import + steer-key mapping | `test_server_import.py` | `genesis_vehicle.server` imports; `steerScale`/`maxSteerRad` mapping-key resolution (auto-skips without genesis/pythonosc) |
 
 ## Public-surface import smoke check
@@ -108,6 +115,7 @@ and that the lazy names (`VehiclePhysics`, `WheelRayPattern`,
 | `strategies/coupling.py` | `CouplingStrategy` + 2 concrete |
 | `strategies/stability.py` | `StabilityHook` + 3 concrete |
 | `presets.py` | 4 ready-to-use `VehicleConfig` builders + `stability_hooks_for_profile` |
+| `_hotset.py` | the HOT set and its build-time derivations: `derived()` (dependent cache, off-instance), `prime_derived()`, `HOT_DEPENDENTS`, `square_f64`, `row_tensor` (v1.6.4; contract in `docs/physics-contracts.md` §7.13) |
 | `_version.py` | `__version__`, `VERSION_INFO` (single source of truth) |
 | `control/plant.py` | `DifferentiablePlant` — autodiff inverse plant (the default for `PathFollower`), batched over (vehicle, env) members |
 | `tests/` | Pure-Python unit tests (no Genesis runtime needed) |

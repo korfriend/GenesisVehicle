@@ -2,7 +2,25 @@
 
 The 5-step pipeline with every strategy and stability-hook seam marked.
 
+| abbr | meaning |
+|---|---|
+| derived value | a strategy value computed once at build from config, re-computed when a source moves (`_hotset`, v1.6.4) |
+| `pw` / `pw3` | `_pipeline.pw` / `pw3` — rank-checked per-wheel broadcast helpers |
+| SFL | `StaticFrictionLock` |
+| M | `contact_samples` — rays per wheel in a swept-envelope fan |
+
 ```
+[build]  VehiclePhysics.__init__ → _hotset.prime_derived(resolved, wheel_meta,
+         dev, fdt)
+         # v1.6.4: the Ackermann geometry, the driven-axle share, the
+         # brake-bias / AWD weight vectors, the drive-omega cap and the two
+         # squared thresholds (SFL v_thr², Coulomb eps_v²) are computed HERE,
+         # not per step. They stay LIVE: a post-build write to any source in
+         # _hotset.HOT_DEPENDENTS is picked up on the next call, including an
+         # in-place list edit. Per-wheel config is NOT live — it is read off
+         # WheelMeta and needs mark_config_dirty(). (physics-contracts.md
+         # S7.13, S7.12)
+
 VehiclePhysics.step(inputs)
 
 [0] Input adaptation
@@ -29,6 +47,12 @@ VehiclePhysics.step(inputs)
 
 [per-wheel loop i = 0 .. n_wheels-1, all batched over n_envs]
     (A) compression, comp_rate, asymmetric damper -> N     (physics-contracts.md S7.2)
+        # per-wheel WheelMeta fields enter through _pipeline.pw / pw3 (v1.6.4):
+        # rank 1 -> unsqueeze(0), rank 2/3 passed through. Every field is rank 1
+        # today, so this is value-identical. (S7.13)
+        # bump-stop term guarded by the build-time bool WheelMeta.has_bump_stop
+        # = OR over k_bump > 0 — a WHOLE-BATCH branch, exact because
+        # bump_stop_force is 0 where k_bump == 0. (S7.13)
     (B) wheel-frame fwd/lat using steer_per_wheel[:, i]
     (C) F_long, F_lat = TireModel(...)
         for hook in stability_hooks if POST_TIRE in hook.slots:
@@ -67,6 +91,16 @@ attribute (a tuple containing some of `"PRE_LOOP"`, `"POST_TIRE"`).
 | `RollingResistance` | `("POST_TIRE",)` | Subtracts `cr * N * tanh(v_long / scale)` from `F_long` per wheel. |
 | `LowSpeedRegularizer` | `("PRE_LOOP", "POST_TIRE")` | Pre-loop: compute `moving ∈ [0,1]` from chassis speed. Post-tire: scale `F_long`/`F_lat` by `moving`; record an omega pull target so core blends ω toward `v_long / radius`. |
 | `StaticFrictionLock` | `("POST_TIRE",)` | When `brake > thr` and planar speed `sqrt(v_long² + v_lat²) < thr`: 2D stick-slip lock with per-wheel position anchor. Stores anchor at lock engagement; computes `F = -K_spring·displacement - K_damp·velocity` in both axes; projects onto the per-wheel friction ellipse (same form as `pacejka.py`); requests `omega = 0` via `ctx.omega_override`. v0.5.7 — replaced v0.5.6's tanh velocity damper with proper position-anchored stick-slip. Vehicle holds with **zero drift** on any slope up to `μ ≈ tan(slope_angle)` (truck preset with μ=1.0: rock-solid up to ~30°, vehicle rolls over physically beyond ~35°). |
+
+**Hook config stays live (v1.6.4).** `StaticFrictionLock`'s speed threshold is
+now squared once at build (`v_thr²`, in double, then cast) instead of on every
+`apply_post_tire`. Writing `hook.v_thr` after `build()` — which
+`samples/tank_tuning.py` does — still takes effect on the next step: the cached
+square is keyed on `v_thr`. The cache lives off the hook instance, not in its
+`__dict__`, because `control/plant._sync_hooks` row-slices every TENSOR
+attribute of a live hook by the flat batch; a config tensor sitting there would
+be sliced as if it were integrator state. The SOURCES (`v_thr`, `brake_thr`,
+`k_spring`, `k_damp`) are still plain public attributes — set them freely.
 
 Hook order is the list order (see
 [`stability-profiles.md`](stability-profiles.md#hook-ordering-inside-a-profile)

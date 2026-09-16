@@ -18,6 +18,7 @@ from genesis_vehicle.inputs import (
 from genesis_vehicle.strategies import (
     Ackermann,
     Independent,
+    PartialAckermann,
     PerSide,
     RWD,
     SameSideBelt,
@@ -268,3 +269,116 @@ def test_perside_throttle_gear_cap_scales():
     # Effective throttle = 0.3 -> per-wheel = 3000 N*m.
     assert float(Td[0, 0]) == pytest.approx(3000.0)
     assert float(Td[0, 5]) == pytest.approx(3000.0)
+
+
+# ---------------------------------------------------------------------------
+# PartialAckermann (multi-axle steering) — the truck path
+# ---------------------------------------------------------------------------
+#
+# This strategy had NO coverage at all (grep: one import in _check_import.py)
+# and it is in no GATE 0 arm either, because the 6-wheel truck URDF is not in
+# the repo. It is also the second copy of the Ackermann math, so it is where a
+# rank / reassociation change can drift unseen.
+
+
+def _truck_meta() -> _FakeWheelMeta:
+    """6-wheel, 3-axle truck meta (front steers, mid + rear drive)."""
+    positions = torch.tensor([
+        [2.60, 1.10, 0.50], [2.60, -1.10, 0.50],     # axle 0
+        [-0.60, 1.10, 0.50], [-0.60, -1.10, 0.50],   # axle 1
+        [-2.20, 1.10, 0.50], [-2.20, -1.10, 0.50],   # axle 2
+    ], dtype=torch.float32)
+    axle = torch.tensor([0, 0, 1, 1, 2, 2], dtype=torch.long)
+    L = torch.tensor([True, False] * 3)
+    R = torch.tensor([False, True] * 3)
+    return _FakeWheelMeta(
+        n_wheels=6, positions=positions, axle_index=axle,
+        side_mask_L=L, side_mask_R=R,
+        left_idx=torch.nonzero(L, as_tuple=False).flatten().to(torch.long),
+        right_idx=torch.nonzero(R, as_tuple=False).flatten().to(torch.long),
+    )
+
+
+def _steer(strat, meta, steer, n_envs=1):
+    from genesis_vehicle.inputs import PartialAckermannInputs
+    inp = PartialAckermannInputs(throttle=0.0, brake=0.0, steer=steer)
+    return strat.per_wheel_steer(inp, n_envs=n_envs, wheel_meta=meta,
+                                 device="cpu", dtype=torch.float32)
+
+
+def test_partial_ackermann_steers_only_the_listed_axles():
+    meta = _truck_meta()
+    out = _steer(PartialAckermann(max_steer_rad=0.55, steered_axles=(0,)),
+                 meta, 0.4)
+    assert float(out[0, 0]) > 0.0 and float(out[0, 1]) > 0.0
+    assert [float(x) for x in out[0, 2:]] == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_partial_ackermann_two_steered_axles_both_move():
+    meta = _truck_meta()
+    out = _steer(PartialAckermann(max_steer_rad=0.55, steered_axles=(0, 1)),
+                 meta, 0.4)
+    assert all(float(x) > 0.0 for x in out[0, :4])
+    assert [float(x) for x in out[0, 4:]] == [0.0, 0.0]
+    # Same wheelbase, each wheel its own y: the mid axle's wheels sit at the
+    # same |y| as the front's, so their magnitudes match wheel for wheel.
+    assert float(out[0, 2]) == pytest.approx(float(out[0, 0]), abs=1e-7)
+    assert float(out[0, 3]) == pytest.approx(float(out[0, 1]), abs=1e-7)
+
+
+def test_partial_ackermann_iso_inner_outer_and_sign_flip():
+    meta = _truck_meta()
+    strat = PartialAckermann(max_steer_rad=0.55, steered_axles=(0,))
+    right = _steer(strat, meta, 0.4)
+    assert float(right[0, 1]) > float(right[0, 0]) > 0.0   # inner = FR (y < 0)
+    left = _steer(strat, meta, -0.4)
+    assert float(left[0, 0]) < float(left[0, 1]) < 0.0     # inner = FL
+    assert float(left[0, 0]) == pytest.approx(-float(right[0, 1]), abs=1e-7)
+
+
+def test_partial_ackermann_small_steer_is_exactly_zero():
+    """The `|theta| < 1e-6` mask, which the (n_envs, 1) rank rewrite runs
+    through `torch.where` — an off-by-one-rank slip here would broadcast the
+    mask over the wrong axis."""
+    meta = _truck_meta()
+    out = _steer(PartialAckermann(max_steer_rad=0.55, steered_axles=(0, 1)),
+                 meta, 1e-9)
+    assert torch.equal(out, torch.zeros_like(out))
+
+
+def test_partial_ackermann_is_per_env_at_n_envs_gt_1():
+    """Per-env steer must stay per-env after the rank rewrite: row 1 is the
+    negation of row 0, and row 2 (zero steer) is exactly zero."""
+    meta = _truck_meta()
+    strat = PartialAckermann(max_steer_rad=0.55, steered_axles=(0,))
+    out = _steer(strat, meta, torch.tensor([0.4, -0.4, 0.0]), n_envs=3)
+    assert out.shape == (3, 6)
+    assert float(out[1, 0]) == pytest.approx(-float(out[0, 1]), abs=1e-7)
+    assert float(out[1, 1]) == pytest.approx(-float(out[0, 0]), abs=1e-7)
+    assert torch.equal(out[2], torch.zeros(6))
+
+
+def test_partial_ackermann_single_axle_equals_ackermann_exactly():
+    """With one steered axle the two classes must compute the SAME angles —
+    they share `_resolve_geometry` and the bicycle formula, and PartialAckermann
+    is the copy that no rollout in this repo exercises. VALUE equality, over a
+    sweep, because that is what would catch a reassociation drift in one copy
+    only."""
+    meta = _truck_meta()
+    a = Ackermann(max_steer_rad=0.55, front_axle=0)
+    p = PartialAckermann(max_steer_rad=0.55, steered_axles=(0,))
+    for s in (-1.0, -0.37, -1e-7, 0.0, 1e-7, 0.25, 1.0):
+        inp = AckermannInputs(throttle=0.0, brake=0.0, steer=s)
+        got_a = a.per_wheel_steer(inp, 1, meta, "cpu", torch.float32)
+        assert torch.equal(got_a, _steer(p, meta, s)), s
+
+
+def test_partial_ackermann_geometry_is_live_after_the_first_call():
+    """It inherits the hoisted `_geom`, so the same dependency gate applies."""
+    meta = _truck_meta()
+    strat = PartialAckermann(max_steer_rad=0.55, steered_axles=(0,))
+    base = _steer(strat, meta, 0.4).clone()
+    strat.wheelbase = 6.0
+    after = _steer(strat, meta, 0.4)
+    assert not torch.equal(after, base)
+    assert float(after[0, 0]) > float(base[0, 0])     # longer wb -> less cut

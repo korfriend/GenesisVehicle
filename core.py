@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import math
+import os
 
 import torch
 import genesis as gs
@@ -18,7 +19,8 @@ from genesis.utils.geom import transform_by_quat
 from ._version import __version__
 from .config import ResolvedConfig, VehicleConfig, resolve
 from ._gs_compat import apply_links_wrench
-from ._pipeline import compute_wheel_step
+from ._hotset import prime_derived
+from ._pipeline import compute_wheel_step, pw, pw3
 from .inputs import VehicleInputs, VehicleStepInputs
 from .raycast import (
     check_miss_supported, is_ray_hit_corrected, ray_miss_value, read_distances,
@@ -94,7 +96,14 @@ def _susp_visual_offset(distance: torch.Tensor, mesh_radius: float,
     # closed-form mirror is stateless and does not.)
     air = ~is_ray_hit_corrected(distance, miss)
     jp = mesh_radius - distance
-    jp = torch.where(air, torch.full_like(jp, -l_susp), jp)
+    # broadcast_to, not full_like: `full_like`'s fill_value must be a Number
+    # and raises `TypeError: fill_value must be Number, not Tensor` the moment
+    # `l_susp` arrives as a per-row tensor (fused group). Value-identical for a
+    # python float — both round it to jp's dtype once.
+    neg_l_susp = -l_susp
+    if not torch.is_tensor(neg_l_susp):
+        neg_l_susp = torch.as_tensor(neg_l_susp, device=jp.device, dtype=jp.dtype)
+    jp = torch.where(air, torch.broadcast_to(neg_l_susp, jp.shape), jp)
     if torch.is_tensor(clamp):
         return torch.maximum(-clamp, torch.minimum(clamp, jp))
     return torch.clamp(jp, -clamp, clamp)
@@ -186,7 +195,17 @@ class WheelMeta:
     comp_rate_clamp: torch.Tensor    # (n_wheels,)
     # Bump-stop (v1.2.6): extra rate beyond rest_stroke; all-zero = off.
     # `has_bump_stop` is a build-time python bool so the pipeline can skip the
-    # term without a per-step GPU sync.
+    # term without a per-step GPU sync. It is the OR of `k_bump > 0` over every
+    # element, so it stays a single whole-batch branch when `k_bump` becomes
+    # per-row: one wheel with a bump stop makes every row take the branch,
+    # which is exact because `bump_stop_force` is 0 where `k_bump == 0`.
+    # It replaced `float(k_bump.max()) > 0.0`, and the two agree on every
+    # ordinary value INCLUDING -0.0 and +/-inf, but NOT under NaN: torch.max
+    # propagates NaN, so the max form was False for a whole vehicle as soon as
+    # ONE wheel carried a NaN k_bump, even with real bump stops on the others.
+    # The OR is True there. That is the intended behaviour, not an accident —
+    # a NaN rate is a broken config, and silently disabling every wheel's bump
+    # stop is the worse of the two answers. Pinned in tests/test_bump_stop.py.
     k_bump: torch.Tensor             # (n_wheels,)
     has_bump_stop: bool
     # Tire / hook coefficients (added in v0.5.0 for batched per-wheel ops).
@@ -292,11 +311,12 @@ class VehiclePhysics:
         sensor: Any,
         config: VehicleConfig,
         n_envs: int = 1,
+        name: Optional[str] = None,
     ):
         assert n_envs >= 1
         global _BANNER_PRINTED
         if not _BANNER_PRINTED:
-            import os, sys
+            import sys
             if not os.environ.get("GENESIS_VEHICLE_QUIET"):
                 print(f"[genesis_vehicle] v{__version__}",
                       file=sys.stderr, flush=True)
@@ -304,6 +324,14 @@ class VehiclePhysics:
         self.scene = scene
         self.entity = entity
         self.sensor = sensor
+        #: Identifier for messages about THIS driver's config (the dt-stability
+        #: warning). ``VehicleScene`` passes the ``Vehicle.name`` the user gave
+        #: ``add_vehicle``; a direct ``VehiclePhysics(...)`` / plain
+        #: ``MultiVehiclePhysics(...)`` caller supplies no name, so it falls
+        #: back to the URDF file name, which is the only identifier that exists
+        #: on that path.
+        self.vehicle_name = name or os.path.basename(
+            getattr(config, "urdf_path", "") or "") or "<unnamed>"
         # The distance a wheel ray reports when it hit NOTHING. Read off the
         # sensor (raycast.ray_miss_value → the engine's no_hit_value, which
         # defaults to max_range). None when this instance was built WITHOUT a
@@ -351,25 +379,18 @@ class VehiclePhysics:
 
         self.wheel_meta = self._build_wheel_meta(self.resolved)
 
-        # Bump-stop stability guard (v1.2.6). The suspension force is
-        # recomputed once per dt (held through the substeps), so the total
-        # spring rate is stability-bounded by (k_susp + k_bump)*dt^2/m_share.
-        # Measured on a 38.5 t / 14-wheel tracked hull at dt=0.025: ratio 0.61
-        # shows mm-level rest chatter, >= 0.86 diverges outright.
-        if self.wheel_meta.has_bump_stop:
-            sprung = getattr(self.resolved.urdf, "sprung_mass", None)
-            if sprung:
-                m_share = float(sprung) / self.wheel_meta.n_wheels
-                k_tot = float((self.wheel_meta.k_susp + self.wheel_meta.k_bump).max())
-                ratio = k_tot * self.dt * self.dt / m_share
-                if ratio > 0.7:
-                    import logging
-                    logging.getLogger("genesis_vehicle").warning(
-                        "bump-stop is too stiff for this timestep: "
-                        "(k_susp + k_bump)*dt^2/m_share = %.2f (> 0.7). The "
-                        "suspension will chatter or diverge - lower k_bump or dt.",
-                        ratio,
-                    )
+        # BUILD TIME for everything the step path derives from config: the
+        # Ackermann geometry, the driven-axle share, the brake-bias / AWD
+        # weight vectors, the drive-omega cap, and the two squared thresholds
+        # (`_v_thr_sq`, `_eps2`). Deliberately here and not in each strategy's
+        # __init__: `TankTuning.apply_config` (samples/tank_tuning.py:35-37)
+        # writes hook scalars onto the CONSTRUCTED hook, so an __init__-time
+        # snapshot would silently revert v_thr 5.0 -> 0.5. A later write is
+        # picked up too — every one of these is a dependent cache keyed on its
+        # sources (see _hotset).
+        prime_derived(self.resolved, self.wheel_meta, self.dev, self.fdt)
+
+        self._warn_bump_stop_dt()
 
         self.pre_loop_hooks = [h for h in self.resolved.stability_hooks if "PRE_LOOP" in h.slots]
         self.post_tire_hooks = [h for h in self.resolved.stability_hooks if "POST_TIRE" in h.slots]
@@ -412,7 +433,7 @@ class VehiclePhysics:
             [0.0, 0.0, 1.0], device=self.dev, dtype=self.fdt,
         ).unsqueeze(0).expand(n_envs, 3).contiguous()
         # Pre-built (n_envs, n_wheels, 3) wheel-body broadcast.
-        self._wheel_body_b = self.wheel_meta.positions.unsqueeze(0).expand(
+        self._wheel_body_b = pw3(self.wheel_meta.positions).expand(
             n_envs, n_wheels, 3
         ).contiguous()
 
@@ -449,7 +470,7 @@ class VehiclePhysics:
         else:
             susp_stroke = torch.clamp(
                 self.wheel_meta.rest_d - self.wheel_meta.radius, min=0.02)
-        self._susp_clamp = susp_stroke.unsqueeze(0)
+        self._susp_clamp = pw(susp_stroke)
         # Skid-steer/tank presets disable the wheel spin visual (cylindrical
         # road wheels — spin is invisible). Match WheelJointInternalSync so the
         # closed-form pose agrees: no spin baked into the quat when disabled.
@@ -463,12 +484,54 @@ class VehiclePhysics:
         # raycast attach point and carry a rest orientation).
         self._rest_wheel_pos_local = None
         self._rest_wheel_quat_local = None
+        # Initialised unconditionally: the capture below only ASSIGNS this on
+        # the failure path, so `p._rest_capture_err` used to raise
+        # AttributeError on every healthy build - an attribute that exists only
+        # when something went wrong cannot be read by a health check.
+        self._rest_capture_err = None
         try:
             self._capture_rest_wheel_pose(entity)
         except Exception as e:   # entity not yet readable → lazy-capture on first getter call
             self._rest_capture_err = e
 
         _print_version_banner(self.resolved, n_envs)
+
+    def _warn_bump_stop_dt(self) -> None:
+        """Bump-stop stability guard (v1.2.6), named per vehicle.
+
+        The suspension force is recomputed once per dt (held through the
+        substeps), so the total spring rate is stability-bounded by
+        ``(k_susp + k_bump) * dt^2 / m_share``. Measured on a 38.5 t /
+        14-wheel tracked hull at dt=0.025: ratio 0.61 shows mm-level rest
+        chatter, >= 0.86 diverges outright.
+
+        SCOPE, exactly. This driver carries ONE config, so the ratio is that
+        config's and the message names the vehicle it was built for
+        (``self.vehicle_name``); where several vehicles share the kind they
+        share the cfg, hence the ``+N more`` suffix the caller composes. The
+        ratio mixes ``sprung_mass`` with the MAXIMUM ``k_susp + k_bump`` over
+        the wheels — worst wheel against the average wheel's mass share, which
+        is the intended conservative reading WITHIN one vehicle. It becomes a
+        real per-slot mix-up only when ``wheel_meta`` carries several vehicles'
+        rows (fused groups, STEP 3); this method is the single site that then
+        has to loop.
+        """
+        if not self.wheel_meta.has_bump_stop:
+            return
+        sprung = getattr(self.resolved.urdf, "sprung_mass", None)
+        if not sprung:
+            return
+        m_share = float(sprung) / self.wheel_meta.n_wheels
+        k_tot = float((self.wheel_meta.k_susp + self.wheel_meta.k_bump).max())
+        ratio = k_tot * self.dt * self.dt / m_share
+        if ratio > 0.7:
+            import logging
+            logging.getLogger("genesis_vehicle").warning(
+                "vehicle '%s': bump-stop is too stiff for this timestep: "
+                "(k_susp + k_bump)*dt^2/m_share = %.2f (> 0.7). The "
+                "suspension will chatter or diverge - lower k_bump or dt.",
+                self.vehicle_name, ratio,
+            )
 
     # -----------------------------------------------------------------
     # Public API
@@ -785,9 +848,9 @@ class VehiclePhysics:
         # "nobody has stepped"; envs that a PARTIAL reset un-stepped are
         # masked back to the rest pose below.
         if not self._stepped_any():
-            rest_pos = self._rest_wheel_pos_local.unsqueeze(0).expand(
+            rest_pos = pw3(self._rest_wheel_pos_local).expand(
                 self.n_envs, -1, 3).contiguous()
-            rest_quat = self._rest_wheel_quat_local.unsqueeze(0).expand(
+            rest_quat = pw3(self._rest_wheel_quat_local).expand(
                 self.n_envs, -1, 4).contiguous()
             if frame == "local":
                 return rest_pos, rest_quat
@@ -812,8 +875,8 @@ class VehiclePhysics:
         spin = (self.wheel_spin_angle if self._visual_spin_enabled
                 else torch.zeros_like(self.wheel_spin_angle))                # (N, n)
 
-        rest_pos = self._rest_wheel_pos_local.unsqueeze(0)                   # (1, n, 3)
-        rest_quat = self._rest_wheel_quat_local.unsqueeze(0)                 # (1, n, 4)
+        rest_pos = pw3(self._rest_wheel_pos_local)                           # (1, n, 3)
+        rest_quat = pw3(self._rest_wheel_quat_local)                         # (1, n, 4)
 
         # Position: rest + suspension translation along chassis +z.
         z_off = torch.stack(
@@ -1058,7 +1121,7 @@ class VehiclePhysics:
             c_extension=_t("c_extension"),
             comp_rate_clamp=_t("comp_rate_clamp"),
             k_bump=k_bump,
-            has_bump_stop=bool(float(k_bump.max()) > 0.0),
+            has_bump_stop=bool((k_bump > 0.0).any()),
             mu_long=_t("mu_long"), mu_lat=_t("mu_lat"),
             rolling_resistance_cr=_t("rolling_resistance_cr"),
             pb_x=_t("pb_x"), pc_x=_t("pc_x"), pe_x=_t("pe_x"),

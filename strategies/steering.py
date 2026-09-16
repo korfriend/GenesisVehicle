@@ -12,6 +12,7 @@ from typing import Any, ClassVar, Optional
 
 import torch
 
+from .._hotset import derived
 from ..config import ConfigError
 from ..inputs import (
     AckermannInputs,
@@ -86,8 +87,26 @@ class Ackermann(SteeringStrategy):
         self.wheelbase = wheelbase
         self.track_width = track_width
 
+    def _prime_derived(self, wheel_meta: Any, device: Any, dtype: Any) -> None:
+        """Build-time hook (``_hotset.prime_derived``): derive ``_geom`` now."""
+        self._resolve_geometry(wheel_meta)
+
     def _resolve_geometry(self, wheel_meta: Any) -> tuple[float, float]:
-        """Compute (wheelbase, track_width) from wheel positions if not supplied."""
+        """(wheelbase, track_width), derived from wheel positions if not supplied.
+
+        Derived ONCE per (wheel_meta, wheelbase, track_width, front_axle) and
+        cached under the ``_geom`` slot: it used to run four tensor reductions
+        on every ``per_wheel_steer`` call, i.e. every step. A write to any of the
+        three sources (``HOT_DEPENDENTS[("steering", …)]``) still lands on the
+        next call — the cache key carries them.
+        """
+        return derived(
+            self, "_geom", wheel_meta,
+            (self.wheelbase, self.track_width, self.front_axle),
+            lambda: self._compute_geometry(wheel_meta),
+        )
+
+    def _compute_geometry(self, wheel_meta: Any) -> tuple[float, float]:
         if self.wheelbase is not None and self.track_width is not None:
             return float(self.wheelbase), float(self.track_width)
         positions = wheel_meta.positions   # (n_wheels, 3) torch tensor
@@ -107,7 +126,15 @@ class Ackermann(SteeringStrategy):
         # Track width = max - min y on the front axle.
         front_y = positions[front_mask, 1]
         tw = self.track_width if self.track_width is not None else float(front_y.max() - front_y.min())
-        if wb <= 0.0 or tw <= 0.0:
+        # Written through ``torch.as_tensor(...).le(0).any()`` rather than
+        # ``wb <= 0.0 or tw <= 0.0``: the plain form raises "Boolean value of
+        # Tensor with more than one element is ambiguous" the moment a fused
+        # group hands these in as per-row tensors. It is a build-time check
+        # since the geometry was hoisted, so the extra wrap costs nothing per
+        # step. NB the rest of this function still returns python floats — a
+        # per-row wheelbase is STEP 3, not this change.
+        if bool(torch.as_tensor(wb).le(0.0).any()) or \
+                bool(torch.as_tensor(tw).le(0.0).any()):
             raise ConfigError(f"Ackermann: derived wheelbase={wb}, track_width={tw}")
         return float(wb), float(tw)
 
@@ -132,11 +159,20 @@ class Ackermann(SteeringStrategy):
         positions = wheel_meta.positions
         # Bicycle radius from chassis center to ICR projection on x-axis.
         # Use a soft tan to avoid singularity at theta=0; signed.
+        # RANK: everything below is (n_envs, 1), not (n_envs,) — a fused group
+        # carries `wb` as one value per ROW, and `(NV,) / (NV, 1)` would
+        # broadcast to (NV, NV). The write-back squeezes it off again.
+        theta_center = theta_center.unsqueeze(-1)                    # (n_envs, 1)
         small = torch.abs(theta_center) < 1e-6
         tan_theta = torch.tan(theta_center)
         # Avoid div-by-zero; we will mask back to 0 for very small steer.
         safe_tan = torch.where(small, torch.ones_like(tan_theta), tan_theta)
-        R_center = wb / safe_tan                                     # (n_envs,) signed
+        # RECIPROCAL FORM: `x.reciprocal() * wb`, not `wb / x`. With `wb` a
+        # python float torch CPU already evaluates the division that way, so
+        # this is value-identical today (measured: 0/24,000 mismatches,
+        # plan v4); with `wb` a per-row tensor the naive `wb_rows / x` is not
+        # (6,665/24,000 differed).
+        R_center = safe_tan.reciprocal() * wb                        # (n_envs, 1) signed
 
         for wi in front_idx.tolist():
             # y of this wheel in chassis frame (ISO 8855: +Y = left).
@@ -145,11 +181,12 @@ class Ackermann(SteeringStrategy):
             # y = -R_center). Distance from ICR to a wheel at y_wheel is
             # |y_wheel + R_center|. For +steer, R_center > 0, so the right wheel
             # (y < 0) ends up with a smaller R_w (= inner wheel, larger angle).
-            R_w = y + R_center                                       # (n_envs,)
-            mag = torch.atan(wb / torch.clamp(torch.abs(R_w), min=1e-6))
+            R_w = y + R_center                                       # (n_envs, 1)
+            mag = torch.atan(
+                torch.clamp(torch.abs(R_w), min=1e-6).reciprocal() * wb)
             theta_w = torch.sign(theta_center) * mag
             theta_w = torch.where(small, torch.zeros_like(theta_w), theta_w)
-            out[:, wi] = theta_w
+            out[:, wi] = theta_w.squeeze(-1)
         return out
 
 
@@ -189,20 +226,23 @@ class PartialAckermann(Ackermann):
         steer_in = _to_tensor(inputs.steer, n_envs, device, dtype)
         theta_center = steer_in * self.max_steer_rad
         out = torch.zeros(n_envs, wheel_meta.n_wheels, device=device, dtype=dtype)
+        # Same (n_envs, 1) rank + reciprocal form as Ackermann above.
+        theta_center = theta_center.unsqueeze(-1)
         small = torch.abs(theta_center) < 1e-6
         tan_theta = torch.tan(theta_center)
         safe_tan = torch.where(small, torch.ones_like(tan_theta), tan_theta)
-        R_center = wb / safe_tan
+        R_center = safe_tan.reciprocal() * wb
         positions = wheel_meta.positions
         for axle in self.steered_axles:
             mask = (wheel_meta.axle_index == axle)
             for wi in torch.nonzero(mask, as_tuple=False).flatten().tolist():
                 y = float(positions[wi, 1])
                 R_w = y + R_center
-                mag = torch.atan(wb / torch.clamp(torch.abs(R_w), min=1e-6))
+                mag = torch.atan(
+                    torch.clamp(torch.abs(R_w), min=1e-6).reciprocal() * wb)
                 theta_w = torch.sign(theta_center) * mag
                 theta_w = torch.where(small, torch.zeros_like(theta_w), theta_w)
-                out[:, wi] = theta_w
+                out[:, wi] = theta_w.squeeze(-1)
         return out
 
 

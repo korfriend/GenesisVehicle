@@ -726,3 +726,121 @@ never stepped again, and **the rendered wheels stop turning permanently** while
 the physics keeps running (measured headless with one offscreen camera: the old
 proto's spin frozen at `[0.3005, 0.3005, 0.5585, 0.5585]` while the live kind
 reached `[0.3867, 0.3864, 0.6415, 0.6420]`).
+
+## 7.13 What a post-`build()` config write reaches (v1.6.4)
+
+Since v1.6.4 several quantities the step path needs are computed at BUILD time
+instead of on every call (`_hotset.prime_derived`, from
+`VehiclePhysics.__init__`). This section is the contract that hoist has to keep:
+**which writes still take effect, on which call, and which need a rebuild.**
+
+| abbr | meaning |
+|---|---|
+| hot source | a config field the step path must keep reading LIVE; a post-`build()` write to it takes effect on the next call |
+| derived value | a value computed from hot sources + `wheel_meta` + device/dtype, cached until one of them moves (`_hotset.derived`) |
+| cold config | config the driver reads ONCE at build; changing it needs `VehicleScene.mark_config_dirty()` (§7.12) |
+| SFL | `StaticFrictionLock` |
+| `v_thr` / `eps_v` | SFL's activation speed threshold (m/s) / `CoulombIsotropic`'s slip-magnitude floor |
+
+```mermaid
+flowchart TD
+    W["post-build() write"] --> Q{"what did you write?"}
+    Q -->|"hot source: steering.wheelbase, track_width, front_axle,<br/>drivetrain.driven_axles, brake_bias, drive_weights,<br/>omega_max_drive, tire.eps_v, hook.v_thr"| H["derived value re-computed on the NEXT call<br/>(_hotset.derived: key moved)"]
+    Q -->|"other live scalar read at the call site<br/>(t_drive_max, t_brake_max, max_steer_rad, gear_cap, ...)"| L["takes effect on the next step<br/>(never cached)"]
+    Q -->|"per-wheel config: WheelConfig fields,<br/>k_susp, radius, mu_long, i_wheel, k_bump"| C["COLD: the driver reads WheelMeta,<br/>not resolved.wheels[i]<br/>-> mark_config_dirty() (S7.12)"]
+    Q -->|"in-place edit of a built WheelMeta tensor"| X["unsupported: no invalidation exists"]
+```
+
+### The hot set is declared, not implied
+
+`_hotset.HOT_DEPENDENTS` maps `(role, source attribute) -> (derived slot, ...)`:
+
+| role | source | derived slot(s) |
+|---|---|---|
+| `steering` | `wheelbase`, `track_width`, `front_axle` | `_geom` |
+| `drivetrain` | `driven_axles` | `_driven`, `_drive_share` |
+| `drivetrain` | `brake_bias` | `_brake_bias` |
+| `drivetrain` | `drive_weights` | `_drive_weights` |
+| `drivetrain` | `omega_max_drive` | `_omega_cap` |
+| `tire` | `eps_v` | `_eps2` (`CoulombIsotropic` only — `PacejkaAnisotropic` reads `eps_v` live at the call site and squares nothing, so it has no derived slot) |
+| `hook` (any `stability_hooks` entry) | `v_thr` | `_v_thr_sq` (`StaticFrictionLock`; a hook without the source simply has no slot) |
+
+The table is DESCRIPTIVE of the call sites — it does not itself invalidate
+anything. The enforcement is `_hotset.derived`, which re-runs the compute
+whenever the key it was given moves, and the gates are
+`tests/test_build_time_hoists.py` and `tests/test_tire_coulomb_eps.py`: each
+derives the value first, THEN writes the source, then asserts the next call
+moved. That order matters — a "snapshot at construction" implementation passes
+any test that writes the source before the first call, and fails these.
+
+Guaranteed, and by what:
+
+- **A write to a hot source lands on the next call.** Guard: the source is in
+  `derived(...)`'s `key`, compared by VALUE.
+- **An in-place edit of a LIST source lands too** (`brake_bias[0] = 0.9`,
+  `driven_axles[0] = 1`): list sources enter the key as tuples
+  (`drivetrain._axles_key` / `_bias_key`), so a mutation is a different key.
+- **A new `wheel_meta` object is never answered with the old one's value**:
+  `ref` is compared by `is` and held weakly. It deliberately never reaches
+  `==`, because `WheelMeta` is a dataclass and `==` on two different metas
+  raises "Boolean value of Tensor … is ambiguous".
+- **A copy never inherits a cache**: the cache is keyed by `id(owner)` in
+  `_hotset._CACHES`, so `copy.copy` / `copy.deepcopy` (the plant's prediction
+  hooks) start empty.
+
+NOT guaranteed, stated plainly:
+
+- **An in-place mutation of a built `WheelMeta` tensor is not seen by
+  anything.** That is unchanged from every earlier release — the pipeline reads
+  `wm.*`, never `resolved.wheels[i].*` — and no invalidation hook exists for
+  it. Re-resolve through `mark_config_dirty()` (§7.12).
+- **A `wheel_meta` or an owner that cannot be weakly referenced is not cached at
+  all.** `wheel_meta` is a documented duck type
+  (`strategies.steering._WheelMetaProto`), and a `SimpleNamespace`, a
+  `namedtuple` and a `__slots__` class all satisfy it while refusing
+  `weakref.ref`. Such callers get the pre-v1.6.4 behaviour — derive on every
+  call — not a stale value.
+- **Derived slots are not attributes.** They live in `_hotset._CACHES`, off the
+  owner — so a config stays picklable, and so the generic attribute sweeps that
+  walk a strategy's `__dict__` cannot see them (`control/plant._sync_hooks`
+  here; the structural fusion predicate in the diagnostic workstream).
+  Read one with `_hotset.derived_value(owner, slot)`; there is nothing to
+  `getattr`.
+
+### Deriving early never changes WHETHER a config is accepted
+
+`prime_derived` catches and debug-logs any role that raises while pre-computing.
+A bad config (an `Ackermann` whose `front_axle` matches no wheel, a
+`brake_bias` of the wrong length) therefore still raises its `ConfigError` from
+the step path, with the same message, exactly as before v1.6.4 — the hoist
+moved WHEN a value is computed, not whether a build succeeds.
+
+### `has_bump_stop` is a whole-batch branch, and it differs under NaN
+
+`WheelMeta.has_bump_stop` is a build-time python bool so §7.2's bump-stop term
+can be skipped without a per-step device→host sync. Since v1.6.4 it is
+`bool((k_bump > 0.0).any())`, an OR over every element, where it was
+`float(k_bump.max()) > 0.0`. Consequences, exactly:
+
+- It is a branch for the WHOLE batch, not a per-row flag: one wheel with a bump
+  stop makes every row take the branch. That is exact, because
+  `dynamics.bump_stop_force` returns 0 wherever `k_bump == 0`.
+- The two forms agree on every ordinary value **including `-0.0` and `±inf`**,
+  but NOT under NaN. `torch.max` propagates NaN, so the old form evaluated
+  `nan > 0.0` as False and disabled the bump stop for the whole vehicle as soon
+  as ONE wheel carried a NaN rate — even with real bump stops on the others.
+  The OR is True there. A NaN rate is a broken config, and silently disabling
+  every wheel's bump stop is the worse answer. Pinned in
+  `tests/test_bump_stop.py`.
+
+### Per-wheel broadcasts go through a rank test
+
+`_pipeline.pw` / `pw3` replace 16 `unsqueeze(0)` broadcasts of `WheelMeta`
+fields in `_pipeline.compute_wheel_step` and `core.py`. They return
+`t.unsqueeze(0)` at rank 1 and `t` unchanged at rank 2 (`pw`) / rank 3 (`pw3`).
+Every `WheelMeta` field is rank 1 today, so this is value-identical; the rank
+test exists so that a later per-row field cannot silently become `(1, B, n)`
+and broadcast the wrong axis. **13 sites are NOT yet converted** — 4 in
+`strategies/stability.py`, 8 in `tire_models/pacejka.py`, 1 in
+`tire_models/coulomb.py` — so do not read the helpers as a completed
+invariant: `WheelMeta` fields are per-wheel-only until every site uses them.

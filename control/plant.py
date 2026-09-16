@@ -718,6 +718,15 @@ class DifferentiablePlant:
         for live, pred in ((self.src.physics.pre_loop_hooks, self._pred_pre_hooks),
                            (self.src.physics.post_tire_hooks, self._pred_post_hooks)):
             for lh, ph in zip(live, pred):
+                # Tensors only, which is also why a hook's build-time
+                # DERIVED config (StaticFrictionLock's `v_thr**2`) must not
+                # live in `__dict__` as a tensor: it is not indexed by the flat
+                # batch, so the row slice and the interleave below would both
+                # be wrong for it. `_hotset` keeps derived values OFF the hook
+                # entirely — see `_hotset._CACHES`. NB a promoted SOURCE
+                # (`v_thr`, `k_spring`, ...) is user-facing config and stays a
+                # public attribute, so STEP 3 has to answer this question again
+                # from the source side.
                 for k, v in lh.__dict__.items():
                     if not torch.is_tensor(v):
                         continue
