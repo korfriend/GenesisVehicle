@@ -8,6 +8,8 @@
 | abbr | meaning |
 |---|---|
 | BVH | Bounding Volume Hierarchy (ray/collision acceleration tree) |
+| CoACD | Collision-Aware Convex Decomposition (genesis' convexify path for rigid meshes) |
+| SDF | Signed Distance Field (the volumetric collision structure a rigid mesh builds) |
 | FK | Forward Kinematics (link world transforms from joint/base state) |
 | `maybe_static` | a raycast BVH whose solver has no physics-movable link → built once, never re-fit |
 | re-cast | shooting the rays through an existing BVH (cheap, ~flat in face count) |
@@ -26,6 +28,41 @@ optimization described below; `raycast_mode="single_scene"` is the classic
 one-scene path. The legacy names `"raywheel"` / `"inline"` and `"split"` /
 `"single"` are accepted as aliases for `"dual_scene"` / `"single_scene"` but
 retired from prose — the tables below use the official mode names.
+
+### `single_scene` cannot carry a high-poly road mesh (documented v1.6.3)
+
+The mode comparison below was about COST. It omitted a hard capability gap,
+and the omission shipped: **`single_scene` has no working route for a
+CARLA-style town/road mesh at all.** In `single_scene` the wheel rays hit only
+RIGID COLLISION geometry, which leaves three doors and closes all of them:
+
+| route | `single_scene` | `dual_scene` |
+|---|---|---|
+| rigid mesh, `convexify=False` | **refused above 1000 faces** by the mesh guard (`vehicle_scene.py:158-217`; limit `_MAX_NONCONVEX_COLLISION_FACES` at `:97`) | same guard — but you would not use this route |
+| kinematic raycast surface (`add_static(collision=False)` / `add_raycast_surface`) | **raises** (`vehicle_scene.py:817-833`) | the recommended route: exact surface, BVH built once |
+| rigid mesh, `convexify=True` | builds, but the wheels ride the CoACD convex hulls (bulge instead of kerbs/dips) and the BVH re-fits every step | not needed — pair a coarse `collision_morph` with an exact `wheel_raycast_morph` |
+
+Verified against SDK 1.6.2 on a 5,120-face mesh, with the actual errors:
+
+```
+[genesis_vehicle:mesh-guard] add_static('road_mesh'): refusing to build a
+5120-face non-convex mesh as a rigid collision/raycast body with
+convexify=False (limit 1000). ...
+
+add_static('road_mesh'): collision=False requires raycast_mode='dual_scene';
+single_scene cannot host a no-collision wheel-raycast surface.
+```
+
+The guard fires only for `convexify=False`; the `collision=False` refusal is
+unconditional in `single_scene` (the rays would pass straight through, so it
+fails fast instead of building a fall-through scene). On the server the same
+gap appears one level up: `--single-scene` is rejected together with
+`--road-raycast-only` at arg-parse time (`server/physics_server.py:436-439`),
+and `--road-raycast-only` is how the server loads a road as a raycast surface.
+
+So `single_scene` is for primitives, small meshes and heightfields — plane,
+box ramps, a `gs.morphs.Terrain`, a decimated patch. A detailed road mesh
+requires `dual_scene` (the default). See [`server.md`](server.md) §3.
 
 ## The problem it solves
 

@@ -399,14 +399,29 @@ def main():
                              "ratio, time since last switch). Off by default; "
                              "the server benchmark enables it.")
     parser.add_argument("--substeps", type=int, default=4,
-                        help="Genesis internal substeps per dt (default: 4). The "
-                             "internal step is dt/substeps; a stiff suspension "
-                             "spring needs a small internal step or it rings. "
-                             "Lower this (e.g. 1) only to reproduce coarse-step "
-                             "instability; raise it for stiffer models. Cost is "
-                             "usually negligible at n_envs=1 (step time is "
-                             "dominated by raycast + per-step overhead, not the "
-                             "internal integration).")
+                        help="Genesis internal substeps per dt (default: 4); the "
+                             "internal step is dt/substeps. It refines the CHASSIS "
+                             "rigid-body / contact integration — contact transients "
+                             "(peak normal force on drops and kerbs) above all. It "
+                             "does NOT refine the ray-wheel suspension: the SDK "
+                             "applies its wheel wrench once per step and genesis "
+                             "holds it CONSTANT across every substep (on the "
+                             "installed genesis-world 1.4.0 the external force is "
+                             "cleared once per step, outside the substep loop), so "
+                             "the spring/damper always integrate at dt. "
+                             "(Help text through v1.6.2 said a stiff suspension "
+                             "spring 'rings' at a coarse internal step and told you "
+                             "to lower this only to reproduce that — WRONG; see "
+                             "CHANGELOG v1.6.3.) NOT trajectory-neutral, so not a "
+                             "free performance knob: measured on one car (CPU, "
+                             "genesis-world 1.4.0, plane, dt 0.02, open loop) the "
+                             "settled ride height moves 0.03 mm over substeps "
+                             "1/2/4/8, but peak contact normal force on a 0.5 m drop "
+                             "goes 39.1/53.5/60.6/63.3 kN and the 12 s trajectory "
+                             "differs by 0.217 m between substeps 2 and 4 "
+                             "(convergence is not monotone). The per-step cost "
+                             "difference at n_envs=1 was below run-to-run noise on "
+                             "the same machine. Details: docs/server.md §2.3.")
     parser.add_argument("--follow-cam", type=str, default="none",
                         choices=["none", "side", "chase"],
                         help="Make the viewer camera track a target (the viewer's "

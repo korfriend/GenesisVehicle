@@ -171,7 +171,7 @@ targets (`add_dynamic`).
 | `raycast_mode` | `"dual_scene"` | `"dual_scene"` (separate static-BVH raycast scene) / `"single_scene"` (one scene). Aliases: `raywheel`/`split`, `inline`/`single` |
 | `solver` | `"batched"` | `"batched"` (one `MultiVehiclePhysics`, same-kind vehicles grouped) / `"per_vehicle"` (one `VehiclePhysics` each) |
 | `gravity` | `(0,0,-9.81)` | world gravity |
-| `substeps` | `4` | engine solver substeps per `step()` |
+| `substeps` | `4` | engine solver substeps per `step()` (internal step = `dt/substeps`). Refines the CHASSIS rigid-body/contact integration only: the SDK's wheel wrench is applied once per step and held constant across substeps, so the ray-wheel spring/damper always integrate at `dt`. Not trajectory-neutral — see [`server.md`](server.md) §2.3 |
 | `sim_options` / `rigid_options` / `vis_options` | `None` | inject Genesis option objects (else built from the args above) |
 | `viewer_options` | `None` | native-viewer config — `gs.options.ViewerOptions(camera_pos, camera_lookat, camera_fov, res, max_FPS, refresh_rate, …)`. Main scene only (the raycast scene is never shown). Needs `view="native"` to actually open a window |
 | `view` | `None` | `None` headless / `"native"` (Genesis viewer) / `"cv2"` (render cameras for a cv2 HUD) |
