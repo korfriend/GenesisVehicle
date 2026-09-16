@@ -118,7 +118,27 @@ class _BatchPoseReader:
         return pos.cpu().numpy(), quat.cpu().numpy()
 
 
-def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles=None, sim_dt=0.02, update_angles=False, mvp=None, readers=None):
+def needs_override_capture(safe_overrides, safe_relative_cmds,
+                           safe_obstacle_overrides, reset_ran):
+    """Did anything between the reset branch and the post-override capture move
+    the solver? (v1.6.6)
+
+    Those four are the complete set of inputs on that span that reach the
+    solver: the three popped override dicts drive ``set_pos`` / ``set_quat`` /
+    ``set_dofs_velocity``, and the reset branch re-places every entity.
+    ``recv['target_forces']`` is deliberately NOT here — it goes through
+    ``control_dofs_force``, which records a command consumed by the NEXT step
+    and changes no pose now.
+
+    False means the state captured before this point is still current, so the
+    post-override ``capture_state`` would return what the loop already holds.
+    Pure and module-level so it can be unit-tested away from the loop.
+    """
+    return bool(safe_overrides or safe_relative_cmds
+                or safe_obstacle_overrides or reset_ran)
+
+
+def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles=None, sim_dt=0.02, update_angles=False, mvp=None, readers=None, *, tag=""):
     """
     Captures positions and rotations for all target entities (including wheels if active)
     and dynamic obstacles in Genesis physics engine.
@@ -132,6 +152,15 @@ def capture_state(target_entities, dynamic_obstacles, is_urdf_active, controller
     obstacles))`` — replaces the 2·K per-entity ``get_pos/get_quat`` engine
     calls with ONE batched solver read each (v1.0.13). Entity order must match
     the dicts' iteration order (build the readers from the same dicts).
+
+    ``tag`` (keyword-only, default ``""``): a label naming WHICH call site this
+    is — ``"init"``, ``"reset"``, ``"override"`` or ``"post_step"`` in the L2
+    server loop. It does not change what is captured; it exists so a profiler,
+    a monkeypatched wrapper or a future refactor can tell the per-loop call
+    sites apart without depending on positional-argument trivia (before v1.6.6
+    the only thing distinguishing the post-override call from the post-step one
+    was the 8th positional argument). Keyword-only with a default, so every
+    existing positional call keeps working unchanged.
     """
     state = {
         'targets': {},
@@ -392,6 +421,25 @@ def main():
                              "overload, returning to burst when headroom comes "
                              "back. Pass N to pin the cap (1 = always-smooth, "
                              "old --max-catchup-steps 1 behavior).")
+    parser.add_argument("--legacy-override-capture", action="store_true",
+                        help="(L2) Restore the pre-v1.6.6 behaviour: re-capture "
+                             "the whole world state after the override block on "
+                             "EVERY loop that received data, even when no "
+                             "override, relative command, obstacle override or "
+                             "reset actually touched the solver. Since v1.6.6 "
+                             "that capture is skipped when nothing changed (the "
+                             "state is then identical to the one already held). "
+                             "Rollback switch only.")
+    parser.add_argument("--serve-timers", action="store_true",
+                        help="(L2) Time the post-override capture_state call and "
+                             "report the per-window total as [SERVE] "
+                             "cap_override_us. Off by default. NB: this is the "
+                             "GROSS cost of the calls that ran, NOT the loop "
+                             "saving from skipping them: saving = gross - the "
+                             "work displaced onto the remaining captures, and "
+                             "this timer wraps only the call, so it cannot see "
+                             "the displacement term in either arm. When "
+                             "comparing two arms, enable it in BOTH.")
     parser.add_argument("--pacing-profile", action="store_true",
                         help="Log a detailed context dump on every adaptive "
                              "catch-up switch (window steps/loop history, loop "
@@ -805,7 +853,7 @@ def main():
                     _BatchPoseReader(dynamic_obstacles.values()))
     except Exception:
         _readers = None
-    prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers)
+    prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers, tag="init")
     curr_state = prev_state
 
     step_count = 0
@@ -818,6 +866,38 @@ def main():
     log_phys_dur_sum = 0.0
     log_step_sum = 0
     log_count = 0
+
+    # [SERVE] per-window serving counters (v1.6.6). Printed on their OWN line at
+    # the same 50-loop boundary as [STATS] and reset there — the [STATS] string
+    # is frozen (server/benchmark.py and server/benchmark_collision.py each hold
+    # their own regex copy of it), so new information goes on a new line.
+    # Definitions (all counted over the last window):
+    #   recv_loops            loops that REACHED the capture-skip decision, i.e.
+    #                         recv was truthy and the loop did not leave early
+    #                         (a 'stop' command breaks out before the decision).
+    #   skipped_captures      of those, the ones that skipped the post-override
+    #                         capture because nothing had changed the solver.
+    #   nonskip_loops         of those, the ones that did capture.
+    #                         Identity: skipped_captures + nonskip_loops == recv_loops.
+    #   post_step_captures    post-step capture_state calls actually executed.
+    #   post_step_captures_ref  sum of min(catchup_steps, 2) per loop — the number
+    #                         of post-step captures that the interpolation
+    #                         actually consumes (prev/curr), i.e. the reference a
+    #                         catch-up capture-skip must match.
+    #   cap_override_us       --serve-timers only; see the print site.
+    log_recv_loops = 0
+    log_skipped_captures = 0
+    log_nonskip_loops = 0
+    log_post_step_captures = 0
+    log_post_step_captures_ref = 0
+    log_cap_override_us = 0.0
+    _legacy_override_capture = bool(getattr(args, "legacy_override_capture", False))
+    _serve_timers = bool(getattr(args, "serve_timers", False))
+    if _legacy_override_capture:
+        # NB: no "[SERVE]" token in this banner — that token marks the
+        # per-window counter line ONLY, so a parser can count windows by it.
+        print(" [Genesis] --legacy-override-capture: post-override "
+              "capture_state runs unconditionally (pre-v1.6.6 behaviour).")
 
     # =========================================================================
     # Main simulation loop
@@ -886,6 +966,7 @@ def main():
                 print(f" [Genesis] viewer reframe skipped: {e}")
 
         if recv:
+            _reset_ran = False          # set by the reset branch below
             cmd = recv.get('command')
             if cmd == 'stop':
                 print(" [Genesis] 언리얼 엔진으로부터 정지 명령 수신. 종료합니다.")
@@ -949,8 +1030,9 @@ def main():
                 # Reset timing and state
                 last_time = time.perf_counter()
                 accumulator = 0.0
-                prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers)
+                prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers, tag="reset")
                 curr_state = prev_state
+                _reset_ran = True
 
             recv['command'] = None
 
@@ -1051,8 +1133,33 @@ def main():
                         ft[0:3] = fw
                         tentity.control_dofs_force(ft, slice(0, 6))
 
-            # Refresh state after applying overrides
-            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers)
+            # Refresh state after applying overrides.
+            # [v1.6.6] ...but only if something above could have moved the solver.
+            # The block from the reset branch to here reaches the solver through
+            # exactly three inputs — pop_overrides / pop_relative_cmds /
+            # pop_obstacle_overrides (set_pos / set_quat / set_dofs_velocity) —
+            # plus the reset branch itself. `target_forces` uses
+            # control_dofs_force, which only records a command for the NEXT step
+            # and moves nothing now. When all four are absent the capture returns
+            # the state we already hold, so it is pure cost.
+            # --legacy-override-capture restores the unconditional call.
+            _need_capture = needs_override_capture(
+                safe_overrides, safe_relative_cmds, safe_obstacle_overrides,
+                _reset_ran)
+            # recv_loops is counted HERE, at the skip decision — not at `if recv:`.
+            # A loop that received 'stop' breaks out above and never reaches this
+            # point, so counting earlier would break the identity
+            # skipped_captures + nonskip_loops == recv_loops by that one loop.
+            log_recv_loops += 1
+            if _need_capture or _legacy_override_capture:
+                log_nonskip_loops += 1
+                if _serve_timers:
+                    _cap_t0 = time.perf_counter()
+                curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers, tag="override")
+                if _serve_timers:
+                    log_cap_override_us += (time.perf_counter() - _cap_t0) * 1e6
+            else:
+                log_skipped_captures += 1
 
         catchup_steps = 0
         physics_dur_total = 0.0
@@ -1116,7 +1223,8 @@ def main():
                     raise e
             
             # Record the latest physics state
-            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, True, mvp=vs.physics, readers=_readers)
+            curr_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, True, mvp=vs.physics, readers=_readers, tag="post_step")
+            log_post_step_captures += 1
             
             if not args.lockstep:
                 accumulator -= SIM_DT
@@ -1171,6 +1279,12 @@ def main():
                 print(f" [WARNING] [Slow-Motion] Simulation lagging behind real-time. Running at {sim_ratio:.2f}x speed. (Next warning in 5s)")
                 last_slow_motion_warn_time = current_warn_time
             accumulator = 0.0
+
+        # [SERVE] Reference count for the post-step captures: only the last two
+        # captures of a catch-up burst survive into the interpolation (prev and
+        # curr), so min(catchup_steps, 2) is how many this loop actually needed.
+        # `catchup_steps` is final here — the catch-up loop above has exited.
+        log_post_step_captures_ref += min(catchup_steps, 2)
 
         # GPU sync once all catch-up physics computations are done
         if catchup_steps > 0:
@@ -1229,7 +1343,27 @@ def main():
                   f"Physics Avg: {avg_phys:.2f} ms "
                   f"({steps_per_loop:.1f} steps/loop, {per_step:.2f} ms/step) "
                   f"[cap={pacer.cap()}:{pacer.mode}]")
-            
+            # [SERVE] — serving-side counters for the SAME 50-loop window. This is
+            # deliberately a SEPARATE line: the [STATS] string above is frozen
+            # (server/benchmark.py and server/benchmark_collision.py each parse it
+            # with their own regex copy).
+            _serve = (f" [SERVE] [L2] recv_loops={log_recv_loops} "
+                      f"nonskip_loops={log_nonskip_loops} "
+                      f"skipped_captures={log_skipped_captures} "
+                      f"post_step_captures={log_post_step_captures} "
+                      f"post_step_captures_ref={log_post_step_captures_ref}")
+            if _serve_timers:
+                # cap_override_us is the GROSS cost of the post-override
+                # capture_state calls that DID run in this window — it is not the
+                # loop saving from skipping them. saving = gross - displacement,
+                # where the displacement is the work that moves to the remaining
+                # captures (warm caches, freshly read buffers). This timer wraps
+                # only the call itself and therefore cannot observe the
+                # displacement term, in either arm. It answers "what did this call
+                # cost", never "how much faster did the loop get".
+                _serve += f" cap_override_us={log_cap_override_us:.1f}"
+            print(_serve)
+
             # Once the first 50-frame average loop-time statistic is available, send the corresponding lag speed ratio (TimeDilation) to Unreal once.
             if not hasattr(main, '_dilation_sent'):
                 main._dilation_sent = True
@@ -1245,6 +1379,14 @@ def main():
             log_phys_dur_sum = 0.0
             log_step_sum = 0
             log_count = 0
+            # [SERVE] counters reset on the SAME boundary, so every [SERVE] line
+            # describes exactly the preceding 50-loop window, like [STATS].
+            log_recv_loops = 0
+            log_skipped_captures = 0
+            log_nonskip_loops = 0
+            log_post_step_captures = 0
+            log_post_step_captures_ref = 0
+            log_cap_override_us = 0.0
 
     osc.close()
 

@@ -84,14 +84,23 @@ Visual demos (with `--viewer`):
 ## Installation
 
 Requires Python 3.12+ and
-[Genesis](https://genesis-embodied-ai.github.io/) — **`genesis-world` 1.3.3 or
-1.4.0**, which are the only two versions the source actually branches on
-(`_gs_compat.py`, `vehicle_scene.py`). 1.4.0 is what the test suite and every
-published measurement run on; 1.3.3 is kept working for the deployed clones
-that have not upgraded yet. Earlier releases are NOT supported — the old
-`≥ 1.0.0` claim printed here through v1.6.4 was never enforced by any branch
-or test. See the 1.5.0 entry (and 1.2.7 for the renderer API split) for what
-moved between the two. On
+[Genesis](https://genesis-embodied-ai.github.io/) — **`genesis-world` 1.4.0 is
+the supported floor** (v1.6.6). It is the only version the test suite and every
+published measurement run on, and the only one the project supports. Earlier
+releases are NOT supported; the `≥ 1.0.0` claim printed here through v1.6.4 was
+never enforced by any branch or test, and the "1.3.3 or 1.4.0" wording that
+replaced it in v1.6.5 is now narrowed to 1.4.0.
+
+**What the code actually does, since nothing enforces the floor:** the
+`<= 1.3.3` branches in `_gs_compat.py` (the force API, the link inertial reads,
+the `Scene.sim_options` name) and in `vehicle_scene.py` are still there and will
+still be taken if you install 1.3.3 — the SDK does not refuse it and there is no
+version check. Those branches are **dead weight to be removed in a later
+release, not a compatibility promise**: they are untested, unmeasured, and no
+new ones will be added. See the 1.5.0 entry (and 1.2.7 for the renderer API
+split) for what moved at the 1.3.3 → 1.4.0 bump; its cross-version parity table
+is a record of a measurement taken once at that bump, not an ongoing guarantee.
+On
 `genesis-world >= 1.4.0`, ask for the solver rate with
 `VehicleScene(substeps=...)` and do **not** pass `dt=` to `RigidOptions` —
 that field now means the substep interval. See
@@ -317,7 +326,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-519 tests covering URDF parsing, config resolve, suspension sizing, strategy
+544 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity check on
@@ -326,11 +335,13 @@ semantics (v1.6.2), the raycast-mode benchmark harness (schedule,
 gates, pairing and publication rule, driven through an injected runner), the
 build-time config derivations staying live under a post-`build()` write
 (v1.6.4), simulation time being fixed at `build()` and the server's
-`sim_options` write guard (v1.6.5), and the server subpackage surface. Almost all
-pure-Python; a handful build a real `VehicleScene` on the CPU backend, so
-`genesis-world` must be importable. No GPU needed — measured on the v1.6.5 tree,
-`519 passed in 144.33s` (CPU/WSL2, genesis-world 1.4.0, `pytest tests/ -q`, one
-run). Earlier: `507 passed in 170.53s` at v1.6.4, 116 s / 450 tests at
+`sim_options` write guard (v1.6.5), the L2 serving counters and the
+post-override capture skip gate (v1.6.6), and the server subpackage surface.
+Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
+backend, so `genesis-world` must be importable. No GPU needed — measured on the
+v1.6.6 tree, `544 passed in 144.45s` (CPU/WSL2, genesis-world 1.4.0,
+`pytest tests/ -q`, one run). Earlier: `519 passed in 144.33s` at v1.6.5,
+`507 passed in 170.53s` at v1.6.4, 116 s / 450 tests at
 v1.6.2-v1.6.3, 88 s at v1.6.1 — the wall time swings more between runs than
 between releases, so treat it as an order of magnitude, not a metric.
 

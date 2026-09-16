@@ -10,6 +10,295 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.6.6] — 2026-09-16
+
+**The L2 server stops re-capturing the whole world when nothing moved it, and
+the serving side of the loop becomes countable — and this release publishes NO
+speed figure for either change, on purpose.** The post-override
+`capture_state` is now skipped on a receiving loop where no override, relative
+command or obstacle override arrived and the reset branch did not run; the
+server prints five per-window `[SERVE]` counters that make the skip and the
+post-step captures machine-checkable; and `server/benchmark.py` learns
+`--kinds`, `--input-hz`, a `serving` column, a `[SERVE]` parser, a per-arm
+sample size `n` and an OBSERVED batched-kind count. No quantitative saving is
+quoted anywhere below — see §5, which is a declaration, not an omission.
+Unrelated to the serving work and shipped in the same release: the supported
+`genesis-world` floor narrows to **1.4.0** (§7).
+
+| abbr | meaning |
+|---|---|
+| L2 | per-entity batching axis (K vehicles in one scene; the OSC server's default mode) |
+| L3 | `n_envs` batching axis (`--multi-env`) |
+| UE | Unreal Engine (the OSC client) |
+| OSC | Open Sound Control (the UDP wire protocol the server speaks) |
+| cfg | resolved `VehicleConfig` object; targets sharing one are ONE batched kind |
+| kind | one batched vehicle configuration (`build_cfg` cache entry) |
+| K | number of `/Init/Target` vehicles in a run |
+| n | number of `[STATS]` windows averaged for one benchmark arm (first dropped) |
+| dt | one simulation STEP duration (s) |
+| µs | microsecond |
+| V1/V2/V3 | the three measurement steps of the serving plan (none has been run) |
+
+### 1. The skip gate — which paths it covers, and what guards it
+
+`needs_override_capture(safe_overrides, safe_relative_cmds,
+safe_obstacle_overrides, reset_ran)` is a new module-level pure predicate in
+`server/physics_server.py`. The post-override capture
+(`server/physics_server.py:1158`, `tag="override"`) runs only when it returns
+True, or when `--legacy-override-capture` is passed.
+
+The claim this rests on, stated with its scope: **on the span from the reset
+branch to that capture, exactly four inputs reach the solver** — the three
+popped override dicts, which drive `set_pos` / `set_quat` /
+`set_dofs_velocity`, and the reset branch, which re-places every entity. The
+fourth input on that span, `recv['target_forces']`, goes through
+`control_dofs_force`, which records a command consumed by the NEXT
+`scene.step()` and moves nothing now; it is deliberately absent from the
+predicate. That enumeration is what makes the skip safe, and it is enumerated
+in the predicate's docstring rather than asserted in the abstract.
+
+| | before (≤ v1.6.5) | after (v1.6.6) |
+|---|---|---|
+| post-override `capture_state` | ran on EVERY loop with `recv`, unconditionally | runs only when one of the four inputs fired |
+| call sites distinguishable by | the 8th positional argument (`update_angles`) — the post-override and post-step calls were otherwise identical | a keyword-only `tag=` (`"init"` / `"reset"` / `"override"` / `"post_step"`) |
+| rollback | — | `--legacy-override-capture` restores the unconditional call |
+
+`tag=` is keyword-only with a default `""`, so every existing positional call
+keeps working; it changes nothing about what is captured.
+
+**Known constraint, recorded because a future change can make it load-bearing:
+the `reset_ran` term is currently REDUNDANT.** The reset branch
+(`server/physics_server.py:1033`, `tag="reset"`) re-captures for itself and
+assigns both `prev_state` and `curr_state`, so on a reset loop the state is
+already fresh when the gate is evaluated. The term is kept because removing it
+couples the gate's correctness to that re-capture: if the reset branch's own
+capture is ever optimised away, a gate without `reset_ran` would broadcast
+pre-reset state for one loop. It is a deliberate belt-and-braces term, not a
+live condition.
+
+### 2. `[SERVE]` — five per-window counters on their own line
+
+Printed at the same 50-loop boundary as `[STATS]` and reset there, so each
+`[SERVE]` line describes exactly the preceding window:
+
+```
+ [SERVE] [L2] recv_loops=<int> nonskip_loops=<int> skipped_captures=<int> post_step_captures=<int> post_step_captures_ref=<int>
+ [SERVE] [L2] ... post_step_captures_ref=<int> cap_override_us=<float>      # with --serve-timers
+```
+
+| counter | what it counts | identity it satisfies |
+|---|---|---|
+| `recv_loops` | loops that REACHED the skip decision (`recv` truthy and the loop did not break out first) | — |
+| `nonskip_loops` | of those, the ones that captured | `skipped_captures + nonskip_loops == recv_loops` |
+| `skipped_captures` | of those, the ones the gate skipped | same identity |
+| `post_step_captures` | post-step `capture_state` calls actually executed | — |
+| `post_step_captures_ref` | `sum(min(catchup_steps, 2))` over the window — the post-step captures the interpolation actually consumes (`prev` and `curr`) | the reference any future catch-up capture-skip must match |
+| `cap_override_us` | `--serve-timers` only; §3 | — |
+
+Two deliberate shape decisions, both of which a parser depends on:
+
+* **It is a separate line, not new fields on `[STATS]`.** The `[STATS]` string
+  is frozen — `server/benchmark.py` and `server/benchmark_collision.py` each
+  hold their own regex copy of it — so new information goes on a new line.
+* **`recv_loops` is counted at the skip decision, not at `if recv:`.** A loop
+  that receives `stop` breaks out before the decision; counting earlier would
+  break the `skipped_captures + nonskip_loops == recv_loops` identity by
+  exactly that one loop.
+* The `--legacy-override-capture` startup banner carries **no** `[SERVE]`
+  token, so a reader can count windows by that token alone.
+
+**Scope: L2 only.** `server/l3_runtime.py` prints no `[SERVE]` line and has no
+skip gate; its `st.capture` path is untouched by this release.
+
+### 3. `cap_override_us` is a GROSS cost, and it releases no figure
+
+`--serve-timers` wraps the post-override `capture_state` call and reports the
+per-window total. **That is the gross cost of the calls that ran — it is not
+the loop saving from skipping them.** Saving = gross − the work displaced onto
+the remaining captures (warm caches, freshly read buffers), and a timer around
+the call alone cannot observe the displacement term in either arm. It answers
+"what did this call cost", never "how much faster did the loop get". When
+comparing two arms, enable it in BOTH — otherwise the arms differ by a flag.
+
+It is off by default and adds two `time.perf_counter()` calls per non-skipped
+loop when on.
+
+### 4. `server/benchmark.py` — the kind count becomes machine-checkable
+
+| addition | what it does |
+|---|---|
+| `--kinds N` | varies ONLY the per-target `/Init/Target` friction (`2.0 + 1e-3*(tid % N)`, `server/benchmark.py:136`), so `build_cfg`'s cache key `(abspath(urdf), float(friction), mapping)` yields N kinds. `N=1` reproduces the historical constant `2.0` bit-for-bit. Obstacle friction and the global `/Genesis/Init/Physics` friction are untouched, so the 88 static hulls stay one kind |
+| `--input-hz` | `/Genesis/Vehicle/Control` streaming rate, default `30.0` — bit-identical to the previous hardcoded `time.sleep(1.0 / 30.0)`, so §2.1's table stays valid. `benchmark_collision.py` has its own streamer pinned at 30 Hz and does NOT take this flag |
+| `serving` column | `Loop Avg − Physics Avg`: everything in the loop that is not a physics step (capture, interpolation, OSC encode/send, pacing). Same decomposition §2.4 already documented, now reported per arm |
+| `[SERVE]` parser | `_SERVE_RE` / `_SERVE_KV_RE`; only `key=value`-bearing lines count as rows, so a bare `[SERVE]`-tagged line cannot shift window alignment |
+| `n = len(rows)` | per arm, IN the record. A timeout that shortens one arm silently changes what its averages mean, so **an `n` mismatch between arms is a rejection reason**, not a footnote |
+| `reuse_lines`, `k_observed` | counted from `reusing shared cfg` (`server/vehicle_builder.py:197`) and `  Target ID: ` (`print_resolved_table`, called per target at `server/physics_server.py:741`); the record carries `kinds = k_observed − reuse_lines` |
+
+**Why the two counters had to exist.** Through v1.6.5 the reader thread kept
+only `Initialization Complete` / `[PROFILE]` / `[MODE]` / `[AdaptiveCatchup]`
+/ `_STATS_RE` matches and dropped everything else into an `else` that
+discarded it unless `-v` was passed. Both kind-count lines fell in there, so
+the benchmark could only ASSUME how many batched kinds the server built. The
+count is now observed, printed on the per-config progress line and carried in
+the summary table's `kinds` column.
+
+**GATE 0 (the kind-count check) is L2-only.** `server/l3_runtime.py:367` calls
+`print_resolved_table("L3-shared", ...)` exactly once for the whole fleet, so
+even a 100-vehicle L3 run reports `k_observed=1, reuse_lines=0, kinds=1`. That
+`1` is correct as a kind count and is NOT a target count; the record flags it
+with `kinds_observable=False` and the table prints `1*`.
+
+**`--kinds N>1` is not a pure batching knob.** The per-target friction it
+varies is also the chassis material friction
+(`gs.materials.Rigid(friction=t_fric)`, `server/vehicle_builder.py:614`) and
+the fallback for `mu_long` / `mu_lat` when the URDF declares neither
+(`server/vehicle_builder.py:455` and `:461`). A `--kinds 3` arm therefore
+differs from a `--kinds 1` arm by up to 0.1% in friction and its trajectories
+diverge. Compare arms at the SAME `--kinds`. This is printed under the summary
+table, not only in `--help`.
+
+**`serve_windows` can race the reader thread.** The reader sets `stats_done`
+while handling a `[STATS]` line and the matching `[SERVE]` line is the NEXT
+line on the same stream, so the main thread can snapshot before it is parsed
+and lose the last window. Since the `[SERVE]` sums scale with the window
+count, that would make two arms silently incomparable. Both guards are
+applied: a bounded 2 s grace wait, AND `serve_windows != n` recorded as an
+explicit rejection reason (`serve_windows_match`, flagged on the progress line
+with `!!`), with the same standing as an `n` mismatch. The fail-open direction
+is deliberate — a server with no `[SERVE]` stream at all still exits.
+
+### 5. No quantitative saving is published in this release
+
+This is a declaration. The serving plan's own quoting threshold is n ≥ 10 per
+arm; the V1 measurement step specifies n ≥ 6; and no n ≥ 10 re-measurement is
+scheduled. **So v1.6.6 ships with no speed figure for the skip gate, and none
+for the encoder work (plan item 3, not in this release.)**
+
+V1, V2 and V3 have not been run at all. They were blocked on the engine-API
+crash fixed in v1.6.5 (the L2 server died on the first client connection, so no
+L2 `[STATS]` could be collected) and remain future work. Every figure that
+earlier drafts of the plan carried for this work has been retired at the
+plan's own register and is not repeated here, in any form — including as a
+range, a ratio or a "roughly".
+
+What this release ships instead of a number is the apparatus to measure one:
+the counters, the per-arm `n`, the observed kind count, the rejection rules,
+and the `--legacy-override-capture` arm to measure against.
+
+### 6. Tests
+
+`tests/test_server_serving_counters.py` — 25 cases, pure Python, no server
+process. They pin: the predicate's truth table and its exclusion of
+`target_forces`; `tag=` being keyword-only with a default and all four loop
+call sites carrying one; the five counters existing, incrementing and
+resetting on the same boundary as the `[STATS]` counters; `recv_loops` being
+counted at the skip decision; the `[SERVE]` token marking only the counter
+line; the `[SERVE]` line parsing with the benchmark's parser, balancing the
+identity, and disturbing NEITHER `_STATS_RE` copy; `--kinds 1` being
+bit-identical to the historical constant and `--kinds N` splitting into
+exactly N kinds without touching global or obstacle friction; `--input-hz`
+reproducing the historical sleep exactly; the observed-kind anchors matching
+the strings the server actually prints; a replayed server stdout through
+`run_config`; `reset_ran` being armed per loop and set only by the reset
+branch; `post_step_captures_ref` being counted outside the catch-up loop; the
+override capture being the ONLY one behind the gate; L3 reporting one kind and
+flagging the count as not observable; and the `serve_windows` race guard plus
+the short-stream rejection.
+
+Suite on this tree: **`544 passed in 144.45s`**
+(`python -m pytest tests/ -q --ignore=tests/test_fusion_probe.py`, CPU/WSL2,
+genesis-world 1.4.0, one run, no warm-cache control). 519 at v1.6.5 + 25 = 544.
+`tests/test_fusion_probe.py` is an untracked file from a parallel workstream
+and is excluded from that command; a bare `pytest tests/` on this working tree
+collects it too.
+
+### 7. Supported `genesis-world` floor is now 1.4.0 (support policy; no code moved)
+
+**1.3.3 is no longer a target.** 1.4.0 is the floor and the only version the
+test suite and every published measurement run on. Through v1.6.4 the docs
+advertised `>= 1.0.0`, which nothing enforced; v1.6.5 corrected that to "1.3.3
+or 1.4.0"; this release narrows it to 1.4.0.
+
+**Stated as what the code does, because the code enforces nothing here:** the
+`<= 1.3.3` branches in `_gs_compat.py` — the force API
+(`apply_links_external_force` + `_torque`), the link inertial reads
+(`link.inertial_*`), and the `Scene.sim_options` name — and the `RigidOptions.dt`
+/ terrain-mirror branches in `vehicle_scene.py` are all still present and will
+still be taken if someone installs 1.3.3. There is no version check and the SDK
+does not refuse it. Those branches are **dead weight to be removed in a later
+release, not a compatibility promise**: untested, unmeasured from here on, and
+closed to additions — no new `<= 1.3.3` branch should be written.
+
+What does NOT change: the v1.5.0 entry's account of the 1.3.3 → 1.4.0 migration
+and its cross-version parity table stand as the historical record they are. That
+table was measured ONCE, at the bump; it was never a standing guarantee and is
+not one now.
+
+Docs narrowed: `README.md` (installation), `docs/index.md` (backend
+compatibility), `docs/quickstart.md` (prerequisites), plus the two
+"both supported engines" phrasings in `docs/index.md` and
+`docs/physics-contracts.md` §7.14, which now name 1.4.0 as the supported one and
+1.3.3 as an unsupported branch that still runs.
+
+### 8. Docs
+
+* `docs/server.md` **§2.5 "Serving-side counters — the `[SERVE]` line"** —
+  new: the exact line format, all five counters with the identity each
+  satisfies, the L2-only scope, `--legacy-override-capture`, `--serve-timers`
+  and the gross-cost warning, `--kinds` (with the friction caveat),
+  `--input-hz`, and the `serving` column. `--serve-timers`' help text pointed
+  at "the `[SERVE]` docs in `docs/server.md`" and `grep SERVE docs/*.md`
+  returned nothing; it does now.
+* `docs/server.md` §2.4 — **the L2 line-number table was wrong and is
+  corrected.** It was already stale at v1.6.5 (it cited the loop span as
+  `:814 → :1188` when HEAD had `:830 → :1247`, and the post-step
+  `capture_state` as `:1095` when HEAD had `:1119`); this release moved it
+  further. It now cites the working tree and gains a row for the post-override
+  capture, which is the call the gate governs.
+* `docs/server.md` §2.4 — **the two `capture_state` cost figures quoted there
+  (at 3 and at 12 vehicle kinds) are retired in place**, values removed rather
+  than restated. They came from an unshipped scratchpad harness (`bench_l2.py`)
+  under conditions that are not the ones any current measurement uses, nothing
+  in the tree reproduces them, and they are on the serving plan's retired
+  register. The qualitative claim they were
+  cited for — state capture is a large excluded cost that grows with the fleet
+  — stands on the `serving` column, which is now measured by the shipped
+  benchmark.
+* `docs/index.md` — a "Server serving counters" row in the built-in-utilities
+  table pointing at §2.5, including the "no speed figure is published" note.
+* The v1.6.3 CHANGELOG entry keeps its text but gains a **RETRACTED** marker on
+  the same two figures and a note that its L2 line numbers describe the v1.6.3
+  tree and were already stale then.
+* `docs/testing.md`, `README.md` — count 519 → 544, runtime, and a row for the
+  new file.
+
+### 9. Not in this release
+
+* **No measurement.** §5. V1/V2/V3 unrun; no figure for item 1 or item 3.
+* **Plan item 3 (the encoder) is not here**, and neither is the LRU bound or
+  the `enc_cache_size` / `enc_cache_evictions` counters the plan sketches for
+  it.
+* **The post-step capture is not gated.** `post_step_captures_ref` exists to
+  make that future gate checkable (`post_step_captures` is above it whenever a
+  catch-up burst runs more than 2 steps), but no skip is implemented; the
+  post-step capture runs once per catch-up step as before.
+* **L3 gets nothing.** No `[SERVE]` line, no gate, no kind observability.
+* **`server/benchmark_collision.py` is untouched** — it holds its own
+  `[STATS]` regex and its own 30 Hz streamer, and does not take `--input-hz`,
+  so using that flag on `benchmark.py` splits the two benchmarks' input rates.
+* Two citations corrected while writing this: the benchmark's `stop` is sent
+  from `server/benchmark.py:172` (`MockUEClient.stop`), not `:136` — `:136` is
+  the `/Init/Target` send; both the plan and the implementation report had it
+  wrong. And the `reset_ran` redundancy above.
+* Carried over unchanged: the unconsumed `/Genesis/Config/Physics` endpoint;
+  `server/benchmark.py`'s poor diagnosis when a child dies during the stats
+  wait; `server/l3_runtime.py:455-456` reporting the argument rather than the
+  engine; the `update_angles` parameter, dead in both
+  `server/physics_server.py:141` and `server/l3_runtime.py:119`, left in place
+  because removing it means changing two files at once.
+
+---
+
 ## [1.6.5] — 2026-09-16
 
 **Hotfix: the L2 OSC server died on the first client connection, and had done
@@ -590,6 +879,16 @@ catch-up loop, so an L2 GPU `Physics Avg` under-reports the kernel tail.
 
 New `docs/server.md` §2.4; the `[STATS]` bullet in §2 now states the scope
 inline.
+
+> **RETRACTED (v1.6.6): the two `capture_state` cost figures in the paragraph
+> above.** They came from an unshipped scratchpad harness whose conditions no
+> current measurement reproduces, and they are on the serving work's
+> retired-figures register; `docs/server.md` §2.4 no longer carries them. The
+> qualitative claim — state capture is excluded from `ms/step` and grows with
+> the fleet — is unaffected and is now measurable from the shipped benchmark's
+> `serving` column (`docs/server.md` §2.5). The line numbers in the table above
+> describe the v1.6.3 tree and were already stale then; see §2.4 for the
+> corrected ones.
 
 ### 3. `single_scene` cannot carry a real road mesh — the gap was undocumented
 

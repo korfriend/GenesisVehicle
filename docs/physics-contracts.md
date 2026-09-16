@@ -857,7 +857,8 @@ invariant: `WheelMeta` fields are per-wheel-only until every site uses them.
 
 `VehicleScene.sim_options` is the **authored** `SimOptions` object — the one the
 scene was constructed with. **Writing to it after `build()` changes nothing**,
-on every genesis version this SDK supports.
+on genesis 1.4.0 — the supported backend since SDK v1.6.6 — and on 1.3.3, which
+is no longer supported but whose compatibility branches still run if installed.
 
 Why: `Simulator.__init__` snapshots `_dt` / `_substep_dt` / `_substeps` at
 construction and copies them into each solver at build; `Simulator.dt` is a

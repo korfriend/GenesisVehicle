@@ -77,6 +77,7 @@ The right-hand column is where the full story lives.
 | Stability profiles | maps a use-case profile (`"control"` / `"raw"` / `"research"`) to the right stability-hook stack | `stability_hooks_for_profile` | [`stability-profiles.md`](stability-profiles.md) |
 | OSC physics server | runs the SDK as a standalone physics process for an external engine (UE / Unity), L2 and L3 modes | `python -m genesis_vehicle.server` | [`server.md`](server.md) |
 | Server benchmark | official server perf matrix (mock UE client, tanks × terrain × mode × backend) | `python -m genesis_vehicle.server.benchmark` | [`server.md`](server.md) §2.1 |
+| Server serving counters | L2-only per-window `[SERVE]` line (`recv_loops` / `nonskip_loops` / `skipped_captures` / `post_step_captures` / `post_step_captures_ref`) plus the post-override `capture_state` skip gate and its `--legacy-override-capture` rollback. No speed figure is published for the skip (v1.6.6) | `python -m genesis_vehicle.server --serve-timers`, `python -m genesis_vehicle.server.benchmark --kinds N --input-hz H` | [`server.md`](server.md) §2.5 |
 | Raycast-mode benchmark | order-independent, paired, fail-closed comparison of `dual_scene` vs `single_scene` (fresh process per measurement; prints NO ratio when the machine's noise cannot carry one) | `python -m genesis_vehicle.samples.bench_raycast_mode` | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
 | Samples | 20 runnable, self-contained example programs with bundled assets (every `samples/*.py` with a `__main__` entry, minus the `_hud.py` / `tank_tuning.py` helpers and the deprecated `two_scene_terrain` alias) | `python -m genesis_vehicle.samples.<name>` | [`../samples/README.md`](../samples/README.md) |
 
@@ -91,7 +92,7 @@ The right-hand column is where the full story lives.
 | Wheel contact model | `wheel_contact="point"` (DEFAULT, one ray per wheel) or `"swept_envelope"` (M rays reduced by the swept-circle lower envelope, so a wheel climbs an edge instead of teleporting onto it). Opt-in; the default is bit-identical to earlier releases | `VehicleScene.add_vehicle(wheel_contact=, contact_samples=)`, `WheelRayPattern(fan_samples=)` | [`tire-and-contact.md`](tire-and-contact.md), [`physics-contracts.md` §7.11](physics-contracts.md) |
 | Ray-MISS / grounded | "did this wheel's ray find ground?", against the raycaster's OWN miss sentinel rather than a fixed threshold | `Vehicle.wheels_grounded`, `all_wheels_grounded`, `MultiVehiclePhysics.grounded_list`, `is_ray_hit`, `is_ray_hit_corrected` | [`physics-contracts.md`](physics-contracts.md) §7.8, §7.10 |
 | Live vs derived config | which post-`build()` config writes take effect on the next step (steering geometry, driven axles, brake bias, AWD weights, the drive-omega cap, `eps_v`, a hook's `v_thr`) and which need a rebuild (anything per-wheel, read off `WheelMeta`). Derived once at build, re-derived when a source moves (v1.6.4) | `_hotset.HOT_DEPENDENTS`, `VehicleScene.mark_config_dirty` | [`physics-contracts.md` §7.13](physics-contracts.md) |
-| Simulation time / gravity | `dt` and `substeps` are FIXED at `build()` on both supported engines — post-build `sim_options` writes are inert (and raise on genesis 1.4.0, where `Scene.sim_options` is gone). READ the engine, do not echo the ctor args; `set_gravity` is the one live knob (v1.6.5) | `VehicleScene.effective_dt`, `VehicleScene.substeps`, `VehicleScene.set_gravity` | [`physics-contracts.md` §7.14](physics-contracts.md) |
+| Simulation time / gravity | `dt` and `substeps` are FIXED at `build()` on genesis 1.4.0 (the supported backend) and on 1.3.3 alike — post-build `sim_options` writes are inert (and raise on genesis 1.4.0, where `Scene.sim_options` is gone). READ the engine, do not echo the ctor args; `set_gravity` is the one live knob (v1.6.5) | `VehicleScene.effective_dt`, `VehicleScene.substeps`, `VehicleScene.set_gravity` | [`physics-contracts.md` §7.14](physics-contracts.md) |
 | Config rebuild / reset | re-resolve a cfg after `build()` while the vehicle keeps its runtime state, and reset per vehicle rather than per flat row. A wheel-count or wheel-order change raises; a failed rebuild keeps the previous driver and re-raises on the next step (v1.6.2) | `VehicleScene.mark_config_dirty`, `VehicleScene.reset`, `MultiVehiclePhysics.reset(vehicle_ids=)`, `MultiVehicleKindPhysics.reset(rows=)` | [`physics-contracts.md` §7.12](physics-contracts.md) |
 
 **Telemetry & rendering feed**
@@ -114,17 +115,20 @@ prints a one-line banner with the version on first construction in a process:
 Release history lives in
 [`../CHANGELOG.md`](../CHANGELOG.md).
 
-**Backend compatibility:** the supported Genesis physics backends are
-`genesis-world` **1.3.3 and 1.4.0** — the only two the source branches on.
-1.4.0 is what the tests and published measurements run on; 1.3.3 still works
-(the `≥ 1.0.0` claim printed here through v1.6.4 was never enforced by any
-branch or test) — the APIs that moved between the two are branched at runtime
-in `genesis_vehicle/_gs_compat.py` (force/torque -> wrench, link inertial
+**Backend compatibility:** the supported Genesis physics backend is
+`genesis-world` **1.4.0** — the floor and the only version the tests and every
+published measurement run on (v1.6.6; the `≥ 1.0.0` claim printed here through
+v1.6.4 was never enforced, and v1.6.5's "1.3.3 and 1.4.0" is now narrowed).
+**Nothing in the code enforces that floor**: the `<= 1.3.3` branches in
+`genesis_vehicle/_gs_compat.py` (force/torque -> wrench, link inertial
 accessors) and in `vehicle_scene.py` (`RigidOptions.dt`, terrain raycast
-mirror). The instanced-wheel renderer likewise branches on the 1.3.x buffer
-API — see the 1.2.7 CHANGELOG entry. Per-release backend notes are in
-[`../CHANGELOG.md`](../CHANGELOG.md) (see the 1.5.0 entry for the
-1.3.3 → 1.4.0 bump and its cross-version parity table, and 0.5.33 for the
+mirror) still run if 1.3.3 is installed, and there is no version check. They
+are dead weight slated for removal, not a compatibility promise — untested,
+unmeasured, and closed to additions. The instanced-wheel renderer likewise
+branches on the 1.3.x buffer API — see the 1.2.7 CHANGELOG entry. Per-release
+backend notes are in [`../CHANGELOG.md`](../CHANGELOG.md) (the 1.5.0 entry
+records the 1.3.3 → 1.4.0 bump and a cross-version parity table measured ONCE
+at that bump — a historical record, not a standing guarantee — and 0.5.33 the
 0.4.6 → 1.0.0 one).
 
 **On `genesis-world >= 1.4.0`, never pass `dt=` to `RigidOptions`** — that

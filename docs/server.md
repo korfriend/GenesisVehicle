@@ -89,6 +89,12 @@ python -m genesis_vehicle.server --follow-cam side --follow-target 0
 # Pass N to PIN the cap and disable the adaptive pacer:
 python -m genesis_vehicle.server --max-catchup-steps 1   # always-smooth (old fixed behavior)
 
+# serving (L2 only, v1.6.6): the post-override capture_state is SKIPPED when
+# no override / relative command / obstacle override arrived and no reset ran.
+# Per-window counters print as a separate [SERVE] line. Full story in 2.5.
+python -m genesis_vehicle.server --legacy-override-capture  # rollback: always capture
+python -m genesis_vehicle.server --serve-timers             # + cap_override_us (GROSS cost, not a saving)
+
 # pacing diagnostics: dump the trigger context on every adaptive switch
 # (window steps/loop history, loop_dur avg/p95, dt budget, est speed ratio).
 # Off by default; the server benchmark (§2.1) always enables it.
@@ -110,6 +116,9 @@ python -m genesis_vehicle.server --pacing-profile
   and the OSC send are inside the loop but outside that timer, so they show up
   only in `Loop Avg`. Compare `Loop Avg`, not `ms/step`, against the real-time
   budget; the exact boundaries are in §2.4.
+- runtime `[SERVE] [L2] recv_loops=… nonskip_loops=… skipped_captures=…
+  post_step_captures=… post_step_captures_ref=…` on its OWN line at the same
+  50-loop boundary — **L2 only**, v1.6.6. The serving-side counters; see §2.5.
 
 ## 2.1 Official server benchmark
 
@@ -130,11 +139,19 @@ Per configuration it launches the server subprocess (`--headless
 handshake (`/Genesis/Init/Physics` → `/Genesis/Vehicle/Init` (SkidSteer
 mapping → `tank_skid_belt`) → K `/Init/Target`s → 88 `/Init/Obstacle`s
 (complex) → `/Init/Done`), streams `/Genesis/Vehicle/Control` driving inputs
-at ~30 Hz, averages the server's `[STATS]` lines (first dropped as warm-up),
-then sends `stop`. The summary table reports ms/step, steps/loop, Loop Avg,
-the **pacing mode** (final adaptive-catchup state, with switch count — the
-benchmark always runs the server with `--pacing-profile`) and a real-time
-verdict (steps/loop ≤ 1.05 AND Loop Avg ≤ 25 ms). Every adaptive-catchup
+at ~30 Hz (`--input-hz`, default 30.0 — the rate every table below was
+measured at), averages the server's `[STATS]` lines (first dropped as warm-up),
+then sends `stop` (`MockUEClient.stop`, `server/benchmark.py:172`). The summary
+table reports ms/step, steps/loop, Loop Avg, the **pacing mode** (final
+adaptive-catchup state, with switch count — the benchmark always runs the
+server with `--pacing-profile`) and a real-time verdict (steps/loop ≤ 1.05 AND
+Loop Avg ≤ 25 ms). Since v1.6.6 it also reports **`serving`** (Loop Avg −
+Physics Avg), the OBSERVED **`kinds`** count and the per-arm sample size **`n`**
+— see §2.5 for those three and for `--kinds` / `--input-hz` /
+`--legacy-override-capture` / `--serve-timers`. The reference tables below
+predate those columns; the quantities they DO report are unaffected (`--kinds`
+defaults to 1, which is the historical single shared kind bit-for-bit, and
+`--input-hz` defaults to the historical rate). Every adaptive-catchup
 trigger context is echoed per config as a `[pacing]` line (window steps/loop
 history, loop_dur avg/p95, budget, est speed). The tank URDF defaults to
 the SDK's bundled `samples/urdf/tank_ray.urdf` (`--urdf` to override).
@@ -392,20 +409,36 @@ Boundaries, so you can check them in the source:
 
 | path | timer opens | timer closes | outside but in-loop |
 |---|---|---|---|
-| L2 (`server/physics_server.py`) | `:1081` `physics_start` | `:1083` `physics_end` (`+=` at `:1085`) | `capture_state` `:1095`, GPU sync `:1154`, `lerp_state` `:1160`, OSC sends `:1167` / `:1177`; loop span `:814` → `:1188` |
+| L2 (`server/physics_server.py`) | `:1212` `physics_start` | `:1214` `physics_end` (`+=` at `:1216`) | post-override `capture_state` `:1158` (gated since v1.6.6, §2.5), post-step `capture_state` `:1226`, GPU sync `:1292`, `lerp_state` `:1298`, OSC sends `:1305` / `:1315`; loop span `:910` → `:1389` |
 | L3 (`server/l3_runtime.py`) | `:677` `physics_start` | `:692` (`torch.cuda.synchronize()` at `:689-691` is INSIDE) | `st.capture` `:694`, `lerp_state` `:714`, OSC sends `:715-720`; loop span `:499` → `:722` |
+
+**These L2 line numbers were WRONG before v1.6.6 and are corrected above.** The
+table cited the loop span as `:814 → :1188` and the post-step `capture_state` as
+`:1095`; at v1.6.5 the file already had `:830 → :1247` and `:1119` (everything
+but the loop start was off by a uniform 24 lines, the loop start by 16), so the
+citations were stale before this release moved them again. Re-derive them with
+`grep -n` rather than trusting them after any edit to `physics_server.py`; the
+L3 row was re-checked against the current file and is accurate.
 
 Two consequences worth knowing:
 
 - **State capture is the big excluded cost, and it grows with the fleet.**
-  Measured (CPU/WSL2, genesis-world 1.4.0, `n_envs=1`, `dt` 0.02, substeps 4,
-  dual_scene, plane; scratchpad harness `bench_l2.py`, not shipped):
-  `capture_state` costs **1.74 ms at 3 vehicle kinds and 5.56 ms at 12 kinds** —
-  none of it inside the reported `ms/step`. A server that reports a comfortable
-  `ms/step` can still miss real-time.
+  None of it is inside the reported `ms/step`, so a server that reports a
+  comfortable `ms/step` can still miss real-time.
+
+  > **Two `capture_state` cost figures used to be quoted here (one at 3 vehicle
+  > kinds, one at 12) and are WITHDRAWN as of v1.6.6 — values removed, not
+  > restated.** They came from an unshipped scratchpad harness (`bench_l2.py`)
+  > under its own conditions, nothing in the tree reproduces them, and they are
+  > on the serving work's retired-figures register. The qualitative claim — the
+  > cost is excluded from `ms/step` and grows with the fleet — stands on the
+  > code path (the table above) and is now measurable from the shipped
+  > benchmark's `serving` column (§2.1, §2.5). No replacement number is
+  > published; see §2.5.
+
 - **On GPU the two paths differ.** L3 synchronizes inside the timer, L2
   synchronizes after the whole catch-up loop, so an L2 GPU `Physics Avg`
-  under-reports by whatever kernel tail lands after `:1083`. CPU runs are
+  under-reports by whatever kernel tail lands after `:1214`. CPU runs are
   unaffected.
 
 **So: compare `Loop Avg` against the `dt` budget** (the real-time verdict in
@@ -413,6 +446,156 @@ Two consequences worth knowing:
 `ms/step` only to attribute cost *within* the physics step. The `[PROFILE]`
 line's `raycast/proxy | SDK compute | genesis solver | 기타` breakdown is also a
 decomposition of `vs.step()` alone, on the same scope.
+
+---
+
+## 2.5 Serving-side counters — the `[SERVE]` line (v1.6.6)
+
+**L2 only.** `server/l3_runtime.py` prints no `[SERVE]` line, has no capture
+skip gate and takes none of the flags below.
+
+§2.4 says state capture is the big cost outside the physics timer. This
+section is how you count it. Since v1.6.6 the L2 loop skips one of its
+`capture_state` calls when nothing has moved the solver, and prints five
+per-window counters so both the skip and the remaining captures are
+machine-checkable rather than assumed.
+
+### The skip gate
+
+Per receiving loop the L2 server used to capture the whole world twice: once
+after the override block and once after the physics step. The first of those
+is now conditional.
+
+```mermaid
+flowchart TD
+    R[recv arrived] --> C{command == stop?}
+    C -->|yes| X[break out of the loop]
+    C -->|no| RST{reset branch ran?}
+    RST -->|yes| CAPR["capture_state tag=reset<br/>(re-captures for itself)"]
+    RST -->|no| G
+    CAPR --> G{"needs_override_capture:<br/>overrides or relative cmds or<br/>obstacle overrides or reset_ran"}
+    G -->|True| CAPO["capture_state tag=override<br/>nonskip_loops += 1"]
+    G -->|False| SKIP["skip — state already current<br/>skipped_captures += 1"]
+    CAPO --> STEP[catch-up physics steps]
+    SKIP --> STEP
+    STEP --> CAPS["capture_state tag=post_step<br/>post_step_captures += 1"]
+    CAPS --> SEND[lerp + OSC bulk send]
+```
+
+The gate is the pure, module-level predicate
+`needs_override_capture(safe_overrides, safe_relative_cmds,
+safe_obstacle_overrides, reset_ran)` in `server/physics_server.py`; it guards
+the one call at `server/physics_server.py:1158` and nothing else.
+
+**What makes the skip safe, stated with its scope:** on the span from the reset
+branch to that capture, exactly four inputs reach the solver — the three popped
+override dicts, which drive `set_pos` / `set_quat` / `set_dofs_velocity`, and
+the reset branch, which re-places every entity. `recv['target_forces']` is
+deliberately NOT one of them: it goes through `control_dofs_force`, which
+records a command consumed by the NEXT `scene.step()` and moves nothing now.
+When none of the four fired, the capture would return the state the loop
+already holds. That enumeration is the whole argument; it is not a general
+claim that "nothing else can move the solver anywhere in the loop".
+
+The `reset_ran` term is currently **redundant** — the reset branch
+(`server/physics_server.py:1033`) re-captures for itself and assigns both
+`prev_state` and `curr_state`. It is kept deliberately: without it the gate's
+correctness would depend on that re-capture continuing to exist, and optimising
+the re-capture away later would turn the gate into a one-loop stale-state
+broadcast.
+
+Rollback: `--legacy-override-capture` restores the pre-v1.6.6 unconditional
+call. Its startup banner carries no `[SERVE]` token, so a parser can still
+count windows by that token alone.
+
+### The line
+
+Printed at the same 50-loop boundary as `[STATS]` and reset there, so each line
+describes exactly the preceding window. It is a SEPARATE line on purpose: the
+`[STATS]` string is frozen — `server/benchmark.py` and
+`server/benchmark_collision.py` each hold their own regex copy of it — so new
+information goes on a new line rather than into that string.
+
+```
+ [SERVE] [L2] recv_loops=<int> nonskip_loops=<int> skipped_captures=<int> post_step_captures=<int> post_step_captures_ref=<int>
+ [SERVE] [L2] ... post_step_captures_ref=<int> cap_override_us=<float>      # only with --serve-timers
+```
+
+| counter | counts, over the window | identity |
+|---|---|---|
+| `recv_loops` | loops that REACHED the skip decision — `recv` truthy and the loop did not break out first | — |
+| `nonskip_loops` | of those, the ones that captured | `skipped_captures + nonskip_loops == recv_loops` |
+| `skipped_captures` | of those, the ones the gate skipped | same |
+| `post_step_captures` | post-step `capture_state` calls actually executed | — |
+| `post_step_captures_ref` | `sum(min(catchup_steps, 2))` — the post-step captures the interpolation actually consumes (`prev` and `curr`) | the reference a future catch-up capture-skip must match; it is BELOW `post_step_captures` whenever a burst runs more than 2 steps |
+| `cap_override_us` | `--serve-timers` only — see below | — |
+
+`recv_loops` is counted at the skip decision, **not** at `if recv:`. A loop that
+receives `stop` breaks out before the decision; counting it earlier would break
+the identity by exactly that loop.
+
+### `--serve-timers` — and why `cap_override_us` is not a saving
+
+`--serve-timers` wraps the post-override `capture_state` call and reports the
+per-window total in microseconds. **It is the GROSS cost of the calls that ran.
+It is not the loop saving from skipping them.**
+
+    saving = gross - displacement
+
+where the displacement is the work that moves onto the remaining captures (warm
+caches, freshly read buffers). The timer wraps only the call, so it cannot
+observe the displacement term in either arm. It answers "what did this call
+cost", never "how much faster did the loop get". When comparing two arms,
+enable it in BOTH — otherwise the arms differ by a flag.
+
+Off by default; when on it adds two `time.perf_counter()` calls per
+non-skipped loop.
+
+### Benchmark side (`server.benchmark`, §2.1)
+
+| flag / column | meaning |
+|---|---|
+| `--kinds N` | split the K targets into N batched vehicle KINDS by varying ONLY the per-target `/Init/Target` friction (`2.0 + 1e-3*(tid % N)`); `build_cfg`'s cache key is `(abspath(urdf), friction, mapping)`. `N=1` is the historical constant `2.0`, bit-for-bit. Obstacle and global friction are untouched |
+| `--input-hz` | `/Genesis/Vehicle/Control` streaming rate; default `30.0` is exactly the historical hardcoded rate, which is what §2.1's table was measured at. `benchmark_collision.py` has its own 30 Hz streamer and does NOT take this flag |
+| `--legacy-override-capture`, `--serve-timers` | forwarded to the server, for A/B arms |
+| `serving` column | `Loop Avg − Physics Avg` — the non-physics part of the loop (capture, interpolation, OSC encode/send, pacing); the §2.4 decomposition, per arm |
+| `kinds` column | the OBSERVED kind count: `  Target ID: ` lines minus `reusing shared cfg` lines. Before v1.6.6 the reader discarded both unless `-v` was passed, so the count could only be assumed |
+| `n` column | `[STATS]` windows averaged (first dropped), per arm |
+
+Three rules that decide whether two arms may be compared at all:
+
+1. **An `n` mismatch is a rejection reason.** A timeout that shortens one arm
+   silently changes what its averages mean.
+2. **A `serve_windows != n` flag (`!!` on the progress line) is a rejection
+   reason, same standing.** The reader thread sets `stats_done` while handling
+   a `[STATS]` line and the matching `[SERVE]` line is the NEXT line on the
+   same stream, so the snapshot can lose the last window; the `[SERVE]` sums
+   scale with the window count, so a short arm is not comparable. A bounded 2 s
+   grace wait is applied first, and a server with no `[SERVE]` stream at all
+   still exits cleanly rather than hanging.
+3. **`--kinds N>1` is not a pure batching knob, so compare arms at the SAME
+   `--kinds`.** The friction it varies is also the chassis material friction
+   (`server/vehicle_builder.py:614`) and the `mu_long` / `mu_lat` fallback when
+   the URDF declares neither (`server/vehicle_builder.py:455`, `:461`), so a
+   `--kinds 3` arm differs from `--kinds 1` by up to 0.1% in friction and its
+   trajectories diverge.
+
+**The kind count is L2-only.** `server/l3_runtime.py:367` calls
+`print_resolved_table("L3-shared", ...)` exactly once for the whole fleet, so
+even a 100-vehicle L3 run reports `k_observed=1, reuse_lines=0, kinds=1`. That
+is a correct kind count and NOT a target count; the table prints `1*` and the
+record carries `kinds_observable=False`.
+
+### No serving speed figure is published
+
+v1.6.6 ships the counters and the A/B arm, and **no number**. The quoting
+threshold for this work is n ≥ 10 per arm, the planned measurement step
+specifies n ≥ 6, and no n ≥ 10 re-measurement is scheduled; the measurement
+steps themselves have not been run (they were blocked on the engine-API crash
+fixed in v1.6.5). Earlier figures that circulated for this work are retired and
+are not repeated in any form. If you need a number for your hardware, run both
+arms yourself with `--serve-timers` on BOTH, honour the three rules above, and
+remember that `cap_override_us` is a gross cost, not a saving.
 
 ---
 
