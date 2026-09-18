@@ -38,7 +38,7 @@ if sys.platform == "win32":
         pass
 
 from .osc_manager import OSCManager
-from .pacing import AdaptiveCatchup
+from .pacing import AdaptiveCatchup, SendRateLimiter
 from genesis_vehicle import (
     PacejkaAnisotropic, VehicleScene
 )
@@ -446,6 +446,41 @@ def main():
                              "duration avg/p95, dt budget, estimated speed "
                              "ratio, time since last switch). Off by default; "
                              "the server benchmark enables it.")
+    parser.add_argument("--send-hz", type=float, default=None,
+                        help="(L2) Downsample the state send to Unreal to H Hz "
+                             "while physics keeps running at dt. Default OFF "
+                             "= one send per loop (bit-identical to every "
+                             "release before v1.6.7). The gate is WALL-CLOCK: "
+                             "a send goes out on the first loop at or after "
+                             "the next deadline, and the deadline carries (by "
+                             "P = 1/H) so the long-run average is H even when "
+                             "H does not divide the pacing rate. The cost is "
+                             "LAG, not stutter: the newest pose the client "
+                             "holds ages by P/2 on average and P at worst, so "
+                             "the ADDED lag is a delta against the period the "
+                             "server was ALREADY achieving. On a SATURATED "
+                             "server (baseline 25 ms) that is about +12.5 ms "
+                             "mean and up to +50 ms worst at H=20 / dt=25 ms; "
+                             "on a server WITH HEADROOM it is LARGER — the "
+                             "measured un-gated send rate is 126-137 Hz "
+                             "(baseline ~7.5 ms), where the same arithmetic "
+                             "gives about +21 ms mean and up to +68 ms worst. "
+                             "(ESTIMATE, computed from P/2, P "
+                             "and one 0-step loop — not measured; the "
+                             "readable UE client follows with a fixed-rate "
+                             "VInterpTo filter of 66.7 ms time constant, so "
+                             "it reads as the car dragging behind and "
+                             "steering feeling slow, NOT as frame judder). A "
+                             "RESET is always flushed immediately — that "
+                             "payload is the exact reset pose and exists on "
+                             "that one loop only. Client-driven teleports "
+                             "(override / relative command / obstacle "
+                             "transform) are NOT flushed: they go out on the "
+                             "ordinary schedule, delayed by at most P + one "
+                             "loop interval (<= 75 ms at H=20, dt=25 ms). "
+                             "H >= the pacing rate 1/dt is WARNed and demoted "
+                             "to OFF. L2 only — --multi-env (L3) warns and "
+                             "ignores it.")
     parser.add_argument("--substeps", type=int, default=4,
                         help="Genesis internal substeps per dt (default: 4); the "
                              "internal step is dt/substeps. It refines the CHASSIS "
@@ -487,6 +522,10 @@ def main():
                      "an rco road is a kinematic raycast surface, which only the "
                      "dual raycast scene can host.")
 
+    if args.send_hz is not None and args.send_hz <= 0.0:
+        parser.error(f"--send-hz must be > 0 (got {args.send_hz}); omit the flag "
+                     f"to keep the default of one state send per loop.")
+
     # [L3] Multi-env batching mode — branch to the dedicated path for many same-URDF vehicles
     if args.multi_env:
         print(" [Genesis] [MODE] === L3 (multi-env) === "
@@ -494,6 +533,10 @@ def main():
         if args.single_scene:
             print(" [Genesis] [WARN] --single-scene is a per-entity-mode flag; "
                   "multi-env (L3) is always dual_scene — ignoring it.")
+        if args.send_hz is not None:
+            print(" [Genesis] [WARN] --send-hz is a per-entity-mode (L2) flag; "
+                  "multi-env (L3) has no state-send gate — ignoring it. "
+                  "L3 keeps sending once per loop.")
         from .l3_runtime import run_l3
         run_l3(args)
         return
@@ -826,7 +869,52 @@ def main():
     # Send the fixed sync period to Unreal Engine for confirmation.
     print(f" [Pacing] [Auto-Pacing] 언리얼 엔진으로 동조 주기({sim_dt * 1000.0:.1f}ms)를 전송합니다...")
     osc.client_cpp.send_message("/Genesis/Init/Pacing", [float(sim_dt)])
-        
+
+    # [Send-Rate] state-send downsampling (--send-hz, v1.6.7). Resolved and
+    # announced here; the gate itself is in the send block far below.
+    # The DEMOTION test is against `sim_dt` (the pacing dt), NOT `_eff_dt`:
+    # send opportunities are produced by the catch-up loop, which consumes
+    # time in SIM_DT units, so when the two disagree (the WARN above) an H
+    # between them would slip past an _eff_dt-based test and then send on
+    # every loop while the banner still claimed H. `_eff_dt` is used only as
+    # the physics-Hz LABEL on the banner line.
+    # /Genesis/Init/SendRate is deliberately NOT sent: this is a server-local
+    # flag and no readable client subscribes to such an address. Note that
+    # /Genesis/Init/Pacing above still carries dt, so a client that assumes
+    # the arrival period equals dt will be wrong while this flag is on.
+    _send_hz = getattr(args, "send_hz", None)
+    _send_hz_req = _send_hz          # what the operator asked for, pre-demotion
+    if _send_hz is not None and _send_hz <= 0.0:
+        # Unreachable through the CLI — argparse rejects it above with
+        # parser.error. Only a hand-built args namespace reaches here, and
+        # the 1.0/_send_hz below would raise. Fail to OFF, but LOUDLY: the
+        # tests below distinguish None (not asked for) from a rejected value.
+        print(f" [Pacing] [Send-Rate] [WARN] --send-hz {_send_hz}는 양수가 "
+              f"아닙니다 — OFF로 강등합니다(매 루프 송신).")
+        _send_hz = None
+    elif _send_hz is not None and _send_hz >= 1.0 / sim_dt:
+        print(f" [Pacing] [Send-Rate] [WARN] --send-hz {_send_hz}는 페이싱 "
+              f"레이트 {1.0 / sim_dt:.1f}Hz 이상이라 다운샘플링이 불가능합니다 "
+              f"— OFF로 강등합니다(매 루프 송신).")
+        _send_hz = None
+    # `is not None`, never truthiness: 0.0 is not "off", it is a value that
+    # was rejected above, and conflating the two makes a banner (and, on the
+    # benchmark side, a record field) claim a rate nothing ever ran at.
+    _send_lim = SendRateLimiter((1.0 / _send_hz) if _send_hz is not None else None)
+    if _send_hz is not None:
+        _send_label = (f"{_send_hz:.1f}Hz ({1000.0 / _send_hz:.1f}ms) "
+                       f"— --send-hz {_send_hz} (강등 판정 기준: pacing)")
+    elif _send_hz_req is not None:
+        # Do not label a DEMOTED run "기본값" — the operator passed the flag
+        # and it is not in effect; the banner has to say so on its own line.
+        _send_label = (f"{1.0 / sim_dt:.1f}Hz (매 루프) "
+                       f"— --send-hz {_send_hz_req} 강등됨(OFF)")
+    else:
+        _send_label = f"{1.0 / sim_dt:.1f}Hz (매 루프) — 기본값 (--send-hz 미지정)"
+    print(f" [Pacing] [Send-Rate] physics(engine dt) {1.0 / _eff_dt:.1f}Hz "
+          f"({_eff_dt * 1000.0:.3f}ms) | pacing {sim_dt * 1000.0:.1f}ms "
+          f"({1.0 / sim_dt:.1f}Hz) | state send {_send_label}")
+
     SIM_DT = sim_dt
     # Catch-up cap — adaptive (AdaptiveCatchup) since v1.0.20: monitors steps/loop
     # and auto-switches to cap=1 (uniform slow-motion) under sustained overload,
@@ -885,12 +973,51 @@ def main():
     #                         actually consumes (prev/curr), i.e. the reference a
     #                         catch-up capture-skip must match.
     #   cap_override_us       --serve-timers only; see the print site.
+    #
+    # --send-hz gate counters (v1.6.7). All four are unconditional (unlike
+    # cap_override_us) and all four are SUMMABLE, because server/benchmark.py
+    # adds [SERVE] keys across windows — a ratio key would be meaningless
+    # there, so the effective rate is left to be derived:
+    #   sends                 loops in this window that actually sent state.
+    #   send_skips            loops the gate suppressed. 0 whenever --send-hz
+    #                         is off.
+    #                         Identity, ON THE NON-LOCKSTEP PATH ONLY:
+    #                         sends + send_skips == 50. Both counters live
+    #                         inside `if not args.lockstep:`, so under
+    #                         lockstep neither increments while log_count
+    #                         still does and the sum reads 0. That path is
+    #                         unreachable today (--lockstep is commented out
+    #                         of argparse and args.lockstep is forced False),
+    #                         so every [SERVE] line a user can produce does
+    #                         balance — but the identity is a property of the
+    #                         branch, not of the window.
+    #   send_flushes          of `sends`, the ones forced out by a RESET flush.
+    #                         send_flushes <= sends. A HIGH value is NOT a good
+    #                         sign — it means resets are frequent, and each one
+    #                         is a send the rate gate did not get to bound.
+    #                         Attribution caveat: when a reset lands on the
+    #                         same loop as an ordinary deadline, the send is
+    #                         attributed to the FLUSH even though it would have
+    #                         gone out anyway. Read the counter as a trend, not
+    #                         as "sends that only happened because of a flush".
+    #   window_ms             wall-clock length of this 50-loop window (ms,
+    #                         sleep included). It is the DENOMINATOR for the
+    #                         effective send rate: 1000 * sum(sends) /
+    #                         sum(window_ms). It is not a comparability gate —
+    #                         under overload a working --send-hz arm SHORTENS
+    #                         its windows, which is the flag succeeding.
     log_recv_loops = 0
     log_skipped_captures = 0
     log_nonskip_loops = 0
     log_post_step_captures = 0
     log_post_step_captures_ref = 0
     log_cap_override_us = 0.0
+    log_sends = 0
+    log_send_skips = 0
+    log_send_flushes = 0
+    # Window wall-clock origin. Read fresh (never the loop's `now`) at the
+    # window boundary and carried over with no gap between windows.
+    _win_t0 = time.perf_counter()
     _legacy_override_capture = bool(getattr(args, "legacy_override_capture", False))
     _serve_timers = bool(getattr(args, "serve_timers", False))
     if _legacy_override_capture:
@@ -909,6 +1036,9 @@ def main():
 
     while True:
         loop_start = time.perf_counter()
+        # [Send-Rate] armed per loop, OUTSIDE `if recv:` — `_reset_ran` is only
+        # defined inside that block, and an empty recv skips it entirely.
+        _flush_hard = False
 
         if args.lockstep:
             recv = osc.wait_for_next_frame(timeout=3.0)
@@ -1033,6 +1163,8 @@ def main():
                 prev_state = capture_state(target_entities, dynamic_obstacles, is_urdf_active, controllers, ue_driven_obstacle_ids, accumulated_wheel_angles, sim_dt, False, mvp=vs.physics, readers=_readers, tag="reset")
                 curr_state = prev_state
                 _reset_ran = True
+                # [Send-Rate] force this loop's send past the --send-hz gate.
+                _flush_hard = True
 
             recv['command'] = None
 
@@ -1293,18 +1425,44 @@ def main():
 
         # [State interpolation (LERP/SLERP) and Unreal telemetry send]
         if not args.lockstep:
-            alpha = accumulator / SIM_DT
-            alpha = float(np.clip(alpha, 0.0, 0.9999))
-            interpolated = lerp_state(prev_state, curr_state, alpha)
+            # [Send-Rate] --send-hz gate (v1.6.7). The OFF path (the default)
+            # is one attribute read and one branch — perf_counter() is not
+            # even called, and the send block below is byte-for-byte the
+            # pre-v1.6.7 code, only indented.
+            _do_send = True
+            if _send_lim.enabled:
+                _now_s = time.perf_counter()
+                if _flush_hard:
+                    # Reset flush, unconditional. The reset branch zeroed the
+                    # accumulator, so this loop ran ZERO catch-up steps:
+                    # prev_state IS curr_state and alpha is 0.0, which makes
+                    # this payload EXACTLY the reset pose. It exists on this
+                    # loop only — swallow it and the client never sees the
+                    # reset pose at all, because the next step advances
+                    # curr_state. notify_sent() spends the SAME budget the
+                    # ordinary path spends, so the flush cannot double the
+                    # realised rate.
+                    _do_send = True
+                    _send_lim.notify_sent(_now_s)
+                    log_send_flushes += 1
+                else:
+                    _do_send = _send_lim.should_send(_now_s)
+            if _do_send:
+                log_sends += 1
+                alpha = accumulator / SIM_DT
+                alpha = float(np.clip(alpha, 0.0, 0.9999))
+                interpolated = lerp_state(prev_state, curr_state, alpha)
 
-            # Bulk-send the final interpolated state (sim-time stamp first —
-            # prev_state is at step_count-1, curr at step_count; the lerp sits
-            # alpha of the way between them). v1.1.20.
-            if interpolated['targets']:
-                osc.send_sim_time((step_count - 1 + alpha) * SIM_DT)
-                osc.send_target_states_bulk(interpolated['targets'])
-            if interpolated['dynamic_obstacles']:
-                osc.send_dynamic_states_bulk(interpolated['dynamic_obstacles'])
+                # Bulk-send the final interpolated state (sim-time stamp first —
+                # prev_state is at step_count-1, curr at step_count; the lerp sits
+                # alpha of the way between them). v1.1.20.
+                if interpolated['targets']:
+                    osc.send_sim_time((step_count - 1 + alpha) * SIM_DT)
+                    osc.send_target_states_bulk(interpolated['targets'])
+                if interpolated['dynamic_obstacles']:
+                    osc.send_dynamic_states_bulk(interpolated['dynamic_obstacles'])
+            else:
+                log_send_skips += 1
         else:
             # Lockstep mode sends the latest state without interpolation
             if target_entities:
@@ -1333,6 +1491,12 @@ def main():
         log_count += 1
 
         if log_count >= 50:
+            # Fresh clock read, NOT the loop's `now` (:919): `now` is taken
+            # before this loop's work, so reusing it would drop the 50th loop
+            # from the window and bias the effective send rate UPWARD by ~2%.
+            # It is also bound only in the non-lockstep branch.
+            _win_now = time.perf_counter()
+            window_ms = (_win_now - _win_t0) * 1000.0
             avg_loop = (log_loop_dur_sum / 50.0) * 1000.0
             avg_phys = (log_phys_dur_sum / 50.0) * 1000.0
             # Physics Avg is the SUM of catch-up steps per loop — steps/loop and
@@ -1351,7 +1515,10 @@ def main():
                       f"nonskip_loops={log_nonskip_loops} "
                       f"skipped_captures={log_skipped_captures} "
                       f"post_step_captures={log_post_step_captures} "
-                      f"post_step_captures_ref={log_post_step_captures_ref}")
+                      f"post_step_captures_ref={log_post_step_captures_ref} "
+                      f"sends={log_sends} send_skips={log_send_skips} "
+                      f"send_flushes={log_send_flushes} "
+                      f"window_ms={window_ms:.1f}")
             if _serve_timers:
                 # cap_override_us is the GROSS cost of the post-override
                 # capture_state calls that DID run in this window — it is not the
@@ -1387,6 +1554,10 @@ def main():
             log_post_step_captures = 0
             log_post_step_captures_ref = 0
             log_cap_override_us = 0.0
+            log_sends = 0
+            log_send_skips = 0
+            log_send_flushes = 0
+            _win_t0 = _win_now      # no gap between consecutive windows
 
     osc.close()
 

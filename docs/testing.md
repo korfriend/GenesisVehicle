@@ -8,6 +8,8 @@
 | M | swept-envelope contact samples per wheel (`contact_samples`) |
 | SFL | `StaticFrictionLock` — the hold-at-rest stability hook |
 | dt | one simulation STEP duration (s) |
+| H | requested state-send rate (the server's `--send-hz` value, Hz) |
+| P | send period, `1/H` (s) |
 | substeps | solver iterations per step; internal interval is `dt / substeps` |
 
 ## Running the tests
@@ -18,12 +20,17 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-544 tests, almost all pure-Python. Measured on the v1.6.6 tree:
-`544 passed in 144.45s` (`python -m pytest tests/ -q`, CPU/WSL2,
-genesis-world 1.4.0, one run, no warm cache control; run on the release working
-tree with `--ignore=tests/test_fusion_probe.py`, an untracked file belonging to
-a parallel workstream that is not part of this repo). Earlier figures on the same machine:
-`519 passed in 144.33s` at v1.6.5, `507 passed in 170.53s` at v1.6.4,
+578 tests, almost all pure-Python, plus one env-gated live test that skips by
+default. Measured on the v1.6.7 tree: `578 passed, 1 skipped in 137.19s`
+(`python -m pytest tests/ -q --ignore=tests/test_fusion_probe.py`, CPU/WSL2,
+genesis-world 1.4.0, one run, no warm cache control). `test_fusion_probe.py` is
+an untracked file belonging to a parallel workstream and is not part of this
+repo; a bare `pytest tests/` on the release working tree collects its 53 cases
+too and reports `631 passed, 1 skipped in 138.87s`. The 1 skip is
+`test_server_send_downsample_live.py`, which spawns real server processes and
+runs only with `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`. Earlier figures on the same machine:
+`544 passed in 144.45s` at v1.6.6, `519 passed in 144.33s` at v1.6.5,
+`507 passed in 170.53s` at v1.6.4,
 ~116s / 450 tests at v1.6.2-v1.6.3, ~88s at v1.6.1. **Runtime is not a stable
 metric here** — v1.6.5 added 12 tests and measured 26s FASTER than v1.6.4, so
 the run-to-run spread on this machine exceeds the difference a release makes;
@@ -31,7 +38,9 @@ read the count, not the seconds. The count breaks down as v1.6.3's 450 + 57 for
 v1.6.4's build-time hoists + 12 for v1.6.5 (7 in
 `test_sim_options_and_timing.py`, 3 engine-shape stubs in `test_gs_compat.py`,
 2 `sim_options` write-guard cases in `test_server_import.py`) + 25 for v1.6.6
-(all in `test_server_serving_counters.py`). Collection alone is ~6s. The reference URDFs the
+(all in `test_server_serving_counters.py`) + 34 for v1.6.7
+(`test_server_send_downsample.py`; the 35th, the live arrival-rate test, is the
+skip). Collection alone is ~6s. The reference URDFs the
 parsing tests read live in `tests/data/` (self-contained since v1.2.0).
 
 A handful build a real `VehicleScene` on the CPU backend (the batched-visual /
@@ -102,6 +111,8 @@ CI without GPU.
 | Per-wheel broadcast rank convention | `test_rank_helpers.py` | 6 tests (v1.6.4). `_pipeline.pw` / `pw3` return `unsqueeze(0)` at rank 1 and pass a rank-2/3 field through unchanged. The rank-2 branch is not taken anywhere in this tree yet, so it is exercised explicitly rather than left to the promotion step |
 | The bump-stop/`dt` warning names the vehicle | `test_bump_stop_dt_warning.py` | 3 tests (v1.6.4). RED before the change — the old message carried no vehicle name, URDF name or slot index. Scope: one driver = one config, so "per vehicle" means "per config, named after the vehicle it was registered as"; a per-SLOT ratio inside a fused group is not this test |
 | L2 serving counters, the capture skip gate and the benchmark's kind/serving wiring | `test_server_serving_counters.py` | 25 tests (v1.6.6), pure Python — no server process is started. `needs_override_capture`'s truth table and its deliberate exclusion of `target_forces` (which goes through `control_dofs_force` and moves nothing this loop); `capture_state`'s `tag=` being keyword-only with a default and all four loop call sites carrying one; the five `[SERVE]` counters existing, incrementing and resetting on the same 50-loop boundary as the `[STATS]` counters; `recv_loops` counted at the skip decision rather than at `if recv:` (so the `skipped_captures + nonskip_loops == recv_loops` identity survives a `stop` loop); the `[SERVE]` token marking ONLY the counter line; the line parsing with the benchmark's parser and disturbing NEITHER `_STATS_RE` copy; `--kinds 1` being bit-identical to the historical friction constant and `--kinds N` splitting into exactly N kinds without touching global or obstacle friction; `--input-hz` reproducing the historical sleep exactly; the observed-kind anchor strings matching what the server actually prints; a replayed server stdout driven through `run_config`; `reset_ran` armed per loop and set only by the reset branch; `post_step_captures_ref` counted outside the catch-up loop; the override capture being the only call behind the gate; L3 reporting one kind and flagging it not observable; and the `serve_windows` reader race guard plus the short-stream rejection. Source-level assertions where the behaviour lives in `main()`'s body — they read `server/physics_server.py` via `inspect.getsource` / `ast` rather than run the loop, and auto-skip without `genesis` / `pythonosc` |
+| The L2 `--send-hz` state-send gate | `test_server_send_downsample.py` | 34 tests (v1.6.7), pure Python. `SendRateLimiter`: the OFF predicate returning exactly `True` on adversarial clocks (repeats, backwards time, huge jumps, zero), the first send after build not being delayed (`_next_send_t` starts at `-inf`), exact send indices for a dividing H (20 on a 40 Hz loop) and a non-dividing one (25, where the deadline CARRIES), the stall snap, and the single-budget invariant `_next_send_t <= _last_send_t + P` after every record. The REALISED rate is pinned separately from the fields — a mirror of the server's gate is driven with three injected event sequences, including the 30 Hz-override-vs-40 Hz-loop one that made the rejected two-budget design reach 1.65 H, and the rejected design is shown to fail that pin. Source-level: an `ast.dump` FREEZE of the gate body against the pre-v1.6.7 block (the `0.9999` clip, the `if interpolated[...]` structure, the `(step_count - 1 + alpha) * SIM_DT` stamp), the gate wrapping the whole send with `send_step_ack` outside it, the skip branch doing nothing but counting, the OFF path calling no `perf_counter()`, `_flush_hard` armed per loop OUTSIDE `if recv:` and set in exactly one place, no soft-flush path existing, `--legacy-override-capture` not ORed into the flush, the argparse shape and help text (the lag cost and the 75 ms teleport bound), the non-positive `parser.error`, the L3 WARN, demotion judged against `sim_dt` not `_eff_dt`, the banner in both arms, `window_ms` reading a fresh clock rather than the loop's `now`, the four new `[SERVE]` keys parsing with the benchmark regex while matching NEITHER `_STATS_RE` copy, the identity comment naming the non-lockstep path it holds on, and the benchmark's forwarding + record |
+| `--send-hz` arrival rate at a real client (env-gated) | `test_server_send_downsample_live.py` | 1 test (v1.6.7), SKIPPED unless `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`. Spawns the real server twice (arm A without the flag, arm B with `--send-hz 20`) and counts `/Genesis/Vehicle/TargetBulk` arrivals at a `ThreadingOSCUDPServer` listener over a fixed wall-clock window. Measured: A **136.37 Hz**, B **20.00 Hz** (CPU/WSL2, genesis-world 1.4.0, L2, K=1 tank, dt 25 ms, 8 s window anchored on the first TargetBulk after a 2 s warm-up, three repeats). A fixed WALL-CLOCK window is used because a `[STATS]`/`[SERVE]` window is 50 LOOPS — with the gate on the gated arm closed 13 windows in 1.1 ms total. Scope, stated in the file: it proves the arrival RATE, not packet bit-identity (a structural argument) and not the reset FLUSH path (the mock client sends neither reset nor override). An env-var skip rather than a custom marker because the repo has no `pytest.ini` / `pyproject.toml` / `conftest.py` |
 | Server subpackage import + steer-key mapping + the `sim_options` write guard | `test_server_import.py` | `genesis_vehicle.server` imports; `steerScale`/`maxSteerRad` mapping-key resolution (auto-skips without genesis/pythonosc). **v1.6.5: an AST source guard** — any `Assign`/`AugAssign`/`AnnAssign` in `server/*.py` whose target attribute chain mentions `sim_options`, plus a literal `setattr`, fails the suite, with a second test proving the guard catches the shapes its docstring claims (`=`, `+=`, subscripted target, `setattr(getattr(...))`). It is a LITERAL-form tripwire, not runtime proof: aliasing, dynamic `setattr`, `exec`, and three literal forms named in the docstring (tuple-unpacking target, `for x.sim_options.dt in ...`, `with ... as x.sim_options.dt`) all escape it — the runtime facts live in `test_sim_options_and_timing.py` |
 | Simulation time is fixed at `build()` | `test_sim_options_and_timing.py` | 7 cases (v1.6.5), on a real CPU `VehicleScene`. The `[genesis_vehicle] timing:` line is asserted to be EMITTED (`capsys` + regex) and its parsed dt / substeps must equal `effective_dt` / `substeps` — the line printed zero times for eight releases inside an `except Exception: pass`, so "the code path exists" is exactly what does not count here. Also: `sim_options` returns the AUTHORED object; post-build writes to `sim_options.dt` / `.gravity` are pinned INERT (a tripwire on the ENGINE — a future genesis that makes them live turns this test red instead of rotting the contract); `set_gravity` is pinned LIVE; `substeps` / `effective_dt` must equal `scene.sim.*`; `set_gravity` before `build()` raises; `envs_idx` passes through at `n_envs > 1` |
 

@@ -155,3 +155,83 @@ class AdaptiveCatchup:
         self._dur_hist.clear()
         self._good_streak = 0
         self._cooldown_left = self.cooldown
+
+
+class SendRateLimiter:
+    """Wall-clock gate for the L2 server's state send (``--send-hz``, v1.6.7).
+
+    | abbr | meaning |
+    |---|---|
+    | H | requested send rate (Hz) |
+    | P | send period = 1/H (sec) |
+    | L2 | per-entity server mode (K interacting vehicles, n_envs=1) |
+
+    Physics keeps running at ``dt``; only the TargetBulk/SimTime send to the
+    client is downsampled. ``period=None`` disables the gate entirely and
+    ``should_send`` then returns ``True`` unconditionally — that is the default
+    and the historical behaviour (one send per loop).
+
+    **One budget.** Every send, ordinary or flushed, goes through ``_record``.
+    The deadline (``_next_send_t``) and the last send time (``_last_send_t``)
+    are separate fields only so the deadline can CARRY: when H does not divide
+    the loop rate, adding P to the previous deadline (rather than to ``now``)
+    keeps the long-run average at H. The two are tied by the invariant
+
+        ``_next_send_t <= _last_send_t + P``   (holds after every _record)
+
+    - snap path: ``_next_send_t = now + P = _last_send_t + P`` (equality).
+    - carry path: entered only when ``now >= _next_send_t_old``, so
+      ``_next_send_t_new = _next_send_t_old + P <= now + P``.
+
+    That invariant is what bounds the realised rate at H (+ the reset flush
+    rate). An earlier design ran a SECOND, independent budget for a "soft
+    flush" on override/teleport edges; because ordinary sends never consumed
+    it, the two could fire in the same period and the realised rate reached
+    ~1.65H on a 30 Hz override stream against a 40 Hz loop. There is now one
+    budget and no soft path. Do not re-split it — ``tests/
+    test_server_send_downsample.py`` pins the realised rate, not just the
+    fields.
+
+    ``now`` is injected by the caller (the server passes
+    ``time.perf_counter()``), so the whole class is testable without a clock.
+
+    NB the caller is responsible for rejecting a non-positive rate; the server
+    does it in argparse (``--send-hz`` must be > 0) and demotes H >= 1/sim_dt
+    to ``period=None``.
+    """
+
+    def __init__(self, period: "float | None"):
+        self.period = float(period) if period is not None else None
+        self.enabled = period is not None
+        # -inf, so the FIRST should_send() after build fires: `now <
+        # _next_send_t` is False for any finite now. Initialising to 0.0 or to
+        # a perf_counter() reading would delay the first TargetBulk by up to
+        # one period, and that first one is what the client is waiting for.
+        # The invariant holds at t0 too: -inf <= -inf + P.
+        self._next_send_t = float("-inf")
+        self._last_send_t = float("-inf")
+
+    def should_send(self, now: float) -> bool:
+        """Ordinary (non-flush) send decision. Consumes the budget when True."""
+        if not self.enabled:
+            return True
+        if now < self._next_send_t:
+            return False
+        # More than a whole period late (a stall, or the very first call from
+        # -inf): snap the deadline to `now` instead of carrying, so a 1 s hitch
+        # does not queue 20 catch-up sends.
+        self._record(now, snap=(self._next_send_t + self.period <= now))
+        return True
+
+    def notify_sent(self, now: float) -> None:
+        """Tell the gate a send went out outside ``should_send`` (the reset
+        flush). Snaps the deadline, so the flush does not leave the next
+        ordinary send due immediately."""
+        if not self.enabled:
+            return
+        self._record(now, snap=True)
+
+    def _record(self, now: float, snap: bool) -> None:
+        self._last_send_t = now
+        self._next_send_t = (now + self.period) if snap \
+            else (self._next_send_t + self.period)
