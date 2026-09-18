@@ -326,7 +326,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-578 tests covering URDF parsing, config resolve, suspension sizing, strategy
+605 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity check on
@@ -338,13 +338,18 @@ build-time config derivations staying live under a post-`build()` write
 `sim_options` write guard (v1.6.5), the L2 serving counters and the
 post-override capture skip gate (v1.6.6), the L2 `--send-hz` state-send gate
 (v1.6.7 — the rate limiter's realised rate, the frozen gate body and the new
-`[SERVE]` keys), and the server subpackage surface.
+`[SERVE]` keys), the wall-clock `[STATS]`/`[SERVE]` window and the benchmark's
+pooled weighting (v1.6.8 — the trigger in both modes, a byte-identity freeze of
+both `[STATS]` strings, the bare `[SERVE] [L3]` tag, the shared
+`--stats-interval` resolver and its loud clamp, and the re-weighting driven on
+windows of deliberately unequal length), and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v1.6.7 tree, `578 passed, 1 skipped in 137.19s` (CPU/WSL2, genesis-world 1.4.0,
-`pytest tests/ -q --ignore=tests/test_fusion_probe.py`, one run; the skip is
-the env-gated live server test, run it with
-`GENESIS_VEHICLE_LIVE_SERVER_TEST=1`). Earlier: `544 passed in 144.45s` at
+v1.6.8 tree, `605 passed, 3 skipped in 135.07s` (CPU/WSL2, genesis-world 1.4.0,
+`pytest tests/ -q --ignore=tests/test_fusion_probe.py`, one run; the 3 skips
+are the env-gated live server tests, run them with
+`GENESIS_VEHICLE_LIVE_SERVER_TEST=1`). Earlier:
+`578 passed, 1 skipped in 137.19s` at v1.6.7, `544 passed in 144.45s` at
 v1.6.6, `519 passed in 144.33s` at v1.6.5,
 `507 passed in 170.53s` at v1.6.4, 116 s / 450 tests at
 v1.6.2-v1.6.3, 88 s at v1.6.1 — the wall time swings more between runs than

@@ -38,7 +38,7 @@ if sys.platform == "win32":
         pass
 
 from .osc_manager import OSCManager
-from .pacing import AdaptiveCatchup, SendRateLimiter
+from .pacing import AdaptiveCatchup, SendRateLimiter, resolve_stats_interval
 from genesis_vehicle import (
     PacejkaAnisotropic, VehicleScene
 )
@@ -446,6 +446,23 @@ def main():
                              "duration avg/p95, dt budget, estimated speed "
                              "ratio, time since last switch). Off by default; "
                              "the server benchmark enables it.")
+    parser.add_argument("--stats-interval", type=float, default=1.0,
+                        help="(L2 and L3) Wall-clock length in seconds of one "
+                             "[STATS]/[SERVE] reporting window (default 1.0). "
+                             "Before v1.6.8 the window was a fixed 50 LOOPS, "
+                             "which collapsed to ~0.1 ms of wall clock on a "
+                             "server with headroom (the busy-wait spin loops "
+                             "close 50 iterations almost instantly), so the "
+                             "counters described nothing. The window now "
+                             "closes on the first loop at or after the "
+                             "interval, and consecutive windows tile the wall "
+                             "clock with no gap. RAISE it for a heavy config: "
+                             "the per-window sample count is 1 loop per loop "
+                             "duration, so at ~200 ms/loop a 1 s window holds "
+                             "~5 loops (server/benchmark.py prints loops_min "
+                             "and flags !!low-sample below 20). It also fixes "
+                             "the benchmark's runtime: --stats N takes about "
+                             "N * interval seconds of simulation.")
     parser.add_argument("--send-hz", type=float, default=None,
                         help="(L2) Downsample the state send to Unreal to H Hz "
                              "while physics keeps running at dt. Default OFF "
@@ -525,6 +542,13 @@ def main():
     if args.send_hz is not None and args.send_hz <= 0.0:
         parser.error(f"--send-hz must be > 0 (got {args.send_hz}); omit the flag "
                      f"to keep the default of one state send per loop.")
+
+    # NB: no "L3 ignores this" warning below — unlike --send-hz and
+    # --single-scene, --stats-interval is honoured by BOTH modes.
+    if args.stats_interval <= 0.0:
+        parser.error(f"--stats-interval must be > 0 seconds (got "
+                     f"{args.stats_interval}); it is the wall-clock length of "
+                     f"one [STATS]/[SERVE] window.")
 
     # [L3] Multi-env batching mode — branch to the dedicated path for many same-URDF vehicles
     if args.multi_env:
@@ -956,7 +980,7 @@ def main():
     log_count = 0
 
     # [SERVE] per-window serving counters (v1.6.6). Printed on their OWN line at
-    # the same 50-loop boundary as [STATS] and reset there — the [STATS] string
+    # the same window boundary as [STATS] and reset there — the [STATS] string
     # is frozen (server/benchmark.py and server/benchmark_collision.py each hold
     # their own regex copy of it), so new information goes on a new line.
     # Definitions (all counted over the last window):
@@ -982,7 +1006,7 @@ def main():
     #   send_skips            loops the gate suppressed. 0 whenever --send-hz
     #                         is off.
     #                         Identity, ON THE NON-LOCKSTEP PATH ONLY:
-    #                         sends + send_skips == 50. Both counters live
+    #                         sends + send_skips == loops. Both counters live
     #                         inside `if not args.lockstep:`, so under
     #                         lockstep neither increments while log_count
     #                         still does and the sum reads 0. That path is
@@ -1000,12 +1024,51 @@ def main():
     #                         attributed to the FLUSH even though it would have
     #                         gone out anyway. Read the counter as a trend, not
     #                         as "sends that only happened because of a flush".
-    #   window_ms             wall-clock length of this 50-loop window (ms,
-    #                         sleep included). It is the DENOMINATOR for the
+    #   window_ms             wall-clock length of this window (ms, sleep
+    #                         included). It is the DENOMINATOR for the
     #                         effective send rate: 1000 * sum(sends) /
-    #                         sum(window_ms). It is not a comparability gate —
-    #                         under overload a working --send-hz arm SHORTENS
-    #                         its windows, which is the flag succeeding.
+    #                         sum(window_ms). Since v1.6.8 the window is a
+    #                         fixed wall-clock interval (--stats-interval,
+    #                         default 1.0 s), so window_ms is ~1000 by
+    #                         construction and it is the LOOP COUNT that
+    #                         varies — the opposite of the v1.6.6/v1.6.7
+    #                         behaviour, where 50 loops could close in 0.1 ms.
+    #                         It is not a comparability gate.
+    #
+    # Window-shape keys (v1.6.8). The SAME five names, the same meaning and the
+    # same summability appear on the L3 [SERVE] line (server/l3_runtime.py), so
+    # server/benchmark.py can pool them across modes. They exist because the
+    # window is no longer a constant 50 loops: every per-window average the
+    # benchmark reports has to be re-weighted by the window's own loop count,
+    # and the [STATS] fields cannot supply that (they are printed .2f/.1f and
+    # read 0.00 / 0.0 on a server with headroom — rounding has already
+    # destroyed them, and no weighting recovers a 0).
+    #   loops                 loops that reached the bottom of the loop in this
+    #                         window (== the window's log_count). The weight
+    #                         for every per-loop average.
+    #   steps                 physics steps taken in this window (Sum of
+    #                         catchup_steps). The weight for ms/step.
+    #   zero_step_loops       of those loops, the ones that took NO physics
+    #                         step (the busy-wait spin loops). A large value
+    #                         says the loop population is mostly spin, which is
+    #                         why Loop Avg and steps/loop are meaningless on a
+    #                         server with headroom.
+    #   serve_ms              (Sum of loop_dur - Sum of physics_dur) * 1000 —
+    #                         everything the loop did that was not a physics
+    #                         step: capture, lerp, OSC encode/send, pacing.
+    #                         Sum(serve_ms)/Sum(window_ms) is the serving DUTY
+    #                         CYCLE. CAVEAT: it EXCLUDES the window's own
+    #                         reporting cost. The [STATS]/[SERVE] prints and
+    #                         the TimeDilation send happen AFTER loop_dur is
+    #                         stamped, so they land in the NEXT window's
+    #                         window_ms and in no serve_ms at all. Negligible
+    #                         at a 1 s window; it was NOT negligible at the old
+    #                         0.1 ms ones, which is one reason the trigger
+    #                         moved. Sleep is in window_ms only, never here.
+    #   phys_ms_sum           Sum of physics_dur * 1000. By construction
+    #                         serve_ms + phys_ms_sum == Sum(loop_dur)*1000, so
+    #                         the benchmark can rebuild Loop Avg exactly
+    #                         instead of re-weighting a rounded print.
     log_recv_loops = 0
     log_skipped_captures = 0
     log_nonskip_loops = 0
@@ -1015,9 +1078,15 @@ def main():
     log_sends = 0
     log_send_skips = 0
     log_send_flushes = 0
+    log_zero_step_loops = 0
     # Window wall-clock origin. Read fresh (never the loop's `now`) at the
     # window boundary and carried over with no gap between windows.
     _win_t0 = time.perf_counter()
+    # v1.6.8: the window closes on WALL CLOCK, not on a loop count. argparse
+    # rejects <= 0 before the L2/L3 split; resolve_stats_interval clamps the
+    # hand-built-args path, where `or 1.0` alone would let -1.0 through and
+    # close a window on EVERY loop. Both loops call the same resolver.
+    _stats_interval = resolve_stats_interval(args)
     _legacy_override_capture = bool(getattr(args, "legacy_override_capture", False))
     _serve_timers = bool(getattr(args, "serve_timers", False))
     if _legacy_override_capture:
@@ -1481,33 +1550,44 @@ def main():
         if args.lockstep and 'frame_id' in recv:
             osc.send_step_ack(recv['frame_id'])
 
-        loop_dur = time.perf_counter() - loop_start
+        _t_end = time.perf_counter()
+        loop_dur = _t_end - loop_start
         if not args.lockstep:
             pacer.update(catchup_steps, loop_dur)   # adaptive cap switch decision
 
         log_loop_dur_sum += loop_dur
         log_phys_dur_sum += physics_dur_total
         log_step_sum += catchup_steps
+        if catchup_steps == 0:
+            log_zero_step_loops += 1
         log_count += 1
 
-        if log_count >= 50:
-            # Fresh clock read, NOT the loop's `now` (:919): `now` is taken
-            # before this loop's work, so reusing it would drop the 50th loop
-            # from the window and bias the effective send rate UPWARD by ~2%.
-            # It is also bound only in the non-lockstep branch.
-            _win_now = time.perf_counter()
+        # v1.6.8: wall-clock window. The test MUST stay below `log_count += 1`
+        # — that is what makes log_count >= 1 here and the `/ _n` denominators
+        # below structurally safe from a ZeroDivisionError.
+        if _t_end - _win_t0 >= _stats_interval:
+            # `_t_end` is the loop's OWN end stamp, read AFTER the loop body
+            # and reused here at no extra clock read. That preserves the
+            # property the fresh read was introduced for: the loop that closes
+            # the window is INSIDE the window. (The loop's `now` is taken
+            # BEFORE the loop's work, and is bound only in the non-lockstep
+            # branch, so it must not be used.)
+            _win_now = _t_end
             window_ms = (_win_now - _win_t0) * 1000.0
-            avg_loop = (log_loop_dur_sum / 50.0) * 1000.0
-            avg_phys = (log_phys_dur_sum / 50.0) * 1000.0
+            # Window loop count — no longer the constant 50 (v1.6.8). Bound
+            # once so every average in this block divides by the same number.
+            _n = float(log_count)
+            avg_loop = (log_loop_dur_sum / _n) * 1000.0
+            avg_phys = (log_phys_dur_sum / _n) * 1000.0
             # Physics Avg is the SUM of catch-up steps per loop — steps/loop and
             # per-step are shown together to avoid confusion with a per-step value (v1.0.7).
-            steps_per_loop = log_step_sum / 50.0
+            steps_per_loop = log_step_sum / _n
             per_step = (log_phys_dur_sum / max(log_step_sum, 1)) * 1000.0
             print(f" [STATS] [L2] Loop Avg: {avg_loop:.2f} ms | "
                   f"Physics Avg: {avg_phys:.2f} ms "
                   f"({steps_per_loop:.1f} steps/loop, {per_step:.2f} ms/step) "
                   f"[cap={pacer.cap()}:{pacer.mode}]")
-            # [SERVE] — serving-side counters for the SAME 50-loop window. This is
+            # [SERVE] — serving-side counters for the SAME window. This is
             # deliberately a SEPARATE line: the [STATS] string above is frozen
             # (server/benchmark.py and server/benchmark_collision.py each parse it
             # with their own regex copy).
@@ -1518,6 +1598,10 @@ def main():
                       f"post_step_captures_ref={log_post_step_captures_ref} "
                       f"sends={log_sends} send_skips={log_send_skips} "
                       f"send_flushes={log_send_flushes} "
+                      f"loops={log_count} steps={log_step_sum} "
+                      f"zero_step_loops={log_zero_step_loops} "
+                      f"serve_ms={(log_loop_dur_sum - log_phys_dur_sum) * 1000.0:.3f} "
+                      f"phys_ms_sum={log_phys_dur_sum * 1000.0:.3f} "
                       f"window_ms={window_ms:.1f}")
             if _serve_timers:
                 # cap_override_us is the GROSS cost of the post-override
@@ -1531,10 +1615,17 @@ def main():
                 _serve += f" cap_override_us={log_cap_override_us:.1f}"
             print(_serve)
 
-            # Once the first 50-frame average loop-time statistic is available, send the corresponding lag speed ratio (TimeDilation) to Unreal once.
+            # Once the first windowed average loop-time statistic is available, send the corresponding lag speed ratio (TimeDilation) to Unreal once.
+            # v1.6.8 TIMING CHANGE: the window is --stats-interval seconds
+            # (default 1.0) rather than 50 frames, so on a saturated server
+            # at dt=0.025 this one-shot fires SOONER — after 1.0 s instead of
+            # 50*dt = 1.25 s — and averages ~40 loops instead of 50. On a
+            # server with headroom it fires LATER (50 spin loops used to
+            # close in ~0.1 ms). Address, payload and the one-shot-per-reset
+            # behaviour are unchanged.
             if not hasattr(main, '_dilation_sent'):
                 main._dilation_sent = True
-                avg_loop_sec = log_loop_dur_sum / 50.0
+                avg_loop_sec = log_loop_dur_sum / _n
                 if avg_loop_sec > sim_dt:
                     dilation = sim_dt / avg_loop_sec
                 else:
@@ -1547,7 +1638,7 @@ def main():
             log_step_sum = 0
             log_count = 0
             # [SERVE] counters reset on the SAME boundary, so every [SERVE] line
-            # describes exactly the preceding 50-loop window, like [STATS].
+            # describes exactly the preceding window, like [STATS].
             log_recv_loops = 0
             log_skipped_captures = 0
             log_nonskip_loops = 0
@@ -1557,6 +1648,7 @@ def main():
             log_sends = 0
             log_send_skips = 0
             log_send_flushes = 0
+            log_zero_step_loops = 0
             _win_t0 = _win_now      # no gap between consecutive windows
 
     osc.close()

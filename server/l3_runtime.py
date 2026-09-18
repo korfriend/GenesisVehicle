@@ -36,7 +36,7 @@ import genesis as gs
 from genesis_vehicle import VehicleScene
 
 from .osc_manager import OSCManager
-from .pacing import AdaptiveCatchup
+from .pacing import AdaptiveCatchup, resolve_stats_interval
 from . import env_builder
 from . import vehicle_builder
 
@@ -486,6 +486,17 @@ def run_l3(args):
     log_phys_dur_sum = 0.0
     log_step_sum = 0
     log_count = 0
+    log_zero_step_loops = 0
+    # Window wall-clock origin (v1.6.8). The window closes on --stats-interval
+    # seconds, not on a fixed 50 loops: L3 has the same busy-wait
+    # fall-through as L2, so a loop-count window collapses here too. Carried
+    # over at the boundary, so consecutive windows tile the wall clock.
+    _win_t0 = time.perf_counter()
+    # v1.6.8: the window closes on WALL CLOCK, not on a loop count. argparse
+    # rejects <= 0 before the L2/L3 split; resolve_stats_interval clamps the
+    # hand-built-args path, where `or 1.0` alone would let -1.0 through and
+    # close a window on EVERY loop. Both loops call the same resolver.
+    _stats_interval = resolve_stats_interval(args)
 
     # Input buffers (reused without reallocation)
     steer_arr = np.zeros(n_envs, dtype=np.float32)
@@ -719,29 +730,64 @@ def run_l3(args):
         if interpolated['dynamic_obstacles']:
             osc.send_dynamic_states_bulk(interpolated['dynamic_obstacles'])
 
-        loop_dur = time.perf_counter() - loop_start
+        _t_end = time.perf_counter()
+        loop_dur = _t_end - loop_start
         pacer.update(catchup_steps, loop_dur)   # adaptive cap switch decision
         log_loop_dur_sum += loop_dur
         log_phys_dur_sum += physics_dur_total
         log_step_sum += catchup_steps
+        if catchup_steps == 0:
+            log_zero_step_loops += 1
         log_count += 1
 
-        if log_count >= 50:
-            avg_loop = (log_loop_dur_sum / 50.0) * 1000.0
-            avg_phys = (log_phys_dur_sum / 50.0) * 1000.0
+        # v1.6.8: wall-clock window, same trigger as L2. It MUST stay below
+        # `log_count += 1` so log_count >= 1 and `/ _n` cannot divide by zero.
+        # `_t_end` is the loop's own end stamp, read after the loop body and
+        # reused here at no extra clock read, so the loop that closes the
+        # window is inside it.
+        if _t_end - _win_t0 >= _stats_interval:
+            window_ms = (_t_end - _win_t0) * 1000.0
+            _n = float(log_count)
+            avg_loop = (log_loop_dur_sum / _n) * 1000.0
+            avg_phys = (log_phys_dur_sum / _n) * 1000.0
             # Physics Avg is the 'sum' of catch-up steps per loop — print
             # steps/loop and per-step together to avoid confusion with the
             # per-step value (v1.0.7).
-            steps_per_loop = log_step_sum / 50.0
+            steps_per_loop = log_step_sum / _n
             per_step = (log_phys_dur_sum / max(log_step_sum, 1)) * 1000.0
             print(f" [STATS] [L3 n_envs={n_envs}] Loop Avg: {avg_loop:.2f} ms | "
                   f"Physics Avg: {avg_phys:.2f} ms "
                   f"({steps_per_loop:.1f} steps/loop, {per_step:.2f} ms/step) "
                   f"[cap={pacer.cap()}:{pacer.mode}]")
+            # [SERVE] [L3] — the window-shape keys (v1.6.8), on their own line
+            # like L2's, so server/benchmark.py can re-weight L3's headline
+            # averages by the window's real loop count instead of assuming 50.
+            # Three rules this line obeys:
+            #   * the tag is BARE `[L3]`, never `[L3 n_envs=N]`. The
+            #     benchmark's _SERVE_KV_RE harvests `k=v` from ANYWHERE on the
+            #     line, so an n_envs= in the tag would be summed as a metric.
+            #     ([STATS]'s tag keeps n_envs: _STATS_RE reads four fields and
+            #     never sees it.)
+            #   * only keys L3 can actually produce. The L2-only serving
+            #     counters (recv_loops / sends / send_skips / send_flushes /
+            #     post_step_captures*) are ABSENT, not zero: the benchmark sums
+            #     by key name, and `sends=0` would read as "L3 sent state zero
+            #     times" when L3 sends every loop.
+            #   * all six are SUMMABLE counts/sums. D (= Sum serve_ms / Sum
+            #     window_ms) and ms-per-step are DERIVED by the reader, never
+            #     printed here as a per-window ratio.
+            # serve_ms carries the same caveat as L2's: it excludes this
+            # window's own print/TimeDilation cost, which is stamped after
+            # loop_dur and lands in the NEXT window's window_ms.
+            print(f" [SERVE] [L3] loops={log_count} steps={log_step_sum} "
+                  f"zero_step_loops={log_zero_step_loops} "
+                  f"serve_ms={(log_loop_dur_sum - log_phys_dur_sum) * 1000.0:.3f} "
+                  f"phys_ms_sum={log_phys_dur_sum * 1000.0:.3f} "
+                  f"window_ms={window_ms:.1f}")
 
             if not hasattr(run_l3, '_dilation_sent'):
                 run_l3._dilation_sent = True
-                avg_loop_sec = log_loop_dur_sum / 50.0
+                avg_loop_sec = log_loop_dur_sum / _n
                 dilation = sim_dt / avg_loop_sec if avg_loop_sec > sim_dt else 1.0
                 print(f"  [Pacing] [TimeDilation] 실측 Loop Avg({avg_loop:.2f}ms) 기준 Dilation {dilation:.4f} 전송.")
                 osc.client_cpp.send_message("/Genesis/Init/TimeDilation", [float(dilation)])
@@ -750,5 +796,7 @@ def run_l3(args):
             log_phys_dur_sum = 0.0
             log_step_sum = 0
             log_count = 0
+            log_zero_step_loops = 0
+            _win_t0 = _t_end        # no gap between consecutive windows
 
     osc.close()

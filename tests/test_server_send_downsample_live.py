@@ -19,22 +19,33 @@ run. Enable with::
         genesis_vehicle/tests/test_server_send_downsample_live.py -q -s
 
 MEASUREMENT WINDOW — why this file drives the server itself instead of calling
-``benchmark.run_config``. ``run_config`` stops after N ``[STATS]`` lines, and
-one ``[STATS]`` line is 50 LOOPS, not 50 steps. The server busy-waits through
-the last <= 2 ms before each step deadline (the ``time_to_wait > 0.002``
-branch), and each of those zero-step loops used to pay for a full lerp + OSC
-send (~0.2 ms). With the gate ON they cost ~2 us instead, so the loop rate
-rises by orders of magnitude and a 50-loop window collapses to ~0.1 ms:
-measured here, the gated arm produced 13 ``[SERVE]`` windows totalling 1.1 ms
-of wall clock and ``run_config`` returned after ~50 ms of simulation. A
-FIXED WALL-CLOCK window is therefore the only comparable one. (This is a
-property of the server loop, not of the gate; it is reported as a finding.)
+``benchmark.run_config``. Through v1.6.7 one ``[STATS]``/``[SERVE]`` window was
+50 LOOPS. The server busy-waits through the last <= 2 ms before each step
+deadline (the ``time_to_wait > 0.002`` branch), and each of those zero-step
+loops used to pay for a full lerp + OSC send (~0.2 ms). With the gate ON they
+cost ~2 us instead, so the loop rate rises by orders of magnitude and a
+50-loop window collapsed to ~0.1 ms: measured on the v1.6.7 tree, the gated
+arm produced THOUSANDS of ``[SERVE]`` windows in an 8 s span at a median
+``window_ms`` of 0.0-0.1, and ``run_config --stats 5`` returned having
+observed ~25 ms of simulation. (The window COUNT repeats only to about
++-25% run to run, so the median and the observed span are the figures that
+carry the claim, not the count.)
+That finding is FIXED in v1.6.8: the window is a fixed wall-clock interval
+(``--stats-interval``, default 1.0 s) in both L2 and L3, so ``run_config`` now
+measures ``--stats`` x interval seconds. This file still drives the server
+directly because it must count arrivals AT THE CLIENT, which ``run_config``
+does not observe (it binds no listener).
 
 WHAT IT PROVES: the arrival RATE at the client drops to ~H, and the server's
 own ``[SERVE] sends`` / ``send_skips`` agree with it. Note the un-gated arm is
 NOT at 1/dt for the same reason as above: it sends on every loop including the
-zero-step busy-wait loops, so it measures ~130-150 Hz at K=1 / dt=25 ms on
-CPU/WSL2, not 40 Hz. Only a lower bound is asserted for it.
+zero-step busy-wait loops, so it measures well above the 40 Hz pacing rate.
+Observed across SEVEN runs of this harness at K=1 / dt=25 ms on CPU/WSL2,
+genesis-world 1.4.0, input 30 Hz: 123.0-146.3 Hz. That spread is the reason
+only a LOWER bound is asserted for it — the figure is a description of this
+machine over those runs, not a target, and it is not a bound: an eighth run
+may well land outside it. An earlier revision of this docstring said
+"123-144 Hz", which the very next independent run (146.25 Hz) exceeded.
 
 WHAT IT DOES NOT PROVE, explicitly:
   (i)  bit-identity of the packets on the OFF arm. That is a structural
@@ -234,8 +245,10 @@ def test_send_hz_gates_the_arrival_rate_at_the_client():
 
     # The server's own counters must tell the same story as the wire.
     assert rows_a and rows_b
-    assert all(r["sends"] + r["send_skips"] == 50 for r in rows_a), rows_a[:3]
-    assert all(r["sends"] + r["send_skips"] == 50 for r in rows_b), rows_b[:3]
+    # The identity is against the window's OWN loop count: since v1.6.8 the
+    # window is 1 s of wall clock and holds a variable number of loops.
+    assert all(r["sends"] + r["send_skips"] == r["loops"] for r in rows_a), rows_a[:3]
+    assert all(r["sends"] + r["send_skips"] == r["loops"] for r in rows_b), rows_b[:3]
     assert all(r["send_skips"] == 0 for r in rows_a), "OFF arm skipped a send"
     assert sum(r["send_skips"] for r in rows_b) > 0, "ON arm skipped nothing"
     # MockUEClient sends no reset, so no flush may fire in either arm.

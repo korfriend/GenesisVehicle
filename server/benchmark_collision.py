@@ -68,6 +68,14 @@ RECV_PORT = 7111      # server listens here (we send to it)
 SEND_PORT = 7112      # server streams state here (we DO listen — TargetBulk)
 OBS_PORT = 7114
 
+# Second copy of the frozen [STATS] regex (the other lives in benchmark.py).
+# It reads four NUMBERS and nothing about the window, so the v1.6.8 switch
+# from a 50-loop window to a --stats-interval wall-clock one needs no change
+# here: this benchmark ends on --duration, not on a [STATS] count. What DID
+# change is the cadence of the timeline below — one row per second of wall
+# clock at the server's default 1.0 s interval, instead of one per 50 loops
+# (which on a server with headroom arrived hundreds of times per second).
+# This module does not pass --stats-interval, so it gets that default.
 _STATS_RE = re.compile(
     r"\[STATS\].*Loop Avg:\s*([\d.]+)\s*ms\s*\|\s*Physics Avg:\s*([\d.]+)\s*ms"
     r"\s*\((\d+(?:\.\d+)?)\s*steps/loop,\s*([\d.]+)\s*ms/step\)")
