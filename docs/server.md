@@ -95,6 +95,13 @@ python -m genesis_vehicle.server --max-catchup-steps 1   # always-smooth (old fi
 python -m genesis_vehicle.server --legacy-override-capture  # rollback: always capture
 python -m genesis_vehicle.server --serve-timers             # + cap_override_us (GROSS cost, not a saving)
 
+# state-send downsampling (L2 only, v1.6.7): physics keeps running at dt, only
+# the SimTime+TargetBulk send to the client is gated, on a wall clock. Default
+# OFF (one send per loop). A reset is always flushed; a teleport is not and is
+# delayed by up to 1/H + one loop interval (<= 75 ms at H=20, dt=25 ms). The
+# cost is LAG, not stutter, and no speed figure is published. Full story in 2.6.
+python -m genesis_vehicle.server --send-hz 20               # 20 Hz state send, dt untouched
+
 # pacing diagnostics: dump the trigger context on every adaptive switch
 # (window steps/loop history, loop_dur avg/p95, dt budget, est speed ratio).
 # Off by default; the server benchmark (§2.1) always enables it.
@@ -117,8 +124,14 @@ python -m genesis_vehicle.server --pacing-profile
   only in `Loop Avg`. Compare `Loop Avg`, not `ms/step`, against the real-time
   budget; the exact boundaries are in §2.4.
 - runtime `[SERVE] [L2] recv_loops=… nonskip_loops=… skipped_captures=…
-  post_step_captures=… post_step_captures_ref=…` on its OWN line at the same
-  50-loop boundary — **L2 only**, v1.6.6. The serving-side counters; see §2.5.
+  post_step_captures=… post_step_captures_ref=… sends=… send_skips=…
+  send_flushes=… window_ms=…` on its OWN line at the same 50-loop boundary —
+  **L2 only**, v1.6.6, extended with the four send-gate counters in v1.6.7. The
+  serving-side counters; see §2.5 for the table and §2.6 for `--send-hz`;
+- startup `[Pacing] [Send-Rate] physics(engine dt) … | pacing … | state send …`
+  — printed in BOTH arms (v1.6.7), so the log always says whether the send gate
+  is on, off, or DEMOTED (a demoted run gets its own label, not the default
+  one).
 
 ## 2.1 Official server benchmark
 
@@ -517,8 +530,8 @@ describes exactly the preceding window. It is a SEPARATE line on purpose: the
 information goes on a new line rather than into that string.
 
 ```
- [SERVE] [L2] recv_loops=<int> nonskip_loops=<int> skipped_captures=<int> post_step_captures=<int> post_step_captures_ref=<int>
- [SERVE] [L2] ... post_step_captures_ref=<int> cap_override_us=<float>      # only with --serve-timers
+ [SERVE] [L2] recv_loops=<int> nonskip_loops=<int> skipped_captures=<int> post_step_captures=<int> post_step_captures_ref=<int> sends=<int> send_skips=<int> send_flushes=<int> window_ms=<float>
+ [SERVE] [L2] ... window_ms=<float> cap_override_us=<float>                 # only with --serve-timers
 ```
 
 | counter | counts, over the window | identity |
@@ -528,11 +541,34 @@ information goes on a new line rather than into that string.
 | `skipped_captures` | of those, the ones the gate skipped | same |
 | `post_step_captures` | post-step `capture_state` calls actually executed | — |
 | `post_step_captures_ref` | `sum(min(catchup_steps, 2))` — the post-step captures the interpolation actually consumes (`prev` and `curr`) | the reference a future catch-up capture-skip must match; it is BELOW `post_step_captures` whenever a burst runs more than 2 steps |
+| `sends` (v1.6.7) | loops that actually sent state to the client | `sends + send_skips == 50`, **on the non-lockstep path only** — see below |
+| `send_skips` (v1.6.7) | loops the `--send-hz` gate suppressed. Always `0` when the flag is off | same |
+| `send_flushes` (v1.6.7) | of `sends`, the ones forced out by a RESET flush (§2.6) | `send_flushes <= sends`. A HIGH value is **not** a good sign — it means resets are frequent, and each one is a send the rate gate did not bound |
+| `window_ms` (v1.6.7) | wall-clock length of this 50-loop window in ms, sleep included. Read fresh at the boundary, never from the loop's own `now`, and carried over with no gap between windows | the DENOMINATOR of the effective send rate: `1000 * Σsends / Σwindow_ms` |
 | `cap_override_us` | `--serve-timers` only — see below | — |
 
 `recv_loops` is counted at the skip decision, **not** at `if recv:`. A loop that
 receives `stop` breaks out before the decision; counting it earlier would break
 the identity by exactly that loop.
+
+**`sends + send_skips == 50` holds on the NON-LOCKSTEP path only.** Both
+counters live inside `if not args.lockstep:` while `log_count` does not, so
+under lockstep neither increments and the sum reads `0`. Lockstep is unreachable
+today — `--lockstep` is commented out of argparse and `args.lockstep` is forced
+`False` — so every `[SERVE]` line a user can actually produce does balance. The
+qualification stays anyway: it is a property of the branch, not of the window,
+and a test fails if it is dropped from the source comment.
+
+`send_flushes` has one attribution caveat: when a reset lands on the same loop
+as an ordinary send deadline, the send is attributed to the FLUSH even though it
+would have gone out anyway. Read it as a trend, not as "sends that only happened
+because of a flush".
+
+The four v1.6.7 keys are printed **unconditionally** (unlike `cap_override_us`)
+and all four are SUMMABLE, because `server/benchmark.py` sums `[SERVE]` keys
+across windows. A ratio key (`send_hz_eff`) is deliberately absent for the same
+reason — summing ratios is meaningless; derive the rate from `sends` and
+`window_ms`.
 
 ### `--serve-timers` — and why `cap_override_us` is not a saving
 
@@ -588,6 +624,9 @@ record carries `kinds_observable=False`.
 
 ### No serving speed figure is published
 
+*(This subsection is about the v1.6.6 capture-skip gate. v1.6.7's `--send-hz`
+publishes no figure either, for a different and structural reason — §2.6.)*
+
 v1.6.6 ships the counters and the A/B arm, and **no number**. The quoting
 threshold for this work is n ≥ 10 per arm, the planned measurement step
 specifies n ≥ 6, and no n ≥ 10 re-measurement is scheduled; the measurement
@@ -596,6 +635,254 @@ fixed in v1.6.5). Earlier figures that circulated for this work are retired and
 are not repeated in any form. If you need a number for your hardware, run both
 arms yourself with `--serve-timers` on BOTH, honour the three rules above, and
 remember that `cap_override_us` is a gross cost, not a saving.
+
+---
+
+## 2.6 `--send-hz` — state-send downsampling (v1.6.7)
+
+**L2 only. Default OFF.** Physics keeps stepping at `dt`; only the
+`/Genesis/State/SimTime` + `/Genesis/Vehicle/TargetBulk` (+ dynamic-obstacle)
+send to the client is gated. With the flag off the send block is the
+byte-for-byte pre-v1.6.7 code (it was indented, not edited) and the OFF path
+costs one attribute read and one branch — `time.perf_counter()` is not called.
+
+| abbr | meaning |
+|---|---|
+| H | the requested send rate, the `--send-hz` value (Hz) |
+| P | send period, `1/H` (s) |
+| dt | one simulation STEP duration (s) |
+| P₀ | the send period the server was achieving BEFORE the flag |
+| UE | Unreal Engine (the OSC client) |
+| ESTIMATE | a figure derived by arithmetic, not measured |
+
+```bash
+python -m genesis_vehicle.server --send-hz 20
+```
+
+```mermaid
+flowchart TD
+    A["loop reaches the send block<br/>(non-lockstep only)"] --> B{"gate enabled?<br/>(--send-hz given)"}
+    B -- no --> S["SEND (historical path)"]
+    B -- yes --> C{"did a RESET run<br/>this loop?"}
+    C -- yes --> F["SEND — hard flush<br/>notify_sent() spends the budget<br/>send_flushes += 1"]
+    C -- no --> D{"now >= next deadline?"}
+    D -- yes --> E["SEND — deadline carries by P<br/>(snaps if more than one P late)"]
+    D -- no --> G["skip<br/>send_skips += 1"]
+```
+
+### Why a wall-clock gate
+
+The cost being cut is wall-clock, the consumer (the client's render loop) is
+wall-clock, and a step-count gate would stretch the arrival interval exactly
+when the server is in slow motion. The deadline CARRIES (`_next_send_t += P`)
+instead of snapping to `now`, so an `H` that does not divide the loop rate still
+averages `H`; a stall of more than one period snaps instead, so a 1 s hitch does
+not queue 20 catch-up sends.
+
+### One budget, and the effective cap
+
+`SendRateLimiter` (`server/pacing.py`) keeps a carrying deadline
+(`_next_send_t`) and a last-send time (`_last_send_t`), and **every** send —
+ordinary or flushed — updates both through one `_record`. That gives
+
+    _next_send_t <= _last_send_t + P      (after every _record)
+
+equality on the snap path, and on the carry path because the path is entered
+only when `now >= _next_send_t_old`. From the invariant, the ordinary send
+condition (`now >= _next_send_t`) always becomes true at or before any
+"period has elapsed since the last send" condition, so the realised rate is
+bounded by **`H` + the reset-flush rate**.
+
+That bound is why an earlier design's **soft flush** — a second, independent
+budget that fired on the rising edge of an override arrival — was removed
+rather than kept: under one budget it can never fire strictly before the
+ordinary send, so it would only relabel packets. (Under its own separate
+budget it did something worse: ordinary sends never consumed it, and a 30 Hz
+override stream against a 40 Hz loop reached ≈ 33 Hz = 1.65 H.)
+
+The bound is a consequence of the invariant, not a guarantee the code checks at
+runtime; verify it per arm from the counters — `1000 * Σsends / Σwindow_ms`.
+
+### Reset is flushed. Override / teleport is not
+
+| path | under the gate | why |
+|---|---|---|
+| reset (`/Genesis/Control reset`) | **hard flush, unbudgeted** | The reset branch zeroes the accumulator, so that loop runs ZERO catch-up steps: `prev_state is curr_state` and `alpha == 0.0`, and the payload is EXACTLY the reset pose. It exists on that one loop only — swallow it and the client never sees the reset pose, because the next step advances `curr_state` |
+| override / relative command / obstacle transform (teleport) | ordinary schedule; delayed by up to **`P` + one loop interval** (**≤ 75 ms** at `H=20`, `dt=25 ms`) | Those loops do not zero the accumulator, so they can run steps and the send point is already mixed within one `dt`. There is no uniquely-correct payload that only that loop holds |
+
+The teleport delay is an **accepted, bounded cost** — the flag trades teleport
+immediacy for a rate cap. It is `P` + one loop interval rather than `P` because
+a send goes out on the first loop at or after the deadline and loop
+opportunities arrive roughly every `sim_dt`. A teleport issued immediately after
+a reset carries the same bound; the reset flush does not give it a free ride.
+
+If a scene needs teleport immediacy, raise `H` or turn the flag off for that
+scene. Re-adding a second budget is not an option — it returns the realised rate
+to 2 H.
+
+### The cost is LAG, and it differs by regime
+
+With samples arriving every `P`, the newest sample a client holds is `P/2` old
+on average and `P` old at worst. The ADDED lag is a delta against the baseline
+period `P₀` the server already achieved, **and `P₀` depends on whether the
+server is saturated**:
+
+| regime | `P₀` | added mean lag | added worst-case lag |
+|---|---|---|---|
+| SATURATED (every loop runs one step and one send) | 25 ms (= `dt`) | **+12.5 ms** | **+50 ms** |
+| WITH HEADROOM (measured OFF-arm send rate 126–137 Hz, below) | ≈ 7.3–7.9 ms | **≈ +21 ms** | **≈ +68 ms** |
+
+**ESTIMATE — this is arithmetic, not measurement.** The formulas, left visible
+so they can be re-checked (all at `H=20`, `P=50 ms`, `dt=25 ms`):
+
+    added mean  = P/2 − P₀/2
+    added worst = P + 1·dt − P₀          (+1 dt is the 0-step-loop term)
+
+    saturated:  25 − 12.5 = +12.5 ms   |   50 + 25 − 25  = +50 ms
+    headroom :  25 −  3.7 = +21.3 ms   |   50 + 25 − 7.3 = +67.7 ms
+
+The `+1 dt` term is the zero-step loop: a wall-clock gate does not MIScount such
+a loop, but it cannot stop one from consuming the send slot and emitting the
+same `(prev, curr)` pair with only `alpha` advanced.
+
+Against the readable UE client's fixed-rate follow filter
+(`FMath::VInterpTo(..., 15.0f)`, time constant ≈ 66.7 ms) that is **+19 % to
++75 %** saturated and **+32 % to +101 %** with headroom. The symptom is the car
+DRAGGING and steering feeling slow — **not** frame judder — because that client
+does no sample-to-sample interpolation and no extrapolation. Caveat: the only
+readable client copy is `/mnt/d/Genesis_Unreal/GenesisOSCBridge.cpp` (mtime
+2026-05-20, SDK 0.7.17 era) and the field runs its own fork, which was not
+inspected. **If 20 Hz reads as STUTTER rather than lag, that assumption is
+broken** — report it, because the cost structure then changes.
+
+Tune from the top down: start at a high `H`, lower it until the lag is visible,
+and back off.
+
+> The `--send-hz` help string carries only the SATURATED figure
+> (+12.5 ms mean / +50 ms worst). That figure is not wrong; it is the saturated
+> case. The regime split lives here.
+
+### Effective rate is quantised to the loop cadence
+
+A send can only happen on a loop that reaches the send block, so the realised
+interval is a multiple of the loop cadence. When `H` does not divide the loop
+rate the intervals wobble by whole cadence steps while the carry keeps the MEAN
+at `H`. Prefer an `H` that divides the pacing rate (20 at `dt = 25 ms`) when
+uniform arrival matters more than the exact value of `H`.
+
+### Rejection, demotion, and the banner
+
+* `--send-hz 0` or negative → `parser.error`. The flag is never silently dropped.
+* `H >= 1/sim_dt` → WARN and demotion to OFF. The threshold is the **pacing
+  `sim_dt`**, not `VehicleScene.effective_dt`: send opportunities are produced by
+  the catch-up loop, which consumes time in `SIM_DT` units, so an `_eff_dt`-based
+  test would let an `H` between the two through and the server would send every
+  loop while the banner claimed `H`. `_eff_dt` is used only as the physics-Hz
+  LABEL on the banner.
+* A DEMOTED run prints its own banner label (`… 강등됨(OFF)`), distinct from the
+  default label (`기본값 (--send-hz 미지정)`). A flag that is not in effect must
+  not read like a flag that was never passed.
+
+Evidence the flag took effect, with no arithmetic needed — the startup banner
+
+```
+ [Pacing] [Send-Rate] physics(engine dt) 40.0Hz (25.000ms) | pacing 25.0ms (40.0Hz) | state send 20.0Hz (50.0ms) — --send-hz 20.0 (강등 판정 기준: pacing)
+```
+
+and, every window, `[SERVE] … sends=25 send_skips=25` (against `sends=50
+send_skips=0` with the flag off).
+
+### L3 and lockstep
+
+`--multi-env` (L3) prints a WARN and keeps sending once per loop: the flag is
+not implemented there. L3 has no `[SERVE]` line and a different serving cost
+structure (one batched device-to-host copy), so the L2 evidence does not carry
+over. The gate and its counters sit entirely inside `if not args.lockstep:`, so
+the lockstep branch and the step-ack are untouched — see the identity
+qualification in §2.5.
+
+### No speed figure is published — and what would make one measurable
+
+**The benefit of `--send-hz` is NOT yet quantified, and this release publishes
+no speedup.** The obstacle is structural: a `[STATS]`/`[SERVE]` window is
+**50 LOOPS**, not a fixed wall-clock interval. With the gate on, the busy-wait
+loops that used to pay for a full lerp + OSC encode (~0.2 ms) cost ~2 µs, the
+loop rate rises, and a 50-loop window can close in **~0.1 ms** — measured while
+building the live test: the gated arm produced 13 `[SERVE]` windows totalling
+1.1 ms of wall clock. Per-loop averages over windows of such different
+wall-clock length are not comparable, so the A/B below cannot be read off the
+current instrumentation.
+
+**v1.6.8 is the release that makes it measurable**: time-based windows plus
+per-window SUMS instead of per-loop averages. Until then the flag rests on the
+structural argument and on the arrival-rate measurement below.
+
+**Withdrawal criterion, recorded in advance.** If the A/B residual
+(`Loop Avg − Physics Avg`, per-window median) moves by LESS than the spread
+WITHIN an arm, `--send-hz` is **reverted, not tuned**. A null there means
+lerp + OSC serialise/send is a small share of the residual, and the right
+follow-up is the capture / lerp / send three-way timer that splits it — not a
+knob on this flag.
+
+### Measured: arrival rate at the client
+
+| arm | `/Genesis/Vehicle/TargetBulk` arrivals |
+|---|---|
+| A — `--send-hz` off | **136.37 Hz** |
+| B — `--send-hz 20` | **20.00 Hz** |
+
+Conditions: CPU / WSL2, `genesis-world` 1.4.0, L2, K = 1 tank, `dt` 25 ms, an
+8 s window anchored on the first TargetBulk after a 2 s warm-up, three repeats
+(consistent). Harness: `tests/test_server_send_downsample_live.py`, which spawns
+real servers and is skipped unless `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`.
+
+The OFF arm is **not** at `1/dt = 40 Hz`, and is not expected to be: it sends on
+every loop including the zero-step busy-wait loops. That is the same property
+that makes the 50-loop window unusable above. Across runs the OFF arm sits at
+126–137 Hz, which is the `P₀` used in the headroom row of the lag table.
+
+This measures the arrival RATE. It does **not** prove (i) bit-identity of the
+OFF arm's packets — that is a structural argument (a frozen gate body plus an
+unconditionally `True` OFF predicate), not a measurement; nor (ii) the reset
+flush path — the mock client sends neither reset nor override, so no flush fires
+in it.
+
+### Running the A/B anyway (from v1.6.8 on, or with your own harness)
+
+`server/benchmark.py` forwards the flag (`--send-hz`, and `send_hz` in the
+record and the summary table). Run one arm with it and one without, and
+**ALTERNATE the arm order** — a single-process sequential measurement in this
+repo has already been shown to depend on slot order
+(`samples/bench_raycast_mode.py`). Compare the per-window median of the
+`serving` column, with at least 10 windows per arm.
+
+Refuse to compare the arms if any of these holds:
+
+1. Arm B's effective rate `1000 * Σsends / Σwindow_ms` exceeds `1.2 × H` (both
+   sums are on the benchmark's per-config `[serve]` summary line, which prints
+   the summed `[SERVE]` keys). The
+   margin allows a few resets and timer jitter but catches structural double
+   firing. It fails SAFE: a partial degeneration under the threshold biases the
+   measured improvement DOWNWARD, so it under-sells rather than over-sells. If
+   it trips, check `send_flushes / sends` — a large ratio means reset storms.
+2. The arms differ in `pacing_switches`. Compare that counter, not the
+   `[cap=N:mode]` token, which under-detects (a window can round-trip
+   BURST↔SMOOTH and end on the same token). If they differ, report the mode
+   change and do **not** quote a ms delta.
+3. The window count `n` differs (§2.5 rule 1).
+4. `steps/loop` differs — `Physics Avg` is a 50-loop average, not a per-step
+   value, so a different 0-step-loop frequency moves the residual for reasons
+   unrelated to serving.
+5. `--kinds` or `--input-hz` differ (§2.5 rule 3).
+6. For FIELD arms only: the `[Pacing] [TimeDilation]` values differ. The
+   benchmark path is structurally free of it (the mock client has no inbound
+   dispatcher); the readable UE copy does not subscribe to it; a field fork
+   cannot be inspected.
+
+`window_ms` is **not** a refusal criterion. Under overload a working
+`--send-hz` arm shortens its windows — that is the flag succeeding, and
+refusing on it would reject the comparison for exactly the reason it worked.
+It is used only as the denominator in rule 1.
 
 ---
 
@@ -709,6 +996,20 @@ bridge converts on its side before sending).
 | 6 | `/Init/Done` | — | client → server (ends `wait_for_initialization`) |
 | 7 | `/Genesis/Init/Pacing` | `dt:f` | server → client (confirms physics period) |
 
+> **`/Genesis/Init/Pacing` still carries the PHYSICS period (`dt`), and
+> `--send-hz` does not change it (v1.6.7).** The flag gates only the state
+> send, so with it on the period the client is TOLD (`dt`) and the period
+> packets actually ARRIVE at (`P = 1/H`) diverge — a client that derives an
+> expected arrival interval from this message will be wrong by that factor.
+> No new address was added for the send rate: `/Genesis/Init/SendRate` was
+> considered and deliberately rejected for v1.6.7 (the only readable UE bridge
+> copy subscribes to neither it nor `/Genesis/Init/Pacing`, so the benefit
+> against that copy is zero while a permanent wire-surface address is a real
+> cost). **Wire surface change in v1.6.7 is zero.** It stays a follow-up
+> candidate; redefining `Init/Pacing` to carry the send period instead is not
+> one, because that is a silent breaking change for forks that cannot be
+> inspected. See §2.6.
+
 The `urdfPath` of step 3 goes through `prepare_vehicle_urdf()` (since
 v1.1.24 — both server modes), which writes a ray-wheel-ready temp copy next
 to the original and feeds that single path to the morph, the config and the
@@ -733,7 +1034,6 @@ After build, the server also emits topology once:
 |---|---|---|
 | `/Genesis/Vehicle/Control` | `frameId:i, [id:i, steer:f, throttle:f, brake:f, aux1:f, aux2:f] × K` | per-vehicle inputs (6 fields/vehicle). `steer/throttle/brake` in `[-1,1]`/`[0,1]` |
 | `/Genesis/Control` | command string (`stop`, `reset`) | lifecycle |
-| `/Genesis/State/SimTime` | `t:f` | SIM time (s) of the TargetBulk that follows (interpolation-fractional). Lets clients finite-difference velocity in the sim's own time base — immune to server slow motion and lerped sends |
 | `/Genesis/Debug/Spheres` | `r,g,b,a, radius, (x,y,z) x N` | debug overlay: one sphere marker per point (waypoints/goals); receiving any overlay also reframes the server viewer to cover it |
 | `/Genesis/Debug/Polyline` | `r,g,b,a, radius, (x,y,z) x N` | debug overlay: draws the polyline in the server viewer (Genesis metres; e.g. a trajectory client's planned path — see sample #14) |
 | `/Genesis/Vehicle/TargetControl/Transform` | `id:i, Px,Py,Pz, Qx,Qy,Qz,Qw` | teleport (pos+quat) |
@@ -747,7 +1047,19 @@ After build, the server also emits topology once:
 
 | Address | Payload | Meaning |
 |---|---|---|
-| `/Genesis/Vehicle/TargetBulk` | per vehicle: `id:i, Px,Py,Pz, Qx,Qy,Qz,Qw, numWheels:i, (wPx,wPy,wPz, wQx,wQy,wQz,wQw, spinAngle:f) × numWheels`; trailing `-1` sentinel | all vehicle + wheel transforms, one packet/step |
+| `/Genesis/State/SimTime` | `t:f` | SIM time (s) of the TargetBulk that IMMEDIATELY follows (interpolation-fractional). Lets clients finite-difference velocity in the sim's own time base — immune to server slow motion, to lerped sends and to `--send-hz` (§2.6), since the stamp and the bulk are sent from the same block. **Listed under "client → server" before v1.6.7; that was wrong — it is sent by the server** |
+| `/Genesis/Vehicle/TargetBulk` | per vehicle: `id:i, Px,Py,Pz, Qx,Qy,Qz,Qw, numWheels:i, (wPx,wPy,wPz, wQx,wQy,wQz,wQw, spinAngle:f) × numWheels`; trailing `-1` sentinel | all vehicle + wheel transforms, one packet per SEND |
+
+> **Send cadence — "one packet/step" was WRONG and is corrected here (v1.6.7).**
+> The L2 loop sends once per non-lockstep LOOP, and a loop runs zero, one or
+> several catch-up steps: a busy-wait loop sends a re-lerped duplicate with no
+> step behind it, and a catch-up burst runs several steps behind one packet. The
+> pose is the `alpha`-lerp between the last two captured states, not a step
+> boundary. Since v1.6.7 `--send-hz` can additionally gate the send to a
+> wall-clock rate (§2.6), in which case packets arrive at `H`, not at any
+> step-derived rate. A client that needs "when is this state from" must read the
+> `SimTime` stamp above; a client that counts packets to count steps has never
+> been correct.
 
 > **Wheel pose source (v0.7.7+):** the server fills the per-wheel `wPx..wQw`
 > from `VehiclePhysics.wheel_visual_transforms("world")` — a closed-form pose

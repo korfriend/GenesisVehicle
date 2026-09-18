@@ -178,7 +178,7 @@ def run_config(mode: str, terrain: str, k: int, urdf: str, hull_obj: str,
                gpu: bool, measure_stats: int, build_timeout: float,
                python_exe: str, verbose: bool, kinds: int = 1,
                input_hz: float = 30.0, legacy_override_capture: bool = False,
-               serve_timers: bool = False) -> dict:
+               serve_timers: bool = False, send_hz: "float | None" = None) -> dict:
     """Launch server + mock client for one config; return parsed results.
 
     The returned record carries the OBSERVED kind count (``kinds``,
@@ -195,6 +195,12 @@ def run_config(mode: str, terrain: str, k: int, urdf: str, hull_obj: str,
         cmd.append("--legacy-override-capture")
     if serve_timers:
         cmd.append("--serve-timers")
+    # `is not None`, not truthiness: send_hz=0.0 must NOT be silently dropped
+    # here while the record below still reports send_hz=0.0 — that would make
+    # the record claim a rate the server never received. Forwarded, the server
+    # rejects it in argparse and this arm fails loudly instead.
+    if send_hz is not None:
+        cmd += ["--send-hz", str(send_hz)]
     if gpu:
         # Both modes accept --gpu (since v1.0.14). For L2 the GPU parallelizes
         # over LINKS within the one env (23·K of them) rather than over envs —
@@ -260,7 +266,7 @@ def run_config(mode: str, terrain: str, k: int, urdf: str, hull_obj: str,
     result = dict(mode=mode, terrain=terrain, k=k, ok=False,
                   kinds_requested=kinds, input_hz=input_hz,
                   legacy_override_capture=legacy_override_capture,
-                  serve_timers=serve_timers)
+                  serve_timers=serve_timers, send_hz=send_hz)
     t0 = time.time()
     try:
         # init burst until the server acknowledges (it polls RequestInit at 1 Hz)
@@ -386,6 +392,17 @@ def main():
                     help="pass --serve-timers to the server. When comparing two "
                          "arms, run it in BOTH arms — otherwise the arms differ "
                          "by one flag.")
+    ap.add_argument("--send-hz", type=float, default=None,
+                    help="pass --send-hz H to the server (L2 state-send "
+                         "downsampling; physics still runs at dt). Default "
+                         "None = the server default, one send per loop. For "
+                         "A/B arms: run one arm with it and one without, and "
+                         "ALTERNATE the arm order — a single-process "
+                         "sequential measurement in this repo has been shown "
+                         "to depend on slot order. Check the B arm's "
+                         "effective rate 1000*sum(sends)/sum(window_ms) from "
+                         "the [serve] summary line: above 1.2*H the arm is "
+                         "not comparable.")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="echo the server's stdout")
     args = ap.parse_args()
@@ -399,7 +416,8 @@ def main():
 
     print(f"[bench] server benchmark — modes={modes} terrain={terrains} "
           f"tanks={tanks} backend={'GPU(L3)' if args.gpu else 'CPU'} dt=0.025 rco=on "
-          f"kinds={args.kinds} input_hz={args.input_hz:g}")
+          f"kinds={args.kinds} input_hz={args.input_hz:g} "
+          f"send_hz={'off' if args.send_hz is None else args.send_hz}")
     results = []
     for mode in modes:
         for terrain in terrains:
@@ -410,7 +428,8 @@ def main():
                                args.verbose, kinds=args.kinds,
                                input_hz=args.input_hz,
                                legacy_override_capture=args.legacy_override_capture,
-                               serve_timers=args.serve_timers)
+                               serve_timers=args.serve_timers,
+                               send_hz=args.send_hz)
                 results.append(r)
                 if r.get("ok"):
                     kind_note = (f"kinds {r['kinds']}/{r['kinds_requested']} "
@@ -428,9 +447,9 @@ def main():
                     print(f"[bench]     FAILED: {r.get('error')}", flush=True)
 
     budget_ms = 25.0
-    print("\n| mode | terrain | tanks | kinds | n | ms/step | steps/loop | "
-          "Loop Avg | serving | pacing | realtime |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    print("\n| mode | terrain | tanks | kinds | n | send_hz | ms/step | "
+          "steps/loop | Loop Avg | serving | pacing | realtime |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in results:
         if r.get("ok"):
             rt = "O" if (r["steps_per_loop"] <= 1.05 and r["loop_ms"] <= budget_ms) else "X"
@@ -438,10 +457,12 @@ def main():
             pacing = r.get("pacing_mode", "?") + (f" ({sw}sw)" if sw else "")
             print(f"| {r['mode']} | {r['terrain']} | {r['k']} | "
                   f"{r['kinds'] if r['kinds_observable'] else '1*'} | {r['n']} | "
+                  f"{'off' if r.get('send_hz') is None else r['send_hz']} | "
                   f"{r['ms_per_step']:.2f} | {r['steps_per_loop']:.1f} | "
                   f"{r['loop_ms']:.2f} | {r['serving_ms']:.2f} | {pacing} | {rt} |")
         else:
             print(f"| {r['mode']} | {r['terrain']} | {r['k']} | | | "
+                  f"{'off' if r.get('send_hz') is None else r['send_hz']} | "
                   f"FAIL: {r.get('error')} | | | | | |")
     print("\n[bench] realtime O = steps/loop <= 1.05 AND Loop Avg <= 25 ms (dt budget)")
     print("[bench] serving = Loop Avg - Physics Avg (everything in the loop that "
@@ -458,7 +479,14 @@ def main():
           "--kinds 3 arm differs from a --kinds 1 arm by up to 0.1% in friction "
           "and its trajectories diverge. Compare arms at the SAME --kinds")
     print("[bench] pacing = final adaptive-catchup mode (Nsw = switch count); "
-          "trigger contexts below as [pacing] lines")
+          "trigger contexts below as [pacing] lines. Compare two --send-hz "
+          "arms by pacing_switches, NOT by the [cap=N:mode] token: a window "
+          "can round-trip BURST<->SMOOTH and end on the same token. When the "
+          "arms differ in switch count, report the mode change and do not "
+          "quote a ms delta")
+    print("[bench] send_hz = the --send-hz passed to the server ('off' = the "
+          "default one-send-per-loop). The [serve] line below carries sends / "
+          "send_skips / send_flushes / window_ms for the same windows")
     for r in results:
         if r.get("ok") and r.get("profile"):
             print(f"[profile] {r['mode']}/{r['terrain']}/{r['k']}: {r['profile']}")

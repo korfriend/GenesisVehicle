@@ -106,7 +106,10 @@ TargetBulk is preceded by `/Genesis/State/SimTime [t]` (the sim time the
 state corresponds to, interpolation-fractional). FD over a ~0.3 s window
 of `(sim_t, pos)` pairs is robust to the wire's realities — the send
 cadence is not 1:1 with sim steps (catch-up bursts, lerped/duplicate
-sends), and under load (e.g. the server viewer on) the server runs in
+sends; and since v1.6.7 the server's `--send-hz` can downsample the send
+to a wall-clock rate, which widens the cadence further — the `SimTime`
+stamp stays paired with its TargetBulk because both sit inside the same
+gate, so sim-time FD keeps working), and under load (e.g. the server viewer on) the server runs in
 SLOW MOTION, where wall-clock FD under-reads speed, the KICK
 over-throttles, and the vehicle overshoots the course in sim terms
 (measured: a 157 m miss that sim-time FD turns back into a normal PASS).
