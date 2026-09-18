@@ -235,3 +235,67 @@ class SendRateLimiter:
         self._last_send_t = now
         self._next_send_t = (now + self.period) if snap \
             else (self._next_send_t + self.period)
+
+
+# Default wall-clock length of one [STATS]/[SERVE] reporting window, in
+# seconds (v1.6.8). Mirrors the ``--stats-interval`` argparse default.
+DEFAULT_STATS_INTERVAL = 1.0
+
+
+def resolve_stats_interval(args, default: float = DEFAULT_STATS_INTERVAL) -> float:
+    """Return the ``--stats-interval`` both server loops should use (v1.6.8).
+
+    ONE function because the L2 and L3 loops must agree: a divergence between
+    them would make their windows incomparable, which is the whole point of
+    the keys the windows now carry.
+
+    ``getattr(args, "stats_interval", d) or d`` is NOT enough, and the reason
+    is worth naming: ``or`` only replaces FALSY values, so ``0.0`` and
+    ``None`` fall back but ``-1.0`` survives — and a negative interval makes
+    ``_t_end - _win_t0 >= _stats_interval`` true on EVERY loop, closing a
+    window per iteration. That is exactly the collapsed-window pathology
+    v1.6.8 exists to remove, reached by setting the option to the value that
+    most looks like "turn it off". It is the same falsy-vs-invalid confusion
+    as the ``send_hz=0.0`` bug fixed in v1.6.7.
+
+    The CLI already rejects ``<= 0`` (``physics_server.main``'s
+    ``parser.error``, raised before the L2/L3 split, so it covers both
+    modes). This clamp closes the remaining path: a caller that builds
+    ``args`` by hand — a test harness or an embedder — never reaches
+    argparse. With both in place the guarantee "the window interval is
+    positive" holds on every path into either loop, unconditionally.
+
+    A rejected value falls back to ``default`` rather than raising, because
+    these loops are already running when they read it — but it falls back
+    **LOUDLY**, on the model of the ``--send-hz`` demotion WARN. The
+    hand-built path is the only caller this function exists for, so
+    swallowing its bad value in silence would relocate the defect rather
+    than close it. The line prints once, at loop setup.
+
+    A MISSING attribute (or an explicit ``None``) is not a bad value — it is
+    "unset" — and takes the default silently.
+    """
+    raw = getattr(args, "stats_interval", None)
+    if raw is None:                       # unset: the default, no warning
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        _warn_stats_interval(raw, default, "숫자가 아닙니다")
+        return default
+    # NaN lands HERE, not in the `except` above: float("nan") parses fine and
+    # `nan > 0.0` is False — the same comparison that catches 0.0 and -1.0.
+    # Written as `not value > 0.0` rather than `value <= 0.0` for exactly
+    # that reason (`nan <= 0.0` is also False, and would let NaN through,
+    # after which the window trigger is false forever and NO window closes).
+    if not value > 0.0:
+        _warn_stats_interval(raw, default, "양수가 아닙니다")
+        return default
+    return value
+
+
+def _warn_stats_interval(raw, default: float, why: str) -> None:
+    print(f" [Pacing] [Stats-Window] [WARN] --stats-interval {raw!r}는 "
+          f"{why} — 기본값 {default:g}초로 되돌립니다. (CLI는 이 값을 "
+          f"argparse에서 거부합니다; 여기에 도달했다는 것은 args 네임스페이스를 "
+          f"직접 구성한 호출자라는 뜻입니다.)")

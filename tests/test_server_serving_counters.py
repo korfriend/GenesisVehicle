@@ -7,12 +7,25 @@
 | kind | one batched vehicle configuration; targets sharing (URDF, mapping, friction) share one |
 | SERVE | the server's per-window serving-counter stdout line (separate from the frozen STATS line) |
 
+v1.6.8 update: the reporting window is a fixed WALL-CLOCK interval
+(``--stats-interval``, default 1.0 s), not a fixed 50 loops, so the canned
+``[SERVE]`` lines below carry the six window-shape keys and the reset-boundary
+assertions split on the new trigger instead of ``if log_count >= 50:``.
+
 These are pure-Python: no scene is built and no server process is started.
 """
 import inspect
 import re
 
 import pytest
+
+# The source text of the window trigger in physics_server.main(). Every
+# "is it reset on the boundary?" assertion splits on this, and each one
+# asserts the token is PRESENT first: `str.split` on an absent separator
+# returns the whole string, so a silently renamed trigger would turn those
+# assertions into vacuous passes rather than failures. (It did exactly that
+# when the trigger moved off `if log_count >= 50:` — the tests stayed green.)
+_WINDOW_TRIGGER = "if _t_end - _win_t0 >= _stats_interval:"
 
 
 # --------------------------------------------------------------------------
@@ -87,10 +100,12 @@ def test_serve_counters_exist_and_reset_with_the_stats_counters():
         # once initialised, once printed/incremented, once reset
         assert src.count(n) >= 3, n
         assert f"{n} = 0" in src
-    # The reset happens in the same 50-loop block that resets log_count.
+    # The reset happens in the same window block that resets log_count.
     assert "log_count = 0" in src
+    assert _WINDOW_TRIGGER in src, \
+        "the window trigger was renamed; the split below would be vacuous"
     for n in names:
-        assert f"{n} = 0" in src.split("if log_count >= 50:")[-1], \
+        assert f"{n} = 0" in src.split(_WINDOW_TRIGGER)[-1], \
             f"{n} is not reset on the [STATS] window boundary"
 
 
@@ -113,7 +128,14 @@ def test_recv_loops_is_counted_at_the_skip_decision_not_at_if_recv():
     # the 'stop' break must already have happened by the counting point
     assert "cmd == 'stop'" in before_decision
     # and the counter must sit next to the skip branch, not at `if recv:`
+    assert "log_recv_loops += 1" in src
     after = src.split("log_recv_loops += 1")[1]
+    # The guard belongs on `after`, not on `src`: the name also appears in the
+    # initialisation block ABOVE the loop, so asserting it in `src` is always
+    # true and guards nothing. A split on an absent separator returns the
+    # whole remainder, which would turn both "sits BEFORE the post-step
+    # captures" assertions into "exists anywhere after the counter".
+    assert "log_post_step_captures" in after
     assert "log_nonskip_loops += 1" in after.split("log_post_step_captures")[0]
     assert "log_skipped_captures += 1" in after.split("log_post_step_captures")[0]
 
@@ -138,14 +160,26 @@ def test_serve_line_parses_with_the_benchmark_parser_and_balances():
     from genesis_vehicle.server import benchmark as bm
     line = (" [SERVE] [L2] recv_loops=50 nonskip_loops=3 skipped_captures=47 "
             "post_step_captures=52 post_step_captures_ref=50 "
+            "loops=50 steps=40 zero_step_loops=10 serve_ms=312.500 "
+            "phys_ms_sum=687.500 window_ms=1000.0 "
             "cap_override_us=4071.3\n")
     assert bm._SERVE_RE.search(line)
     kv = {k: float(v) for k, v in bm._SERVE_KV_RE.findall(line)}
     assert set(kv) == {"recv_loops", "nonskip_loops", "skipped_captures",
                        "post_step_captures", "post_step_captures_ref",
+                       "loops", "steps", "zero_step_loops", "serve_ms",
+                       "phys_ms_sum", "window_ms",
                        "cap_override_us"}
     # the accounting identity the counters are built to make decidable
     assert kv["skipped_captures"] + kv["nonskip_loops"] == kv["recv_loops"]
+    # the v1.6.8 window-shape identities (see the [SERVE] comment block in
+    # physics_server.main): the window no longer has a constant loop count, so
+    # `loops` is what every per-loop average must be weighted by.
+    assert kv["zero_step_loops"] <= kv["loops"]
+    assert kv["serve_ms"] <= kv["window_ms"]        # proven, not assumed: the
+    # loops' [loop_start, _t_end] spans are disjoint and all lie inside
+    # [_win_t0, _win_now], and sleep is counted in window_ms only.
+    assert kv["phys_ms_sum"] >= 0.0
     # the "[L2]" token has no '=' and must not leak in as a key
     assert not any(k.startswith("L") for k in kv)
 
@@ -156,11 +190,19 @@ def test_serve_line_does_not_disturb_either_stats_parser():
     from genesis_vehicle.server import benchmark_collision as bc
     stats = (" [STATS] [L2] Loop Avg: 3.86 ms | Physics Avg: 2.61 ms "
              "(1.0 steps/loop, 2.61 ms/step) [cap=5:burst]\n")
-    serve = " [SERVE] [L2] recv_loops=50 nonskip_loops=0 skipped_captures=50\n"
+    serve = (" [SERVE] [L2] recv_loops=50 nonskip_loops=0 skipped_captures=50 "
+             "loops=50 steps=40 zero_step_loops=10 serve_ms=312.500 "
+             "phys_ms_sum=687.500 window_ms=1000.0\n")
+    # v1.6.8: L3 prints a [SERVE] line too, and it must be just as invisible
+    # to both frozen [STATS] parsers.
+    serve_l3 = (" [SERVE] [L3] loops=41 steps=40 zero_step_loops=1 "
+                "serve_ms=312.500 phys_ms_sum=687.500 window_ms=1000.0\n")
     assert bm._STATS_RE.search(stats)
     assert bc._STATS_RE.search(stats)
     assert bm._STATS_RE.search(serve) is None
     assert bc._STATS_RE.search(serve) is None
+    assert bm._STATS_RE.search(serve_l3) is None
+    assert bc._STATS_RE.search(serve_l3) is None
 
 
 # --------------------------------------------------------------------------
@@ -260,10 +302,37 @@ def test_run_config_records_kinds_n_and_serving():
     for field in ("kinds=k_observed - reuse_lines", "k_observed=k_observed",
                   "reuse_lines=reuse_lines", "n=n", "serving_ms="):
         assert field in src, field
-    # serving is Loop Avg - Physics Avg
-    assert "serving_ms=(sum(r[0] for r in rows) - sum(r[1] for r in rows)) / n" in src
+    # serving is still Loop Avg - Physics Avg, but v1.6.8 computes it POOLED
+    # over the windows' own loop counts (the windows are wall-clock now and
+    # hold different loop counts, so the mean of the per-window means is
+    # biased). Both estimators must be present: the pooled one and the loud
+    # unweighted fallback for a server that prints no window keys.
+    assert "serving_ms = _serve / _loops" in src              # pooled
+    assert "loop_ms = (_serve + _phys) / _loops" in src
+    assert 'weighting = "loops"' in src
+    assert ("serving_ms = (sum(r[0] for r in rows) - sum(r[1] for r in rows)) / n"
+            in src)                                           # fallback
+    assert 'weighting = "unweighted"' in src
     # the summary table carries the serving column
     assert "serving" in inspect.getsource(bm.main)
+
+
+def test_pooled_headline_is_an_identity_not_an_approximation():
+    """`serving_ms == loop_ms - phys_ms` must hold EXACTLY under the pooled
+    estimator, because loop_ms is rebuilt from the same two [SERVE] sums
+    (`serve_ms + phys_ms_sum` is Sum(loop_dur) by construction) rather than
+    re-weighted from the rounded [STATS] print."""
+    pytest.importorskip("pythonosc")
+    from genesis_vehicle.server import benchmark as bm
+    src = inspect.getsource(bm.run_config)
+    assert "loop_ms = (_serve + _phys) / _loops" in src
+    assert "phys_ms = _phys / _loops" in src
+    assert "serving_ms = _serve / _loops" in src
+    # ms/step is the ONE column weighted by steps rather than by loops, and
+    # Sum(steps) can legitimately be 0 (every loop a zero-step spin loop), so
+    # it is guarded exactly as the server guards it with max(log_step_sum, 1).
+    assert "ms_per_step = _phys / _steps_d" in src
+    assert "_steps_d = _steps if _steps > 0 else 1.0" in src
 
 
 def test_bench_reader_keeps_the_lines_the_gate_depends_on():
@@ -320,9 +389,15 @@ def test_run_config_parses_a_replayed_server_stdout(monkeypatch):
 
     stats_line = (" [STATS] [L2] Loop Avg: {:.2f} ms | Physics Avg: {:.2f} ms "
                   "(1.0 steps/loop, 2.50 ms/step) [cap=5:burst]\n")
+    # Every window here is 50 loops, which is the ONE case where the pooled
+    # estimator and the old unweighted one agree — deliberately, so the
+    # numbers this test has always asserted keep their meaning. The unequal
+    # case is test_run_config_reweights_by_loops in test_server_stats_window.py.
     serve_line = (" [SERVE] [L2] recv_loops=50 nonskip_loops=0 "
                   "skipped_captures=50 post_step_captures=50 "
-                  "post_step_captures_ref=50\n")
+                  "post_step_captures_ref=50 loops=50 steps=50 "
+                  "zero_step_loops=0 serve_ms={:.3f} phys_ms_sum={:.3f} "
+                  "window_ms=1250.0\n")
     lines = [" [Genesis] [MODE] === L2 (per-entity) ===\n"]
     for tid in range(6):
         if tid >= 3:
@@ -333,16 +408,25 @@ def test_run_config_parses_a_replayed_server_stdout(monkeypatch):
     # window 0 is the warm-up window and must be dropped by both parsers
     for loop, phys in ((9.00, 5.00), (4.00, 2.50), (6.00, 3.50)):
         lines.append(stats_line.format(loop, phys))
-        lines.append(serve_line)
+        # serve_ms / phys_ms_sum are the per-window SUMS matching the same
+        # per-loop averages: 50 loops x (loop - phys) ms and 50 x phys ms.
+        lines.append(serve_line.format(50 * (loop - phys), 50 * phys))
 
     r = _replay(bm, monkeypatch, "L2", lines, k=6, kinds=3, measure_stats=3)
     assert r["ok"] is True
     assert r["k_observed"] == 6 and r["reuse_lines"] == 3
     assert r["kinds"] == 3 and r["kinds_requested"] == 3
     assert r["n"] == 2                                  # first window dropped
+    assert r["weighting"] == "loops"                    # v1.6.8 pooled
     assert r["loop_ms"] == pytest.approx(5.0)           # (4.00 + 6.00) / 2
     assert r["phys_ms"] == pytest.approx(3.0)           # (2.50 + 3.50) / 2
     assert r["serving_ms"] == pytest.approx(2.0)        # Loop Avg - Physics Avg
+    assert r["loops_total"] == 100 and r["loops_min"] == 50
+    assert r["low_sample"] is False
+    # D = Sum(serve_ms) / Sum(window_ms) = 200 ms / 2500 ms
+    assert r["duty"] == pytest.approx(0.08)
+    # S' = Sum(serve_ms) / Sum(steps) = 200 ms / 100 steps
+    assert r["s_prime"] == pytest.approx(2.0)
     assert r["serve_windows"] == 2                      # aligned with n
     assert r["serve_windows_match"] is True
     assert r["kinds_observable"] is True                # L2
@@ -455,7 +539,15 @@ def test_l3_reports_one_kind_and_flags_the_count_as_not_observable(monkeypatch):
     """L3 builds ONE shared kind and prints the resolved table once
     (l3_runtime: print_resolved_table("L3-shared")), so k_observed is 1 for any
     fleet size. kinds=1 is right; k_observed is NOT a target count there, and
-    the kind gate is L2-only. The L3 server also prints no [SERVE] line."""
+    the kind gate is L2-only.
+
+    v1.6.8: the L3 server DOES print a [SERVE] line now — bare `[SERVE] [L3]`
+    with the six window-shape keys and none of the L2-only serving counters.
+    Until v1.6.7 it printed none, and this test asserted serve_windows == 0;
+    that assertion would have stayed GREEN after the change (the canned input
+    is the test's own, and simply had no [SERVE] line in it), so the replay
+    input is updated here rather than left to pass while describing a server
+    that no longer exists."""
     pytest.importorskip("pythonosc")
     from genesis_vehicle.server import benchmark as bm
 
@@ -466,15 +558,28 @@ def test_l3_reports_one_kind_and_flags_the_count_as_not_observable(monkeypatch):
         lines.append(f" [STATS] [L3] Loop Avg: {loop:.2f} ms | "
                      f"Physics Avg: {phys:.2f} ms "
                      f"(1.0 steps/loop, 2.50 ms/step) [cap=5:burst]\n")
+        lines.append(f" [SERVE] [L3] loops=50 steps=50 zero_step_loops=0 "
+                     f"serve_ms={50 * (loop - phys):.3f} "
+                     f"phys_ms_sum={50 * phys:.3f} window_ms=1250.0\n")
 
     r = _replay(bm, monkeypatch, "L3", lines, k=100, kinds=1, measure_stats=3)
     assert r["ok"] is True
     assert r["k_observed"] == 1 and r["reuse_lines"] == 0
     assert r["kinds"] == 1
     assert r["kinds_observable"] is False        # 100 vehicles, K reads 1
-    assert r["serve_windows"] == 0               # no [SERVE] line in L3
-    assert r["serve_windows_match"] is True      # an empty stream is not a mismatch
+    assert r["serve_windows"] == 2               # L3 has [SERVE] since v1.6.8
+    assert r["serve_windows_match"] is True
+    assert r["weighting"] == "loops"             # L3 is re-weighted like L2
     assert r["serving_ms"] == pytest.approx(2.0)
+    # The L2-only counters must be ABSENT from the sums, not zero: the reader
+    # sums BY KEY NAME, so a `sends=0` on an L3 line would read as "L3 sent
+    # state zero times" when L3 sends every loop.
+    for absent in ("recv_loops", "sends", "send_skips", "send_flushes",
+                   "post_step_captures", "post_step_captures_ref",
+                   "nonskip_loops", "skipped_captures", "cap_override_us"):
+        assert absent not in r["serve_sum"], absent
+    # ...and the tag must not leak `n_envs` in as a summed metric.
+    assert "n_envs" not in r["serve_sum"]
 
 
 def test_serve_window_alignment_is_guarded_against_the_reader_race():
@@ -514,3 +619,9 @@ def test_run_config_short_serve_stream_is_flagged_not_silently_averaged(monkeypa
     assert r["n"] == 2
     assert r["serve_windows"] == 1
     assert r["serve_windows_match"] is False
+    # v1.6.8: an unaligned [SERVE] stream also costs the pooled weighting —
+    # the record must SAY so rather than quietly mixing estimators between
+    # two arms of a comparison.
+    assert r["weighting"] == "unweighted"
+    assert r["loops_total"] is None and r["loops_min"] is None
+    assert r["duty"] != r["duty"]        # NaN: D is not computable here

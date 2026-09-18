@@ -26,6 +26,48 @@ import pytest
 
 from genesis_vehicle.server.pacing import SendRateLimiter
 
+# Source text of the v1.6.8 wall-clock window trigger in physics_server.main()
+# (it replaced ``if log_count >= 50:``). Assertions that split on it check it
+# is PRESENT first: ``str.split`` on an absent separator returns the whole
+# string, so a renamed trigger would silently make them vacuous — which is
+# exactly what happened to these tests when the trigger changed.
+_WINDOW_TRIGGER = "if _t_end - _win_t0 >= _stats_interval:"
+
+# The OSC calls that ship this loop's state to the client. `_t_end` must be
+# stamped after all of them — that is the whole content of "after the loop's
+# work". Deliberately NOT `send_message`: the window block sends
+# /Genesis/Init/TimeDilation with it, AFTER the stamp, by design.
+_STATE_SEND_CALLS = ("send_target_states_bulk", "send_dynamic_states_bulk",
+                     "send_sim_time", "send_step_ack")
+
+
+def _main_loop(node):
+    """The `while True:` whose body carries the window counters."""
+    loops = [n for n in ast.walk(node)
+             if isinstance(n, ast.While)
+             and isinstance(n.test, ast.Constant) and n.test.value is True
+             and any(isinstance(c, ast.AugAssign)
+                     and getattr(c.target, "id", "") == "log_count"
+                     for c in ast.walk(n))]
+    assert len(loops) == 1, "expected exactly one main loop"
+    return loops[0]
+
+
+def _stmt_index(body, pred):
+    """Indices of the DIRECT statements of `body` satisfying pred(stmt)."""
+    return [i for i, st in enumerate(body) if pred(st)]
+
+
+def _assign_to(name):
+    return lambda st: (isinstance(st, ast.Assign)
+                       and any(getattr(t, "id", "") == name for t in st.targets))
+
+
+def _contains_state_send(st):
+    return any(isinstance(c, ast.Call)
+               and getattr(c.func, "attr", "") in _STATE_SEND_CALLS
+               for c in ast.walk(st))
+
 
 # ==========================================================================
 # 1. SendRateLimiter — pure unit
@@ -402,6 +444,10 @@ def test_off_path_costs_one_attribute_read_and_one_branch():
     assert "perf_counter" in seg
     assert "perf_counter" in ast.dump(blk)
     # and the pre-gate statement is just the default assignment
+    # (presence guard: `str.split` on an absent separator returns the WHOLE
+    # source, and this is a `not in` assertion — it would pass vacuously in
+    # the wrong direction if the anchor were ever reindented or renamed)
+    assert "            _do_send = True" in src
     assert "_now_s" not in src.split("            _do_send = True")[0][-400:]
 
 
@@ -513,7 +559,11 @@ def test_l3_warns_instead_of_silently_ignoring_the_flag():
     warn = [ln for ln in multi.splitlines() if "--send-hz" in ln][0]
     assert "[WARN]" in multi.split("--send-hz")[0].splitlines()[-1] or "[WARN]" in warn
     # the token discipline: [SERVE]/[STATS] mark counter/timing lines only
-    seg = multi.split("--send-hz")[0].rsplit("if args.send_hz", 1)[-1]
+    # `str.index` raises ValueError on a missing anchor, so this slice fails
+    # LOUDLY rather than widening — no presence guard is needed here, unlike
+    # the `str.split` sites elsewhere in this file. (A dead `seg` variable
+    # computed by rsplit lived here from v1.6.7 until v1.6.8; nothing read it,
+    # and the comment above it claimed to protect a check that uses `block`.)
     block = multi[multi.index("if args.send_hz"):]
     assert "[SERVE]" not in block and "[STATS]" not in block
 
@@ -525,6 +575,10 @@ def test_demotion_is_judged_against_the_pacing_dt_not_the_engine_dt():
     every loop while the banner still claimed H. ``_eff_dt`` is the banner's
     physics LABEL only."""
     src = _main_src()
+    # both anchors must exist: either split falling through would silently
+    # widen `region` to the rest of main() and weaken every assertion below
+    assert '_send_hz = getattr(args, "send_hz", None)' in src
+    assert "SIM_DT = sim_dt" in src
     region = src.split('_send_hz = getattr(args, "send_hz", None)')[1] \
                 .split("SIM_DT = sim_dt")[0]
     demote = [ln for ln in region.splitlines()
@@ -550,6 +604,10 @@ def test_banner_is_printed_in_both_arms():
     """A flag whose effect you cannot see in the log is a flag you cannot
     A/B. The [Send-Rate] line is unconditional."""
     src = _main_src()
+    # both anchors must exist: either split falling through would silently
+    # widen `region` to the rest of main() and weaken every assertion below
+    assert '_send_hz = getattr(args, "send_hz", None)' in src
+    assert "SIM_DT = sim_dt" in src
     region = src.split('_send_hz = getattr(args, "send_hz", None)')[1] \
                 .split("SIM_DT = sim_dt")[0]
     # the banner print sits at region top level (no leading `if` indent deeper
@@ -572,26 +630,96 @@ def test_banner_is_printed_in_both_arms():
 
 def test_new_serve_counters_are_initialised_printed_and_reset():
     src = _main_src()
+    assert _WINDOW_TRIGGER in src, \
+        "the window trigger was renamed; the splits below would be vacuous"
     for n in ("log_sends", "log_send_skips", "log_send_flushes"):
         assert src.count(n) >= 3, n
         assert f"{n} = 0" in src
-        assert f"{n} = 0" in src.split("if log_count >= 50:")[-1], \
+        assert f"{n} = 0" in src.split(_WINDOW_TRIGGER)[-1], \
             f"{n} is not reset on the window boundary"
     # the window origin is carried, not re-read, so windows do not gap
     assert "_win_t0 = time.perf_counter()" in src
-    assert "_win_t0 = _win_now" in src.split("if log_count >= 50:")[-1]
+    assert "_win_t0 = _win_now" in src.split(_WINDOW_TRIGGER)[-1]
 
 
-def test_window_ms_uses_a_fresh_clock_not_the_loop_now():
-    """Reusing the loop's `now` (bound at the TOP of the loop, and only in the
-    non-lockstep branch) would drop the 50th loop from the window — a ~2%
-    short window that biases the derived effective send rate UPWARD, i.e. in
-    exactly the direction that would hide a rate regression."""
+def test_window_ms_is_measured_to_a_clock_read_after_the_loop_body():
+    """INTENT (unchanged since v1.6.7; the mechanism changed in v1.6.8).
+
+    ``window_ms`` must end at a stamp taken AFTER this loop's work, so the
+    loop that closes the window is inside the window. Reusing the loop's
+    ``now`` — bound at the TOP of the loop, and only in the non-lockstep
+    branch — would drop that loop and shorten the window by ~2%, biasing the
+    derived effective send rate UPWARD, i.e. in exactly the direction that
+    would hide a rate regression.
+
+    v1.6.7 satisfied this with a dedicated ``_win_now = time.perf_counter()``
+    inside the window block. v1.6.8 needs the same stamp to TRIGGER the
+    window, so it is read once per loop as ``_t_end`` right after the loop
+    body, and ``_win_now`` binds it — no extra clock read, and the property
+    is preserved because ``_t_end``'s read still sits after the loop's work.
+    This test therefore pins the ORDERING, not the identity of the call site.
+
+    WHAT IS ENFORCED, exactly (an upper bound alone is not enough — a
+    ``_t_end`` hoisted to the top of the loop body satisfies "before the
+    counters" and reintroduces the defect, with ``loop_dur`` collapsing to
+    ~0 and ``serve_ms`` going NEGATIVE):
+
+      * ``_t_end`` is a DIRECT statement of the ``while True:`` body, not
+        nested in a branch that some loops skip;
+      * its statement INDEX is greater than that of ``loop_start`` (lower
+        bound), of the catch-up step loop, and of every OSC state-send
+        statement (the loop's work);
+      * and less than that of the ``log_count`` increment and the window
+        block (upper bound).
+    """
     main_node = _main_ast()
+    body = _main_loop(main_node).body
+
+    # `_t_end = time.perf_counter()` is read once, as a direct statement of
+    # the loop body (a read inside a branch would skip whole loops).
+    t_end = [n for n in ast.walk(main_node)
+             if isinstance(n, ast.Assign)
+             and any(getattr(t, "id", "") == "_t_end" for t in n.targets)]
+    assert len(t_end) == 1, "expected exactly one _t_end clock read"
+    assert "perf_counter" in ast.dump(t_end[0].value)
+    i_te = _stmt_index(body, _assign_to("_t_end"))
+    assert len(i_te) == 1, "_t_end is not a direct statement of the loop body"
+    i_te = i_te[0]
+
+    # LOWER bounds — the stamp follows the loop's work.
+    i_ls = _stmt_index(body, _assign_to("loop_start"))
+    assert i_ls == [0], "loop_start is not the first statement of the loop"
+    assert i_te > 0, "_t_end is hoisted to the top of the loop: loop_dur " \
+                     "would collapse to ~0 and serve_ms would go negative"
+    i_send = _stmt_index(body, _contains_state_send)
+    assert i_send, "no OSC state send found in the loop body"
+    assert i_te > max(i_send), \
+        "_t_end is stamped before the state send — the send's cost would " \
+        "fall outside loop_dur and out of serve_ms"
+    i_step = _stmt_index(
+        body, lambda st: any(isinstance(c, ast.AugAssign)
+                             and getattr(c.target, "id", "") == "catchup_steps"
+                             for c in ast.walk(st)))
+    assert i_step and i_te > max(i_step), \
+        "_t_end is stamped before the catch-up steps"
+
+    # UPPER bounds — the stamp precedes the counters it feeds.
+    incs = [n for n in ast.walk(main_node)
+            if isinstance(n, ast.AugAssign)
+            and getattr(n.target, "id", "") == "log_count"]
+    assert len(incs) == 1
+    assert t_end[0].lineno < incs[0].lineno, \
+        "_t_end must be read before the window counters, i.e. after the body"
+
     blocks = [n for n in ast.walk(main_node)
-              if isinstance(n, ast.If) and "log_count" in ast.dump(n.test)
-              and "50" in ast.dump(n.test)]
-    assert len(blocks) == 1
+              if isinstance(n, ast.If)
+              and "_win_t0" in ast.dump(n.test)
+              and "_stats_interval" in ast.dump(n.test)]
+    assert len(blocks) == 1, "expected exactly one wall-clock window block"
+    # ...and the window block runs AFTER the increment, which is what makes
+    # log_count >= 1 and the `/ _n` denominators inside it division-safe.
+    assert incs[0].lineno < blocks[0].lineno
+
     assigns = [n for n in ast.walk(blocks[0])
                if isinstance(n, ast.Assign)
                and any(getattr(t, "id", "") == "window_ms" for t in n.targets)]
@@ -602,7 +730,7 @@ def test_window_ms_uses_a_fresh_clock_not_the_loop_now():
     fresh = [n for n in ast.walk(blocks[0])
              if isinstance(n, ast.Assign)
              and any(getattr(t, "id", "") == "_win_now" for t in n.targets)]
-    assert len(fresh) == 1 and "perf_counter" in ast.dump(fresh[0].value)
+    assert len(fresh) == 1 and "_t_end" in ast.dump(fresh[0].value)
 
 
 def test_serve_line_carries_the_four_new_keys_and_stays_parseable():
@@ -614,12 +742,16 @@ def test_serve_line_carries_the_four_new_keys_and_stays_parseable():
         assert f'f"{key}' in src or f'{key}{{' in src, key
     line = (" [SERVE] [L2] recv_loops=50 nonskip_loops=0 skipped_captures=50 "
             "post_step_captures=50 post_step_captures_ref=50 sends=25 "
-            "send_skips=25 send_flushes=1 window_ms=1252.4\n")
+            "send_skips=25 send_flushes=1 loops=50 steps=50 "
+            "zero_step_loops=0 serve_ms=312.500 phys_ms_sum=687.500 "
+            "window_ms=1252.4\n")
     assert bm._SERVE_RE.search(line)
     kv = {k: float(v) for k, v in bm._SERVE_KV_RE.findall(line)}
     assert {"sends", "send_skips", "send_flushes", "window_ms"} <= set(kv)
-    # the identities the counters are built to make decidable
-    assert kv["sends"] + kv["send_skips"] == 50
+    # the identities the counters are built to make decidable. Since v1.6.8
+    # the window is a wall-clock interval, so the right-hand side is the
+    # window's OWN loop count, not the constant 50 it used to be.
+    assert kv["sends"] + kv["send_skips"] == kv["loops"]
     assert kv["send_flushes"] <= kv["sends"]
     # ...and the new keys must not disturb either frozen [STATS] parser
     assert bm._STATS_RE.search(line) is None
@@ -628,7 +760,7 @@ def test_serve_line_carries_the_four_new_keys_and_stays_parseable():
 
 def test_the_identity_comment_names_the_path_it_holds_on():
     """CLAUDE.md: a guarantee may only be stated unqualified if it holds on
-    every reachable path. `sends + send_skips == 50` holds on the
+    every reachable path. `sends + send_skips == loops` holds on the
     NON-LOCKSTEP path only — both counters sit inside `if not args.lockstep:`
     while log_count does not. Lockstep is unreachable today, so no user can
     see an unbalanced line, but the sentence is scheduled to be copied into
@@ -636,12 +768,15 @@ def test_the_identity_comment_names_the_path_it_holds_on():
     copied."""
     src = _main_src()
     ident = [ln for ln in src.splitlines()
-             if "sends + send_skips == 50" in ln]
+             if "sends + send_skips == loops" in ln]
     assert ident, "the identity is not documented at all"
-    where = src.split("sends + send_skips == 50")[0]
+    # ...and the pre-v1.6.8 form, which the wall-clock window made false,
+    # must be gone: a window no longer holds a constant 50 loops.
+    assert "sends + send_skips == 50" not in src
+    where = src.split("sends + send_skips == loops")[0]
     # the qualification sits on the comment lines immediately around it
     near = "\n".join(where.splitlines()[-3:]) + "\n".join(
-        src.split("sends + send_skips == 50")[1].splitlines()[:8])
+        src.split("sends + send_skips == loops")[1].splitlines()[:8])
     assert "LOCKSTEP" in near.upper(), near
 
 
@@ -658,7 +793,12 @@ def test_serve_keys_are_unconditional_unlike_cap_override_us():
     keys must be in the base f-string, or an A/B arm without --serve-timers
     would lose them."""
     src = _main_src()
+    # `.split(")\n")` is correct only while no line of the f-string ends in
+    # `")` — assert the anchors and that the slice really stopped inside the
+    # [SERVE] statement, rather than swallowing the rest of the block
+    assert '_serve = (f" [SERVE] [L2]' in src
     base = src.split('_serve = (f" [SERVE] [L2]')[1].split(")\n")[0]
+    assert base and "print(" not in base, base
     for key in ("sends=", "send_skips=", "send_flushes=", "window_ms="):
         assert key in base, key
     assert "cap_override_us" not in base
@@ -699,9 +839,10 @@ def test_benchmark_default_arm_passes_no_flag():
 
 
 def test_benchmark_replay_still_parses_with_the_new_serve_keys(monkeypatch):
-    """The reader sums [SERVE] keys per window; the four new ones are all
-    summable, so a canned stdout carrying them must still produce aligned
-    windows and correct sums."""
+    """The reader sums [SERVE] keys per window; the four --send-hz keys and
+    the five v1.6.8 window-shape keys are all summable, so a canned stdout
+    carrying them must still produce aligned windows and correct sums — and
+    the effective send rate must still come out of Σsends / Σwindow_ms."""
     pytest.importorskip("pythonosc")
     from genesis_vehicle.server import benchmark as bm
 
@@ -735,7 +876,9 @@ def test_benchmark_replay_still_parses_with_the_new_serve_keys(monkeypatch):
 
     serve = (" [SERVE] [L2] recv_loops=50 nonskip_loops=0 skipped_captures=50 "
              "post_step_captures=50 post_step_captures_ref=50 sends=25 "
-             "send_skips=25 send_flushes=0 window_ms=1250.0\n")
+             "send_skips=25 send_flushes=0 loops=50 steps=50 "
+             "zero_step_loops=0 serve_ms=125.000 phys_ms_sum=125.000 "
+             "window_ms=1250.0\n")
     lines = [f"{bm._TARGET_TOKEN}0\n",
              " [Genesis] Initialization Complete. Obstacles: 0\n"]
     for loop, phys in ((9.00, 5.00), (4.00, 2.50), (6.00, 3.50)):
@@ -757,3 +900,14 @@ def test_benchmark_replay_still_parses_with_the_new_serve_keys(monkeypatch):
     # the effective send rate the refuse rule uses
     eff = 1000.0 * r["serve_sum"]["sends"] / r["serve_sum"]["window_ms"]
     assert eff == pytest.approx(20.0)
+    # v1.6.8: with the window keys present the headline averages are POOLED
+    # over loops. Both windows are 50 loops here, so the values match the
+    # per-window means, and the record says which estimator produced them.
+    assert r["weighting"] == "loops"
+    assert r["loops_total"] == 100
+    # 2 windows x (125 ms serve + 125 ms phys) over 2 x 50 loops
+    assert r["loop_ms"] == pytest.approx(5.0)
+    assert r["phys_ms"] == pytest.approx(2.5)
+    assert r["serving_ms"] == pytest.approx(2.5)
+    assert r["duty"] == pytest.approx(250.0 / 2500.0)     # D = 0.1
+    assert r["s_prime"] == pytest.approx(2.5)             # 250 ms / 100 steps

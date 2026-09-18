@@ -10,6 +10,472 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.6.8] — 2026-09-18
+
+**The `[STATS]` / `[SERVE]` reporting window is now a fixed WALL-CLOCK
+interval (`--stats-interval`, default 1.0 s) in BOTH server modes instead of a
+fixed 50 LOOPS — and the honest headline is that this does NOT make `Loop Avg`
+or `steps/loop` meaningful on a server with headroom. What it makes possible is
+RECOVERY: five new summable `[SERVE]` keys (and a `[SERVE] [L3]` line, which
+L3 never had) let a reader compute the serving duty cycle `D` and the serving
+cost per physics step `S'`, neither of which depends on the loop count.** The
+`[STATS]` string itself is byte-frozen. The benchmark's five headline columns
+changed ESTIMATOR — they are now pooled over each window's own loop count —
+so figures from a pre-v1.6.8 run are not directly comparable with figures from
+this one.
+
+| abbr | meaning |
+|---|---|
+| L2 | per-entity server mode (K interacting vehicles, `n_envs=1`); the server default |
+| L3 | multi-env server mode (`--multi-env`, one URDF × `n_envs`) |
+| STATS | the server's frozen per-window timing stdout line |
+| SERVE | the server's per-window serving-counter stdout line |
+| D | serving duty cycle = Σ`serve_ms` / Σ`window_ms` |
+| S' | serving cost per physics step = Σ`serve_ms` / Σ`steps` (ms/step, dt-free) |
+| dt | one simulation STEP duration (s); 0.025 in every measurement below |
+| K | number of `/Init/Target` vehicles in a run |
+| H | the `--send-hz` value (Hz) — the L2 state-send rate cap added in v1.6.7 |
+| OSC | Open Sound Control (the UDP wire protocol the server speaks) |
+| UE | Unreal Engine (the OSC client) |
+| AST | Abstract Syntax Tree (how the source-level tests inspect the loop) |
+
+### 1. What changed, in one table
+
+| | before (≤ v1.6.7) | after (v1.6.8) |
+|---|---|---|
+| window closes when | `log_count >= 50` | `_t_end - _win_t0 >= _stats_interval` |
+| window length | whatever 50 loops happened to take | `--stats-interval` seconds (default 1.0), tiled with no gap |
+| loop count per window | constant 50 | varies — and is now PRINTED (`loops`) |
+| denominators in the block | literal `/ 50.0` (8 sites) | `_n = float(log_count)` |
+| `[STATS]` line | 4 fields | **byte-identical**, frozen by a test |
+| L3 `[SERVE]` line | none | `[SERVE] [L3]` with six keys |
+| benchmark headline averages | unweighted mean of per-window means | pooled: `Σ(x × loops) / Σloops` |
+| clock reads per loop | 1 (`loop_dur`) | 1 — `_t_end` is that same read, reused |
+
+`--stats-interval` is honoured by BOTH modes — unlike `--send-hz` and
+`--single-scene`, it carries no "L3 ignores this" warning, because L3 does not
+ignore it — and **a positive interval is enforced on every path into either
+loop**:
+
+* the CLI rejects `<= 0` with `parser.error`, raised before the L2/L3 split so
+  it covers both modes;
+* both loops then read the value through one shared resolver,
+  `pacing.resolve_stats_interval(args)` (new in this release, alongside
+  `pacing.DEFAULT_STATS_INTERVAL`), which clamps a non-positive, NaN or
+  unparseable value back to 1.0 **and prints a WARN**:
+  `[Pacing] [Stats-Window] [WARN] --stats-interval -1.0는 양수가 아닙니다 — 기본값 1초로 되돌립니다. …`
+
+One resolver rather than two, because a divergence between the L2 and L3
+windows would make their keys incomparable — which is the point of the keys.
+The obvious one-liner was not sufficient — and it never shipped, but it is
+what this work started from: `float(getattr(args, "stats_interval", 1.0) or 1.0)`
+uses `or`, which replaces only FALSY values, so `0.0` and `None` fall back
+while **`-1.0` survives** — and a
+negative interval makes the trigger true on EVERY loop, closing one window per
+iteration, which is exactly the collapsed-window pathology this release
+removes, reached by setting the option to the value that most looks like "turn
+it off". (The same falsy-vs-invalid confusion as `send_hz=0.0` in v1.6.7.)
+A hand-built args namespace — a test harness or an embedder — never reaches
+argparse, so the clamp is what closes that path; it falls back rather than
+raising because the loop is already running when it reads the value, but it
+falls back LOUDLY, on the model of the `--send-hz` demotion WARN.
+
+**Unset is not a bad value.** A missing attribute or an explicit `None` takes
+the default QUIETLY, so an embedder that never sets the option is not warned
+every run; only a supplied-and-rejected value warns, and a valid value is
+silent. NaN reaches the fallback through the COMPARISON, not the parse:
+`float("nan")` parses fine, and the check is spelled `not value > 0.0` rather
+than `value <= 0.0` because `nan <= 0.0` is also False — that spelling would
+let NaN through, after which the window trigger is false forever and NO window
+ever closes.
+
+`server/benchmark.py` forwards the flag (`--stats-interval`, `stats_interval`
+in the record) and rejects a non-positive value of its own (`sys.exit`) before
+launching anything.
+
+The trigger sits BELOW `log_count += 1` in both loops. That ordering is what
+makes `log_count >= 1` inside the block and the `/ _n` denominators
+structurally safe from a `ZeroDivisionError`; it is pinned by an AST lineno
+test in each mode rather than left as a comment.
+
+### 2. Why: the window collapsed, and the measurement collapsed with it
+
+The server busy-waits through the last ≤ 2 ms before each step deadline, so on
+a server with headroom MOST loops take no physics step at all. Fifty of those
+close almost instantly, and every per-window statistic then describes a sliver
+of wall clock in which nothing happened. v1.6.7 already recorded this as the
+reason it published no `--send-hz` speed figure (v1.6.7 §7).
+
+| quantity, `--send-hz 20` arm | before (v1.6.7 tree) | after (v1.6.8) |
+|---|---|---|
+| median `window_ms` | **0.0–0.1 ms** | **~1000 ms** |
+| simulation actually observed by `run_config --stats 5` | **25.0 ms** | **4015–4033 ms** |
+| `[SERVE]` windows per 8 s | 2049 / 2589 / 2668 — see below | ~8 |
+
+Conditions for every figure in this section: CPU / WSL2, `genesis-world`
+1.4.0, `dt` 0.025, K = 1 tank (`samples/urdf/tank_ray.urdf`),
+`--road-raycast-only`, 30 Hz input, `--stats-interval 1.0`, an 8 s measurement
+span after a 2 s warm-up. Harness:
+`tests/test_server_stats_window_live.py` (env-gated) and
+`server/benchmark.py`.
+
+**The window COUNT is deliberately not quoted as a single number.** Three runs
+of the identical 8 s harness gave 2049, 2589 and 2668 windows — a ±25% spread,
+because the count is `8 s / (a ~2 µs spin loop × 50)` and is set by scheduler
+noise. The two figures that DO repeat tightly are the median `window_ms` and
+the span of simulation `run_config` returned having observed; those are what
+carry the claim. v1.6.7 §7 quoted "13 windows totalling 1.1 ms" from a single
+build-time observation — the mechanism it described is confirmed, the specific
+count is not reproducible at that precision and should not be re-quoted.
+
+### 3. What this release does NOT fix — read this before reading the numbers
+
+**`Loop Avg`, `steps/loop` and the per-loop `serving` column are still close to
+meaningless on a server with headroom, and a longer window does not change
+that.** A 1 s window on such a server holds thousands of ~2 µs busy-wait loops
+and a few dozen real ones; averaging over `loops` averages mostly spin. They
+print `0.00` / `0.0` for the same reason they did before, and `[STATS]`'s
+`.2f` / `.1f` rounding has already destroyed the information by the time any
+reader sees it. Read those three only on a SATURATED server (`steps/loop ≈ 1.0`,
+`Loop Avg ≈ dt`).
+
+What v1.6.8 delivers is that the serving cost is now **recoverable** from
+quantities that do not depend on the loop population: `D` and `S'` (§5), built
+from per-window SUMS rather than per-loop averages. `zero_step_loops` is
+printed alongside them so the dilution is visible rather than inferred.
+
+### 4. New `[SERVE]` keys — five on L2, a whole new line on L3
+
+```
+ [SERVE] [L2] recv_loops=… nonskip_loops=… skipped_captures=… post_step_captures=… post_step_captures_ref=… sends=… send_skips=… send_flushes=… loops=<int> steps=<int> zero_step_loops=<int> serve_ms=<float> phys_ms_sum=<float> window_ms=<float>
+ [SERVE] [L3] loops=<int> steps=<int> zero_step_loops=<int> serve_ms=<float> phys_ms_sum=<float> window_ms=<float>
+```
+
+| key | counts, over one window | note |
+|---|---|---|
+| `loops` | loops that reached the bottom of the loop (the window's `log_count`) | the WEIGHT for every per-loop average |
+| `steps` | physics steps taken (Σ`catchup_steps`) | the weight for ms/step |
+| `zero_step_loops` | of `loops`, the ones that took NO physics step | the busy-wait spin loops; `zero_step_loops <= loops` |
+| `serve_ms` | (Σ`loop_dur` − Σ`physics_dur`) × 1000 — capture, lerp, OSC encode/send, pacing | `serve_ms <= window_ms`, proven, not assumed (§5) |
+| `phys_ms_sum` | Σ`physics_dur` × 1000 | `serve_ms + phys_ms_sum == Σloop_dur × 1000` by construction |
+| `window_ms` | wall-clock length of the window, sleep included | ~`1000 × --stats-interval` by construction now; it is the LOOP COUNT that varies |
+
+All five new keys are SUMMABLE counts or sums and all five are in the BASE
+f-string, not behind `--serve-timers`. No ratio is ever printed per window:
+summing ratios is meaningless, so `D` and `S'` are derived by the reader.
+
+**The L3 tag is bare `[SERVE] [L3]`, and that is load-bearing.** The
+benchmark's `_SERVE_KV_RE` harvests `key=value` from ANYWHERE on the line, so a
+`[STATS]`-shaped tag (`[L3 n_envs=100]`) would put `n_envs` into the summed
+metric dictionary. `[STATS]`'s own tag keeps `n_envs` because `_STATS_RE` reads
+four numeric fields and never sees it.
+
+**The L2-only counters are ABSENT from the L3 line, not zero.** `recv_loops`,
+`nonskip_loops`, `skipped_captures`, `post_step_captures`,
+`post_step_captures_ref`, `sends`, `send_skips`, `send_flushes` and
+`cap_override_us` have no code path in L3. The reader sums BY KEY NAME, so
+`sends=0` on an L3 line would read as "L3 sent state zero times" when L3 sends
+on every loop. Key absence is not zero.
+
+**The identity changed and the old form is now false.** It is
+`sends + send_skips == loops`, **on the non-lockstep path only** — both
+counters live inside `if not args.lockstep:` while `log_count` does not, so
+under lockstep neither increments and the sum reads 0 (lockstep is unreachable
+today: `--lockstep` is commented out of argparse and `args.lockstep` is forced
+`False`). The pre-v1.6.8 `== 50` form was true only because every window held
+exactly 50 loops; it survives nowhere in the source, the tests or the docs, and
+a test asserts that the string `sends + send_skips == 50` is GONE.
+
+### 5. The publishable metric is D — and what D excludes
+
+    D  = Σ serve_ms / Σ window_ms        serving duty cycle (dimensionless)
+    S' = Σ serve_ms / Σ steps            serving ms per physics step (dt-free)
+
+`D` is the share of wall clock the server spent on non-physics loop work.
+It is invariant to loop count, to window length and to window count, which is
+exactly what the per-loop averages are not. Sleep lands in `window_ms` only, so
+a server with headroom has a small `D` by construction. `S'` answers the other
+question — what serving cost was paid per unit of simulation — and needs no
+`dt`; divide by `dt` for a per-simulated-second figure.
+
+`serve_ms <= window_ms` is proven, not assumed: the `[loop_start, _t_end]`
+spans of the loops reaching the bottom are disjoint (one thread, sequential)
+and all lie inside `[_win_t0, _win_now]`, and the loops that `continue` after a
+sleep never accumulate `loop_dur`.
+
+**`D` EXCLUDES the window's own reporting cost.** The `[STATS]` / `[SERVE]`
+prints and the `/Genesis/Init/TimeDilation` send all happen AFTER `loop_dur` is
+stamped, so they land in the NEXT window's `window_ms` and in no `serve_ms` at
+all. At a 1 s window that is negligible; at the old ~0.1 ms windows it was not,
+which is one of the reasons the trigger had to move rather than the keys alone
+being added. This caveat is stated in the source comment block, in
+`docs/server.md` §2.5 and here, because it is a property of the definition.
+
+**No before/after `D` or `S'` figure is published in this release.** The metric
+was exercised end to end and behaves as designed (an L2 arm with `--send-hz`
+off and one with `--send-hz 20`, both producing well-formed sums over an
+identical Σ`steps`), but that is ONE process per arm in a fixed order with no
+repeats — refuse rule 5 below forbids quoting it, and this repo has already
+been burned once by an order-biased single-process comparison
+(`samples/bench_raycast_mode.py`, v1.6.1). Anyone wanting the number runs fresh
+processes per arm, alternates the arm order and takes a repeated median.
+
+### 6. The benchmark's headline columns changed estimator — old tables are not comparable
+
+`server/benchmark.py` computed each headline column as an **unweighted mean of
+the per-window means**. That was correct only because every window held exactly
+50 loops. With wall-clock windows the loop count varies and the unweighted mean
+is biased — including in the saturated regime, where a window holds
+`1 s / loop_dur` loops.
+
+The five columns are now **pooled**, and the weights come from `[SERVE]`, never
+from `[STATS]` (whose `.2f` / `.1f` prints have already lost the information):
+
+| record field | pooled formula |
+|---|---|
+| `loop_ms` | `Σ(serve_ms + phys_ms_sum) / Σloops` |
+| `phys_ms` | `Σphys_ms_sum / Σloops` |
+| `serving_ms` | `Σserve_ms / Σloops` (identically `loop_ms − phys_ms`) |
+| `steps_per_loop` | `Σsteps / Σloops` |
+| `ms_per_step` | `Σphys_ms_sum / Σsteps` — **unlike the other five columns, this one weights by `steps`, not `loops`** |
+| `duty` (`D`) | `Σserve_ms / Σwindow_ms` |
+| `s_prime` (`S'`) | `Σserve_ms / Σsteps` |
+
+`Σsteps` can legitimately be zero (every loop in every measured window a
+zero-step spin loop), so `ms_per_step` and `S'` guard it the way the server
+guards the same quotient (`max(log_step_sum, 1)`) rather than dying with a
+`ZeroDivisionError` on an otherwise `ok=True` run. `Σloops` and `Σwindow_ms`
+cannot structurally be zero — a window exists only because a loop closed it.
+
+Because the estimator changed, **`docs/server.md` §2.1's reference tables and
+any other pre-v1.6.8 figure are not directly comparable with a run from this
+release** — the window length AND the weighting both moved. They are annotated
+in place rather than retracted: the quantities themselves were not wrong for
+the regime they were measured in (saturated, 50-loop windows).
+
+Supporting changes, all about making the estimator VISIBLE:
+
+* a **`weighting` field** in every record (`"loops"` or `"unweighted"`) and a
+  new **`weighting` column** in the markdown summary table, because that table
+  is the artifact that gets pasted into docs;
+* a LOUD fallback: if the `[SERVE]` stream is short/unaligned
+  (`serve_windows != n`) or lacks the window keys (a pre-v1.6.8 server binary),
+  the old unweighted estimator runs, the record says so, and the progress line
+  carries `!!unweighted`. It never falls back silently;
+* the footer now prints **`!! MIXED ESTIMATORS`**, naming the offending rows,
+  instead of the `POOLED` caption whenever any row fell back — a caption alone
+  cannot describe a table whose rows disagree;
+* sample-size visibility: `loops_total` / `loops_min` / `loops_max` in the
+  record, `loops=Σ (min..max)` on the progress line and the `[serve]` summary,
+  and `!!low-sample` when `loops_min < 20` (computed over the measured windows
+  only — the dropped warm-up window would skew the minimum). A saturated 1 s
+  window holds ~40 loops and passes; a K=400 config at ~200 ms/loop holds ~5
+  and needs `--stats-interval` raised;
+* the refuse list on the footer grew from 3 rules to **7**: (1)
+  `serve_windows != n`; (2) the arms' Σ`steps` differ by more than 5%; (3) only
+  one arm saturated, or materially different `zero_step_loops/loops`; (4)
+  different `pacing_switches`; (5) not fresh processes with alternated order
+  and a repeated median; (6) either arm `!!unweighted`; (7) either arm
+  `!!low-sample`;
+* `WIRE_DT = 0.025` is hoisted to one module constant (it was three separate
+  literals: the `/Genesis/Init/Physics` payload, the banner, and the real-time
+  verdict's budget) and recorded as `result["dt"]`. **The budget is
+  `WIRE_DT * 1000.0` — milliseconds**; substituting the seconds value would
+  have set a 0.025 ms budget and flipped every row to `X`.
+
+### 7. TimeDilation: same wire, different timing
+
+`/Genesis/Init/TimeDilation` keeps its address, its payload and its
+fire-once-per-reset behaviour. Only WHEN it fires moved, because it fires on
+the first closed window:
+
+* on a SATURATED server at `dt` 0.025 it now fires after ~1.0 s instead of
+  50·dt = 1.25 s, and averages ~40 loops instead of 50 — the same statistic on
+  a slightly smaller sample;
+* on a server with headroom it fires LATER (50 spin loops used to close in
+  ~0.1 ms). The value is unaffected in practice: spin dilution already put
+  `avg_loop_sec` below `sim_dt`, so the guard returns `1.0` in both trees.
+
+One new degenerate case is possible — a single loop longer than the interval
+gives a one-sample window. It is deliberately NOT guarded; the `loops` key
+exposes it. A UE fork that depends on the ARRIVAL TIME of this one-shot (the
+readable client copy does not subscribe to it at all) should be aware of the
+shift.
+
+### 8. `[STATS]` is byte-frozen
+
+Two independent regex copies parse that line (`server/benchmark.py`,
+`server/benchmark_collision.py`) and a field fork may parse it too, so not one
+character of the f-string changed in either mode — only the denominators behind
+it. A test compares both f-string literals against hardcoded expected text, and
+another test asserts both regex copies still match a synthetic `[STATS]` line
+and match NEITHER `[SERVE]` line.
+
+`server/benchmark_collision.py` needs no code change: it ends on `--duration`,
+not on a `[STATS]` count, and its regex reads four numbers. What did change for
+it is CADENCE — its `[STATS]` timeline is now one row per second of wall clock
+(it passes no `--stats-interval`, so it gets the server default) instead of one
+row per 50 loops, which on a server with headroom arrived hundreds of times per
+second. That is documented in a comment above its regex copy.
+
+### 9. Deliberately NOT fixed in this release
+
+Three known items were left alone, as follow-ups rather than oversights:
+
+* **the busy-wait fall-through itself** (`server/physics_server.py`,
+  `server/l3_runtime.py`): a loop that cannot step yet still reaches the bottom
+  of the loop and counts. That is what makes `Loop Avg` and `steps/loop`
+  meaningless with headroom (§3). The window change exposes it (via
+  `zero_step_loops`); it does not remove it;
+* **suppressing state sends on zero-step loops**: the server still sends a
+  re-lerped duplicate on a loop with no step behind it. That is the reason the
+  v1.6.7 OFF arm measures 126–137 Hz rather than `1/dt` = 40 Hz;
+* **`AdaptiveCatchup` is still LOOP-COUNT based** (`window=25`, `grace=100`,
+  `cooldown=50`). `server/pacing.py` is modified in this release — it gained
+  the `--stats-interval` resolver — but the pacer itself was not touched. Spin loops therefore still dilute
+  its steps/loop history and delay a BURST→SMOOTH transition. This is not a new
+  problem — it behaves exactly as it did before v1.6.8 — but it is now the only
+  loop-count window left in the server;
+* **the clock-ordering test's anchor list is a WHITELIST, and that is a
+  structural limit of the approach.**
+  `test_window_ms_is_measured_to_a_clock_read_after_the_loop_body` checks that
+  `_t_end`'s statement index sits after every OSC state send it KNOWS about
+  (`send_target_states_bulk`, `send_dynamic_states_bulk`, `send_sim_time`,
+  `send_step_ack`). A send helper added later, after the stamp, is simply not
+  in the list and goes undetected — demonstrated by a reviewer who inserted
+  `osc.client_cpp.send_message("/Genesis/Telemetry", ...)` after the stamp and
+  watched 57 tests pass. The list cannot be replaced by "any `osc.*` call",
+  because the window block legitimately sends `/Genesis/Init/TimeDilation`
+  AFTER the stamp by design. Recorded, not fixed: anyone adding a per-loop
+  send must add it to `_STATE_SEND_CALLS`.
+
+### 10. Two tests were passing VACUOUSLY, and that is the repo's recurring defect
+
+`tests/test_server_serving_counters.py` and
+`tests/test_server_send_downsample.py` each asserted "this counter is reset
+INSIDE the window block" with
+
+```python
+assert f"{n} = 0" in src.split("if log_count >= 50:")[-1]
+```
+
+`str.split` on a separator that is not present returns **the whole string**, so
+the moment the trigger was renamed those assertions degraded from "is it inside
+the window block?" to "does it appear anywhere in `main()`?" — and stayed
+GREEN. This is the same defect class as a docstring that outlives its code, and
+it is the one this repo keeps hitting.
+
+Fixed by asserting the anchor is PRESENT before splitting on it, at those two
+sites and at **six others** in the same files that had the same shape
+(`_do_send = True`, `if args.send_hz`, the two `_send_hz` / `SIM_DT` region
+splits, the `[SERVE]` base-f-string slice, and the `log_recv_loops += 1`
+ordering split). The anchor itself is now a module constant
+(`_WINDOW_TRIGGER`) so a future rename fails loudly in one place.
+
+Two more corrections of the same kind:
+
+* `test_l3_reports_one_kind_and_flags_the_count_as_not_observable` asserted
+  `serve_windows == 0` with the docstring "The L3 server also prints no
+  `[SERVE]` line." The assertion would have stayed green after this change —
+  its input is a CANNED stdout that simply contained no `[SERVE]` line — while
+  its docstring became false. The canned input now carries an L3 `[SERVE]` line
+  and the test asserts the real window count, the pooled weighting, and that
+  none of the L2-only keys (nor `n_envs`) reached the summed dictionary;
+* `test_window_ms_uses_a_fresh_clock_not_the_loop_now` pinned the
+  IMPLEMENTATION (`_win_now = time.perf_counter()`) rather than the property.
+  v1.6.8 binds `_win_now = _t_end`, which preserves the property — a stamp read
+  AFTER the loop body, so the loop that closes the window is inside it — at no
+  extra clock read. The test is rewritten as
+  `test_window_ms_is_measured_to_a_clock_read_after_the_loop_body` and now pins
+  the ORDERING: `_t_end` is a direct statement of the loop body (not nested in
+  a branch some loops skip), its index is above `loop_start`, the catch-up loop
+  and every OSC state send, and below the `log_count` increment and the window
+  block. An upper bound alone would have accepted a `_t_end` hoisted to the top
+  of the loop, which collapses `loop_dur` to ~0 and drives `serve_ms` NEGATIVE.
+
+### 11. Tests
+
+`tests/test_server_stats_window.py` — **26 tests, pure Python**; no scene is
+built and no server process is started. It pins: the wall-clock trigger in BOTH
+`main()` and `run_l3()` with no literal `50` left in either test; zero
+`/ 50.0` denominators remaining; the window block running AFTER the `log_count`
+increment (the division-safety invariant) in both modes; the `_n` denominators
+with `per_step` still dividing by `log_step_sum`; a byte-identity freeze of
+both `[STATS]` f-strings; both `_STATS_RE` copies still matching a synthetic
+`[STATS]` and matching NEITHER `[SERVE]` line; the bare `[L3]` tag yielding
+exactly the six keys with no `n_envs`; the five shared keys present in both
+modes and, on L2, in the base f-string outside the `--serve-timers` gate; the
+identities (`sends + send_skips == loops`, `zero_step_loops <= loops`,
+`serve_ms >= 0`, `serve_ms <= window_ms`, `phys_ms_sum >= 0`,
+`serve_ms + phys_ms_sum == Σloop_dur × 1000`) — `serve_ms >= 0` is on that
+list because the upper bound ALONE lets a negative through, which is exactly
+how a mutation of the stamp position escaped detection; the L2-only keys
+absent from the L3 line; `zero_step_loops` initialised / incremented / reset in both modes; the
+window origin carried rather than re-read; `_win_now` binding `_t_end`;
+`--stats-interval` validated and shared by both modes with no L3 warning; the
+benchmark forwarding it; `budget_ms` being milliseconds. Three cases cover the
+resolver: `resolve_stats_interval` clamping `-1.0` / `-1e-9` / `0.0` / `-0.0` /
+NaN / an unparseable string back to 1.0 while passing valid values through
+(including the string `"0.25"` and a caller-supplied `default`); the fallback
+being LOUD for every rejected value and SILENT for unset (missing attribute,
+explicit `None`) and for valid ones; and both loops calling that one resolver,
+with no local `or`-style fallback left in either. And — the MAJOR
+regression guards — `run_config` re-weighting by `loops` on three synthetic
+windows of deliberately unequal length (40 / 4000 / 38 loops), with the value
+the unweighted estimator WOULD have produced asserted to differ, the loud
+`"unweighted"` fallback, the sample-size record, survival of a zero-`steps`
+window, the summary table's `weighting` column on every row, the
+`!! MIXED ESTIMATORS` footer replacing the pooled caption whenever any row
+fell back, and the `!!low-sample` marker.
+
+`tests/test_server_stats_window_live.py` — **2 tests, SKIPPED** unless
+`GENESIS_VEHICLE_LIVE_SERVER_TEST=1`. Spawns real servers: window length tracks
+the interval in both `--send-hz` arms, the per-line identities hold on the
+wire, and the L3 server prints a `[SERVE] [L3]` line parsing into exactly six
+keys with no `n_envs`. It prints `zero_step_loops` so the spin dilution is
+visible, and its docstring states what it does not prove (nothing about the
+QUALITY of `Loop Avg`, and its ms figures are not a benchmark — one process per
+arm, no alternation, no repeats).
+
+Updated: `tests/test_server_serving_counters.py` (25 → **26**; canned `[SERVE]`
+lines carry the six keys, the L3 replay case rewritten per §10, a new test that
+`serving_ms == loop_ms − phys_ms` is an IDENTITY under the pooled estimator
+rather than an approximation), `tests/test_server_send_downsample.py` (34, one
+test rewritten per §10 plus the `== loops` identity), and
+`tests/test_server_send_downsample_live.py` (the hard `== 50` assertions became
+`== r["loops"]`; its header no longer describes the collapse as an open
+finding).
+
+Suite on this tree: **`605 passed, 3 skipped in 135.07s`**
+(`python -m pytest tests/ -q --ignore=tests/test_fusion_probe.py`, CPU / WSL2,
+genesis-world 1.4.0, one run, no warm-cache control). 578 at v1.6.7 + 26 + 1 =
+605; the 3 skips are the three env-gated live server tests. A BARE
+`pytest tests/` on this working tree also collects the untracked
+`tests/test_fusion_probe.py` (53 cases from a parallel workstream that is not
+part of this repo) and reports `658 passed, 3 skipped`.
+
+### 12. Files
+
+| file | change |
+|---|---|
+| `server/pacing.py` | `+DEFAULT_STATS_INTERVAL`, `+resolve_stats_interval(args, default=1.0)` and its WARN helper — the ONE resolver both loops read the interval through. `AdaptiveCatchup` and `SendRateLimiter` behaviour is unchanged, and the module still imports only `time` + `collections`, so the resolver is testable without genesis or pythonosc |
+| `server/physics_server.py` | `--stats-interval` argparse + `parser.error`; the interval read through `pacing.resolve_stats_interval`; `_t_end` / `_win_t0` wall-clock trigger; `_n` denominators; `log_zero_step_loops`; five new `[SERVE]` keys in the base f-string; the `[SERVE]` definition comment block rewritten (including the D caveat and the `== loops` identity) |
+| `server/l3_runtime.py` | the same resolver call, trigger, origin, denominators and counter, plus the NEW `[SERVE] [L3]` line with its three rules recorded in place |
+| `server/benchmark.py` | `--stats-interval` CLI + forwarding + record; pooled headline estimator with the loud `"unweighted"` fallback; `duty` / `s_prime` / `weighting` / `loops_total` / `loops_min` / `loops_max` / `low_sample`; the `weighting` table column; `!! MIXED ESTIMATORS` footer; 7 refuse rules; `WIRE_DT` hoist and `result["dt"]` |
+| `server/benchmark_collision.py` | comment only — why the frozen regex needs no change and how its timeline cadence moved |
+| `tests/` | `+test_server_stats_window.py`, `+test_server_stats_window_live.py`, three files updated (§10, §11) |
+| `docs/server.md` | Diagnostics bullets, §2.1 comparability note + `--stats-interval` guidance, §2.5 line schema / counter table / new key table / L3 subsection, §2.5 comparability rules 3 → 7, §2.6 §7-related corrections |
+| `docs/testing.md`, `docs/index.md`, `README.md` | suite figures, the two new test-file rows, the `[SERVE]` key lists |
+
+Not touched: the physics pipeline (`_pipeline.compute_wheel_step`), the L1 / L2
+/ L3 batching axes, `_gs_compat.py` (this change uses no engine symbol),
+`server/osc_manager.py`, the OSC schema, `samples/`, `GeneVehicle_*`. Note
+`server/pacing.py` IS modified in this release (the resolver above) — what is
+unchanged there is the BEHAVIOUR of `AdaptiveCatchup` and `SendRateLimiter`,
+including the loop-count windows named in §9.
+
+---
+
 ## [1.6.7] — 2026-09-18
 
 **The L2 server can now downsample its state send to the client without
