@@ -8,7 +8,7 @@ distances captured from the tree BEFORE any of this landed.
 
 Baseline capture
 ----------------
-* commit ``20f7380776b64de81ed5ebd6f366128187f79206`` (``genesis_vehicle/``),
+* commit ``37b8b7943f7000245e462e53090d2ce3b303dd70`` (``genesis_vehicle/``),
   plus the then-uncommitted v1.5.1 terrain-sample fix and the v1.5.2
   ray-miss/grounded work that were already in the working tree — i.e. the tree
   exactly as it stood at the START of the swept-envelope change, with none of it
@@ -22,12 +22,12 @@ Re-capture for genesis-world 1.4.5 (SDK v1.6.9)
 The baselines are kept PER ENGINE VERSION (``BASELINES`` below); a version that
 is not in the table skips, it does not compare against another engine's
 numbers. The 1.4.5 entry was captured from the same pre-change commit
-``20f7380`` (a ``git archive`` of the commit itself; the uncommitted v1.5.1 /
+``37b8b79`` (a ``git archive`` of the commit itself; the uncommitted v1.5.1 /
 v1.5.2 working-tree additions above are not in it), with genesis-world 1.4.5 /
 quadrants 1.3.3 / trimesh 5.2.0, CPU backend, and the identical rollout. The
 method was validated by running that same archive on genesis-world 1.4.0, where
 it reproduced the 1.4.0 entry bit-for-bit. Running the then-current tree
-(``df4f9bb``, v1.6.8) on 1.4.5 gave the same 1.4.5 numbers. The 1.4.0 entry is
+(``54b3959``, v1.6.8) on 1.4.5 gave the same 1.4.5 numbers. The 1.4.0 entry is
 kept so the test still guards a rollback to 1.4.0.
 
 A failure here means the default contact path changed. It is NOT a tolerance
@@ -51,7 +51,7 @@ from genesis_vehicle.raycast import (
 URDF = os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
                                     "samples", "urdf", "car_4w.urdf"))
 
-BASELINE_COMMIT = "20f7380776b64de81ed5ebd6f366128187f79206"
+BASELINE_COMMIT = "37b8b7943f7000245e462e53090d2ce3b303dd70"
 
 #: genesis-world version -> {step index -> the four wheel distances of the
 #: reference car (float32), "final_pos" -> the chassis position after step 199}.

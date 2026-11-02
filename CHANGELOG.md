@@ -46,7 +46,7 @@ change; nothing is fixed there.**
 Every measurement below: CPU backend, WSL2, 8 cores, one fresh process per run,
 a separate QD cache per engine version (two interpreters sharing
 `~/.cache/quadrants` recompile on every alternation and made planning-time build
-timings 5-10x noisy; those are not quoted). "pre tree" is `df4f9bb` (v1.6.8),
+timings 5-10x noisy; those are not quoted). "pre tree" is `54b3959` (v1.6.8),
 "post tree" this release.
 
 ### 1. Deploying: the floor and the dependency set
@@ -379,10 +379,10 @@ measurement taken once at the bump, not a standing guarantee.
 
 `tests/test_fan_default_identity.py` compares a 200-step reference-car rollout
 with `torch.equal` against a baseline captured from the pre-v1.5.1 commit
-`20f7380`. Through v1.6.8 the baseline existed for 1.4.0 only and the test
+`37b8b79`. Through v1.6.8 the baseline existed for 1.4.0 only and the test
 SKIPPED on any other engine. It is now `BASELINES = {"1.4.0": ..., "1.4.5":
 ...}`; a version not in the table still skips. The 1.4.5 entry was captured by
-running a `git archive` of `20f7380` on B with the identical rollout; the method
+running a `git archive` of `37b8b79` on B with the identical rollout; the method
 was validated by running the same archive on A, which reproduced the 1.4.0
 entry bit-for-bit, and the v1.6.8 tree on B gives the same 1.4.5 numbers.
 Final chassis position: 1.4.0 `(5.92042875289917, 0.03004419431090355,
@@ -1640,7 +1640,7 @@ exactly that `dt` — and listed as deferred in §8.
 
 **The `/Reset` handler was a SECOND crash site, not just a dead knob.** At
 HEAD it ran `vs.sim_options.gravity = ...` and `vs.sim_options.dt = ...`
-(`server/physics_server.py:911-912` at `6b5dd50`), on the same removed
+(`server/physics_server.py:911-912` at `24e265e`), on the same removed
 accessor as the startup write — so on genesis 1.4.0 a client that reached
 `/Reset` would have taken the same `AttributeError`, had the startup write not
 already killed the process first. On 1.3.3 both lines ran and did nothing. The
@@ -2355,7 +2355,7 @@ installed and stepping, not a half-built zombie.
 ### This release did not cause it — v1.5.0 is affected identically
 
 The field team's deployed **v1.5.0 has the same defect**. Release commit
-`8916b18` was extracted with `git archive` into a scratch tree (the checkout and
+`44b256a` was extracted with `git archive` into a scratch tree (the checkout and
 `.git` untouched, no worktree metadata), its `[genesis_vehicle] v1.5.0` banner
 confirmed, and the same probe run against it — only the `_stepped_once` line
 adapted, since it was a scalar bool before v1.5.2. The `omega` loss is
@@ -2939,7 +2939,7 @@ spawned at `z=1.0` on a friction-1.0 plane, 60 steps of `brake=1` then 140 of
 `throttle=0.5`. Wheel distances at steps 49/99/149/199 and the final chassis
 position are compared with `torch.equal` — **bit-identical, not `allclose`** —
 against a baseline captured from the tree as it stood BEFORE any of this work
-(commit `20f7380` plus the then-uncommitted v1.5.1 and v1.5.2 changes). Final
+(commit `37b8b79` plus the then-uncommitted v1.5.1 and v1.5.2 changes). Final
 position `(5.92042875289917, 0.03004419431090355, 0.1114146038889885)`.
 
 Because that baseline predates 1.5.1 and 1.5.2 as well, the same comparison
