@@ -287,3 +287,73 @@ def test_collision_false_single_scene_fails_fast(cpu_genesis, cube_obj):
         env_builder.build_obstacles(
             vs=vs, init_data=_mesh_init(0, "[Complex]", cube_obj),
             ue_friction=1.0, ue_restitution=0.0, vis_mode=None, road_raycast_only=True)
+
+
+# ---------------------------------------------------------------------------
+# v1.6.9: every collision geom build_obstacles creates is CONVEX
+# ---------------------------------------------------------------------------
+
+def _open_road_obj(path, nx=11, ny=5):
+    """A small bumpy OPEN road strip — the shape a UE '[Complex]' road has
+    (an open surface, not a closed solid), so the double-siding + CoACD path is
+    exercised on what it actually receives."""
+    import numpy as np
+    xs, ys = np.meshgrid(np.linspace(0.0, 10.0, nx), np.linspace(0.0, 4.0, ny), indexing="ij")
+    zs = 0.3 * np.sin(xs / 2.0) + 0.1 * np.cos(ys)
+    verts = np.stack([xs.ravel(), ys.ravel(), zs.ravel()], 1)
+    faces = []
+    for i in range(nx - 1):
+        for j in range(ny - 1):
+            a, b, c, d = i * ny + j, (i + 1) * ny + j, (i + 1) * ny + j + 1, i * ny + j + 1
+            faces += [[a, b, c], [a, c, d]]
+    trimesh.Trimesh(verts, np.array(faces)).export(path)
+    return path
+
+
+def test_build_obstacles_creates_only_convex_collision_geoms(cpu_genesis, cube_obj, tmp_path):
+    """The server gives every obstacle `_gs_compat.COARSE_SDF_MATERIAL_KW` (a
+    16-node SDF grid). That is only safe because a convex geom's SDF is never
+    read; this pins the premise on every build_obstacles branch — primitive
+    types 1-4, the type-5 exact-hull path, the type-5 [Complex] CoACD
+    double-sided road, a physics-dynamic (b_dynamic=1) mesh and a UE-driven
+    (b_dynamic=2) mesh — by building the scene and reading the engine's own
+    convexity, plus the collider's has_nonconvex_nonterrain flag. The dynamic
+    mesh guarantees real collision pairs, so the flag is not vacuously False."""
+    road = _open_road_obj(str(tmp_path / "road.obj"))
+    # A NON-convex input for the exact-hull branch: that branch is only safe
+    # because it convexifies, which a convex cube could not show.
+    ring = str(tmp_path / "ring.obj")
+    trimesh.creation.annulus(r_min=0.3, r_max=0.6, height=0.4).export(ring)
+
+    def obs(i, typ, col_src="", mesh="", b_dynamic=0, pos=None):
+        return dict(type=typ, pos=pos or [6.0 * i, 20.0, 1.0], quat=[1.0, 0.0, 0.0, 0.0],
+                    scale=[1.0, 1.0, 1.0], collision_source=col_src, mesh_path=mesh,
+                    b_dynamic=b_dynamic, mass=2.0, friction=-1.0, restitution=-1.0)
+
+    init = {"obstacles": {
+        0: obs(0, 1), 1: obs(1, 2), 2: obs(2, 3), 3: obs(3, 4),
+        4: obs(4, 5, "[User:Convex]", ring),
+        5: obs(5, 5, "[Simple:Aggregate]", ring),
+        6: obs(6, 5, "[Complex]", road, pos=[0.0, -10.0, 0.0]),
+        7: obs(7, 5, "[Complex]", cube_obj, b_dynamic=1, pos=[0.0, 0.0, 2.0]),
+        8: obs(8, 5, "[Complex]", cube_obj, b_dynamic=2),
+    }}
+    vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False,
+                      dt=0.02, substeps=2)
+    vs.add_ground_plane()
+    env_builder.build_obstacles(vs=vs, init_data=init, ue_friction=1.0,
+                                ue_restitution=0.0, vis_mode=None)
+    assert len(vs.statics) == 1 + 7 and len(vs.dynamics) == 2
+    vs.build()
+
+    solver = vs.rigid_solver
+    assert any(not link.is_fixed for link in solver.links)          # a real pair exists
+    nonconvex = [(g.idx, g.type, g.link.name) for g in solver.geoms
+                 if not g.is_convex and g.type not in (gs.GEOM_TYPE.TERRAIN,)]
+    assert nonconvex == [], nonconvex
+    assert not bool(solver.collider.collider_config.has_nonconvex_nonterrain)
+    # Every obstacle collider carries the coarse kwargs (the claim's subject).
+    from genesis_vehicle._gs_compat import COARSE_SDF_MATERIAL_KW
+    for body in list(vs.statics)[1:] + list(vs.dynamics):
+        mat = body.entity_main.material
+        assert {k: getattr(mat, k) for k in COARSE_SDF_MATERIAL_KW} == COARSE_SDF_MATERIAL_KW

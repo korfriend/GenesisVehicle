@@ -381,7 +381,8 @@ and damper never pass through genesis substep integration at all:
 `_pipeline.compute_wheel_step` computes the wrench once per `vs.step()`, it is
 applied once through `_gs_compat.apply_links_wrench`, and genesis holds it
 CONSTANT for every substep — `clear_external_force()` sits OUTSIDE the substep
-loop (`genesis/engine/simulator.py:349-363`, installed genesis-world 1.4.0).
+loop (`genesis/engine/simulator.py:349-363` on genesis-world 1.4.0; `:439` on 1.4.5,
+same structure).
 So the SDK spring/damper always integrate at `dt`, whatever `--substeps` says.
 
 What `substeps` does refine is the **chassis rigid-body / contact integration**
@@ -1107,6 +1108,97 @@ Refuse to compare the arms if any of these holds:
 `--send-hz` arm shortens its windows — that is the flag succeeding, and
 refusing on it would reject the comparison for exactly the reason it worked.
 It is used only as the denominator in rule 1.
+
+---
+
+## 2.7 Rigid-body hibernation and SDF material on genesis-world 1.4.5 (v1.6.9)
+
+| abbr | meaning |
+|---|---|
+| hib | `RigidOptions(use_hibernation=True)` — genesis puts a rigid body that has come to rest to sleep |
+| SDF | Signed Distance Field — the per-geom grid genesis builds for non-convex contact |
+| dt | one server/physics step duration (s) |
+| μ | ground friction coefficient |
+| RSS | peak resident set size of the process |
+
+### Hibernation: a measured behaviour change, kept ON
+
+Both modes build their scene with `use_hibernation=True` (L2:
+`physics_server.py` `RigidOptions`; L3: `l3_runtime.py` `_rigid_kwargs`). On
+genesis-world 1.4.5 that measurably delays a car pulling away from rest. **The
+user decided to keep hibernation ON in both modes; v1.6.9 changes no
+hibernation setting.** This is a description of what was measured, not a
+guarantee either way.
+
+Harness: the L2 server's `RigidOptions` (hib on or off), one
+`car_4w_rwd_ackermann` (`samples/urdf/car_4w.urdf`, `stability="control"`)
+spawned at z = 1.0 on a plane, μ 1.0, dt 0.025, `substeps=10`, `n_envs=1`,
+CPU/WSL2, 160 steps of `brake=1` then 120 of `throttle=0.5`:
+
+| | zero-velocity steps in 60..160 (at rest) | distance over the 120 throttle steps |
+|---|---|---|
+| genesis-world 1.4.0, hib | 0 | 4.3657 m |
+| genesis-world 1.4.0, no hib | 0 | 4.3657 m |
+| **genesis-world 1.4.5, hib** | **46 / 100** | **3.8062 m (-12.8%)** |
+| genesis-world 1.4.5, no hib | 0 | 4.3657 m |
+
+At rest the 1.4.5 car cycles between exactly-zero and non-zero velocity
+(sleep / wake), and after the throttle comes on it covers 12.8% less ground in
+3 s. Over 7 runs with spawn perturbed by 1e-6 m (plain `RigidOptions(
+enable_collision=True, use_hibernation=True)`), the delay appeared in 6/7 runs;
+a tank driving straight or skid-turning was unaffected in 7/7. On 1.4.0 hib and
+no-hib were identical in every measured run — hibernation had no measured
+effect on these vehicles before 1.4.5.
+
+**Cause not established.** Both engines contain wake-on-external-wrench code,
+and the SDK drives the chassis through the external-wrench API; why 1.4.5 still
+lags was not investigated. **Not measured:** L3 with `n_envs > 1`, other
+vehicles, a live UE session, and what turning hibernation off would cost in a
+scene with many dynamic obstacles. If a UE scenario depends on a vehicle
+pulling away from a stop on time, measure it on your build rather than relying
+on this table.
+
+`docs/differentiable-sot.md` §7 notes that a `requires_grad` scene bans
+hibernation; that is unrelated to the delay above.
+
+### The `n_cells` monkey-patch is gone; server collision bodies use `COARSE_SDF_MATERIAL_KW`
+
+Through v1.6.8 both modes did `RigidGeom.n_cells = property(lambda self: 1)`
+after `init_backend`, and gave vehicles and obstacles
+`gs.materials.Rigid(..., sdf_cell_size=10000.0)`. Neither did what it looked
+like:
+
+* On 1.4.5 `RigidGeom` has no `n_cells`, so the patch attached an attribute
+  nothing reads — a no-op. On 1.4.0 it sized the SDF buffer at one cell per
+  geom, which would have mis-laid the grids had any non-convex non-terrain geom
+  been in a collision pair (code-read, not reproduced; no measured server scene
+  had one).
+* `sdf_cell_size=10000.0` does not switch the SDF off; genesis clips it to the
+  default `sdf_min_res`, 32 nodes per axis. 1.4.5 computes every geom's SDF at
+  build, so that grid is paid for whether or not it is read.
+
+The patch is removed. The L2 vehicle (`vehicle_builder.build_vehicle`), the L3
+shared vehicle, the generic `/Init/Target` primitive and every
+`env_builder.build_obstacles` obstacle now use
+`gs.materials.Rigid(..., **COARSE_SDF_MATERIAL_KW)` = `sdf_cell_size=1e4,
+sdf_min_res=16` (16 nodes per axis on a convex geom). That is safe only because
+the server's collision geoms are convex — checked by
+`tests/test_server_mesh_obstacles.py::test_build_obstacles_creates_only_convex_collision_geoms`
+over the `build_obstacles` branches listed in CHANGELOG 1.6.9 §2 (not the
+`structures_as_primitive` / mesh-not-found Box / `road_raycast_only` branches,
+and not the vehicle/target bodies, which are convex by construction), and warned
+about — not enforced — at runtime by `VehicleScene.build()`'s
+`[genesis_vehicle:coarse-sdf]` warning, which names any non-convex geom carrying
+the kwargs when a contact could read its SDF. A car driven into a convexified
+wall ends at a bit-identical pose with the old and the new kwargs, on 1.4.0 and
+1.4.5.
+
+Measured in a server-shaped scene (L2 `RigidOptions`, `dual_scene`, one car,
+obstacles through `build_obstacles`: 30 convex hulls, a CoACD (convex decomposition) road, a dynamic
+mesh, types 1-4; CPU/WSL2, cold asset cache, medians of 3): on 1.4.5, peak RSS
+1538.9 MB with the patch and old kwargs vs 1201.5 MB without the patch and with
+the coarse kwargs; on 1.4.0, 1306.4 vs 1308.8 MB. Not a speed claim; the
+benchmark in §2.1 was not re-run for publication on 1.4.5.
 
 ---
 

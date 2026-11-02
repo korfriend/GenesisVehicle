@@ -7,6 +7,7 @@
 | L3 | `n_envs` batching axis (same-URDF fleet) |
 | M | swept-envelope contact samples per wheel (`contact_samples`) |
 | SFL | `StaticFrictionLock` — the hold-at-rest stability hook |
+| SDF | Signed Distance Field — the per-geom grid genesis builds for non-convex contact |
 | dt | one simulation STEP duration (s) |
 | H | requested state-send rate (the server's `--send-hz` value, Hz) |
 | P | send period, `1/H` (s) |
@@ -20,16 +21,21 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-605 tests, almost all pure-Python, plus three env-gated live tests that skip by
-default. Measured on the v1.6.8 tree: `605 passed, 3 skipped in 135.07s`
-(`python -m pytest tests/ -q --ignore=tests/test_fusion_probe.py`, CPU/WSL2,
-genesis-world 1.4.0, one run, no warm cache control). `test_fusion_probe.py` is
+633 tests, almost all pure-Python, plus three env-gated live tests that skip by
+default. Measured on the v1.6.9 tree: `633 passed, 3 skipped in 58.69s`
+(`python -m pytest tests/ -q -p no:cacheprovider --ignore=tests/test_fusion_probe.py`,
+CPU/WSL2, genesis-world 1.4.5, one run, warm kernel cache). The drop from
+~135 s is not a release effect to quote: it came with the engine switch (the
+final tree took 124 s on 1.4.0 in a scratchpad overlay venv, CHANGELOG 1.6.9 §1.2),
+and kernel-cache state alone moves a run by tens of seconds.
+`test_fusion_probe.py` is
 an untracked file belonging to a parallel workstream and is not part of this
-repo; a bare `pytest tests/` on the release working tree collects its 53 cases
-too and reports `658 passed, 3 skipped`. The 3 skips are
+repo; a bare `pytest tests/` on the release working tree collects its cases
+too. The 3 skips are
 `test_server_send_downsample_live.py` (1) and
 `test_server_stats_window_live.py` (2), which spawn real server processes and
 run only with `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`. Earlier figures on the same machine:
+`605 passed, 3 skipped in 135.07s` at v1.6.8 (genesis-world 1.4.0),
 `578 passed, 1 skipped in 137.19s` at v1.6.7,
 `544 passed in 144.45s` at v1.6.6, `519 passed in 144.33s` at v1.6.5,
 `507 passed in 170.53s` at v1.6.4,
@@ -44,7 +50,10 @@ v1.6.4's build-time hoists + 12 for v1.6.5 (7 in
 (`test_server_send_downsample.py`; the 35th, the live arrival-rate test, is a
 skip) + 27 for v1.6.8 (26 in `test_server_stats_window.py` and one more in
 `test_server_serving_counters.py`, 25 → 26; the two cases of
-`test_server_stats_window_live.py` are skips). Collection alone is ~6s. The reference URDFs the
+`test_server_stats_window_live.py` are skips) + 28 for v1.6.9
+(`test_gs_compat.py` 26 → 53 collected: the floor guard and the coarse-SDF
+material; `test_server_mesh_obstacles.py` 17 → 18: the obstacle convexity
+test). Collection alone is ~6s. The reference URDFs the
 parsing tests read live in `tests/data/` (self-contained since v1.2.0).
 
 A handful build a real `VehicleScene` on the CPU backend (the batched-visual /
@@ -107,7 +116,10 @@ CI without GPU.
 | Wheel-contact mode selection | `test_swept_envelope.py` | `wheel_contact` / `contact_samples` on `VehicleScene.add_vehicle` and `make_wheel_raycaster`; `"swept_envelope"` with `contact_samples=1` refused; unknown mode refused; `check_fan_uniformity` rejects a kind with mixed M |
 | The defect the envelope addresses (analytic harness) | `test_swept_envelope.py` | a wheel crossing a 0.130 m lip at 3.3 m/s through the real `read_distances` + `suspension_normal_force`: point contact takes the whole lip in one `dt` (`85,120 N`); M=9 spreads it (`49,978 N`, ratio 1.703); **M is not an accuracy dial** — ratios 1.703 / 1.906 / 2.039 / 1.959 at M = 9 / 15 / 31 / 101, non-monotone; M=3 at full span IS the point contact; the envelope never RAISES the peak, at any M or span |
 | Swept-envelope in a real scene | `test_swept_envelope.py` | `single_scene` + M=9 does not self-hit and does not launch: same ride height and wheel distances as the point contact on flat ground, raw read `(1, 4, 9)` vs `(1, 4)` |
-| The DEFAULT path did not move by one bit | `test_fan_default_identity.py` | a 200-step Genesis rollout of the reference car in the default configuration compared with `torch.equal` — **not `allclose`** — against wheel distances and the final pose captured from the pre-v1.5.1 tree (commit `20f7380`). Skips itself off genesis-world 1.4.0, because the baseline is a bit-pattern: re-capture, do not loosen. Also drives the M > 1 branch through a stub sensor, so the file witnesses the branch the rollout does not take |
+| The DEFAULT path did not move by one bit | `test_fan_default_identity.py` | a 200-step Genesis rollout of the reference car in the default configuration compared with `torch.equal` — **not `allclose`** — against wheel distances and the final pose captured from the pre-v1.5.1 tree (commit `20f7380`). Baselines are kept PER ENGINE VERSION since v1.6.9 (`BASELINES`, entries for genesis-world 1.4.0 and 1.4.5, each captured by running a `git archive` of `20f7380` on that engine); a version with no entry skips, because the baseline is a bit-pattern: re-capture, do not loosen. (Through v1.6.8 this row said it "skips itself off genesis-world 1.4.0" — true then; on 1.4.5 it now RUNS and passes.) Also drives the M > 1 branch through a stub sensor, so the file witnesses the branch the rollout does not take |
+| Supported-floor warning (genesis-world 1.4.5) | `test_gs_compat.py` | v1.6.9, stubs. `check_genesis_floor` warns ONCE per process below 1.4.5 and on a 1.4.5 pre-release (`1.4.5rc1`, `1.4.5.dev3`), is silent at 1.4.5 / `.post1` / `+local` / non-PEP-440 build labels (`1.4.5-cuda12`, `1.4.5_cpu`) and above, warns-and-continues on an unparseable or missing version, does not call 1.4.0 "untested", and fires from BOTH call sites — `_ensure_genesis` with `GENESIS_VEHICLE_QUIET=1` set, and `VehiclePhysics.__init__`. Never raises: the guard is warn-only by design |
+| Coarse SDF material on SDK-owned bodies | `test_gs_compat.py` | v1.6.9. Stubs: `COARSE_SDF_MATERIAL_KW` is the validator minimum (`sdf_min_res=16`); the lister names only non-convex, non-terrain geoms carrying the kwargs; the post-build warning is gated on `has_nonconvex_nonterrain` and fails OPEN when the flag is missing. One real CPU scene on the installed engine: coarse primitive, coarse convex mesh and both SDK-owned `dual_scene` mirrors (rigid Terrain, `add_dynamic` wheel_raycast) are `(16,16,16)`, a default-material convex mesh is finer (so the assertion is not vacuous), and the post-build check ran on both scenes and stayed quiet with a coarse non-convex ring present but every body fixed |
+| Every server obstacle is a convex collision geom | `test_server_mesh_obstacles.py` | v1.6.9, real CPU scene. `env_builder.build_obstacles` over types 1-4, type-5 `[User:Convex]`, the `[Simple:Aggregate]` hull branch fed a NON-convex annulus, the `[Complex]` CoACD (convex decomposition) double-sided road, `b_dynamic=1` and `b_dynamic=2` meshes: every non-terrain geom `is_convex`, `has_nonconvex_nonterrain` False, a non-fixed link present, every obstacle material carries the coarse kwargs. Together with the convex-by-construction vehicle/target bodies this is the evidence for the server's use of the coarse SDF kwargs; branches it does not run are listed in CHANGELOG 1.6.9 §2 |
 | Raycast-mode benchmark harness | `test_bench_raycast_mode.py` | 61 tests, all pure Python: the shipped entry point `main(argv, runner=fake)` is driven with a STUB runner, so the whole schedule (even/adjacent pairing, alternating slot order), the validity + x-margin gates, the cross-worker invariants, `paired_ratios` / `split_groups` and the fail-closed publication rule run without spawning a process. The only test in the suite that patches `genesis.init` — to RAISE, proving the PARENT path never calls it; that is NOT a claim that genesis is absent from the parent (`__init__.py` imports it eagerly via `control/plant.py`). Also pins `verdicts()` backward compatibility: no `terrain_half` key -> bound 18.0 and "±20 m", `terrain_half=(320, 320)` -> 318.0 |
 | Config rebuild carries the runtime state | `test_rebuild_state_carry.py` | 14 tests, all on a real CPU `VehicleScene` (`samples/urdf/car_4w.urdf`, `dt = cfg.recommended_dt`, substeps 10, friction 1.0); two of them add a 160×120 offscreen camera, which is what turns the wheel-visual path on headless. Nothing skips. Covers: `torch.equal` copy fidelity of every carried attribute; 40-step continuity against a control scene built in the same process; the wheel rest pose (a regression reproduces z `0.3000` → `0.1499`); `VehicleScene.reset()` actually resetting the batched driver; a post-build wheel-count change and a wheel-ORDER change both raising `ValueError` with `_grouped_version` rolled back so the next step raises the same thing; the authoritative post-construction check driven directly; `MultiVehicleKindPhysics.reset(rows=)` vs `MultiVehiclePhysics.reset(vehicle_ids=)` semantics at K=2 / `n_envs`=2 and the `TypeError` on `vehicle_ids=`; a per-vehicle reset not wiping another vehicle's visuals; the instanced renderer rebind, including that the FIRST frame after it does not raise; plant freshness by identity AND by solve equality, plus `RuntimeError` on a structural change; the whole carry again under `raycast_mode="single_scene"`; and that one `mark_config_dirty()` rebuilds exactly ONCE over the next 10 steps |
 | Build-time hoists stay LIVE | `test_build_time_hoists.py` | 23 tests (v1.6.4). Every value the step path now derives once — Ackermann geometry, driven-axle share, brake bias, AWD weight normalisation, the drive-omega cap, SFL's `v_thr²` — is derived FIRST, then its source is written, then the next call must move. Written that way round deliberately: a "snapshot at construction" implementation passes any test that writes the source before the first call, and fails these (confirmed by a reviewer who substituted a snapshot: 16 red). Numbers are characterisation baselines captured from the pre-hoist tree |

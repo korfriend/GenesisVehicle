@@ -367,3 +367,276 @@ def test_scene_sim_options_raises_naming_both_spellings():
     msg = str(ei.value)
     assert "options.sim" in msg
     assert "sim_options" in msg
+
+
+# --- check_genesis_floor: warn-only supported-floor guard (v1.6.9) -----------
+#
+# Captured with a handler on the `genesis_vehicle` logger, not caplog: gs.init()
+# replaces the logging configuration and pytest's capture handler does not
+# survive it (see tests/test_bump_stop_dt_warning.py::_Capture).
+
+import logging as _logging
+
+from genesis_vehicle import _gs_compat
+
+
+class _FloorCapture(_logging.Handler):
+    def __init__(self):
+        super().__init__(level=_logging.WARNING)
+        self.msgs = []
+
+    def emit(self, record):
+        if "genesis-floor" in record.getMessage():
+            self.msgs.append(record.getMessage())
+
+    def __enter__(self):
+        _logging.getLogger("genesis_vehicle").addHandler(self)
+        return self
+
+    def __exit__(self, *exc):
+        _logging.getLogger("genesis_vehicle").removeHandler(self)
+        return False
+
+
+class _GsStub:
+    def __init__(self, version):
+        if version is not None:
+            self.__version__ = version
+
+
+@pytest.fixture
+def fresh_floor(monkeypatch):
+    """Reset the once-per-process flag for the duration of one test."""
+    monkeypatch.setattr(_gs_compat, "_floor_checked", False)
+    return _gs_compat
+
+
+@pytest.mark.parametrize("version", ["1.4.0", "1.3.3", "1.4", "1.4.4", "1.4.5rc1",
+                                     "1.4.5.dev3", "0.4.6"])
+def test_floor_warns_below_1_4_5(fresh_floor, version):
+    with _FloorCapture() as cap:
+        fresh_floor.check_genesis_floor(_GsStub(version))
+    assert len(cap.msgs) == 1, cap.msgs
+    assert version in cap.msgs[0] and "1.4.5" in cap.msgs[0]
+
+
+@pytest.mark.parametrize("version", ["1.4.5", "1.4.5.post1", "1.4.5+local",
+                                     "1.4.5-cuda12", "1.4.5_cpu", "1.4.6", "1.5.0.dev0+g1", "2.0.0"])
+def test_floor_is_silent_at_or_above_1_4_5(fresh_floor, version):
+    with _FloorCapture() as cap:
+        fresh_floor.check_genesis_floor(_GsStub(version))
+    assert cap.msgs == []
+
+
+def test_floor_warns_once_per_process(fresh_floor):
+    with _FloorCapture() as cap:
+        fresh_floor.check_genesis_floor(_GsStub("1.4.0"))
+        fresh_floor.check_genesis_floor(_GsStub("1.4.0"))
+        fresh_floor.check_genesis_floor(_GsStub("1.3.3"))
+    assert len(cap.msgs) == 1
+
+
+def test_floor_message_for_1_4_0_does_not_call_it_untested(fresh_floor):
+    """1.4.0 IS measured with this release (it is the rollback target), so the
+    warning must not describe it as untested."""
+    with _FloorCapture() as cap:
+        fresh_floor.check_genesis_floor(_GsStub("1.4.0"))
+    assert "untested" not in cap.msgs[0].lower()
+
+
+@pytest.mark.parametrize("version", ["garbage", "", None])
+def test_floor_unparseable_version_warns_and_continues(fresh_floor, version):
+    with _FloorCapture() as cap:
+        assert fresh_floor.check_genesis_floor(_GsStub(version)) is None   # no raise
+    assert len(cap.msgs) == 1 and "could not parse" in cap.msgs[0]
+
+
+def test_floor_guard_runs_from_ensure_genesis_even_when_quiet(fresh_floor, monkeypatch):
+    """The VehicleScene / server entry point. GENESIS_VEHICLE_QUIET silences the
+    version banner only — the floor warning is not behind it."""
+    import genesis
+
+    from genesis_vehicle import vehicle_scene
+    monkeypatch.setenv("GENESIS_VEHICLE_QUIET", "1")
+    monkeypatch.setattr(genesis, "__version__", "1.4.0")
+    with _FloorCapture() as cap:
+        vehicle_scene._ensure_genesis()
+    assert len(cap.msgs) == 1 and "1.4.0" in cap.msgs[0]
+
+
+def test_floor_guard_runs_from_vehicle_physics_init(fresh_floor, monkeypatch):
+    """The direct-driver entry point (GeneVehicle_* demos construct
+    VehiclePhysics themselves). The guard is the first statement, so it fires
+    even though these placeholder arguments make the constructor fail later."""
+    import genesis
+
+    from genesis_vehicle import core
+    monkeypatch.setenv("GENESIS_VEHICLE_QUIET", "1")
+    monkeypatch.setattr(genesis, "__version__", "1.4.0")
+    with _FloorCapture() as cap:
+        with pytest.raises((AttributeError, TypeError)):
+            core.VehiclePhysics(None, None, None, None)
+    assert len(cap.msgs) == 1
+
+
+# --- coarse-SDF post-build check: stub solvers (both collider shapes) --------
+
+class _Mat:
+    def __init__(self, **kw):
+        self.sdf_cell_size = kw.get("sdf_cell_size", 0.005)
+        self.sdf_min_res = kw.get("sdf_min_res", 32)
+
+
+class _Ent:
+    def __init__(self, idx, mat):
+        self.idx, self.material = idx, mat
+
+
+class _Link:
+    def __init__(self, name):
+        self.name = name
+
+
+class _Geom:
+    def __init__(self, idx, convex, mat, gtype=None, link="body"):
+        self.idx, self.is_convex, self.type = idx, convex, gtype
+        self.entity, self.link = _Ent(idx, mat), _Link(link)
+
+
+class _Cfg:
+    def __init__(self, flag):
+        self.has_nonconvex_nonterrain = flag
+
+
+class _Collider:
+    def __init__(self, flag):
+        self.collider_config = _Cfg(flag)
+
+
+class _StubRigidSolver:
+    def __init__(self, geoms, flag="absent"):
+        self.geoms = geoms
+        if flag != "absent":
+            self.collider = _Collider(flag)
+
+
+def _coarse():
+    return _Mat(**_gs_compat.COARSE_SDF_MATERIAL_KW)
+
+
+def test_coarse_sdf_kwargs_are_the_validator_minimum():
+    """16 is the `ge=16` floor of `sdf_min_res` on genesis 1.4.0 and 1.4.5; the
+    cell size is large enough that the upper clip always wins."""
+    kw = _gs_compat.COARSE_SDF_MATERIAL_KW
+    assert kw == {"sdf_cell_size": 1.0e4, "sdf_min_res": 16}
+
+
+def test_coarse_sdf_lists_only_nonconvex_nonterrain_coarse_geoms():
+    import genesis as gs
+    geoms = [_Geom(0, True, _coarse()),                                  # convex: fine
+             _Geom(1, False, _coarse(), link="bad"),                     # the one
+             _Geom(2, False, _Mat()),                                    # default material
+             _Geom(3, False, _coarse(), gtype=gs.GEOM_TYPE.TERRAIN),     # heightfield
+             _Geom(4, False, _Mat(sdf_cell_size=1.0e4))]                 # old kwargs, not ours
+    got = _gs_compat.coarse_sdf_nonconvex_geoms(_StubRigidSolver(geoms))
+    assert len(got) == 1 and "geom 1" in got[0] and "bad" in got[0]
+
+
+def test_coarse_sdf_warning_is_gated_on_the_nonconvex_narrowphase():
+    geoms = [_Geom(1, False, _coarse())]
+    assert _gs_compat.warn_coarse_sdf_on_nonconvex(_StubRigidSolver(geoms, False), "s") == []
+    assert len(_gs_compat.warn_coarse_sdf_on_nonconvex(_StubRigidSolver(geoms, True), "s")) == 1
+
+
+def test_coarse_sdf_warning_fails_open_without_the_collider_flag():
+    """An engine without `collider.collider_config.has_nonconvex_nonterrain`
+    (the path 1.4.0 and 1.4.5 share) must still report, not go quiet."""
+    geoms = [_Geom(1, False, _coarse())]
+    assert len(_gs_compat.warn_coarse_sdf_on_nonconvex(_StubRigidSolver(geoms), "s")) == 1
+    assert _gs_compat.warn_coarse_sdf_on_nonconvex(None, "s") == []
+
+
+# --- coarse-SDF kwargs on a REAL engine: node counts + the post-build check ---
+
+def _sdf_nodes(geom):
+    """Per-axis SDF node count of a built geom. genesis 1.4.5 carries it on the
+    geom description (``desc.sdf.n_nodes``); 1.4.0 on ``RigidGeom.sdf_res``.
+    Branched here, in the test, because only the test reads it."""
+    sdf = getattr(getattr(geom, "desc", None), "sdf", None)
+    if sdf is not None:
+        return tuple(int(n) for n in sdf.n_nodes)
+    return tuple(int(n) for n in geom.sdf_res)
+
+
+def test_coarse_sdf_kwargs_give_a_16_node_grid_on_this_engine(tmp_path, monkeypatch):
+    """`COARSE_SDF_MATERIAL_KW` must land on 16 nodes per axis for every kind of
+    convex geom the SDK gives it to — a primitive, a convexified mesh, and the
+    two SDK-owned dual_scene raycast mirrors (rigid Terrain mirror, add_dynamic
+    wheel_raycast mirror) — while the DEFAULT material stays finer (so this
+    cannot pass vacuously). Also checks the post-build check runs on BOTH scenes
+    and lists a real non-convex coarse geom, but stays quiet while no collision
+    pair can read its SDF (every body here is fixed)."""
+    trimesh = pytest.importorskip("trimesh")
+    gs = pytest.importorskip("genesis")
+    from genesis_vehicle import VehicleScene, vehicle_scene
+    from genesis_vehicle._gs_compat import COARSE_SDF_MATERIAL_KW as C
+
+    box = str(tmp_path / "box.obj")
+    trimesh.creation.box(extents=(1.0, 2.0, 3.0)).export(box)
+    ring = str(tmp_path / "ring.obj")
+    trimesh.creation.annulus(r_min=0.3, r_max=0.6, height=0.4).export(ring)
+
+    calls = []
+    real_check = vehicle_scene.warn_coarse_sdf_on_nonconvex
+
+    def _recording_check(solver, where):
+        out = real_check(solver, where)
+        calls.append((where, out))
+        return out
+
+    monkeypatch.setattr(vehicle_scene, "warn_coarse_sdf_on_nonconvex", _recording_check)
+
+    VehicleScene.init_backend("cpu")
+    vs = VehicleScene(dt=0.02, substeps=2, n_envs=1, show_viewer=False)
+    prim = vs.add_static(morph=gs.morphs.Box(size=(1, 1, 1), pos=(5, 0, 0.5), fixed=True),
+                         material=gs.materials.Rigid(**C), name="prim")
+    cmesh = vs.add_static(morph=gs.morphs.Mesh(file=box, pos=(-5, 0, 1.5), fixed=True,
+                                               convexify=True),
+                          material=gs.materials.Rigid(**C), name="cmesh")
+    dmesh = vs.add_static(morph=gs.morphs.Mesh(file=box, pos=(-9, 0, 1.5), fixed=True,
+                                               convexify=True),
+                          material=gs.materials.Rigid(), name="dmesh")
+    ring_h = vs.add_static(morph=gs.morphs.Mesh(file=ring, pos=(0, 6, 0.2), fixed=True,
+                                                convexify=False),
+                           material=gs.materials.Rigid(**C), name="ring")
+    terr = vs.add_static(
+        morph=gs.morphs.Terrain(n_subterrains=(1, 1), subterrain_size=(8.0, 8.0),
+                                horizontal_scale=0.5, vertical_scale=0.005,
+                                subterrain_types=[["flat_terrain"]], pos=(20.0, 20.0, 0.0)),
+        material=gs.materials.Rigid(**C), name="terrain")
+    dyn = vs.add_dynamic(gs.morphs.Box(size=(0.5, 0.5, 0.5), pos=(0, -6, 1.0)),
+                         physics=False, wheel_raycast=True, name="dyn")
+    vs.build()
+
+    def nodes(entity):
+        return [_sdf_nodes(g) for g in entity.geoms]
+
+    assert nodes(prim.entity_main) == [(16, 16, 16)]
+    assert nodes(cmesh.entity_main) == [(16, 16, 16)]
+    assert all(min(n) > 16 for n in nodes(dmesh.entity_main)), nodes(dmesh.entity_main)
+    # SDK-owned raycast-scene mirrors (vehicle_scene add_static Terrain branch,
+    # add_dynamic wheel_raycast mirror): material chosen by the SDK.
+    if type(terr.entity_raycast).__name__ != "KinematicEntity":     # genesis >= 1.4.0
+        assert nodes(terr.entity_raycast) == [(16, 16, 16)]
+    assert nodes(dyn.entity_raycast) == [(16, 16, 16)]
+    assert all(min(n) > 16 for n in nodes(dyn.entity_main))         # user default kept
+
+    # The post-build check ran for both scenes ...
+    assert [w for w, _ in calls] == ["main scene", "raycast scene"]
+    # ... finds the real non-convex coarse geom on this engine's geom objects ...
+    listed = _gs_compat.coarse_sdf_nonconvex_geoms(vs.rigid_solver)
+    ring_idx = ring_h.entity_main.geoms[0].idx
+    assert len(listed) == 1 and f"geom {ring_idx} " in listed[0]
+    # ... and stays quiet: every body is fixed, so no collision pair reads an SDF.
+    assert not bool(vs.rigid_solver.collider.collider_config.has_nonconvex_nonterrain)
+    assert calls[0][1] == [] and calls[1][1] == []

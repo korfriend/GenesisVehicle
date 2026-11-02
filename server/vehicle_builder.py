@@ -24,6 +24,7 @@ from genesis_vehicle import (
     AWD, PartialAckermann, Independent, PacejkaAnisotropic,
     RollingResistance, LowSpeedRegularizer
 )
+from genesis_vehicle._gs_compat import COARSE_SDF_MATERIAL_KW
 
 created_temp_urdfs = []
 
@@ -611,7 +612,7 @@ def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
     # a scene directly.
     veh = vs.add_vehicle(
         temp_path, cfg=cfg, morph=target_morph,
-        material=gs.materials.Rigid(friction=t_fric, coup_restitution=t_rest, sdf_cell_size=10000.0),
+        material=gs.materials.Rigid(friction=t_fric, coup_restitution=t_rest, **COARSE_SDF_MATERIAL_KW),
         surface=gs.surfaces.Rough(color=t_color), vis_mode=vis_mode,
         name=f"target_{target_id}")
     vehicles[target_id] = veh

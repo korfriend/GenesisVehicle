@@ -3,6 +3,8 @@ import trimesh
 import numpy as np
 import genesis as gs
 
+from genesis_vehicle._gs_compat import COARSE_SDF_MATERIAL_KW
+
 # [Fix] List of preprocessing temp files created to prevent face winding issues in CoACD/Complex colliders
 created_temp_files = []
 
@@ -330,8 +332,13 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
         
         is_road_mesh = (obs_type == 5 and ("[Complex" in col_src or is_user_complex))
         surface = gs.surfaces.Rough(color=current_color, double_sided=is_road_mesh)
+        # Every collision geom built above is convex (primitive, or a Mesh with
+        # convexify=True on both mesh branches; the raycast-only road has no
+        # collision geom), so the minimum SDF grid is safe here — and VehicleScene
+        # .build() warns if a non-convex geom carries these kwargs in a scene where a
+        # collision pair can read its SDF (has_nonconvex_nonterrain).
         mat = gs.materials.Rigid(friction=obs_friction,
-                                 coup_restitution=obs_restitution, sdf_cell_size=10000.0)
+                                 coup_restitution=obs_restitution, **COARSE_SDF_MATERIAL_KW)
 
         # Route through VehicleScene — it owns the single_scene-vs-dual_scene
         # distribution (collision body in main + a static/synced raycast mirror in

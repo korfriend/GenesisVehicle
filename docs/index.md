@@ -94,7 +94,7 @@ The right-hand column is where the full story lives.
 | Wheel contact model | `wheel_contact="point"` (DEFAULT, one ray per wheel) or `"swept_envelope"` (M rays reduced by the swept-circle lower envelope, so a wheel climbs an edge instead of teleporting onto it). Opt-in; the default is bit-identical to earlier releases | `VehicleScene.add_vehicle(wheel_contact=, contact_samples=)`, `WheelRayPattern(fan_samples=)` | [`tire-and-contact.md`](tire-and-contact.md), [`physics-contracts.md` §7.11](physics-contracts.md) |
 | Ray-MISS / grounded | "did this wheel's ray find ground?", against the raycaster's OWN miss sentinel rather than a fixed threshold | `Vehicle.wheels_grounded`, `all_wheels_grounded`, `MultiVehiclePhysics.grounded_list`, `is_ray_hit`, `is_ray_hit_corrected` | [`physics-contracts.md`](physics-contracts.md) §7.8, §7.10 |
 | Live vs derived config | which post-`build()` config writes take effect on the next step (steering geometry, driven axles, brake bias, AWD weights, the drive-omega cap, `eps_v`, a hook's `v_thr`) and which need a rebuild (anything per-wheel, read off `WheelMeta`). Derived once at build, re-derived when a source moves (v1.6.4) | `_hotset.HOT_DEPENDENTS`, `VehicleScene.mark_config_dirty` | [`physics-contracts.md` §7.13](physics-contracts.md) |
-| Simulation time / gravity | `dt` and `substeps` are FIXED at `build()` on genesis 1.4.0 (the supported backend) and on 1.3.3 alike — post-build `sim_options` writes are inert (and raise on genesis 1.4.0, where `Scene.sim_options` is gone). READ the engine, do not echo the ctor args; `set_gravity` is the one live knob (v1.6.5) | `VehicleScene.effective_dt`, `VehicleScene.substeps`, `VehicleScene.set_gravity` | [`physics-contracts.md` §7.14](physics-contracts.md) |
+| Simulation time / gravity | `dt` and `substeps` are FIXED at `build()` on genesis 1.4.0 (the supported backend when this was measured, v1.6.5) and on 1.3.3 alike — post-build `sim_options` writes are inert (and raise on genesis 1.4.0, where `Scene.sim_options` is gone). READ the engine, do not echo the ctor args; `set_gravity` is the one live knob (v1.6.5) | `VehicleScene.effective_dt`, `VehicleScene.substeps`, `VehicleScene.set_gravity` | [`physics-contracts.md` §7.14](physics-contracts.md) |
 | Config rebuild / reset | re-resolve a cfg after `build()` while the vehicle keeps its runtime state, and reset per vehicle rather than per flat row. A wheel-count or wheel-order change raises; a failed rebuild keeps the previous driver and re-raises on the next step (v1.6.2) | `VehicleScene.mark_config_dirty`, `VehicleScene.reset`, `MultiVehiclePhysics.reset(vehicle_ids=)`, `MultiVehicleKindPhysics.reset(rows=)` | [`physics-contracts.md` §7.12](physics-contracts.md) |
 
 **Telemetry & rendering feed**
@@ -118,20 +118,30 @@ Release history lives in
 [`../CHANGELOG.md`](../CHANGELOG.md).
 
 **Backend compatibility:** the supported Genesis physics backend is
-`genesis-world` **1.4.0** — the floor and the only version the tests and every
-published measurement run on (v1.6.6; the `≥ 1.0.0` claim printed here through
-v1.6.4 was never enforced, and v1.6.5's "1.3.3 and 1.4.0" is now narrowed).
-**Nothing in the code enforces that floor**: the `<= 1.3.3` branches in
-`genesis_vehicle/_gs_compat.py` (force/torque -> wrench, link inertial
-accessors) and in `vehicle_scene.py` (`RigidOptions.dt`, terrain raycast
-mirror) still run if 1.3.3 is installed, and there is no version check. They
-are dead weight slated for removal, not a compatibility promise — untested,
-unmeasured, and closed to additions. The instanced-wheel renderer likewise
-branches on the 1.3.x buffer API — see the 1.2.7 CHANGELOG entry. Per-release
-backend notes are in [`../CHANGELOG.md`](../CHANGELOG.md) (the 1.5.0 entry
-records the 1.3.3 → 1.4.0 bump and a cross-version parity table measured ONCE
-at that bump — a historical record, not a standing guarantee — and 0.5.33 the
-0.4.6 → 1.0.0 one).
+`genesis-world` **1.4.5**, with `quadrants` 1.3.3, `trimesh` >= 5.0 and
+`zstandard` (v1.6.9; the floor was 1.4.0 from v1.6.6 to v1.6.8; the `≥ 1.0.0`
+claim printed here through v1.6.4 was never enforced). The v1.6.9 tests run on
+1.4.5; **measurements published before v1.6.9 were taken on 1.4.0 and keep that
+label** — they were not re-run.
+**The floor is enforced by a warning, not a refusal.** Through v1.6.8 this page
+said "there is no version check"; since v1.6.9 there is one:
+`_gs_compat.check_genesis_floor` logs one `[genesis_vehicle:genesis-floor]`
+WARNING per process below 1.4.5 (or on a 1.4.5 pre-release) and continues. It
+runs from `vehicle_scene._ensure_genesis` (`VehicleScene.init_backend`, every
+`VehicleScene(init_genesis=True)`) and `VehiclePhysics.__init__` (also reached by
+the batched driver); a `VehicleScene(init_genesis=False)` that never builds a
+vehicle is not covered, and `GENESIS_VEHICLE_QUIET` does not silence it. The
+`<= 1.3.3` branches in `genesis_vehicle/_gs_compat.py` (force/torque -> wrench,
+link inertial accessors) and in `vehicle_scene.py` (`RigidOptions.dt`, terrain
+raycast mirror) still run if 1.3.3 is installed. They are dead weight slated
+for removal, not a compatibility promise — untested, unmeasured, and closed to
+additions. The instanced-wheel renderer likewise branches on the 1.3.x buffer
+API — see the 1.2.7 CHANGELOG entry. Per-release backend notes are in
+[`../CHANGELOG.md`](../CHANGELOG.md) (1.6.9 records the 1.4.0 → 1.4.5 bump — the
+eager signed-distance-field (SDF) build, the coarse-SDF material on SDK-owned bodies, the measured
+hibernation delay (also [`server.md`](server.md) §2.7), a parity table and the rollback recipe; 1.5.0 the 1.3.3 →
+1.4.0 bump; 0.5.33 the 0.4.6 → 1.0.0 one). Each parity table was measured ONCE
+at its bump — a historical record, not a standing guarantee.
 
 **On `genesis-world >= 1.4.0`, never pass `dt=` to `RigidOptions`** — that
 field became the solver SUBSTEP interval, so restating `SimOptions.dt` there

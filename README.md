@@ -84,28 +84,51 @@ Visual demos (with `--viewer`):
 ## Installation
 
 Requires Python 3.12+ and
-[Genesis](https://genesis-embodied-ai.github.io/) — **`genesis-world` 1.4.0 is
-the supported floor** (v1.6.6). It is the only version the test suite and every
-published measurement run on, and the only one the project supports. Earlier
-releases are NOT supported; the `≥ 1.0.0` claim printed here through v1.6.4 was
-never enforced by any branch or test, and the "1.3.3 or 1.4.0" wording that
-replaced it in v1.6.5 is now narrowed to 1.4.0.
+[Genesis](https://genesis-embodied-ai.github.io/) — **`genesis-world` 1.4.5 is
+the supported floor** (v1.6.9; it was 1.4.0 from v1.6.6 to v1.6.8), together
+with the dependency set the 1.4.5 wheel requires: **`quadrants` 1.3.3,
+`trimesh` >= 5.0 and `zstandard`**. A clone that updates by `git pull` (the UE
+deployment) or a frozen field build must upgrade those packages separately.
+The v1.6.9 test suite runs on 1.4.5. **Measurements published before v1.6.9
+were taken on 1.4.0 and stay labelled 1.4.0** — they were not re-run on 1.4.5;
+a figure in these docs without an engine label is not a 1.4.5 figure. The
+`≥ 1.0.0` claim printed here through v1.6.4 was never enforced, and v1.6.5's
+"1.3.3 or 1.4.0" was narrowed to 1.4.0 in v1.6.6.
 
-**What the code actually does, since nothing enforces the floor:** the
+**What enforces the floor — a warning, not a refusal.** Through v1.6.8 this
+section said "there is no version check"; that was true then and is not any
+more. Since v1.6.9 `_gs_compat.check_genesis_floor` logs ONE
+`[genesis_vehicle:genesis-floor]` WARNING per process when the installed
+genesis-world is below 1.4.5 (or a 1.4.5 pre-release), and continues. It runs
+from `VehicleScene.init_backend` / every `VehicleScene(init_genesis=True)` and
+from `VehiclePhysics.__init__` (which the batched driver also reaches), and
+`GENESIS_VEHICLE_QUIET` does not silence it; a `VehicleScene(init_genesis=False)`
+that never builds a vehicle is not covered. 1.4.0 still runs and still passes the
+suite (the final v1.6.9 tree: 633 passed / 3 skipped, CHANGELOG 1.6.9 §1.2). The
 `<= 1.3.3` branches in `_gs_compat.py` (the force API, the link inertial reads,
-the `Scene.sim_options` name) and in `vehicle_scene.py` are still there and will
-still be taken if you install 1.3.3 — the SDK does not refuse it and there is no
-version check. Those branches are **dead weight to be removed in a later
-release, not a compatibility promise**: they are untested, unmeasured, and no
-new ones will be added. See the 1.5.0 entry (and 1.2.7 for the renderer API
-split) for what moved at the 1.3.3 → 1.4.0 bump; its cross-version parity table
-is a record of a measurement taken once at that bump, not an ongoing guarantee.
-On
-`genesis-world >= 1.4.0`, ask for the solver rate with
+the `Scene.sim_options` name) and in `vehicle_scene.py` are still there and
+still taken on 1.3.3 — **dead weight to be removed in a later release, not a
+compatibility promise**: untested, unmeasured, and closed to additions. See the
+1.6.9 CHANGELOG entry for what 1.4.5 changed (every collision geom's signed
+distance field (SDF) is computed at build; under `use_hibernation=True` a car measured pulling away
+from rest later) and how to roll back; 1.5.0 (and 1.2.7 for the renderer API
+split) for the 1.3.3 → 1.4.0 bump. Both cross-version parity tables are records
+of a measurement taken once at the bump, not ongoing guarantees.
+
+On `genesis-world >= 1.4.0`, ask for the solver rate with
 `VehicleScene(substeps=...)` and do **not** pass `dt=` to `RigidOptions` —
 that field now means the substep interval. See
 [`CHANGELOG.md`](CHANGELOG.md) for the per-release backend-compatibility
 notes.
+
+**Default materials cost memory on 1.4.5.** genesis-world 1.4.5 computes every
+collision geom's SDF at `build()`, and the default
+`gs.materials.Rigid()` gives a mesh or URDF geom a 128-per-axis grid — measured
++0.8 .. +1.2 s of build and +490 .. +508 MB of peak resident memory (two default-material cars, CHANGELOG 1.6.9 §3) versus 1.4.0. The SDK does NOT change a
+material you pass or leave as `None`. For a body whose geoms are all convex,
+in a scene with no non-convex, non-terrain collision geom (so no contact reads
+any SDF), pass `gs.materials.Rigid(sdf_cell_size=1e4, sdf_min_res=16, ...)`; a large
+`sdf_cell_size` alone does not switch the SDF off (it lands on 32 per axis).
 
 The SDK is a single Python package directory; there is no `pip install`
 yet. Clone and add the parent directory to `PYTHONPATH`:
@@ -326,7 +349,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-605 tests covering URDF parsing, config resolve, suspension sizing, strategy
+633 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity check on
@@ -342,13 +365,18 @@ post-override capture skip gate (v1.6.6), the L2 `--send-hz` state-send gate
 pooled weighting (v1.6.8 — the trigger in both modes, a byte-identity freeze of
 both `[STATS]` strings, the bare `[SERVE] [L3]` tag, the shared
 `--stats-interval` resolver and its loud clamp, and the re-weighting driven on
-windows of deliberately unequal length), and the server subpackage surface.
+windows of deliberately unequal length), the genesis-world
+supported-floor warning and the coarse-SDF material for SDK-owned collision
+bodies (v1.6.9 — version parsing, both call sites, the post-build non-convex
+check, a real-engine 16-node grid, and every server obstacle branch building
+only convex geoms), and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v1.6.8 tree, `605 passed, 3 skipped in 135.07s` (CPU/WSL2, genesis-world 1.4.0,
-`pytest tests/ -q --ignore=tests/test_fusion_probe.py`, one run; the 3 skips
-are the env-gated live server tests, run them with
+v1.6.9 tree, `633 passed, 3 skipped in 58.69s` (CPU/WSL2, genesis-world 1.4.5,
+`pytest tests/ -q -p no:cacheprovider --ignore=tests/test_fusion_probe.py`, one
+run; the 3 skips are the env-gated live server tests, run them with
 `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`). Earlier:
+`605 passed, 3 skipped in 135.07s` at v1.6.8 (genesis-world 1.4.0),
 `578 passed, 1 skipped in 137.19s` at v1.6.7, `544 passed in 144.45s` at
 v1.6.6, `519 passed in 144.33s` at v1.6.5,
 `507 passed in 170.53s` at v1.6.4, 116 s / 450 tests at

@@ -43,6 +43,8 @@ from genesis_vehicle import (
     PacejkaAnisotropic, VehicleScene
 )
 
+from genesis_vehicle._gs_compat import COARSE_SDF_MATERIAL_KW
+
 # Import the split-out modules (package-internal modules — aliased to keep the reference names used by existing code)
 from . import env_builder as genesis_env_builder
 from . import vehicle_builder as genesis_vehicle_builder
@@ -586,10 +588,6 @@ def main():
 
     VehicleScene.init_backend("cpu" if backend is gs.cpu else "gpu")
 
-    # [Engine Hack] RigidGeom.n_cells Monkey-patch
-    import genesis.engine.entities.rigid_entity.rigid_geom as rigid_geom
-    rigid_geom.RigidGeom.n_cells = property(lambda self: 1)
-
     # 2. Create the OSC communication manager
     osc = OSCManager(
         send_ip=args.send_ip,
@@ -730,7 +728,7 @@ def main():
             # teleports. Routed through VehicleScene like any obstacle.
             _obs = vs.add_dynamic(
                 target_morph, physics=True,
-                material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution, sdf_cell_size=10000.0),
+                material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution, **COARSE_SDF_MATERIAL_KW),
                 surface=gs.surfaces.Rough(color=t_color), vis_mode=args.vis_mode,
                 mass=target_info.get('mass', 1.0), name=f"target_{target_id}")
             target_entities[target_id] = _obs.entity_main

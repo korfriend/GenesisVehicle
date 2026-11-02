@@ -278,10 +278,16 @@ a `ValueError` and logs a `[genesis_vehicle:mesh-guard] >>> REVIEW THIS MESH <<<
 error. As a *rigid* body it is expensive **two** ways, either of which can crash
 the process (under WSL, the whole VM): (1) an SDF/collision build over every
 face, and (2) in `single_scene`, a **per-step wheel-raycaster BVH re-fit** over
-every face (the vehicle moves → the BVH is never static). Note (2) fires **even
-with a large `sdf_cell_size`** — that only caps the SDF grid (1), not the raycast
-re-fit, which is why a terrain that set `sdf_cell_size=10000` could still take the
-VM down. Applies to **every rigid path**: `add_static` (main collider, and the
+every face (the vehicle moves → the BVH is never static). The guard fires **even
+with a large `sdf_cell_size`**, because that bounds neither cost: (2) is
+untouched by it, and for (1) a large `sdf_cell_size` does NOT cap the SDF grid
+of a watertight non-convex mesh — genesis first refines the cell to half the
+wall thickness, up to `sdf_max_res` (128 per axis by default). This paragraph
+said through v1.6.8 that `sdf_cell_size` "only caps the SDF grid"; that was
+wrong for exactly the meshes this guard is about (corrected v1.6.9, with the
+same correction in the `vehicle_scene.py` guard text). A terrain that set
+`sdf_cell_size=10000` could still take the VM down either way. Applies to
+**every rigid path**: `add_static` (main collider, and the
 single_scene raycast target) and `add_dynamic` (main body, and the dual_scene
 `wheel_raycast` mirror). **Exempt:** primitives & heightfields (not a `Mesh`),
 `convexify=True` (convex decomposition keeps both the collider and the raycast
@@ -294,7 +300,37 @@ the mesh, set `convexify=True`, or register it as `add_static(collision=False)`
 `[genesis_vehicle:<slug>]` prefix so an issue class is easy to spot/filter:
 `mesh-guard` (mesh refused), `single-scene` (a dual_scene-only option used in
 single_scene), `refit-cost` (a non-primitive `wheel_raycast` mirror that re-fits
-each step). Grep `\[genesis_vehicle:` for all, or a slug for one class.
+each step), `genesis-floor` (installed genesis-world below the supported 1.4.5,
+once per process, v1.6.9), `coarse-sdf` (a NON-convex geom carrying the SDK's
+coarse SDF kwargs in a scene where a contact can read its SDF, once per scene
+at `build()`, v1.6.9). Grep `\[genesis_vehicle:` for all, or a slug for one class.
+
+**SDF cost of materials (genesis-world 1.4.5, v1.6.9).** 1.4.5 computes the
+signed distance field (SDF) of EVERY collision geom at `build()` (1.4.0 computed
+it only when a non-convex, non-terrain geom was in a collision pair). Per axis
+the grid is `cell = clip(target, grid/(sdf_max_res-1), grid/max(sdf_min_res-1, 2))`,
+so:
+
+| material | convex geom grid (nodes per axis) |
+|---|---|
+| `material=None` / `gs.materials.Rigid()` (default `sdf_cell_size=0.005`) | 128 for a mesh or URDF geom; 32 for a primitive (genesis resets a Primitive's `sdf_max_res` to 32) |
+| `Rigid(sdf_cell_size=1e4)` | 32 — a large cell size does NOT switch the SDF off; it lands on the default `sdf_min_res` |
+| `Rigid(sdf_cell_size=1e4, sdf_min_res=16)` (= `_gs_compat.COARSE_SDF_MATERIAL_KW`) | 16, the validator minimum |
+
+`VehicleScene` does **not** change a material you pass or leave as `None`
+(`add_vehicle`, `add_static`, `add_dynamic`). It uses the coarse kwargs only on
+the collision bodies it owns: the `dual_scene` rigid raycast mirror of a
+`Terrain` and the `add_dynamic(wheel_raycast=...)` raycast mirror — both fixed
+bodies in the raycast scene, whose SDF nothing reads. Measured cost of a default
+material on 1.4.5: a default-material car took +0.8 .. +1.2 s of build and +490 .. +508 MB of peak resident memory (two default-material cars, CHANGELOG 1.6.9 §3) versus 1.4.0. For a body
+whose geoms are all convex, in a scene with no non-convex, non-terrain
+collision geom (so no contact reads any SDF), pass the coarse kwargs yourself.
+Whether a convex geom's coarse SDF is read when it touches a non-convex geom
+was not examined — keep the default there. Do not put them on
+a non-convex geom that collides with a moving body: its contact reads that SDF,
+and `build()` then logs a `coarse-sdf` warning naming it (the check runs only
+when the solver's `has_nonconvex_nonterrain` is set, i.e. when such a contact
+is possible; scenes not built through `VehicleScene` are not checked).
 
 **`add_dynamic`** — `physics` sets motion; `wheel_raycast` only controls the
 **dual_scene** raycast mirror (see the caveat below):
@@ -499,7 +535,10 @@ angle accumulators. Pass a `(K,)` long tensor or a `(n_envs,)` bool mask to
 reset only specific environments (RL / MPPI partial reset).
 
 `VehiclePhysics.__init__` prints a one-line version banner the first time
-it's called per process. Suppress with `GENESIS_VEHICLE_QUIET=1`.
+it's called per process. Suppress with `GENESIS_VEHICLE_QUIET=1`. Since v1.6.9
+it also runs the supported-floor check (`_gs_compat.check_genesis_floor`: one
+`[genesis_vehicle:genesis-floor]` WARNING per process if genesis-world is below
+1.4.5, never raises), which `GENESIS_VEHICLE_QUIET` does NOT silence.
 
 ## 2. Inputs
 

@@ -18,7 +18,7 @@ from genesis.utils.geom import transform_by_quat
 
 from ._version import __version__
 from .config import ResolvedConfig, VehicleConfig, resolve
-from ._gs_compat import apply_links_wrench
+from ._gs_compat import apply_links_wrench, check_genesis_floor
 from ._hotset import prime_derived
 from ._pipeline import compute_wheel_step, pw, pw3
 from .inputs import VehicleInputs, VehicleStepInputs
@@ -328,6 +328,7 @@ class VehiclePhysics:
         n_envs: int = 1,
         name: Optional[str] = None,
     ):
+        check_genesis_floor()   # warn-only, once per process; not QUIET-gated
         assert n_envs >= 1
         global _BANNER_PRINTED
         if not _BANNER_PRINTED:

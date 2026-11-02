@@ -48,7 +48,9 @@
   - **CPU never needed it.** The CPU backend pins the arm unconditionally, in
     every genesis version, multi-threaded included. Since CPU is the SDK
     default everywhere, most users are already reproducible.
-  - **genesis-world 1.4.0 already helps without it.** Upstream #3187 changed
+  - **genesis-world 1.4.0 already helps without it** — and so does 1.4.5, the
+    floor since SDK v1.6.9 (`tests/test_gs_compat.py` checks both upstream
+    fixes on whichever engine is installed). Upstream #3187 changed
     the re-benchmark trigger from a 5-second wall clock to a 300-call count, so
     the arm schedule follows the step number instead of the clock. The flag
     (upstream #3222) is what removes the choice entirely.

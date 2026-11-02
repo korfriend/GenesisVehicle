@@ -191,6 +191,11 @@ def main():
         print(f"WARNING: --rigid-terrain builds a {n_faces}-face non-convex mesh "
               f"as a RIGID collider (the heavy path). The SDK mesh-guard will "
               f"refuse it above 1000 faces.")
+        # sdf_cell_size=10000.0 does NOT switch the SDF off: this geom is
+        # non-convex, so its SDF is what the chassis-vs-terrain contact reads,
+        # and genesis still clips (and, for a closed mesh, wall-refines) its
+        # grid within [sdf_min_res, sdf_max_res]. Deliberately NOT the SDK's
+        # _gs_compat.COARSE_SDF_MATERIAL_KW, which is for convex geoms only.
         try:
             vs.add_static(
                 morph=gs.morphs.Mesh(file=terrain_obj, fixed=True, align=False,

@@ -10,6 +10,479 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.6.9] — 2026-11-02
+
+**Genesis backbone 1.4.0 -> 1.4.5, and the supported floor moves with it:
+`genesis-world` 1.4.5 with `quadrants` 1.3.3, `trimesh` >= 5.0 and
+`zstandard`.** The SDK's own physics did not move — open-loop parity against
+1.4.0 holds under criteria fixed before measuring (§6) — but two ENGINE
+behaviours did: 1.4.5 computes every collision geom's SDF eagerly at `build()`,
+and under `use_hibernation=True` (the OSC server's setting, both modes) a car
+that has come to rest pulls away measurably later. The server's
+`RigidGeom.n_cells` monkey-patch, a no-op on 1.4.5, is removed; the collision
+bodies the SDK itself creates now carry an explicit minimum-SDF material.
+**Hibernation stays ON by user decision — §5 documents a measured behaviour
+change; nothing is fixed there.**
+
+| abbr | meaning |
+|---|---|
+| SDF | Signed Distance Field — the per-geom volumetric grid genesis builds for non-convex contact |
+| RSS | peak resident set size of the process (`ru_maxrss`, or `/usr/bin/time -v`) |
+| QD | quadrants, genesis' kernel compiler (its on-disk kernel cache) |
+| CoACD | the convex-decomposition library genesis uses for `convexify=True` meshes |
+| L2 / L3 | server per-entity mode (K interacting vehicles) / multi-env mode (`n_envs` copies of one URDF) |
+| A / B | the 1.4.0 interpreter (genesis-world 1.4.0, quadrants 1.3.0, trimesh 4.12.2) / the 1.4.5 one (1.4.5, 1.3.3, 5.2.0, zstandard 0.25.0) |
+| hib | `RigidOptions(use_hibernation=True)` — genesis puts a rigid body that has come to rest to sleep |
+| env diag | diagonal of the (x, y) bounding box of 7 final positions: the nominal run plus 6 spawn perturbations of +/-1e-6 m per axis |
+| dt | one simulation STEP duration (s) |
+| μ | ground friction coefficient |
+| UE | Unreal Engine (the OSC server's client) |
+| OSC | Open Sound Control (the server's UDP wire protocol) |
+| MPR / GJK | Minkowski Portal Refinement / Gilbert-Johnson-Keerthi — genesis' convex collision algorithms |
+| SAP | Sweep-And-Prune — genesis' broad-phase collision query |
+| DOF | degree of freedom (one joint axis) |
+| WSL2 | Windows Subsystem for Linux 2 (the measurement host) |
+
+Every measurement below: CPU backend, WSL2, 8 cores, one fresh process per run,
+a separate QD cache per engine version (two interpreters sharing
+`~/.cache/quadrants` recompile on every alternation and made planning-time build
+timings 5-10x noisy; those are not quoted). "pre tree" is `df4f9bb` (v1.6.8),
+"post tree" this release.
+
+### 1. Deploying: the floor and the dependency set
+
+| package | v1.6.8 venv | v1.6.9 venv | why |
+|---|---|---|---|
+| `genesis-world` | 1.4.0 | **1.4.5** | the backbone |
+| `quadrants` | 1.3.0 | **1.3.3** | pinned `==1.3.3` by the 1.4.5 wheel |
+| `trimesh` | 4.12.2 | **5.2.0** | 1.4.5 requires `>=5.0.0` |
+| `zstandard` | absent | **0.25.0** | new requirement of 1.4.5 |
+
+Every other requirement of the 1.4.5 wheel was already satisfied by the 1.4.0
+venv (`pip check` clean after the switch). **Anyone running the SDK from a clone
+that updates by `git pull` — the `D:\Genesis_Unreal` UE deployment — or from a
+frozen field build (PyInstaller) must upgrade that environment's packages
+separately.** `git pull` alone gives v1.6.9 on 1.4.0, which still runs (§1.2)
+but is below the floor and says so.
+
+#### 1.1 The floor guard is warn-only
+
+New `_gs_compat.check_genesis_floor()` (`GENESIS_FLOOR = (1, 4, 5)`) logs ONE
+WARNING per process, `[genesis_vehicle:genesis-floor] genesis-world <v> is older
+than this SDK's supported floor 1.4.5 ...`, on the `genesis_vehicle` logger. It
+never raises — a raise would break the UE deployment on the first `git pull`
+that lands before its venv is upgraded, which is exactly the order a deployer
+does it in. It is NOT silenced by `GENESIS_VEHICLE_QUIET` (that variable only
+silences the version banner).
+
+Where it runs — exactly two call sites:
+
+* `vehicle_scene._ensure_genesis`, on both its branches (first init and
+  already-initialised) — reached by `VehicleScene.init_backend` and by every
+  `VehicleScene` built with the default `init_genesis=True`. Both server modes
+  call `init_backend` first, so the server is covered.
+* `VehiclePhysics.__init__`, outside the QUIET branch — reached by direct driver
+  users (`scene_helpers.add_vehicle`, the `GeneVehicle_*` demos) and by the
+  batched driver, which constructs a `VehiclePhysics` prototype.
+
+**Not covered:** a `VehicleScene(init_genesis=False)` that never constructs a
+vehicle, and any entry point that touches neither site.
+
+Version parsing: `genesis.__version__` is read as `major.minor[.patch]` plus an
+optional pre-release tag. `1.4.4`, `1.4.0`, `1.4`, and the pre-releases
+`1.4.5rc1` / `1.4.5.dev3` warn. `1.4.5`, `1.4.5.post1`, `1.4.5+local`, and
+non-PEP-440 build labels such as `1.4.5-cuda12` / `1.4.5_cpu` read as 1.4.5 and
+are silent. An unparseable or missing version warns that the floor could not be
+checked, and continues.
+
+#### 1.2 1.4.0 still runs, and the `<= 1.3.3` branches are still dead weight
+
+The final tree, run on A (a scratchpad overlay venv with genesis-world 1.4.0 /
+quadrants 1.3.0 / trimesh 4.12.2, its own kernel cache, CPU/WSL2), passed
+`633 passed, 3 skipped` (124 s) — the same count as on 1.4.5. The
+1.4.0 fan baseline is kept (§7), so that test still guards a rollback. Below
+1.4.0 nothing changed: the `<= 1.3.3` branches in `_gs_compat.py` remain
+untested dead weight to be removed in a later release, and the floor message
+says releases before 1.4.0 are not supported.
+
+#### 1.3 Rollback
+
+The pre-switch environment is frozen at
+`/home/korfriend/dev/genesis_vehicle_system/gen_vesis_freeze_pre_gs145.txt`
+(outside this repo). From `/home/korfriend/dev/genesis_vehicle_system`:
+
+```bash
+gen_vesis/bin/python -m pip install --no-deps genesis-world==1.4.0 quadrants==1.3.0 trimesh==4.12.2 \
+  && gen_vesis/bin/python -m pip uninstall -y zstandard
+gen_vesis/bin/python -m pip freeze | diff gen_vesis_freeze_pre_gs145.txt -   # expect empty
+```
+
+Not executed. The switch itself changed exactly those four lines of
+`pip freeze`.
+
+### 2. SDF: the `n_cells` monkey-patch is gone; SDK-owned bodies get `COARSE_SDF_MATERIAL_KW`
+
+**What 1.4.5 changed (code-read of both engines).** On 1.4.0 the collider
+allocated the SDF buffer at init but COMPUTED grid values lazily, only when the
+scene had a collision pair involving a non-convex, non-terrain geom
+(`has_nonconvex_nonterrain`). On 1.4.5 the collider computes EVERY geom's grid at
+init, eagerly, once per unique (mesh, grid) with an on-disk `.gsd` cache
+(upstream #3569, "compute the SDF of rigid geoms ... once per geometry"). So on
+1.4.5 the grid size of every collision geom is paid in build time and memory
+whether or not anything ever reads it. In a rigid-only scene only the
+non-convex vs non-terrain narrowphase reads an SDF; terrain collides through its
+heightfield, and the SDK's ray-wheel contact never reads one.
+
+**The patch.** `server/physics_server.py` and `server/l3_runtime.py` both did
+`RigidGeom.n_cells = property(lambda self: 1)` after `init_backend`. Removed from
+both.
+
+* On 1.4.5 it was a **no-op**: `RigidGeom` no longer has an `n_cells` attribute,
+  so the patch attached a class attribute nothing reads.
+* On 1.4.0 it shrank the SDF buffer to one cell per geom (measured: 39 cells for
+  39 geoms in the server-shaped scene below). That was harmless while no grid was
+  ever computed. **If a non-convex non-terrain geom was in a collision pair, the
+  lazily computed grids would have been written into a buffer laid out for one
+  cell per geom — mis-laid.** This is a code-read; it was NOT reproduced, and
+  every server scene measured for this release had `has_nonconvex_nonterrain ==
+  False`.
+
+**`sdf_cell_size=10000.0` never switched the SDF off.** genesis sizes each geom's
+grid per axis as `cell = clip(target, grid/(sdf_max_res-1), grid/max(sdf_min_res-1, 2))`
+(same formula on 1.4.0 and 1.4.5). A huge `sdf_cell_size` is clipped to the upper
+bound and lands on `sdf_min_res` — whose default is 32 nodes per axis, not 1.
+The smallest grid the material validator accepts is `sdf_min_res=16`. New
+constant, in `_gs_compat`:
+
+```python
+COARSE_SDF_MATERIAL_KW = {"sdf_cell_size": 1.0e4, "sdf_min_res": 16}
+```
+
+Its effect by geom kind (docstring on the constant):
+
+| geom | grid with these kwargs |
+|---|---|
+| convex (primitive; `convexify=True` mesh; URDF collision geom under the default `convexify`) | 16 nodes per axis (was 32 with `sdf_cell_size=1e4` alone; with the default material, 128 for a mesh or URDF geom and 32 for a primitive, whose `sdf_max_res` genesis resets to 32) |
+| non-convex, watertight | genesis first shrinks the target to half the wall thickness. Where that is `<= grid/31` nothing changes (thin walls still refine, up to `sdf_max_res`); above it, the upper clip moves from `grid/31` to `grid/15` — **coarser** |
+| non-convex, not watertight | 32 -> 16 nodes per axis — **coarser** |
+
+So the kwargs are only safe where every geom is convex, or where no contact reads
+the SDF. Where they are now used — the complete list (obstacles: convex by test
+over the branches listed below; vehicle/target bodies: convex by construction,
+not tested; the two raycast mirrors: not convexity-dependent — fixed bodies in a
+scene where no contact reads an SDF):
+
+| site | body | before | after |
+|---|---|---|---|
+| `server/vehicle_builder.py` `build_vehicle` | L2 vehicle (URDF) | `Rigid(..., sdf_cell_size=10000.0)` | `Rigid(..., **COARSE_SDF_MATERIAL_KW)` |
+| `server/l3_runtime.py` `run_l3` | L3 shared vehicle (URDF) | same | same |
+| `server/physics_server.py` generic `/Init/Target` | free rigid primitive (Box / Sphere / Cylinder) via `add_dynamic` | same | same |
+| `server/env_builder.py` `build_obstacles` | every UE obstacle, all types | same | same |
+| `VehicleScene.add_static`, `dual_scene`, genesis >= 1.4.0 | the FIXED RIGID raycast mirror of a `gs.morphs.Terrain` | `gs.materials.Rigid()` | `Rigid(**COARSE_SDF_MATERIAL_KW)` |
+| `VehicleScene.add_dynamic(wheel_raycast=...)`, `dual_scene` | the fixed raycast-scene mirror | `gs.materials.Rigid()` | `Rigid(**COARSE_SDF_MATERIAL_KW)` |
+
+Not changed: the `dual_scene` vehicle proxy (a `collision=False` Box — measured 0
+collision geoms on both engines, so its material has no SDF), and every
+user-facing `material=None` default (§3).
+
+**How "only on convex geoms" is enforced:**
+
+* **Post-build check, every `VehicleScene`.** `VehicleScene.build()` calls
+  `_gs_compat.warn_coarse_sdf_on_nonconvex` on the main solver and, in
+  `dual_scene`, the raycast solver. It logs ONE `[genesis_vehicle:coarse-sdf]`
+  WARNING per scene naming every non-convex, non-terrain geom whose material
+  carries the coarse kwargs — **gated on that solver's
+  `collider_config.has_nonconvex_nonterrain`**, i.e. it speaks only when some
+  collision pair can actually read that SDF, and is silent otherwise (every
+  raycast-scene body is fixed, so a non-convex mirror there does not trigger
+  it). If the flag path is absent on some engine it fails OPEN and warns. Scenes
+  built without `VehicleScene` are not checked. impl-review drove it: it fired
+  on every non-convex coarse path tried and was silent otherwise.
+* **The tested server obstacle branches are convex.** Not run by the test, convex
+  or collision-free by code-read only: the `structures_as_primitive` Box branch,
+  the mesh-not-found Box fallback and the `road_raycast_only` branch.
+  `tests/test_server_mesh_obstacles.py::test_build_obstacles_creates_only_convex_collision_geoms`
+  runs the real `env_builder.build_obstacles` over types 1-4, type-5
+  `[User:Convex]` and the `[Simple:Aggregate]` hull branch (fed a NON-convex
+  annulus, so a missing hull would show), the `[Complex]` CoACD double-sided
+  road, a `b_dynamic=1` `[Complex]` mesh and a `b_dynamic=2` mesh, and asserts
+  every non-terrain geom `is_convex`, `has_nonconvex_nonterrain is False`, a
+  non-fixed link exists (so the pairs are real), and every obstacle material
+  carries the kwargs.
+* **Contact is unchanged, bit for bit.** A car driven into a convexified
+  box-mesh wall (60 brake + 200 throttle-0.5 steps) ends at the identical
+  float32 pose (position + quaternion, exact equality) with
+  `sdf_cell_size=1e4` and with `COARSE_SDF_MATERIAL_KW`, on A and on B. In the
+  server-shaped scene below, car and dynamic-obstacle final positions are
+  identical pre (patch + old kwargs) vs post (no patch + coarse), on A and on B,
+  3/3 repeats.
+* **The grid really is 16.** `tests/test_gs_compat.py::test_coarse_sdf_kwargs_give_a_16_node_grid_on_this_engine`
+  builds a real CPU scene on whichever engine is installed (branching on
+  `desc.sdf.n_nodes` / `RigidGeom.sdf_res`): coarse Box and coarse convex mesh
+  `(16,16,16)`, both raycast mirrors `(16,16,16)`, while a default-material
+  convex mesh stays finer than 16 so the assertion is not vacuous (128 per axis
+  in the implementer's probe, identical on both engines). It also asserts the
+  post-build check ran on both scenes and stayed quiet with a coarse non-convex
+  ring present but every body fixed.
+
+**Measured footprint** — SDF cell counts are deterministic and identical on both
+engines; RSS and build seconds are medians of n=3, alternating A/B order, fresh
+asset cache per run, warm per-version QD cache:
+
+| scene | SDF cells | A build s / RSS MB | B build s / RSS MB |
+|---|---|---|---|
+| reference car + 100 convex box meshes, `sdf_cell_size=1e4` (the v1.6.8 server kwargs) | 3,342,336 | 5.76 / 1325.7 | 5.80 / 1343.1 |
+| same, `COARSE_SDF_MATERIAL_KW` | 446,464 | 5.62 / 1270.6 | 5.15 / 1221.5 |
+
+**Patch removal in a server-shaped scene** — the L2 server's `RigidOptions`
+(hibernation included), `dual_scene`, `car_4w` through `VehicleScene`, obstacles
+through the tree's own `env_builder.build_obstacles` (30 distinct
+`[User:Convex]` hulls, a `[Complex]` CoACD double-sided road, a `b_dynamic=1`
+`[Complex]` mesh in the car's path, a `b_dynamic=2` mesh, types 1-4), 200 steps,
+cold asset cache, n=3 medians:
+
+| | pre: `n_cells` patch + `sdf_cell_size=1e4` | post: no patch + coarse |
+|---|---|---|
+| A (1.4.0) | build 5.78 s, RSS 1306.4 MB, SDF buffer 39 cells | build 5.88 s, RSS 1308.8 MB, 188,416 cells |
+| B (1.4.5) | build 6.28 s, RSS 1538.9 MB, 1,376,256 cells | build 5.09 s, RSS 1201.5 MB, 200,704 cells |
+
+On 1.4.0 removing the patch costs about 2.4 MB here (the buffer is sized for real
+grids, the values are still never computed). On 1.4.5 the coarse kwargs save
+about 337 MB. The same input meshes build 39 geoms on 1.4.0 and 44 on 1.4.5 —
+CoACD / hull output differs between the engine versions.
+
+### 3. User-facing `material=None` defaults are UNCHANGED — and what they cost on 1.4.5
+
+`VehicleScene.add_vehicle(material=None)` passes no material (genesis default);
+`add_static` / `add_dynamic` with `material=None` use `gs.materials.Rigid()`.
+The default `sdf_cell_size` is 0.005 m, so a convex geom lands on the FINEST
+allowed grid, `sdf_max_res`: 128 nodes per axis for a mesh or URDF geom (the
+reference car's collision box alone is 128^3 = 2,097,152 cells), 32 for a
+primitive. On 1.4.5 that grid is now computed at build. The SDK
+does not rewrite a material a user passed or defaulted (a deliberate decision for this
+release) — **if every geom of a body is convex and the scene holds no
+non-convex, non-terrain collision geom (then no contact reads any SDF), pass
+`gs.materials.Rigid(sdf_cell_size=1e4, sdf_min_res=16, ...)` yourself.**
+
+Measured (medians of n=3, cold asset cache, warm per-version QD cache):
+
+| scene | SDF cells | A build s / RSS MB | B build s / RSS MB |
+|---|---|---|---|
+| reference car + plane, default material | 2,129,920 | 3.13 / 1147.0 | 4.29 / 1654.8 |
+| reference car + plane, car on `COARSE_SDF_MATERIAL_KW` | 36,864 | 3.20 / 1107.0 | 3.50 / 1109.7 |
+| `GeneVehicle_HJW` `car_raywheel.urdf`, `Rigid(friction=1.0)` (default SDF) | 2,129,920 | 3.46 / 1178.1 | 4.23 / 1668.2 |
+
+One default-material vehicle costs +0.8 .. +1.2 s of build and +490 .. +508 MB of
+peak RSS on 1.4.5 (the two car rows above: HJW +0.77 s / +490.1 MB, reference car
++1.16 s / +507.8 MB). One planning-time probe — the reference car + 100 distinct convex box
+meshes on the default material, 211,845,120 SDF cells — peaked at 5,314 MB on
+1.4.0 and **14,082 MB** on 1.4.5 (n=1, run before the per-version QD caches; a
+sibling figure from the same run did not reproduce under controlled conditions,
+1,803 vs 1,343 MB, so read it as an order of magnitude only). A scene with many
+distinct default-material meshes can exhaust memory at `build()` on 1.4.5 where
+it did not on 1.4.0.
+
+### 4. `samples/dual_scene_terrain.py`: the >50k-face SDF warning does not go away
+
+The sample's 51,212-face `gs.morphs.Terrain` makes 1.4.5 print `Beware that SDF
+pre-processing of mesh having more than 50000 faces may take a very long time`;
+1.4.0 printed nothing (lazy SDF). Moving the Terrain raycast mirror onto the
+coarse kwargs does not remove it — **on a cold asset cache it now prints TWICE**
+(pre tree 1, post tree 2, 3/3 runs each, B); with a warm asset cache both trees
+print none. Cause, by the warm/cold contrast: before, the mirror's grid equalled
+the main Terrain's, so the mirror hit the `.gsd` file the main terrain had just
+written; now its 16-node grid is a different cache key and a second, small SDF
+pass over the same 51,212 faces runs. Measured on B, cold asset cache: wall
+median pre 27.9 s vs post 29.9 s (n=5, ranges overlap — not separable), peak RSS
+1927 vs 1917 MB (n=2); warm asset cache 1477 vs 1444 MB (n=1). So for this
+sample the mirror change saves 10-33 MB and costs one extra small SDF pass on a
+cold cache; it is **not** a build-time reduction. The same applies to an
+`add_dynamic` mesh mirror whose main body keeps a default material.
+`FINAL: PASS`, `x=+10.342` in every run, both modes, both engines.
+
+### 5. Hibernation: a measured behaviour change on 1.4.5, NOT fixed
+
+Both server modes build with `use_hibernation=True` (`physics_server.py` L2
+`RigidOptions`, `l3_runtime.py` `_rigid_kwargs`). On 1.4.5 that measurably
+delays a car pulling away from rest. **The user decided to keep hibernation ON
+in both modes; this release changes no hibernation setting.**
+
+Harness: the L2 server's `RigidOptions` (`enable_collision`, `tolerance=0.001`,
+MPR, `box_box_detection`, SAP broadphase, `max_collision_pairs=2048`, hib on or
+off), `car_4w_rwd_ackermann(samples/urdf/car_4w.urdf, stability="control")`
+spawned at z=1.0 on a plane, μ 1.0, dt 0.025, `substeps=10`, `n_envs=1`, 160
+steps of `brake=1` then 120 of `throttle=0.5`. "Zero-velocity step" = every
+component of the chassis velocity exactly 0.0.
+
+| | zero-velocity steps in 60..160 (at rest) | dx over the 120 throttle steps |
+|---|---|---|
+| 1.4.0, hib | 0 | 4.3657 m |
+| 1.4.0, no hib | 0 | 4.3657 m |
+| **1.4.5, hib** | **46 / 100** | **3.8062 m (-12.8%)** |
+| 1.4.5, no hib | 0 | 4.3657 m |
+
+Reproduced in a second, independent run of the same scenario (46/100; 3.806 vs 4.366 m). At rest the
+1.4.5 car alternates between exactly-zero and non-zero velocity — a sleep/wake
+cycle rather than a steady sleep. A second arm with plain `RigidOptions(enable_collision=True,
+use_hibernation=True)` over the 7-run parity envelope (§6): on 1.4.5,
+`car_rest_then_go` was delayed in 6/7 runs (final x 3.8032 .. 3.8052 m) and not
+in 1/7 (4.3619 m); `tank_straight` and `tank_skid` were unaffected in 7/7. On
+1.4.0, hib and no-hib were identical in 7/7 runs for all three scenarios (the
+planning per-step trace matched to 5 decimals) — i.e. hibernation had no
+measured effect on these vehicles before.
+
+**Cause NOT established.** Both engines contain code that wakes a hibernated
+body when an external wrench is applied to it, which is how the SDK drives the
+chassis; why 1.4.5 still lags was not investigated. Upstream 1.4.5 did change
+hibernated-link handling (#3582, "wrong armature handling for hibernated
+links"); that it is the cause is not shown. **Not measured:** L3 with
+`n_envs > 1`, any vehicle other than these, any client-driven UE session, and
+whether turning hibernation off costs throughput in a scene with many dynamic
+obstacles. Read this as what the harness above does, not as a guarantee either
+way. Documented in `docs/server.md` §2.7.
+
+### 6. Cross-version parity, 1.4.0 vs 1.4.5
+
+Harness: `n_envs=1`, `dual_scene`, dt 0.025 (`cfg.recommended_dt`),
+`substeps=10`, plane μ 1.0, spawn z=1.0, `brake=1` settle then drive; 7 runs
+per cell (nominal + 6 spawn perturbations). Run on the pre tree; the post tree
+reproduces every nominal pose, quaternion, velocity and wheel distance at the
+probe's 6-decimal output (18/18 runs, both engines), so this table holds for
+v1.6.9.
+
+Criteria were fixed BEFORE measuring, and the regime is chosen by the A env
+diag:
+
+* **deterministic** (A env diag < 1 mm): `|dx| <= 1 mm + 0.05% x distance`,
+  `|dz| <= 0.5 mm`, settled pose within 1e-4 m; for the mirror-symmetric
+  straight runs `y` is compared without sign.
+* **launch-sensitive** (A env diag >= 1 mm): the two 7-run envelopes overlap and
+  their centroids are no farther apart than the larger diagonal.
+
+| scenario (settle / drive, throttle, steer) | 1.4.0 nominal | 1.4.5 nominal | env diag A / B | regime | result |
+|---|---|---|---|---|---|
+| car_straight (1.5 s / 5.0 s, 0.5, 0) | `(11.995459, 0.030594, 0.111414)` | `(11.995463, -0.030735, 0.111414)` | 62.0 / 58.6 mm | launch-sensitive | overlap; centroids 20.5 mm apart (<= 62.0) — PASS |
+| car_steer (1.5 / 5.0, 0.5, 0.4) | `(7.974177, -7.462219, 0.111487)` | `(8.098068, -7.344538, 0.111487)` | 184.4 / 111.8 mm | launch-sensitive | overlap; 29.5 mm (<= 184.4) — PASS |
+| car_box (wall at x=8; 1.5 / 5.0, 0.5, 0) | `(5.600050, 0.033280, 0.111446)` | `(5.599257, -0.037195, 0.111080)` | 76.1 / 60.7 mm | launch-sensitive | overlap; 22.7 mm (<= 76.1) — PASS |
+| tank_straight (1.5 / 2.0, 0.5, 0) | `(3.719822, -0.000001, 0.398435)` | `(3.719821, 0.000000, 0.398435)` | 0.005 / 0.006 mm | deterministic | dx 0.001 mm, abs-y 0.001 mm (tol 2.861), dz 0, settled 2.0e-6 m — PASS |
+| tank_skid (1.5 / 2.0, 0.5, 0.5) | `(0.003524, 0.012018, 0.398431)` | `(0.003969, 0.012058, 0.398431)` | 0.903 / 0.630 mm | deterministic | dx 0.445 mm, dy 0.040 mm (tol 1.007), dz 0, settled 2.0e-6 m — PASS |
+| car_rest_then_go (4.0 / 3.0, 0.5, 0), no hib | `(4.362280, 0.023160, 0.111415)` | `(4.362217, -0.010424, 0.111415)` | 81.1 / 97.7 mm | launch-sensitive | overlap; 34.6 mm (<= 97.7) — PASS |
+
+The car's straight runs were expected to be deterministic; measured, a 1e-6 m
+spawn change flips the sign of the lateral drift (as it did at the 1.3.3 ->
+1.4.0 bump, v1.5.0 table), so the pre-fixed rule put them in the
+launch-sensitive regime. The criteria were not changed after measuring.
+`tank_skid` is deterministic by 0.097 mm of margin. As in v1.5.0, this is a
+measurement taken once at the bump, not a standing guarantee.
+
+### 7. The default-contact bit-identity test is now kept per engine version
+
+`tests/test_fan_default_identity.py` compares a 200-step reference-car rollout
+with `torch.equal` against a baseline captured from the pre-v1.5.1 commit
+`20f7380`. Through v1.6.8 the baseline existed for 1.4.0 only and the test
+SKIPPED on any other engine. It is now `BASELINES = {"1.4.0": ..., "1.4.5":
+...}`; a version not in the table still skips. The 1.4.5 entry was captured by
+running a `git archive` of `20f7380` on B with the identical rollout; the method
+was validated by running the same archive on A, which reproduced the 1.4.0
+entry bit-for-bit, and the v1.6.8 tree on B gives the same 1.4.5 numbers.
+Final chassis position: 1.4.0 `(5.92042875289917, 0.03004419431090355,
+0.1114146038889885)`, 1.4.5 `(5.920430660247803, -0.030101105570793152,
+0.11141432076692581)`. The test runs and passes on 1.4.5 (no skip).
+
+### 8. Engine audit — what did NOT need a change
+
+Read off the 1.4.5 source and exercised by the suite: `apply_links_external_wrench`,
+`set_dofs_position` / `set_dofs_velocity` / `control_dofs_position` /
+`get_links_*` / `n_faces` signatures, every `RigidOptions` kwarg the server
+passes (`prefer_parallel_linesearch` is absent on both engines and still
+filtered out), `gs.broadphase_traversal.SAP`, the substep derivation and the
+`RigidOptions(dt=)` conflict raise, Terrain still not hostable on the
+kinematic solver (the rigid mirror path stays), `link.desc.*` inertial reads,
+the Raycaster options (byte-identical; a miss is still `max_range` when
+`no_hit_value` is unset), and `JITRenderer.update_buffer(node, buffer_name,
+data)`. DOF armature / damping / kp / kv and link masses of the reference car
+are identical on both engines. The determinism test (`repeat_after_count=300`)
+passes on 1.4.5. 1.4.0 forced `torch.set_default_device`, 1.4.5 does not —
+no effect on CPU; on GPU see §11. trimesh 5's `Scene.dump(concatenate=True)`
+DeprecationWarning (`server/env_builder.py`) was already printed on 4.12.2.
+
+### 9. Samples and demos, A vs B (post tree)
+
+No verdict changed between engines. `quickstart` (x=+12.00), `l2l3_minimal`,
+`dual_scene_terrain` both modes (`FINAL: PASS`), `slope_hold` (lateral slip
++0.1 mm, OK), `quickstart --gpu` (x=+12.00), `GeneVehicle_KDU --headless`: rc 0
+and the same verdict on both. Pre-existing and unchanged by this release (each
+reproduces on the pre tree with A): `path_follow_reverse_demo` rc 1 with
+`yaw_err 0.43` against its 0.4 threshold (the v1.5.0-recorded boundary);
+`road_loop` "12/12 flown away"; `GeneVehicle_HJW` "FAIL z anchored";
+`GeneVehicle_JMK` ends at z = -289.6 and `GeneVehicle_Truck6w` at z = -15.6
+(both drive off their demo's finite ground). `server.benchmark --modes L2,L3
+--terrain simple,complex --tanks 1,10 --stats 3`: rc 0 on both, all 8
+configurations realtime on both, no SDF-related exception, no `coarse-sdf`
+warning.
+
+### 10. Tests
+
+`633 passed, 3 skipped in 58.69s` (final tree, genesis-world 1.4.5, CPU/WSL2,
+`pytest tests/ -q -p no:cacheprovider --ignore=tests/test_fusion_probe.py`, one
+run). v1.6.8 was 605 + 3 skipped on 1.4.0, and 604 + 4 skipped on 1.4.5 (the
+4th was the fan test's version gate). +28: `test_gs_compat.py` 26 -> 53 collected
+(floor guard: version parsing incl. pre-release / post / local / non-PEP-440
+labels, once-per-process, the message, both call sites including under
+`GENESIS_VEHICLE_QUIET`; coarse SDF: the kwargs are the validator minimum, the
+non-convex lister, the narrowphase gate, fail-open, and the real-engine 16-node
+test) and `test_server_mesh_obstacles.py` 17 -> 18 (the convexity test of §2).
+The 3 skips are still the env-gated live server tests; on B they pass with
+`GENESIS_VEHICLE_LIVE_SERVER_TEST=1` (3 passed). The implementer
+mutation-checked the guards: the floor value, the pre-release term, the
+once-flag, each call site (removed, or moved inside the QUIET branch), the
+narrowphase gate, the fail-open default, both mirror materials, the main-scene
+post-build call, a non-convex `[Complex]` road, and the fan read-back each made
+the intended test fail.
+
+### 11. Not measured
+
+* Hibernation in L3 with `n_envs > 1`, on other vehicles, in a UE session, and
+  its cause (§5).
+* GPU beyond one `samples.quickstart --gpu` run per engine. 1.4.5 no longer
+  forces torch's default device, so `control/plant.py`'s device-less index
+  tensor is created on CPU under a GPU backend — read, not run.
+* Speed. The benchmark run above is one run per engine, not alternated; no
+  speed figure is published for 1.4.5.
+* The offscreen instanced-wheel renderer path (`visual.py` buffer API) — the
+  `update_buffer` signature was read, the path was not run.
+* `docs/path-following.md`'s "the external-wrench API is not on genesis' autodiff
+  tape (`grad is None`)" was measured on 1.3.3 / 1.4.0 and not re-measured after
+  1.4.5's differentiable-simulation changes (#3586, #3592).
+
+### 12. Known, not fixed
+
+* **`--no-target-collision` appears to have done nothing since genesis-world
+  1.4.0.** `server/physics_server.py` (line 756) writes `geom._contype` /
+  `geom._conaffinity` on every target geom; no engine version reads those
+  attributes (`RigidGeom.contype` returns `self.desc.contype` on 1.4.5, and no
+  reader of `_contype` exists on 1.4.0 either). Code-read, not measured. Ticket
+  only.
+* genesis writes `material.sdf_max_res = 32` IN PLACE on a material passed to a
+  Primitive morph, so one `Rigid` object reused for a later Mesh inherits it.
+  `env_builder` builds a fresh material per obstacle, so the server is
+  unaffected; a user reusing one material object is not protected.
+* `pip freeze` after this switch records genesis-world as a `file://` wheel URL;
+  reinstalling `genesis-world==1.4.5` from the index gives a clean line.
+
+Files: `_gs_compat.py`, `core.py`, `vehicle_scene.py` (floor-guard call, both
+mirrors, post-build check, and the mesh-guard text — it said a large
+`sdf_cell_size` "only caps the SDF grid", which was wrong for a watertight
+non-convex mesh: genesis refines that grid to the wall thickness up to
+`sdf_max_res`), `server/physics_server.py`, `server/l3_runtime.py`,
+`server/vehicle_builder.py`, `server/env_builder.py`,
+`samples/terrain_drive.py` (comment only: its `--rigid-terrain`
+`sdf_cell_size=10000.0` does not switch the SDF off and is deliberately not the
+coarse kwargs), three test files. Not touched: `_pipeline.compute_wheel_step`,
+the batching axes, the OSC schema, `use_hibernation`.
+
+---
+
 ## [1.6.8] — 2026-09-18
 
 **The `[STATS]` / `[SERVE]` reporting window is now a fixed WALL-CLOCK

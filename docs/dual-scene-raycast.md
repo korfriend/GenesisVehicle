@@ -425,6 +425,22 @@ produced one either), and `dual_scene` is the default.
 > several releases (see CHANGELOG 1.5.1); after the fix the reference car reads
 > `d0 = [0.411, 0.411, 0.412, 0.412]` and settles at `z = 0.112`.
 
+> **A large `Terrain` costs an SDF pass at build on genesis-world 1.4.5
+> (v1.6.9).** 1.4.5 computes every collision geom's SDF at `build()`; 1.4.0
+> did it only when a non-convex contact needed it. On genesis >= 1.4.0 the
+> `dual_scene` raycast mirror of a `Terrain` is a fixed RIGID body (above), so
+> it has an SDF too. Since v1.6.9 that mirror is built with the minimum grid
+> (`_gs_compat.COARSE_SDF_MATERIAL_KW`, 16 nodes per axis — its SDF is never
+> read), but this does **not** make the build cheap: for the sample's
+> 51,212-face terrain, 1.4.5 still prints genesis' "SDF pre-processing of mesh
+> having more than 50000 faces" warning, and on a cold asset cache it prints it
+> **twice** (v1.6.8: once), because the mirror's grid no longer matches the main
+> terrain's cached one and gets its own, small pass. Measured on 1.4.5, CPU/WSL2,
+> cold asset cache: wall median 27.9 s (v1.6.8 tree) vs 29.9 s (v1.6.9), n=5,
+> overlapping ranges — not separable; peak RSS (resident memory) 1927 vs 1917 MB
+> (n=2). With a warm asset cache neither tree prints the warning. 1.4.0 printed
+> it in neither tree. Details: CHANGELOG 1.6.9 §4.
+
 Runnable demo: `python -m genesis_vehicle.samples.dual_scene_terrain --compare`.
 It is an **API and pose-equivalence demo**, not a benchmark: it shows how the
 two `raycast_mode` values are wired and checks that they agree

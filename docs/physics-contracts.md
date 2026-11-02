@@ -857,8 +857,12 @@ invariant: `WheelMeta` fields are per-wheel-only until every site uses them.
 
 `VehicleScene.sim_options` is the **authored** `SimOptions` object — the one the
 scene was constructed with. **Writing to it after `build()` changes nothing**,
-on genesis 1.4.0 — the supported backend since SDK v1.6.6 — and on 1.3.3, which
-is no longer supported but whose compatibility branches still run if installed.
+on genesis 1.4.5 — the supported backend since SDK v1.6.9, where
+`test_sim_options_and_timing.py::test_post_build_sim_options_writes_are_inert`
+passes on a real CPU scene — on 1.4.0, the supported backend for SDK
+v1.6.6-v1.6.8 and the engine the measurement below was taken on, and on 1.3.3,
+which is no longer supported but whose compatibility branches still run if
+installed.
 
 Why: `Simulator.__init__` snapshots `_dt` / `_substep_dt` / `_substeps` at
 construction and copies them into each solver at build; `Simulator.dt` is a

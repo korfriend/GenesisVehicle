@@ -73,7 +73,8 @@ from typing import Any, Callable, Optional
 
 import genesis as gs
 
-from ._gs_compat import scene_sim_options
+from ._gs_compat import (COARSE_SDF_MATERIAL_KW, check_genesis_floor,
+                         scene_sim_options, warn_coarse_sdf_on_nonconvex)
 from .core import VehiclePhysics
 from .inputs import VehicleInputs
 from .raycast import (
@@ -165,8 +166,11 @@ def _guard_collision_mesh(morph: Any, where: str) -> None:
     wheel raycaster re-fits a BVH over every face *each step* (the vehicle moves,
     so the BVH is never static). Past ``_MAX_NONCONVEX_COLLISION_FACES`` either
     cost can spike memory/compute and hard-crash the process (under WSL, the
-    whole VM). It fires even with a large ``sdf_cell_size`` (which only caps the
-    SDF grid) because the per-step raycaster re-fit is unaffected by it. Raising
+    whole VM). It fires even with a large ``sdf_cell_size``: that does not bound
+    the SDF grid of a watertight non-convex mesh (genesis refines its cells to
+    the wall thickness, up to ``sdf_max_res``; an earlier revision of this
+    docstring said it "only caps the SDF grid", which was wrong for such a
+    mesh), and the per-step raycaster re-fit is unaffected by it either way. Raising
     here — before the entity is added/built — turns that silent crash into a
     clear, actionable error and asks for the mesh to be reviewed.
 
@@ -199,8 +203,9 @@ def _guard_collision_mesh(morph: Any, where: str) -> None:
         "RIGID collision/raycast body with convexify=False (limit %d). >>> REVIEW "
         "THIS MESH <<< — as a rigid body it pays both an SDF/collision build and "
         "(single_scene) a per-step wheel-raycaster BVH re-fit over every face, "
-        "either of which can crash the process (independent of sdf_cell_size, "
-        "which only caps the SDF grid). Fix: decimate it, enable convexify=True "
+        "either of which can crash the process (sdf_cell_size does not prevent "
+        "either: a watertight non-convex mesh's SDF is refined to its wall "
+        "thickness up to sdf_max_res). Fix: decimate it, enable convexify=True "
         "(convex decomposition), or register it as a KINEMATIC wheel-raycast "
         "target (add_static(collision=False) in dual_scene), which needs no SDF "
         "and whose BVH is built once. File: %s",
@@ -211,8 +216,9 @@ def _guard_collision_mesh(morph: Any, where: str) -> None:
         f"(limit {_MAX_NONCONVEX_COLLISION_FACES}). As a rigid body it forces a "
         f"large SDF/collision build AND, in single_scene, a per-step "
         f"wheel-raycaster BVH re-fit over every face — either can exhaust "
-        f"memory/compute and crash the process/WSL (independent of sdf_cell_size, "
-        f"which only caps the SDF grid). Decimate the mesh, set convexify=True, or "
+        f"memory/compute and crash the process/WSL (sdf_cell_size does not prevent "
+        f"either: a watertight non-convex mesh's SDF is refined to its wall "
+        f"thickness up to sdf_max_res). Decimate the mesh, set convexify=True, or "
         f"use a kinematic wheel-raycast target (add_static(collision=False)) "
         f"instead. File: {f}")
 
@@ -237,8 +243,13 @@ def _ensure_genesis(backend: Optional[str] = None,
     (genesis >= 1.4.0), which pins the rigid constraint solver's arm instead of
     letting the runtime autotuner pick it — see
     :meth:`VehicleScene.init_backend`. Ignored with a warning on a genesis that
-    does not have the option."""
+    does not have the option.
+
+    Also runs the warn-only supported-floor check
+    (:func:`genesis_vehicle._gs_compat.check_genesis_floor`, once per process)
+    on both branches — first init and already-initialized."""
     global _GENESIS_BACKEND
+    check_genesis_floor()
     if getattr(gs, "_initialized", False) or _GENESIS_BACKEND is not None:
         if (backend is not None and _GENESIS_BACKEND is not None
                 and backend != _GENESIS_BACKEND):
@@ -888,8 +899,13 @@ class VehicleScene:
                     # than the visual one — same hit distances, and the BVH is still
                     # static (the raycast scene holds nothing that moves), so the
                     # dual_scene "build the BVH once" property is preserved.
+                    # The mirror's SDF is never read (terrain collides through
+                    # its heightfield, and nothing in the raycast scene moves),
+                    # but genesis >= 1.4.5 computes every geom's SDF at build —
+                    # so ask for the smallest grid (_gs_compat.COARSE_SDF_MATERIAL_KW).
                     body.entity_raycast = self._raycast_scene.add_entity(
-                        rc_morph, **_add_kwargs(gs.materials.Rigid(), surface, None))
+                        rc_morph, **_add_kwargs(gs.materials.Rigid(**COARSE_SDF_MATERIAL_KW),
+                                                surface, None))
                 else:
                     body.entity_raycast = self._raycast_scene.add_entity(
                         rc_morph, **_add_kwargs(
@@ -1026,8 +1042,12 @@ class VehicleScene:
             mirror_morph = _clone_morph(morph, fixed=True, collision=True)
             _guard_collision_mesh(mirror_morph,
                                   f"add_dynamic({name!r}) wheel_raycast mirror")
+            # Every raycast-scene rigid body is fixed, so the mirror is in no
+            # collision pair and its SDF is never read; genesis >= 1.4.5 still
+            # computes it at build, hence the minimum grid.
             obs.entity_raycast = self._raycast_scene.add_entity(
-                mirror_morph, **_add_kwargs(gs.materials.Rigid(), surface, vis_mode))
+                mirror_morph, **_add_kwargs(gs.materials.Rigid(**COARSE_SDF_MATERIAL_KW),
+                                            surface, vis_mode))
 
         self._dynamics.append(obs)
         return obs
@@ -1316,6 +1336,13 @@ class VehicleScene:
             # user-rendered, so skip the per-step visualizer/render update.
             self._raycast_scene.step(update_visualizer=False)
         self._main_scene.build(n_envs=self.n_envs, **_kw)   # viewer (if any) starts LAST
+        # Name any NON-convex geom that carries the SDK's coarse SDF kwargs in a
+        # solver that reads SDFs in contacts (one warning per scene; silent when
+        # every coarse geom is convex). See _gs_compat.COARSE_SDF_MATERIAL_KW.
+        warn_coarse_sdf_on_nonconvex(self._main_scene.sim.rigid_solver, "main scene")
+        if self._dual_scene:
+            warn_coarse_sdf_on_nonconvex(self._raycast_scene.sim.rigid_solver,
+                                         "raycast scene")
 
         # WheelJointInternalSync drives the URDF wheel VISUAL joints through the engine
         # each step so GENESIS's own renderer shows wheels spinning/steering. It is

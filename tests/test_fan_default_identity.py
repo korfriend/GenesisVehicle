@@ -17,6 +17,19 @@ Baseline capture
   ``dt=0.025``, ``substeps=10``, car spawned at ``z=1.0`` on a friction-1.0
   ground plane, 60 steps of ``brake=1`` then 140 of ``throttle=0.5``.
 
+Re-capture for genesis-world 1.4.5 (SDK v1.6.9)
+-----------------------------------------------
+The baselines are kept PER ENGINE VERSION (``BASELINES`` below); a version that
+is not in the table skips, it does not compare against another engine's
+numbers. The 1.4.5 entry was captured from the same pre-change commit
+``20f7380`` (a ``git archive`` of the commit itself; the uncommitted v1.5.1 /
+v1.5.2 working-tree additions above are not in it), with genesis-world 1.4.5 /
+quadrants 1.3.3 / trimesh 5.2.0, CPU backend, and the identical rollout. The
+method was validated by running that same archive on genesis-world 1.4.0, where
+it reproduced the 1.4.0 entry bit-for-bit. Running the then-current tree
+(``df4f9bb``, v1.6.8) on 1.4.5 gave the same 1.4.5 numbers. The 1.4.0 entry is
+kept so the test still guards a rollback to 1.4.0.
+
 A failure here means the default contact path changed. It is NOT a tolerance
 knob: loosen it and the mandate this file exists to enforce is gone. If the
 Genesis version or the backend changes, RE-CAPTURE against the pre-change tree
@@ -40,27 +53,44 @@ URDF = os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 BASELINE_COMMIT = "20f7380776b64de81ed5ebd6f366128187f79206"
 
-#: step index -> the four wheel distances of the reference car, float32.
-BASELINE = {
-    49:  [0.41489899158477783, 0.41489899158477783,
-          0.41740989685058594, 0.41740989685058594],
-    99:  [0.411739706993103,   0.41198277473449707,
-          0.4113011360168457,  0.41154420375823975],
-    149: [0.41162025928497314, 0.41162025928497314,
-          0.41120994091033936, 0.41121017932891846],
-    199: [0.41160452365875244, 0.41160428524017334,
-          0.41122496128082275, 0.41122472286224365],
+#: genesis-world version -> {step index -> the four wheel distances of the
+#: reference car (float32), "final_pos" -> the chassis position after step 199}.
+BASELINES = {
+    "1.4.0": {
+        49:  [0.41489899158477783, 0.41489899158477783,
+              0.41740989685058594, 0.41740989685058594],
+        99:  [0.411739706993103,   0.41198277473449707,
+              0.4113011360168457,  0.41154420375823975],
+        149: [0.41162025928497314, 0.41162025928497314,
+              0.41120994091033936, 0.41121017932891846],
+        199: [0.41160452365875244, 0.41160428524017334,
+              0.41122496128082275, 0.41122472286224365],
+        "final_pos": (5.92042875289917, 0.03004419431090355, 0.1114146038889885),
+    },
+    "1.4.5": {
+        49:  [0.4148988723754883,  0.4148988723754883,
+              0.41740942001342773, 0.4174095392227173],
+        99:  [0.4119824171066284,  0.4117391109466553,
+              0.411543607711792,   0.4113004207611084],
+        149: [0.4116201400756836,  0.4116201400756836,
+              0.4112095832824707,  0.41120970249176025],
+        199: [0.4116039276123047,  0.4116036891937256,
+              0.41122496128082275, 0.4112248420715332],
+        "final_pos": (5.920430660247803, -0.030101105570793152, 0.11141432076692581),
+    },
 }
-BASELINE_FINAL_POS = (5.92042875289917, 0.03004419431090355, 0.1114146038889885)
 
 
 def test_default_rollout_is_bit_identical_to_the_pre_change_tree():
     genesis = pytest.importorskip("genesis")
     from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 
-    if getattr(genesis, "__version__", None) != "1.4.0":
-        pytest.skip(f"baseline captured on genesis-world 1.4.0, running "
-                    f"{getattr(genesis, '__version__', '?')}")
+    version = getattr(genesis, "__version__", None)
+    if version not in BASELINES:
+        pytest.skip(f"no baseline captured for genesis-world {version!r} "
+                    f"(have {sorted(BASELINES)}); re-capture against the "
+                    f"pre-change tree before trusting this engine")
+    baseline = BASELINES[version]
 
     cfg = car_4w_rwd_ackermann(URDF, stability="control")
     VehicleScene.init_backend("cpu")
@@ -81,18 +111,18 @@ def test_default_rollout_is_bit_identical_to_the_pre_change_tree():
         else:
             veh.set_inputs(throttle=0.5, brake=0.0, steer=0.0)
         vs.step()
-        want = BASELINE.get(i)
+        want = baseline.get(i)
         if want is None:
             continue
         got = veh.distances[0].cpu()
         expect = torch.tensor(want, dtype=got.dtype)
         assert torch.equal(got, expect), (
             f"step {i}: the DEFAULT point-contact path changed.\n"
-            f"  baseline ({BASELINE_COMMIT[:12]}): {want}\n"
+            f"  baseline ({BASELINE_COMMIT[:12]}, genesis {version}): {want}\n"
             f"  now:                              {got.tolist()}")
 
     pos = veh.get_pos()[0].cpu()
-    assert torch.equal(pos, torch.tensor(BASELINE_FINAL_POS, dtype=pos.dtype))
+    assert torch.equal(pos, torch.tensor(baseline["final_pos"], dtype=pos.dtype))
 
 
 # --- the branch the rollout does not take ------------------------------------

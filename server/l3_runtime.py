@@ -34,6 +34,7 @@ import torch
 import genesis as gs
 
 from genesis_vehicle import VehicleScene
+from genesis_vehicle._gs_compat import COARSE_SDF_MATERIAL_KW
 
 from .osc_manager import OSCManager
 from .pacing import AdaptiveCatchup, resolve_stats_interval
@@ -219,10 +220,6 @@ def run_l3(args):
     VehicleScene.init_backend("cpu" if use_cpu else "gpu")
     print(f" [Genesis] [L3] Multi-env batched mode | backend = {'CPU' if use_cpu else 'GPU'}")
 
-    # [Engine Hack] RigidGeom.n_cells monkey-patch (same as legacy)
-    import genesis.engine.entities.rigid_entity.rigid_geom as rigid_geom
-    rigid_geom.RigidGeom.n_cells = property(lambda self: 1)
-
     # 2. OSC handshake (same protocol as legacy)
     osc = OSCManager(
         send_ip=args.send_ip,
@@ -354,7 +351,7 @@ def run_l3(args):
         temp_urdf, cfg=cfg,
         morph=gs.morphs.URDF(file=temp_urdf, pos=first_info.get('pos', [0, 0, 2]),
                              quat=first_info.get('quat', [1, 0, 0, 0]), fixed=False, align=False),
-        material=gs.materials.Rigid(friction=t_fric, coup_restitution=0.0, sdf_cell_size=10000.0),
+        material=gs.materials.Rigid(friction=t_fric, coup_restitution=0.0, **COARSE_SDF_MATERIAL_KW),
         surface=gs.surfaces.Rough(color=(1.0, 0.3, 0.3, 0.5)), vis_mode=args.vis_mode,
         name="L3-shared")
     car = veh.entity_main
