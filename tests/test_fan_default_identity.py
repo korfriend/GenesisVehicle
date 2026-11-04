@@ -30,16 +30,35 @@ it reproduced the 1.4.0 entry bit-for-bit. Running the then-current tree
 (``54b3959``, v1.6.8) on 1.4.5 gave the same 1.4.5 numbers. The 1.4.0 entry is
 kept so the test still guards a rollback to 1.4.0.
 
-A failure here means the default contact path changed. It is NOT a tolerance
-knob: loosen it and the mandate this file exists to enforce is gone. If the
-Genesis version or the backend changes, RE-CAPTURE against the pre-change tree
-and say so in the CHANGELOG.
+Platform scope (v1.6.10)
+------------------------
+A baseline is a float32 BIT PATTERN, and it is only valid on the platform it was
+captured on. Every entry above was captured on Linux x86_64 (WSL2), CPU backend.
+Another OS, CPU instruction set or compiler output can round differently: a field
+run on Windows 11 differed from the 1.4.5 entry by about 0.00036 mm in the wheel
+distances (~12 float32 ULP at 0.41 m after 200 steps). That is not a change of
+the default contact path. The baselines are therefore keyed by
+(genesis version, platform) — ``platform`` being ``f"{sys.platform}-{platform.machine()}"``
+— and an uncaptured pair SKIPS, it does not fail. Through v1.6.9 this file keyed
+by version only and compared on every platform, and this docstring did not say
+the pattern was platform-bound; that was wrong. A matching key is still not a
+guarantee across CPUs: two Linux x86_64 machines with different instruction-set
+support may differ too, which calls for a re-capture on that machine, not a
+looser comparison.
+
+A failure here, on a platform whose baseline was captured there, means the
+default contact path changed. It is NOT a tolerance knob: loosen it and the
+mandate this file exists to enforce is gone. If the Genesis version, the backend
+or the platform changes, RE-CAPTURE against the pre-change tree (``git archive``
+of ``BASELINE_COMMIT``, the rollout below) and say so in the CHANGELOG.
 
 The second half of the file drives the M > 1 branch through a stub sensor, so
 this file also witnesses that the branch the rollout does NOT take is live.
 """
 
 import os
+import platform
+import sys
 
 import pytest
 import torch
@@ -53,10 +72,11 @@ URDF = os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 BASELINE_COMMIT = "37b8b7943f7000245e462e53090d2ce3b303dd70"
 
-#: genesis-world version -> {step index -> the four wheel distances of the
-#: reference car (float32), "final_pos" -> the chassis position after step 199}.
+#: (genesis-world version, platform key) -> {step index -> the four wheel
+#: distances of the reference car (float32), "final_pos" -> the chassis position
+#: after step 199}. Platform key: see ``platform_key()``.
 BASELINES = {
-    "1.4.0": {
+    ("1.4.0", "linux-x86_64"): {
         49:  [0.41489899158477783, 0.41489899158477783,
               0.41740989685058594, 0.41740989685058594],
         99:  [0.411739706993103,   0.41198277473449707,
@@ -67,7 +87,7 @@ BASELINES = {
               0.41122496128082275, 0.41122472286224365],
         "final_pos": (5.92042875289917, 0.03004419431090355, 0.1114146038889885),
     },
-    "1.4.5": {
+    ("1.4.5", "linux-x86_64"): {
         49:  [0.4148988723754883,  0.4148988723754883,
               0.41740942001342773, 0.4174095392227173],
         99:  [0.4119824171066284,  0.4117391109466553,
@@ -81,16 +101,37 @@ BASELINES = {
 }
 
 
+def platform_key() -> str:
+    """``"linux-x86_64"``, ``"win32-AMD64"``, ``"darwin-arm64"`` ..."""
+    return f"{sys.platform}-{platform.machine()}"
+
+
+def baseline_for(version, plat):
+    """The captured baseline for this (engine, platform), or None — never the
+    nearest other entry: a bit pattern from another engine or platform proves
+    nothing about this one."""
+    return BASELINES.get((version, plat))
+
+
+def test_baseline_lookup_is_exact_on_version_and_platform():
+    assert baseline_for("1.4.5", "linux-x86_64") is BASELINES[("1.4.5", "linux-x86_64")]
+    assert baseline_for("1.4.5", "win32-AMD64") is None       # the field report's platform
+    assert baseline_for("1.4.4", "linux-x86_64") is None
+    assert all(isinstance(k, tuple) and len(k) == 2 for k in BASELINES)
+
+
 def test_default_rollout_is_bit_identical_to_the_pre_change_tree():
     genesis = pytest.importorskip("genesis")
     from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 
     version = getattr(genesis, "__version__", None)
-    if version not in BASELINES:
-        pytest.skip(f"no baseline captured for genesis-world {version!r} "
-                    f"(have {sorted(BASELINES)}); re-capture against the "
-                    f"pre-change tree before trusting this engine")
-    baseline = BASELINES[version]
+    plat = platform_key()
+    baseline = baseline_for(version, plat)
+    if baseline is None:
+        pytest.skip(f"no baseline captured for genesis-world {version!r} on "
+                    f"{plat!r} (have {sorted(BASELINES)}); the baseline is a "
+                    f"float32 bit pattern bound to the platform it was captured "
+                    f"on — re-capture against the pre-change tree there")
 
     cfg = car_4w_rwd_ackermann(URDF, stability="control")
     VehicleScene.init_backend("cpu")
@@ -118,7 +159,7 @@ def test_default_rollout_is_bit_identical_to_the_pre_change_tree():
         expect = torch.tensor(want, dtype=got.dtype)
         assert torch.equal(got, expect), (
             f"step {i}: the DEFAULT point-contact path changed.\n"
-            f"  baseline ({BASELINE_COMMIT[:12]}, genesis {version}): {want}\n"
+            f"  baseline ({BASELINE_COMMIT[:12]}, genesis {version}, {plat}): {want}\n"
             f"  now:                              {got.tolist()}")
 
     pos = veh.get_pos()[0].cpu()

@@ -10,6 +10,68 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.6.10] — 2026-11-04
+
+Test-only release: the default-path bit-identity baseline is now bound to the
+platform it was captured on. No SDK source change.
+
+| abbr | meaning |
+|---|---|
+| ULP | unit in the last place — the spacing between adjacent float32 values (about 3e-8 m at 0.41 m) |
+| WSL2 | Windows Subsystem for Linux 2 (where every baseline was captured) |
+
+### Field report
+
+A team running `tests/test_fan_default_identity.py` on Windows (genesis-world
+1.4.5, reference car `samples/urdf/car_4w.urdf`) saw the wheel ray distances
+differ from the stored 1.4.5 baseline by about 0.00036 mm (3.6e-7 m, ~12 float32
+ULP at 0.41 m, after the 200-step rollout). The test compares with `torch.equal`,
+so it failed.
+
+### What was wrong
+
+The baselines are float32 bit patterns captured on Linux x86_64 (WSL2), CPU
+backend. Through v1.6.9 they were keyed by genesis version only, so every other
+OS/CPU compared against them, and the test docstring and `docs/testing.md` did
+not say the pattern was platform-bound. Both were wrong: a different OS,
+instruction set or compiler output may round differently, and a difference of a
+few ULP there is not a change of the default contact path. Which of OS or CPU
+caused the field difference is NOT established (the field can separate them by
+running the same test under WSL on the same PC).
+
+### Change
+
+* `BASELINES` is keyed by `(genesis version, platform)` with
+  `platform = f"{sys.platform}-{platform.machine()}"`; the existing two entries
+  are `("1.4.0", "linux-x86_64")` and `("1.4.5", "linux-x86_64")`, values
+  unchanged. An uncaptured pair SKIPS with a message naming the pair and the
+  re-capture procedure; it never falls back to another entry.
+* New `test_baseline_lookup_is_exact_on_version_and_platform`. Checked: a
+  version-only fallback in the lookup makes it fail; with `sys.platform` /
+  `platform.machine()` stubbed to `win32` / `AMD64` the rollout test skips.
+* Limitation, stated in the docstring: a matching key is not a guarantee across
+  CPUs — two `linux-x86_64` machines with different instruction-set support may
+  also differ, which calls for a re-capture on that machine, not a looser
+  comparison.
+* To use the test on Windows: run the rollout from a `git archive` of
+  `BASELINE_COMMIT` (`37b8b79`) on that platform and add the
+  `(version, "win32-AMD64")` entry.
+
+Tests: `tests/test_fan_default_identity.py` 4 passed; full suite `634 passed,
+3 skipped in 88.17s` (`python -m pytest genesis_vehicle/tests/ -q -p no:cacheprovider
+--ignore=genesis_vehicle/tests/test_fusion_probe.py`, Linux x86_64 / WSL2,
+genesis-world 1.4.5, CPU, one run).
+
+### Also reported, no SDK action
+
+A crash in a C++ mutex path at process exit after an L3 single-vehicle run,
+seen on an older genesis/SDK, no longer reproduces for the field team after
+updating to genesis-world 1.4.5 and SDK 1.6.9. The SDK does not manage C++ locks
+itself; the cause is not identified and no matching upstream fix was found in
+the 1.4.1–1.4.5 release notes. Recorded as resolved by the upgrade.
+
+---
+
 ## [1.6.9] — 2026-11-02
 
 **Genesis backbone 1.4.0 -> 1.4.5, and the supported floor moves with it:

@@ -349,7 +349,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-633 tests covering URDF parsing, config resolve, suspension sizing, strategy
+634 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity check on
@@ -372,9 +372,10 @@ check, a real-engine 16-node grid, and every server obstacle branch building
 only convex geoms), and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v1.6.9 tree, `633 passed, 3 skipped in 58.69s` (CPU/WSL2, genesis-world 1.4.5,
+v1.6.10 tree, `634 passed, 3 skipped in 88.17s` (CPU/WSL2, genesis-world 1.4.5,
 `pytest tests/ -q -p no:cacheprovider --ignore=tests/test_fusion_probe.py`, one
-run; the 3 skips are the env-gated live server tests, run them with
+run; v1.6.9 was 633 in 58.69 s — the time difference is not a release effect,
+v1.6.10 adds one lookup-only test; the 3 skips are the env-gated live server tests, run them with
 `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`). Earlier:
 `605 passed, 3 skipped in 135.07s` at v1.6.8 (genesis-world 1.4.0),
 `578 passed, 1 skipped in 137.19s` at v1.6.7, `544 passed in 144.45s` at
