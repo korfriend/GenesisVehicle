@@ -2,7 +2,9 @@
 
 The SDK's promises about ambiguous physical conventions. These contracts are
 enforced by `genesis_vehicle.dynamics` (pure-Python, unit-tested in
-`tests/test_dynamics.py`) and consumed by `core.py`.
+`tests/test_dynamics.py`) and consumed by `_pipeline.compute_wheel_step`
+(this sentence said `core.py` until v1.7.0; the step math lives in
+`_pipeline.py`).
 
 | abbr | meaning |
 |---|---|
@@ -24,6 +26,12 @@ enforced by `genesis_vehicle.dynamics` (pure-Python, unit-tested in
 | `s_j` / `c_j` | sample `j`'s longitudinal offset from the wheel centre / its swept-circle height penalty `r - sqrt(r^2 - s_j^2)` |
 | `d_eff` | the one distance per wheel a fan reduces to, `min_j(d_j + c_j)` |
 | `r` / `h` | wheel radius / obstacle (step) height, metres |
+| RR | rolling resistance (`RollingResistance`), §7.15 |
+| `cr` | rolling-resistance coefficient (`WheelConfig.rolling_resistance_cr`) |
+| ω, ω′ (`omega`, `omega'`) | wheel spin rate before / after this step's pre-tire resisting torque |
+| `T_resist` / `T_rr` | axle resisting torque a pre-tire hook sets (N·m, sign of ω) / its capped value `cap_resist_torque(T_resist, ω)` |
+| `M_eff` | effective coast mass, `M + sum(I_wheel / r^2)` |
+| k | `cr * N * r^2 * DT / (tanh_scale * I_wheel)`, the explicit RR gain in the linear region of the `tanh` |
 
 ## 7.1 Brake torque is a positive command magnitude
 
@@ -40,6 +48,14 @@ domega      = (T_drive - T_brake_eff - R * F_long) / I_wheel
   again decelerates.
 - For `omega ≈ 0`, `T_brake_eff ≈ 0` — the smooth brake cannot pin the
   wheel. Pair with `StaticFrictionLock` for hard hold-at-rest behaviour.
+
+When `dt > 0` and `i_wheel` are passed (the pipeline always passes them),
+`brake_torque_signed` also caps `|T_brake_eff|` at `|omega| * I_wheel / DT`, the
+torque that exactly zeroes ω this step, so the brake alone cannot reverse the
+wheel. This section did not mention the cap before v1.7.0. Since v1.7.0 the
+brake is capped TOGETHER with any axle resisting torque (§7.15):
+`cap_resist_torque(T_brake_eff + T_resist, omega) - T_rr` is what enters the ω
+update.
 
 Implementation: `genesis_vehicle.dynamics.brake_torque_signed`.
 
@@ -202,7 +218,7 @@ the stability limit the wheel oscillates across the rolling point
 the wheel **past the rolling speed** `omega_target = v_long/R` in one step:
 
 ```
-omega_nofric = omega + DT·(T_drive - T_brake_eff)/I_wheel
+omega_nofric = omega' + DT·(T_drive - T_brake_eff)/I_wheel
 F_long_limit = (omega_nofric - omega_target)·I_wheel / (DT·R)
 omega_nofric > omega_target → F_long ∈ [0, F_long_limit]
 omega_nofric < omega_target → F_long ∈ [F_long_limit, 0]
@@ -213,8 +229,23 @@ so it removes the oscillation while leaving the high-slip saturated regime —
 driven-wheel launch slip — untouched (`quickstart` launch is preserved). The
 **clamped** `F_long` is what is applied to both the wheel-ω update and the
 chassis force, so a custom `TireModel` or parameter-fit sees a force that may
-be reduced from its raw output near rolling. Implementation: inline in
-`core.py` step (D); cf. `brake_torque_signed` (§7.1).
+be reduced from its raw output near rolling.
+
+`omega'` is ω after this step's pre-tire axle resisting torque (§7.15); with no
+`T_resist` set it is ω itself (the same tensor), which is the formula this
+section showed through v1.6.10. The ω update `new_omega = omega' + DT·domega`
+and the airborne branch start from `omega'` as well. `T_brake_eff` is the
+remainder after the combined cap of §7.1.
+
+Implementation: `_pipeline.compute_wheel_step`, section (D); cf.
+`brake_torque_signed` (§7.1). **This section said "inline in `core.py` step
+(D)" until v1.7.0. That was stale:** the step math moved to
+`_pipeline.compute_wheel_step`, shared by `VehiclePhysics`,
+`MultiVehicleKindPhysics` and `DifferentiablePlant`.
+
+**The clamp runs AFTER every `POST_TIRE` hook**, so a hook's edit to `F_long` is
+a request the clamp may still cut, to zero on a freely rolling wheel. That is
+how `RollingResistance` had no effect through v1.6.10 (§7.15).
 
 ## 7.8 High-cast rays and over-compression (v1.1.16)
 
@@ -423,7 +454,11 @@ vehicle actually on the terrain?", replacing the ad-hoc
 `VehicleScene.add_vehicle(wheel_contact=...)` selects the wheel-ground contact
 model. **`"point"` is the default and is the single-ray behaviour of every
 earlier release, bit-for-bit** (`torch.equal` on a 200-step reference rollout,
-v1.6.0 CHANGELOG). Nothing below applies unless a caller opts in.
+v1.6.0 CHANGELOG). Since v1.7.0 that rollout is the `"control"` profile minus
+`RollingResistance`: rolling resistance took effect in v1.7.0 (§7.15) and moved
+the default vehicle by -0.6961 m on the same rollout, so the claim is about the
+contact path, not the default trajectory. Nothing below applies unless a caller
+opts in.
 
 **The defect `"swept_envelope"` addresses.** A single zero-radius downward ray
 reads ground height as a STEP FUNCTION. A wheel at road level on one step and
@@ -941,3 +976,80 @@ sends runtime physics settings is silently ignored. Of those fields only
 `gravity` could be honoured today (via `VehicleScene.set_gravity`); `dt` cannot
 be, per this section. Deciding between consuming, rejecting loudly, and
 removing the endpoint is a separate ticket — it is NOT fixed in v1.6.5.
+
+## 7.15 Axle resisting torque is applied to ω BEFORE the tyre (v1.7.0)
+
+**What was wrong through v1.6.10.** `RollingResistance` subtracted
+`cr * N * tanh(v_long / scale)` from `F_long` in `apply_post_tire`. The
+overshoot clamp (§7.7) runs after every hook and, on a freely rolling wheel,
+cut that force back to zero; while driving, the force also entered the ω update
+as `R * F_long`, the wheel spun up and the tyre returned it. The hook had no
+effect. Reference car (`samples/urdf/car_4w.urdf`,
+`car_4w_rwd_ackermann(stability="control")`, CPU/WSL2, genesis-world 1.4.5,
+dt 0.025 x 4 substeps, plane μ 1.0, per_vehicle, dual_scene; 2 s window after
+0.5 s of coasting from 5 m/s): 0.0073 m/s² with or without the hook, against a
+closed form of 0.1478. Nothing in this document stated the RR model before
+v1.7.0; `pipeline-and-hooks.md`, `concepts.md` and `api-reference.md` stated
+the `F_long` subtraction as if it acted, and are corrected in place.
+
+**The contract now.** Per step, in `_pipeline.compute_wheel_step`:
+
+```
+ctx.T_resist = None                         # reset before either hook phase
+for hook in post_tire_hooks: hook.apply_pre_tire(ctx)   # if the method exists
+if ctx.T_resist is not None:
+    T_res  = snapshot(ctx.T_resist)          # clone(); only the copy is used below
+    T_rr   = cap_resist_torque(T_res, omega, DT, I_wheel)
+           = sign(T_res) * min(|T_res|, |omega| * I_wheel / DT)
+    omega' = omega - T_rr * DT / I_wheel
+else:
+    omega' = omega                           # same object; the v1.6.10 path
+tyre(v_roll = R * omega')                    # kappa / last_kappa at omega'
+ctx.omega = omega'; post-tire hooks          # writing ctx.T_resist here raises
+T_brake_eff = brake_torque_signed(T_brake, omega)                  # pre-step omega
+T_brake_eff = cap_resist_torque(T_brake_eff + T_res, omega) - T_rr # if T_res set
+overshoot clamp + omega update from omega'   # §7.7
+```
+
+`RollingResistance` sets `T_resist += cr * N * r * tanh(omega * r / tanh_scale)`
+in `apply_pre_tire` and does nothing post-tire. It keeps `slots = ("POST_TIRE",)`.
+
+| claim | status | where |
+|---|---|---|
+| With no `T_resist` set, the code path is the v1.6.10 one, operation for operation | enforced (`omega' is omega`) | `_pipeline.compute_wheel_step`; witnessed by `test_fan_default_identity.py` (contact path) and `test_zero_cr_rolling_resistance_is_value_identical_to_no_hook` |
+| `T_rr` alone cannot reverse ω: ω′ keeps ω's sign or is zero, at any gain k | enforced by `cap_resist_torque`, for a `T_resist` of ω's sign, up to float rounding (a capped step can land a few ulp past zero) | `dynamics.cap_resist_torque`; `test_tiny_omega_with_huge_cr_cannot_flip_the_wheel` |
+| Brake + resisting torque together cannot reverse ω in one step | enforced by the second cap (the remainder is at most `|omega'| * I_wheel / DT` with ω's sign), same sign and rounding conditions | `test_brake_plus_rr_never_reverses_omega` (192-cell grid) |
+| Capping the sum never makes braking weaker than the brake-only cap | enforced, because both terms carry ω's sign (RR's only because `cr >= 0`) | `test_the_cap_never_weakens_braking` |
+| `cr >= 0` and finite | enforced by `config.check_rolling_resistance_cr`, called from `config.resolve` and `core._build_wheel_meta_impl` (every driver build, `mark_config_dirty()` rebuild, `DifferentiablePlant`). NOT on a direct write to the `wheel_meta.rolling_resistance_cr` tensor. A custom hook adding its own `T_resist` must keep ω's sign itself | `test_rolling_resistance.py` |
+| A write to `ctx.T_resist` in `apply_post_tire` raises `RuntimeError` | enforced for a rebinding always; for an in-place write through the tensor's version counter, which is SKIPPED for inference-mode tensors (no counter), so under `torch.inference_mode()` an in-place write is not detected. The physics uses the snapshot either way | `test_t_resist_written_after_the_tyre_raises`, `test_inference_mode_runs_and_an_in_place_post_write_cannot_change_the_physics` |
+| On a freely rolling wheel the chassis gets `-T_rr / R` on the same step and ω ends at rolling | holds only when the tyre request reaches the clamp limit; a weaker request passes less. Pinned for the reference car and tank at v = 2, 5, -2 m/s | `test_a_rolling_wheel_stays_rolling_and_the_chassis_gets_the_rr_force` |
+| A free coast decelerates at `sum(cr * N) / M_eff` (+ aero) | measured, not enforced; only while `|omega| * r` is well above `tanh_scale` (0.5 m/s) AND chassis speed is at or above `LowSpeedRegularizer.v_kin_com` (0.5 m/s). Below either the deceleration is smaller | CHANGELOG 1.7.0 §1.1: car 0.1473 vs 0.1472 at 5 m/s, tank 0.4779 vs 0.4778 |
+| A free coast has no step-to-step ω alternation and no speed rise | measured, not enforced: 0 alternations (> 1e-4 rad/s), 0 rises (> 1e-5 m/s) over 20 s from 1.0 m/s on the reference car and tank, dt 0.025 x 4 substeps. The test pins 10 s at a 0.01 rad/s tolerance | CHANGELOG 1.7.0 §1.3; `test_coast_is_monotone_and_omega_does_not_alternate` |
+
+**Hook fields.** In `apply_pre_tire`, `ctx.N`, `v_long`, `v_lat`, `omega` (the
+pre-step ω), `air_mask`, `wheel_meta` and `dt` are valid; `F_long` / `F_lat` are
+`None`; `omega_override` and both `omega_pull_*` fields have already been reset.
+In `apply_post_tire`, `ctx.omega` is ω′, and `PipelineResult.kappa` /
+`last_kappa` are taken at ω′; they equal the pre-step values only when no hook
+set `T_resist`. Both methods are looked up with `getattr`, so a duck-typed hook
+lacking one is skipped for that phase.
+
+**Not covered.**
+
+* The cap bounds only the brake and the resisting torque. It does not bound the
+  drive torque, the tyre friction torque or a hook's ω pull.
+* At gain `k = cr * N * r^2 * DT / (tanh_scale * I_wheel) >= 1` the cap engages
+  and ω′ is 0 for that step before the tyre spins the wheel back up. **Not
+  measured in a stable configuration**: the reference tank (k 0.92 at dt 0.025)
+  reaches k > 1 only at dt 0.05, where its suspension is already past the
+  bump-stop stability limit and v1.6.10 diverges too.
+* **The drive and brake torques still go through the clamp the old way, and the
+  same kind of step-to-step ω alternation under throttle or brake is v1.6.10
+  behaviour this section does not change.** Measured on the contact path
+  without RR (the v1.6.10 code path), dt 0.025 x 4 substeps: throttle 0.15 gives
+  the reference car 798 alternations in 800 steps with max ω step 0.92 rad/s and
+  speed rising on 400 of 800 steps. Open; CHANGELOG 1.7.0 §8.
+* `DifferentiablePlant` models the RR torque: it calls the same
+  `compute_wheel_step`. Its prediction was independent of horizon parity within
+  0.3% at h 3 vs 4 on the reference car and tank at 5 m/s
+  (`test_plant_prediction_does_not_depend_on_horizon_parity` checks 1%).

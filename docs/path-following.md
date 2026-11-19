@@ -11,6 +11,7 @@
 | cusp | sign flip of `target_speed` along the path = gear change (stop, then reverse) |
 | block | maximal run of waypoints with one speed sign (the unit the follower drives) |
 | ω_z | chassis yaw rate (rad/s) |
+| ω | wheel spin rate (rad/s) |
 | P control | proportional feedback (`u = K · error`) |
 | MOI | moment of inertia |
 | member | one (vehicle, env) pair a plant serves |
@@ -160,6 +161,7 @@ thr, steer = plant.solve(v_long, a_target, omega_target)   # inverse
 
 # after the step is applied, diagnostics of the solve that produced it
 plant.last_jacobian, plant.last_response, plant.last_target, plant.last_singular
+plant.last_restarted   # v1.7.0: answer came from the zero restart of a saturated warm start
 ```
 
 `predict` takes sequences too, evaluating every candidate command in one
@@ -296,6 +298,21 @@ python -m genesis_vehicle.samples.path_follow_demo --plant jacobian   # default
 python -m genesis_vehicle.samples.path_follow_demo --plant sweep
 ```
 
+The table above predates v1.7.0 and is kept as the original comparison. Re-run
+on v1.7.0 (CPU/WSL2, genesis-world 1.4.5, headless, default args, demos run 3
+or 4 at a time in parallel): forward course mean deviation 0.352 m (jacobian) /
+0.314 m (sweep, with the re-measured tank table); reverse-into-bay PASS
+1.49 m / 0.33 rad (jacobian) and 1.49 m / 0.30 rad (sweep). Max deviation was
+not recorded in that run. **On v1.6.10 with genesis-world 1.4.5 the
+reverse-into-bay jacobian run FAILED** (1.50 m / 0.43 rad against the 0.4 rad
+limit, deterministic), so the PASS in the table above did not hold on that
+engine. v1.7.0 passes it with a 0.07 rad margin; the cause of the v1.6.10
+failure is not established, and v1.7.0 is not claimed to have fixed it.
+v1.7.0 also makes rolling resistance take effect, so holding 2 m/s on the
+forward course now takes throttle +0.13 (v1.6.10: -0.00), and **any sweep table
+measured before v1.7.0 is stale** for the default `"control"` profile;
+`samples/data/tank_sweep_signed.csv` is re-measured.
+
 ### Tuning knobs
 
 | kwarg | default | effect |
@@ -305,6 +322,7 @@ python -m genesis_vehicle.samples.path_follow_demo --plant sweep
 | `coupled` | `False` | solve the full 2×2 instead of channel-diagonal (see below) |
 | `damping` | 1e-2 | Levenberg damping of the coupled solve |
 | `probe_delta` | 0.2 | secant step used when a channel's derivative degenerates (see below) |
+| `saturation_restart` | `True` | v1.7.0. A warm start at a range limit is also solved from 0 in the same batch; the lower residual wins (see below). `False` = the pre-1.7.0 single-start solve |
 | `line_search_steps` | 3 | backtracking halvings, all evaluated in one batched unroll |
 | `scale_a` / `scale_w` | 1.0 / 0.2 | what counts as "one unit of error" in each channel |
 | `mass` / `izz` / `com` | read off the entity | override the planar mass properties |
@@ -344,6 +362,45 @@ mid-manoeuvre on the reverse course. Where a whole Jacobian column
 vanishes, the plant re-estimates it with a one-sided **secant** over
 `probe_delta` of command, large enough to step out of the dead zone. The
 derivative is a local object; the secant over a control-sized step is not.
+
+**A saturated warm start can trap the solve (fixed in v1.7.0).** `solve()`
+linearises at the previous command. At a range limit the local Jacobian can
+point back into the limit, and through v1.6.10 the chord iterations never left
+it: on a field team's harness the reference car at +2 m/s, asked for -3 m/s²
+with a previous command of +1, got throttle +1.00, the wrong direction. Since
+v1.7.0, with `saturation_restart=True` (the default), if any member's warm
+start is within 1% of the half-range of a limit in either channel (throttle
+≤ -0.99 or ≥ +0.99 on the default range), every member also starts from a copy
+with its saturated channels set to 0. Both starts ride the same batched unroll
+and line search, and per member the lower final weighted residual wins (the
+warm start on a tie, and always for a member whose own warm start was not
+saturated). `last_restarted` says which members took the restart. The same
+field case now returns -1.00.
+
+| `saturation_restart` | warm start | throttle | residual | `last_restarted` |
+|---|---|---|---|---|
+| False | -1 | -1.0000 | 5.5905 | False |
+| False | 0 | +0.7384 | 0.4086 | False |
+| True | -1 | +0.7384 | 0.4086 | True |
+| True | 0 | +0.7384 | 0.4086 | False |
+
+Reference tank, Genesis-free fake state of `tests/test_differentiable_plant.py`,
+target +3 m/s² at -2 m/s. Exactness: a solve in which no member is saturated
+runs the single-start code path unchanged. In a mixed fleet every member runs
+two starts, and an unsaturated member is NOT bit-identical to its solo solve; it
+agrees within rel 1e-4 / abs 1e-5
+(`test_a_mixed_fleet_restarts_each_member_as_it_would_alone`). The cost, two
+starts per member in one batch on steps where some member is saturated, was not
+timed.
+
+**`jacobian()` returns NaN at a standstill (v = 0, ω = 0), and that is not
+fixed.** Measured on v1.6.10 and v1.7.0 with the same fake state,
+`jacobian(0, 0)`: the reference car's throttle column is NaN, the reference
+tank's whole 2×2 is NaN. Removing `StaticFrictionLock` from the hook list makes
+both finite, which points at the `sqrt` of the friction-ellipse norm in its
+post-tire path (gradient undefined at zero); that line is suspected, not
+proven. A controller starting from rest should not rely on the Jacobian of that
+exact state.
 
 ### Fleets: one plant, many vehicles
 
@@ -505,6 +562,10 @@ chunks via reset, with the last chunk padded so nothing re-JITs.)
 
 **Re-measure whenever the URDF, the preset, the config overrides, or
 dt/substeps change** — the table is only valid for that exact quadruple.
+**Also re-measure after upgrading to v1.7.0:** rolling resistance took effect
+in that release, so a table measured on v1.6.10 or earlier describes a vehicle
+that coasted with no rolling resistance (the bundled tank table's flat coast
+cells went from about 0 to -0.44 m/s² at 4 m/s).
 
 > **Override-ordering trap (VehicleScene).** Apply cfg overrides
 > (`apply_config(cfg)`) **BEFORE `vs.build()`** — with the default batched

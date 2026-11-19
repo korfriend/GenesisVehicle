@@ -126,8 +126,14 @@ are not modified; the hook just *adds one more term* at a designated seam,
 the same way `git pre-commit`, a web-framework middleware, or a Java
 interceptor works. Examples:
 
-- `RollingResistance` runs after the tire model produces `F_long`, and
-  subtracts `cr * N * tanh(v_long / scale)`.
+- `RollingResistance` runs BEFORE the tire model (v1.7.0, the pre-tire
+  phase of its `POST_TIRE` slot) and sets an axle resisting torque
+  `cr * N * r * tanh(omega * r / tanh_scale)` (cr = rolling-resistance
+  coefficient, N = wheel load, r = wheel radius); the pipeline applies it to
+  `omega` before the tire sees the wheel. This bullet used to say it "subtracts
+  `cr * N * tanh(v_long / scale)`" from `F_long` after the tire model. That was
+  wrong in effect through v1.6.10: the `F_long` overshoot clamp ran after the
+  hook and erased the force, so the hook did nothing (CHANGELOG 1.7.0 §1.1).
 - `LowSpeedRegularizer` runs once pre-loop (computes a `moving ∈ [0, 1]`
   factor) and once per wheel post-tire (scales `F_long`/`F_lat` by `moving`
   and pulls `omega` toward rolling-without-slip).

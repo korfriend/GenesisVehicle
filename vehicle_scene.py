@@ -510,9 +510,36 @@ class Vehicle:
         ``throttle`` [-1,1] (+ = accel) / ``brake`` [0,1] / ``steer`` [-1,1]
         (+ = right) is a scalar (broadcast to all envs) **or a per-env tensor of
         shape ``(n_envs,)``** for L3 — e.g. per-env random controls in an RL / MPPI
-        rollout. Persists until the next ``set_inputs``."""
+        rollout. Persists until the next ``set_inputs``.
+
+        Since v1.7.0 every :meth:`VehicleScene.step` hands the physics driver a
+        FRESH ``VehicleInputs`` built from these values (a shallow copy, one per
+        vehicle per step), in both solver modes. A wrapper around
+        ``physics.step`` that rewrites a field of the object it receives (a
+        traction-control throttle cut, say) therefore no longer persists into
+        the next step's command; through v1.6.10 the same object was passed on
+        every step, so such a rewrite silently replaced what was set here. The
+        copy is SHALLOW on purpose: a tensor value is still the caller's own
+        tensor, so an IN-PLACE write to it (``inputs.throttle.mul_(0.5)``)
+        still persists — replace the attribute instead (``inputs.throttle =
+        inputs.throttle * 0.5``). Cloning the tensors would cost a kernel launch
+        per vehicle per field per step on GPU; the shallow copy costs roughly
+        0.14 .. 0.18 µs per vehicle per step over a plain attribute read on
+        CPU/WSL2 (Python 3.12, torch 2.11, ``timeit``, scalar or ``(1,)``
+        tensor fields alike; the range spans two separate measurements, one
+        of them median of 5 x 200k calls of ``_step_inputs`` over 3 runs —
+        machine-dependent, not a bound). The guarantee covers the
+        ``VehicleScene.step`` path only: a caller driving
+        ``VehiclePhysics.step`` / ``MultiVehiclePhysics.step`` directly passes
+        its own object and owns what happens to it."""
         self._inputs = VehicleInputs(throttle=throttle, brake=brake, steer=steer)
         return self
+
+    def _step_inputs(self) -> VehicleInputs:
+        """The per-step copy :meth:`VehicleScene.step` passes to the physics
+        driver (v1.7.0) — see :meth:`set_inputs`."""
+        i = self._inputs
+        return VehicleInputs(throttle=i.throttle, brake=i.brake, steer=i.steer)
 
     # ---- runtime parameter setters (v1.2.5) ----
     # Explicit, supported way to change plant parameters mid-drive. They mutate
@@ -1074,7 +1101,14 @@ class VehicleScene:
         scene and, in dual_scene mode, the kinematic proxy + wheel sensor in the
         raycast scene — the caller never touches a scene.
 
-        cfg: ``preset`` (a preset fn → cfg) OR a pre-built ``cfg``.
+        cfg: ``preset`` (a preset fn → cfg) OR a pre-built ``cfg``. A
+        ``preset`` is CALLED as ``preset(urdf_path, stability=stability)``
+        (the prepared URDF path when ``morph`` is None, the given
+        ``urdf_path`` as-is otherwise), so a custom one must accept that
+        signature — ``(urdf_path, *, stability="control", ...)``; a function or
+        lambda without a ``stability`` keyword raises ``TypeError`` here. To use
+        a fixed, already-built configuration pass it as ``cfg=`` (``preset`` is
+        then not called).
         entity geometry: pass ``morph`` (e.g. ``gs.morphs.URDF(stripped_path,…)``,
         built internally with ``material`` / ``surface`` / ``vis_mode``), or let
         it be built from ``urdf_path``. ``urdf_path`` always gives the wheel
@@ -1092,8 +1126,13 @@ class VehicleScene:
 
         ``wheel_contact`` selects the wheel-ground contact model (v1.6.0):
 
-        * ``"point"`` (DEFAULT, and bit-identical to every earlier release) —
-          ONE downward ray per wheel. A zero-radius probe: ground height is a
+        * ``"point"`` (DEFAULT) — ONE downward ray per wheel. Its contact path
+          reproduces the pre-v1.6.0 tree bit-for-bit on the reference rollout
+          of ``tests/test_fan_default_identity.py`` (on the genesis-world /
+          platform pairs that have a captured baseline; since v1.7.0 that
+          rollout is the "control" profile minus ``RollingResistance``). The
+          DEFAULT VEHICLE's trajectory is not identical to earlier releases:
+          v1.7.0 made rolling resistance take effect. A zero-radius probe: ground height is a
           step function, so crossing a vertical edge delivers the whole obstacle
           height of compression in one ``dt`` and the damper term dominates.
         * ``"swept_envelope"`` — ``contact_samples`` (M) rays per wheel spread
@@ -1562,14 +1601,16 @@ class VehicleScene:
         dists = self._measure_distances()   # dual: {veh:(N,n)} ; single: {veh:None}
         if self.solver == "batched":
             if self._mvp is not None:       # None → no vehicles; just advance the scene
-                inputs_list = [veh._inputs for veh in self._vehicles]
+                # A fresh shallow copy per vehicle per step (v1.7.0): a
+                # wrapper that rewrites a field must not edit set_inputs' state.
+                inputs_list = [veh._step_inputs() for veh in self._vehicles]
                 # dual_scene: inject the per-vehicle raycast-scene distances into the
                 # batched compute; single_scene: None → the MVP reads each sensor.
                 inj = [dists[veh] for veh in self._vehicles] if self._dual_scene else None
                 self._mvp.step(inputs_list, distances=inj)
         else:
             for veh in self._vehicles:
-                veh.physics.step(veh._inputs, distances=dists[veh])
+                veh.physics.step(veh._step_inputs(), distances=dists[veh])
         if self._wheel_renderer is not None:
             # Solver-free wheel visuals (v1.1.17): the closed-form wheel poses
             # must reach the renderer in the SAME frame as the chassis pose,

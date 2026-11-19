@@ -63,8 +63,9 @@ class VehicleScene:
     #   wheel centre is corrected, missing <inertial>s injected. The original
     #   file is never modified; a compliant URDF is used as-is (no copy).
     #   See physics-contracts.md §7.9 / genesis_vehicle.urdf_prep.
-    #   wheel_contact (v1.6.0): "point" (DEFAULT, one ray per wheel, bit-identical
-    #   to every earlier release) | "swept_envelope" (contact_samples=M rays per
+    #   wheel_contact (v1.6.0): "point" (DEFAULT, one ray per wheel; its contact
+    #   path is bit-identical to earlier releases, the default vehicle is not since
+    #   v1.7.0 made rolling resistance take effect) | "swept_envelope" (contact_samples=M rays per
     #   wheel along body +X, reduced to one distance by the swept-circle lower
     #   envelope, so the wheel climbs an edge instead of teleporting onto it).
     #   M must be ODD; it is a DISCRETISATION count, not an accuracy dial.
@@ -107,6 +108,9 @@ class VehicleScene:
 
 class Vehicle:                           # handle returned by add_vehicle
     def set_inputs(throttle=0.0, brake=0.0, steer=0.0) -> Vehicle
+        # v1.7.0: VehicleScene.step hands the driver a fresh SHALLOW copy per
+        # step, so a physics.step wrapper's attribute rewrite no longer persists;
+        # an in-place tensor write (inputs.throttle.mul_(...)) still does.
     def get_pos() / get_quat() / get_vel() / get_ang()   # (n_envs, ...) main-scene truth
     distances                            # property: last (n_envs, n_wheels) wheel-ground d
                                          #   (n_wheels, not n_wheels x M — read_distances
@@ -189,14 +193,14 @@ targets (`add_dynamic`).
 | param | default | meaning |
 |---|---|---|
 | `urdf_path` | — | URDF; always parsed for wheel positions |
-| `preset` | `None` | preset fn → cfg. Pass this **or** `cfg=` |
+| `preset` | `None` | preset fn → cfg. Pass this **or** `cfg=`. Called as `preset(urdf_path, stability=stability)`, so a custom preset must accept a `stability` keyword (a wrapper without one raises `TypeError`) |
 | `cfg` | `None` | pre-built `VehicleConfig` (e.g. server `build_cfg`) |
 | `morph` | `None` | entity morph built internally (custom collider/visual); else built from `urdf_path` |
 | `pos` / `quat` | `(0,0,1)` / `None` | spawn pose when `morph` is not given |
 | `material` / `surface` / `vis_mode` | `None` | passed to the main-scene `add_entity` |
 | `stability` | `"control"` | stability profile passed to `preset` |
 | `raycaster_max_range` | `20.0` | wheel ray max length (m) |
-| `wheel_contact` | `"point"` | **v1.6.0.** `"point"` = one downward ray per wheel (the historical behaviour, bit-identical). `"swept_envelope"` = `contact_samples` rays per wheel reduced by the swept-circle lower envelope, so a wheel climbs an edge instead of teleporting onto it. Both raycast modes support it. See [`physics-contracts.md` §7.11](physics-contracts.md) |
+| `wheel_contact` | `"point"` | **v1.6.0.** `"point"` = one downward ray per wheel (the historical behaviour; its contact path is bit-identical on the reference rollout, the default vehicle is not since v1.7.0 made rolling resistance take effect). `"swept_envelope"` = `contact_samples` rays per wheel reduced by the swept-circle lower envelope, so a wheel climbs an edge instead of teleporting onto it. Both raycast modes support it. See [`physics-contracts.md` §7.11](physics-contracts.md) |
 | `contact_samples` | `9` | **v1.6.0.** M, rays per wheel. Must be ODD. **Ignored entirely** when `wheel_contact="point"`. A discretisation count, *not* an accuracy dial — do not compare two runs at different M. M=3 at the default span is exactly the point contact |
 | `name` | `None` | handle label |
 
@@ -667,7 +671,12 @@ is visual
 (`visual_susp_mode`). See `docs/physics-contracts.md`.
 
 `ConfigError` — raised on bad config (missing required fields, wheel count
-mismatch, sides missing for skid-steer, etc.).
+mismatch, sides missing for skid-steer, etc.). It subclasses `ValueError`.
+Since v1.7.0 it is also raised for a negative or non-finite
+`rolling_resistance_cr`, from `config.resolve` and from the wheel-meta build
+every driver, `mark_config_dirty()` rebuild and `DifferentiablePlant` goes
+through. A direct write to the `wheel_meta.rolling_resistance_cr` tensor is not
+checked.
 
 ## 4. URDF utilities
 
@@ -801,11 +810,24 @@ one-step lag detail.
 
 ### 5.4 Stability hooks (via `stability=` profile)
 
+| abbr | meaning |
+|---|---|
+| cr | rolling-resistance coefficient (`WheelConfig.rolling_resistance_cr`) |
+| N / r | wheel normal load / wheel radius |
+| ω (`omega`) | wheel spin rate (rad/s) |
+| `T_resist` | per-wheel axle resisting torque set in `apply_pre_tire` (v1.7.0) |
+
 ```python
 class RollingResistance(StabilityHook):
     def __init__(tanh_scale=0.5)
-    # F_long -= cr * N * tanh(v_long / tanh_scale)
-    # cr is per-wheel via WheelConfig.rolling_resistance_cr.
+    # v1.7.0: an AXLE RESISTING TORQUE, set in apply_pre_tire (before the tyre):
+    #   ctx.T_resist += cr * N * r * tanh(omega * r / tanh_scale)
+    # The pipeline caps it (dynamics.cap_resist_torque) and applies it to omega
+    # before the tyre. cr is per-wheel via WheelConfig.rolling_resistance_cr and
+    # must be finite and >= 0 (ConfigError otherwise).
+    # Through v1.6.10 this comment read "F_long -= cr * N * tanh(v_long /
+    # tanh_scale)". That force never reached the chassis: the F_long overshoot
+    # clamp erased it (CHANGELOG 1.7.0 §1.1).
 
 class LowSpeedRegularizer(StabilityHook):
     def __init__(v_kin_com=0.5, ang_kin=0.5,
@@ -816,7 +838,22 @@ class StaticFrictionLock(StabilityHook):
     # 2D stick-slip: per-wheel position anchor + spring-damper,
     # projected onto the friction ellipse; omega forced to 0 on locked wheels.
     # Active when brake > brake_thr AND sqrt(v_long^2 + v_lat^2) < v_thr.
+
+class StabilityHook(ABC):
+    slots: tuple[str, ...]            # subset of {"PRE_LOOP", "POST_TIRE"}
+    def apply_pre_loop(ctx)           # PRE_LOOP slot
+    def apply_pre_tire(ctx)           # POST_TIRE slot, BEFORE the tyre (v1.7.0); no-op default
+    def apply_post_tire(ctx)          # POST_TIRE slot, after the tyre; no-op default
 ```
+
+A `POST_TIRE` hook gets both `apply_pre_tire` and `apply_post_tire` each step
+(v1.7.0). Both are looked up with `getattr`, so a duck-typed hook lacking one
+is skipped for that phase. `ctx.T_resist` may be set only in `apply_pre_tire`;
+a write in `apply_post_tire` raises `RuntimeError` (an in-place write under
+`torch.inference_mode()` is not detected, and cannot change the physics). In
+`apply_post_tire`, `ctx.omega` — and `PipelineResult.kappa` / `last_kappa` —
+are taken at ω after the pre-tire resisting torque whenever one was set, which
+is the default `"control"` profile. Contract: `physics-contracts.md` §7.15.
 
 Hooks are selected via `stability=` profile in the presets (see
 [`stability-profiles.md`](stability-profiles.md)), not assembled by hand
@@ -835,7 +872,13 @@ class PipelineContext:
     vel; ang                         # chassis linear / angular velocity, (n_envs, 3)
     dt: float
     wheel_meta                       # the cached WheelMeta
+    T_resist                         # v1.7.0: axle resisting torque (n_envs, n_wheels), N*m,
+                                     # sign of omega; set in apply_pre_tire ONLY, None = none
 ```
+
+`omega` means the pre-step ω in `apply_pre_tire` and ω after the pre-tire
+resisting torque in `apply_post_tire` (equal only when no hook set
+`T_resist`). `F_long` / `F_lat` are `None` in `apply_pre_tire`.
 
 Fields are `None` in slots where the pipeline has not produced them yet; a hook
 mutates the ones it owns in place. Which slot a hook runs in
@@ -949,7 +992,7 @@ is_ray_hit_corrected(d, miss=None) -> bool tensor
     # corrected 0.0 is a real contact at exactly RAY_UP_OFFSET, not air.
     # Callers must be behind the per-env _stepped_once gate.
 # raycast.RAY_MISS_THRESHOLD (19.9) is unexported, DEPRECATED since v1.5.2
-# (removal targeted v1.7.0): it is pinned to the DEFAULT max_range of 20.0 and
+# (removal targeted v1.8.0 -- retargeted from v1.7.0, which did not remove it): it is pinned to the DEFAULT max_range of 20.0 and
 # survives only as the fallback for a sensor exposing no sentinel at all.
 # Top-level exports: is_ray_hit, is_ray_hit_corrected, sensor_miss_value,
 # set_sensor_miss_value. The two marked above are reached as
@@ -974,7 +1017,17 @@ sensor_up_offset(sensor) -> float
 
 # --- Pure-Python dynamics primitives (testable without Genesis) ---
 brake_torque_signed(
-    t_brake: torch.Tensor, omega: torch.Tensor, smoothing_scale: float = 0.5,
+    t_brake: torch.Tensor, omega: torch.Tensor, dt: float = 0.0,
+    i_wheel: torch.Tensor | None = None, smoothing_scale: float = 0.5,
+) -> torch.Tensor
+    # dt > 0 with i_wheel caps |T| at |omega| * i_wheel / dt (no reversal in one
+    # step); dt = 0 is the tanh-only legacy form. (This entry listed only
+    # (t_brake, omega, smoothing_scale) before v1.7.0; the dt / i_wheel
+    # parameters already existed.)
+# genesis_vehicle.dynamics.cap_resist_torque (v1.7.0; NOT re-exported from the
+# package root): sign(t) * min(|t|, |omega| * i_wheel / dt). physics-contracts §7.15.
+cap_resist_torque(
+    t_signed: torch.Tensor, omega: torch.Tensor, dt: float, i_wheel: torch.Tensor,
 ) -> torch.Tensor
 suspension_normal_force(
     compression, comp_rate, k_susp, c_compression, c_extension, air_mask,
@@ -1325,7 +1378,7 @@ Genesis/torch needed at control time).
 |---|---|---|
 | `PathFollower(path, plant, **tuning)` | `from genesis_vehicle import PathFollower` | path `(x, y, z, speed[, yaw])` → per-step `(throttle, steer, brake)`; the optional per-waypoint `yaw` (rad, world +X = 0, CCW+) pins the desired chassis heading verbatim, else tangential default; `plant` is a `DifferentiablePlant`, a live vehicle (`Vehicle` / `VehiclePhysics`, wrapped for you), a `SweepTable`, or a sweep-CSV path — also accepted as the keyword `sweep=`; cusps (speed-sign flips) handled as stop-and-reverse. `last_mode` ∈ `INIT/DRV±1/STOP/BRAKE_TRANS/DONE` |
 | `FleetFollower(followers, plant)` | `from genesis_vehicle import FleetFollower` | drives N `PathFollower`s off ONE batched plant: `plan` per follower → one batched `solve` → `finish` per follower. `step(states)` → list of `(throttle, steer, brake)`. Needs `plant.n_members == len(followers)` |
-| `DifferentiablePlant(vehicle, horizon=4, **tuning)` | `from genesis_vehicle import DifferentiablePlant` | the DEFAULT inverse plant (v1.3.0): unrolls the SDK's own ray-wheel force model and differentiates it with `torch.autograd` for `J = d(a, ω_z)/d(throttle, steer)`, then Newton-solves. No sweep measurement, no CSV. `solve(v, a_target, ω_target, pitch, roll)` → `(throttle, steer)`; `predict` / `jacobian` / `set_applied` / `reset`; diagnostics in `last_jacobian` / `last_response` / `last_target` / `last_singular`. Pass a SEQUENCE of vehicles (and/or of `env_idx`) for a fleet: M members inverted in one batch, every entry point taking and returning length-M arrays, `set_applied_member(i, ...)` for a single row |
+| `DifferentiablePlant(vehicle, horizon=4, **tuning)` | `from genesis_vehicle import DifferentiablePlant` | the DEFAULT inverse plant (v1.3.0): unrolls the SDK's own ray-wheel force model and differentiates it with `torch.autograd` for `J = d(a, ω_z)/d(throttle, steer)`, then Newton-solves. No sweep measurement, no CSV. `solve(v, a_target, ω_target, pitch, roll)` → `(throttle, steer)`; `predict` / `jacobian` / `set_applied` / `reset`; diagnostics in `last_jacobian` / `last_response` / `last_target` / `last_singular` / `last_restarted`. `saturation_restart=True` (v1.7.0): a warm start at a range limit is also solved from 0 in the same batch and the lower residual wins (`path-following.md`). Pass a SEQUENCE of vehicles (and/or of `env_idx`) for a fleet: M members inverted in one batch, every entry point taking and returning length-M arrays, `set_applied_member(i, ...)` for a single row |
 | `SweepTable` | `from genesis_vehicle import SweepTable` | the measured inverse plant: (v, throttle, steer, pitch, roll) → (a, ω_z) grid; `.load(csv)` / `.save(csv)`; inverse lookups `throttle_for(v, a, pitch, roll)` / `steer_for(v, ω, pitch, roll)`. numpy-only, so it is the option for a controller running without a simulator |
 | `extract_state(vehicle, env_idx=0)` | `from genesis_vehicle.control import extract_state` | Genesis entity / `Vehicle` wrapper → state dict for `PathFollower.step` |
 | `extract_state_from_arrays(pos, quat_wxyz, vel)` | `from genesis_vehicle.control import extract_state_from_arrays` | same, from raw arrays (simulator-agnostic) |

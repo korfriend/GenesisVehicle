@@ -12,6 +12,42 @@ The function is batch-shape-agnostic: every tensor is `(B, n_wheels)` or
 `(B, n_wheels, 3)` where `B` is whatever batch the caller built its proto
 with. It performs no I/O (no entity reads, no solver writes, no visual) —
 the caller does all of that around it.
+
+Axle resisting torque (v1.7.0). Hooks run in TWO phases per step, both over
+the ``post_tire_hooks`` list the caller passes (a hook whose class lacks one
+of the two methods is skipped for that phase):
+
+1. ``apply_pre_tire(ctx)`` -- BEFORE the tyre. The only phase that may set
+   ``ctx.T_resist`` (``(B, n)``, sign of ``omega``; ``RollingResistance``
+   does). The pipeline caps it against the pre-step ω with
+   ``dynamics.cap_resist_torque`` (``T_rr``) and applies it to ω at once:
+   ``omega' = omega - T_rr * dt / i_wheel``. The tyre, the POST_TIRE hooks, the
+   F_long overshoot clamp, the ω update and the airborne branch all start from
+   ``omega'``. So the tyre sees the ω the resisting torque leaves. On a
+   freely rolling wheel whose tyre request reaches the overshoot-clamp limit,
+   the clamp passes exactly ``-T_rr / r`` to the chassis on the SAME step and
+   ω ends at rolling (pinned for the reference car and tank at +-2 and 5 m/s
+   by ``test_a_rolling_wheel_stays_rolling_and_the_chassis_gets_the_rr_force``;
+   a tyre whose request stays below that limit passes less). (The
+   intermediate 1.7.0 design added ``T_resist`` to the brake inside the clamp
+   instead; the clamp target is exact rolling, which is not the resistance
+   equilibrium, and ω alternated step to step between rolling and
+   rolling - ``T_rr*dt/i``.)
+2. ``apply_post_tire(ctx)`` -- after the tyre, as before. Writing
+   ``ctx.T_resist`` here raises ``RuntimeError`` -- a rebinding always, an
+   in-place write except under ``torch.inference_mode()`` (where the
+   ``_version`` read is skipped; the physics still uses the pre-tyre snapshot).
+
+The brake is still evaluated on the PRE-step ω and capped together with the
+resisting torque exactly as before: ``cap_resist_torque(T_brake +
+T_resist, omega) - T_rr`` is what enters the clamp. Brake + resisting torque
+therefore cannot reverse ω in one step -- guarded by ``cap_resist_torque`` on
+``T_resist`` in phase 1 plus the cap of the sum here (the remainder is at most
+``|omega'| * i_wheel / dt`` and has ω's sign, for a ``T_resist`` of ω's sign
+and up to float rounding -- a capped step can land a few ulp past zero). That guard does not bound the
+drive torque, the tyre friction torque or a hook's ω pull. With no
+``T_resist`` set, ``omega'`` IS ``omega`` (the same tensor object) and the
+code path is the pre-1.7.0 one, operation for operation.
 """
 
 from __future__ import annotations
@@ -22,7 +58,7 @@ from typing import Any
 import torch
 from genesis.utils.geom import transform_by_quat
 
-from .dynamics import brake_torque_signed
+from .dynamics import brake_torque_signed, cap_resist_torque
 
 
 def pw(t: torch.Tensor) -> torch.Tensor:
@@ -106,7 +142,14 @@ def compute_wheel_step(
     n: int,
 ) -> PipelineResult:
     """Sections A–E of the ray-wheel pipeline. Pure compute; mutates only
-    ``ctx`` (for the POST_TIRE hooks) and returns a ``PipelineResult``."""
+    ``ctx`` (for the hooks) and returns a ``PipelineResult``.
+
+    ``ctx.T_resist`` (reset to None here, set only in a hook's
+    ``apply_pre_tire``) is the per-wheel axle resisting torque (v1.7.0): it is
+    capped and applied to ω BEFORE the tyre, and the brake is capped as the
+    remainder in section (D) -- see the module docstring. When it is set,
+    ``ctx.omega`` in the POST_TIRE phase and the returned ``kappa`` are taken
+    at that post-resistance ω, not at the ω passed in."""
     wm = wheel_meta
     DT = dt
 
@@ -166,32 +209,76 @@ def compute_wheel_step(
     v_hit = vel.unsqueeze(1) + torch.cross(ang_b, r_vec, dim=-1)
     v_long = (v_hit * wheel_fwd_world).sum(dim=-1)
     v_lat = (v_hit * wheel_lat_world).sum(dim=-1)
-    v_roll = pw(wm.radius) * omega
+    i_w = pw(wm.i_wheel)
+    radius_b = pw(wm.radius)
+
+    # PRE_TIRE hook phase (v1.7.0). Every per-step hook output is reset here,
+    # before EITHER phase, so a pre-tire hook never sees last step's values.
+    # F_long / F_lat do not exist yet in this phase.
+    ctx.F_long = None; ctx.F_lat = None; ctx.N = N
+    ctx.v_long = v_long; ctx.v_lat = v_lat
+    ctx.omega = omega; ctx.air_mask = air_mask
+    ctx.omega_override = None
+    ctx.omega_pull_factor = None; ctx.omega_pull_target = None
+    ctx.T_resist = None
+    ctx.dt = float(DT)
+    for hook in post_tire_hooks:
+        pre = getattr(hook, "apply_pre_tire", None)
+        if pre is not None:
+            pre(ctx)
+    T_resist_obj = ctx.T_resist
+    if T_resist_obj is not None:
+        # Snapshot: only this copy is used below, so a later in-place write to
+        # the hook's tensor cannot change the physics. Such a write is also
+        # detected through the tensor's version counter (a python int, no
+        # device sync) and raises below -- except for an inference-mode
+        # tensor, which has no version counter: there only rebinding is
+        # detected, and the snapshot still keeps the physics unaffected.
+        T_resist_ver = (None if T_resist_obj.is_inference()
+                        else T_resist_obj._version)
+        T_resist = T_resist_obj.clone()
+        # Axle resisting torque applied to omega BEFORE the tyre, capped so it
+        # alone cannot reverse the wheel.
+        T_rr = cap_resist_torque(T_resist, omega, DT, i_w)
+        omega_t = omega - T_rr * DT / i_w
+    else:
+        T_resist = None
+        T_resist_ver = None
+        omega_t = omega     # same object: the no-resistance path is unchanged
+    v_roll = pw(wm.radius) * omega_t
 
     # (C) Tire force — single batched call.
     F_long, F_lat, kappa, alpha = resolved.tire(v_long, v_lat, v_roll, N, wm)
 
     # POST_TIRE stability hooks (batched — one call per hook).
-    ctx.F_long = F_long; ctx.F_lat = F_lat; ctx.N = N
-    ctx.v_long = v_long; ctx.v_lat = v_lat
-    ctx.omega = omega; ctx.air_mask = air_mask
-    ctx.omega_override = None
-    ctx.omega_pull_factor = None; ctx.omega_pull_target = None
-    ctx.dt = float(DT)
+    ctx.F_long = F_long; ctx.F_lat = F_lat
+    ctx.omega = omega_t
     for hook in post_tire_hooks:
-        hook.apply_post_tire(ctx)
+        post = getattr(hook, "apply_post_tire", None)
+        if post is not None:
+            post(ctx)
+    if ctx.T_resist is not T_resist_obj or (
+            T_resist_ver is not None and T_resist_obj._version != T_resist_ver):
+        raise RuntimeError(
+            "ctx.T_resist was written in apply_post_tire; an axle resisting "
+            "torque must be set in apply_pre_tire(ctx), which runs before the "
+            "tyre (v1.7.0). A post-tyre write would be silently ignored.")
     F_long, F_lat = ctx.F_long, ctx.F_lat
 
     # (D) Omega update. brake torque clamped against single-step overshoot.
-    i_w = pw(wm.i_wheel)
+    # The brake is evaluated on the PRE-step omega (unchanged); with a
+    # resisting torque present the brake + resistance SUM is capped as before
+    # and only the remainder after the part already applied (T_rr) enters
+    # the clamp: |remainder| <= |omega_t| * i_wheel / dt, sign of omega.
     T_brake_eff = brake_torque_signed(T_brake_pw, omega, dt=DT, i_wheel=i_w)
-    radius_b = pw(wm.radius)
+    if T_resist is not None:
+        T_brake_eff = cap_resist_torque(T_brake_eff + T_resist, omega, DT, i_w) - T_rr
 
     # [Overshoot Clamp] Cap F_long so the resulting friction torque cannot
     # reverse the tire slip direction in one step.
     omega_target = v_long / radius_b
     domega_nofric = (T_drive_pw - T_brake_eff) / i_w
-    omega_nofric = omega + domega_nofric * DT
+    omega_nofric = omega_t + domega_nofric * DT
     T_fric_limit = (omega_nofric - omega_target) * i_w / DT
     F_long_limit = T_fric_limit / radius_b
     F_long = torch.where(
@@ -202,9 +289,9 @@ def compute_wheel_step(
 
     T_friction = radius_b * F_long
     domega = (T_drive_pw - T_brake_eff - T_friction) / i_w
-    new_omega = omega + domega * DT
+    new_omega = omega_t + domega * DT
     domega_air = (T_drive_pw - T_brake_eff) / i_w
-    new_omega_air = omega + domega_air * DT
+    new_omega_air = omega_t + domega_air * DT
     new_omega = torch.where(air_mask, new_omega_air, new_omega)
     omega_max = float(resolved.chassis.omega_max)
     new_omega = torch.clamp(new_omega, -omega_max, omega_max)

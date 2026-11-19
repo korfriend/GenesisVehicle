@@ -517,6 +517,30 @@ class DifferentiablePlant:
         probe_delta: command step used to rescue a channel whose autograd
             derivative is identically zero (see :meth:`jacobian`). 0 disables
             the rescue and lets such a channel report no authority.
+        saturation_restart: (v1.7.0, default ``True``) when a member's warm
+            start sits at a range limit in either channel (within 1% of the
+            half-range — throttle ``<= -0.99`` or ``>= +0.99`` on the default
+            ``(-1, 1)``), :meth:`solve` also runs the same Newton/line search
+            from a second start with each saturated channel reset to 0
+            (clipped into the range), in the SAME batched unroll, and keeps
+            whichever start ends at the lower weighted residual; on a tie the
+            warm start is kept. A saturated warm start can sit where the local
+            Jacobian points back into the limit, and the chord iterations then
+            never leave it: on the reference tank of
+            ``tests/test_differentiable_plant.py`` (Genesis-free fake state,
+            v1.7.0 force model, restart off) a target of +3 m/s^2 at -2 m/s
+            from a warm start of throttle -1 returned -1 at a residual of 5.59,
+            while the same solve from 0 returned +0.74 at 0.41; with the
+            restart on, both return +0.74. ``False`` reproduces the pre-1.7.0
+            single-start solve. A
+            solve in which NO member's warm start is saturated runs exactly the
+            single-start code path either way. In a mixed fleet (some members
+            saturated) every member runs on the two-start (S=2) path, and an
+            unsaturated member's result is NOT bit-identical to its solo
+            single-start solve: it agrees to the tolerance
+            ``test_a_mixed_fleet_restarts_each_member_as_it_would_alone``
+            checks (rel 1e-4, abs 1e-5). See
+            :attr:`last_restarted`.
         mass / izz / com: override the planar mass properties, which are
             otherwise composed from the entity's links. Giving both
             `mass` and `izz` skips that read entirely, and `com` then
@@ -555,7 +579,8 @@ class DifferentiablePlant:
                  line_search_steps: int = 3,
                  tol: float = 1e-3,
                  probe_delta: float = 0.2,
-                 probe_threshold: float = 1e-9):
+                 probe_threshold: float = 1e-9,
+                 saturation_restart: bool = True):
         if horizon < 2:
             raise ValueError(
                 "horizon must be >= 2: within a single step the tyre force is "
@@ -581,6 +606,7 @@ class DifferentiablePlant:
         self.tol = float(tol)
         self.probe_delta = float(probe_delta)
         self.probe_threshold = float(probe_threshold)
+        self.saturation_restart = bool(saturation_restart)
 
         if mass is None or izz is None:
             mp = plant_mass_properties(self.src.entity)
@@ -610,7 +636,9 @@ class DifferentiablePlant:
         # see why a command came out the way it did: `last_jacobian` is the
         # 2x2 the solve linearised on, `last_response` the (a, omega_z) it
         # converged to, `last_target` what was asked for, `last_singular`
-        # whether a channel had no authority at this operating point.
+        # whether a channel had no authority at this operating point,
+        # `last_restarted` whether the answer came from the zero restart of a
+        # saturated warm start rather than from the warm start itself.
         M = self.n_members
         self._u = np.zeros((M, 2))
         self._jacobian = np.zeros((M, 2, 2))
@@ -618,6 +646,7 @@ class DifferentiablePlant:
         self._target = np.zeros((M, 2))
         self._singular = np.zeros(M, dtype=bool)
         self._cost = np.zeros(M)
+        self._restarted = np.zeros(M, dtype=bool)
         self.last_iters = 0
         self._pending_a: Optional[float] = None
         self._has_solved = False
@@ -683,6 +712,17 @@ class DifferentiablePlant:
     @property
     def last_cost(self):
         return float(self._cost[0]) if self.n_members == 1 else self._cost.copy()
+
+    @property
+    def last_restarted(self):
+        """Per member: did the last :meth:`solve` return the command found
+        from the ZERO restart of a saturated warm start (``saturation_restart``)
+        — i.e. was the warm start discarded? ``False`` where the warm start was
+        not saturated, where it was but the warm start's residual was lower or
+        equal, and before any solve. ``bool`` for one member, an ``(M,)`` bool
+        array for a fleet. (v1.7.0)"""
+        return (bool(self._restarted[0]) if self.n_members == 1
+                else self._restarted.copy())
 
     def __repr__(self) -> str:
         members = "" if self.n_members == 1 else f"members={self.n_members}, "
@@ -947,15 +987,33 @@ class DifferentiablePlant:
             np.asarray(throttle, dtype=np.float64), (M,))
         st = u0[:, 1] if steer is None else np.broadcast_to(
             np.asarray(steer, dtype=np.float64), (M,))
+        J, y = self._jacobian_rows(thr, st, snap, cands=1)
+        if M == 1:
+            return J[0], (float(y[0, 0]), float(y[0, 1]))
+        return J, y
+
+    def _jacobian_rows(self, thr, st, snap: dict, cands: int = 1):
+        """:meth:`jacobian` over ``M * cands`` command rows, member-major.
+
+        ``thr`` / ``st`` are ``(M * cands,)``: member 0's ``cands`` commands
+        first, then member 1's — the same layout as :meth:`_unroll`, which is
+        how :meth:`solve` differentiates a warm start and its zero restart in
+        one backward pass. Returns ``J`` ``(M * cands, 2, 2)`` and ``y``
+        ``(M * cands, 2)``. ``cands == 1`` is exactly the pre-1.7.0 body of
+        :meth:`jacobian`.
+        """
+        R = self.n_members * int(cands)
+        thr = np.asarray(thr, dtype=np.float64).reshape(R)
+        st = np.asarray(st, dtype=np.float64).reshape(R)
         dev, fdt = self.src.dev, self.src.fdt
-        self._sync_hooks(1)
+        self._sync_hooks(cands)
         t = torch.tensor(np.ascontiguousarray(thr), device=dev, dtype=fdt,
                          requires_grad=True)
         s = torch.tensor(np.ascontiguousarray(st), device=dev, dtype=fdt,
                          requires_grad=True)
-        a, w = self._unroll(t, s, snap, cands=1)
+        a, w = self._unroll(t, s, snap, cands=cands)
         y = np.stack([a.detach().cpu().numpy(), w.detach().cpu().numpy()], axis=1)
-        J = np.zeros((M, 2, 2))
+        J = np.zeros((R, 2, 2))
         for i, out in enumerate((a, w)):
             g = torch.autograd.grad(out.sum(), (t, s), retain_graph=(i == 0),
                                     allow_unused=True)
@@ -973,19 +1031,19 @@ class DifferentiablePlant:
         # in reverse sat in exactly that state and froze the controller, since
         # a zero Jacobian means "no authority, do not move".
         #
-        # So: where a column of a member's Jacobian vanishes, replace it with a
+        # So: where a column of a row's Jacobian vanishes, replace it with a
         # one-sided difference over `probe_delta`, large enough to step out of
-        # the dead zone. Both columns of every member ride one batched unroll.
+        # the dead zone. Both columns of every row ride one batched unroll.
         if self.probe_delta > 0.0:
-            u = np.stack([thr, st], axis=1)                       # (M, 2)
-            dead = np.abs(J).max(axis=1) <= self.probe_threshold  # (M, 2)
+            u = np.stack([thr, st], axis=1)                       # (R, 2)
+            dead = np.abs(J).max(axis=1) <= self.probe_threshold  # (R, 2)
             if dead.any():
                 lo = np.array([self.throttle_range[0], self.steer_range[0]])
                 hi = np.array([self.throttle_range[1], self.steer_range[1]])
                 # Probe towards whichever side has room (a saturated command
-                # has room only inwards). Column c of every member at once.
-                trials = np.repeat(u[:, None, :], 2, axis=1)      # (M, 2, 2)
-                steps = np.zeros((M, 2))
+                # has room only inwards). Column c of every row at once.
+                trials = np.repeat(u[:, None, :], 2, axis=1)      # (R, 2, 2)
+                steps = np.zeros((R, 2))
                 for c in (0, 1):
                     d = np.where(u[:, c] + self.probe_delta <= hi[c],
                                  self.probe_delta, -self.probe_delta)
@@ -994,9 +1052,9 @@ class DifferentiablePlant:
                     steps[:, c] = d
                 a_t, w_t = self.predict(trials[:, :, 0].reshape(-1),
                                         trials[:, :, 1].reshape(-1),
-                                        snap=snap, cands=2)
-                a_t = np.asarray(a_t).reshape(M, 2)
-                w_t = np.asarray(w_t).reshape(M, 2)
+                                        snap=snap, cands=2 * cands)
+                a_t = np.asarray(a_t).reshape(R, 2)
+                w_t = np.asarray(w_t).reshape(R, 2)
                 ok = dead & (np.abs(steps) > 1e-9)
                 for c in (0, 1):
                     sel = ok[:, c]
@@ -1004,9 +1062,6 @@ class DifferentiablePlant:
                         continue
                     J[sel, 0, c] = (a_t[sel, c] - y[sel, 0]) / steps[sel, c]
                     J[sel, 1, c] = (w_t[sel, c] - y[sel, 1]) / steps[sel, c]
-
-        if M == 1:
-            return J[0], (float(y[0, 0]), float(y[0, 1]))
         return J, y
 
     # -- inversion -------------------------------------------------------------
@@ -1071,6 +1126,15 @@ class DifferentiablePlant:
         symmetry with :class:`SweepTable` but are NOT used — the plant reads
         the live speed and attitude off the vehicles themselves, which is
         strictly more information than those three scalars carry.
+
+        Saturated warm start (v1.7.0, ``saturation_restart=True``): if any
+        member's warm start sits at a range limit, every member gets a second
+        start — the warm start with its saturated channels reset to 0 — and
+        both starts of every member ride the same batched unroll (``S = 2``
+        rows per member, member-major). Each member then keeps the start with
+        the lower final residual, the warm start on a tie and always for a
+        member whose own warm start was not saturated. With no saturated
+        member the solve is the single-start path, operation for operation.
         """
         self._refresh_source()
         M = self.n_members
@@ -1083,11 +1147,30 @@ class DifferentiablePlant:
         w = np.array([1.0 / self.scale_a, 1.0 / self.scale_w])
 
         u = self._u.copy()
-        J, y = self.jacobian(u[:, 0], u[:, 1], snap=snap)
-        J = np.asarray(J, dtype=np.float64).reshape(M, 2, 2)
-        y = np.asarray(y, dtype=np.float64).reshape(M, 2)
-        best_cost = np.linalg.norm((target - y) * w, axis=1)        # (M,)
-        singular = np.zeros(M, dtype=bool)
+        # Starts per member. S == 1 is the warm start alone (and the exact
+        # pre-1.7.0 path); S == 2 adds the zero restart of saturated channels.
+        S = 1
+        sat_member = np.zeros(M, dtype=bool)
+        if self.saturation_restart:
+            lo = np.array([self.throttle_range[0], self.steer_range[0]])
+            hi = np.array([self.throttle_range[1], self.steer_range[1]])
+            sat_tol = 0.01 * (hi - lo) / 2.0
+            sat = (u <= lo + sat_tol) | (u >= hi - sat_tol)          # (M, 2)
+            sat_member = sat.any(axis=1)
+            if sat_member.any():
+                S = 2
+                u_zero = np.where(sat, np.clip(0.0, lo, hi), u)
+                u = np.stack([u, u_zero], axis=1).reshape(M * S, 2)
+                target_r = np.repeat(target, S, axis=0)             # (M*S, 2)
+        if S == 1:
+            target_r = target
+        R = M * S
+
+        J, y = self._jacobian_rows(u[:, 0], u[:, 1], snap, cands=S)
+        J = np.asarray(J, dtype=np.float64).reshape(R, 2, 2)
+        y = np.asarray(y, dtype=np.float64).reshape(R, 2)
+        best_cost = np.linalg.norm((target_r - y) * w, axis=1)      # (R,)
+        singular = np.zeros(R, dtype=bool)
         iters = 0
 
         # Chord iterations with a backtracking line search. Reusing the same J
@@ -1099,29 +1182,29 @@ class DifferentiablePlant:
         # only if the predicted residual actually shrinks.
         fracs = 0.5 ** np.arange(self.line_search_steps)
         C = self.line_search_steps
-        rows = np.arange(M)
+        rows = np.arange(R)
         for _ in range(max(1, self.newton_iters)):
             live = best_cost >= self.tol
             if not live.any():
                 break
-            # A converged member contributes no residual, so its step is zero
+            # A converged row contributes no residual, so its step is zero
             # and the batched unroll simply re-evaluates it at no extra cost.
-            err = np.where(live[:, None], target - y, 0.0)
+            err = np.where(live[:, None], target_r - y, 0.0)
             cand, sing = self._step_command(J, err, u)
             singular |= sing
             du = cand - u
             if not np.any(np.abs(du) > 1e-12):
                 break
 
-            # All backtracking candidates of all members in ONE batched
-            # unroll: the halvings are independent, and a wider batch costs
-            # almost the same at these sizes.
+            # All backtracking candidates of all rows in ONE batched unroll:
+            # the halvings are independent, and a wider batch costs almost the
+            # same at these sizes.
             trials = u[:, None, :] + du[:, None, :] * fracs[None, :, None]
             a_t, w_t = self.predict(trials[:, :, 0].reshape(-1),
                                     trials[:, :, 1].reshape(-1),
-                                    snap=snap, cands=C)
-            y_t = np.stack([np.asarray(a_t), np.asarray(w_t)], axis=1).reshape(M, C, 2)
-            costs = np.linalg.norm((target[:, None, :] - y_t) * w, axis=2)  # (M, C)
+                                    snap=snap, cands=S * C)
+            y_t = np.stack([np.asarray(a_t), np.asarray(w_t)], axis=1).reshape(R, C, 2)
+            costs = np.linalg.norm((target_r[:, None, :] - y_t) * w, axis=2)  # (R, C)
             k = np.argmin(costs, axis=1)
             best_k = costs[rows, k]
             take = live & (best_k < best_cost)
@@ -1132,11 +1215,23 @@ class DifferentiablePlant:
             y = np.where(take[:, None], y_t[rows, k], y)
             best_cost = np.where(take, best_k, best_cost)
 
+        restarted = np.zeros(M, dtype=bool)
+        if S > 1:
+            c2 = best_cost.reshape(M, S)
+            # Strictly lower only: a tie keeps the warm start, and a member
+            # whose own warm start was not saturated always keeps it (its
+            # "restart" row is the warm start again).
+            restarted = sat_member & (c2[:, 1] < c2[:, 0])
+            sel = np.arange(M) * S + restarted.astype(np.int64)
+            u, J, y = u[sel], J[sel], y[sel]
+            best_cost, singular = best_cost[sel], singular[sel]
+
         self._u = u
         self._jacobian = J
         self._response = y
         self._cost = best_cost
         self._singular = singular
+        self._restarted = restarted
         self.last_iters = iters
         self._has_solved = True
         if M == 1:
@@ -1194,6 +1289,11 @@ class DifferentiablePlant:
         in. That mismatch is invisible while the two agree and divergent the
         moment they do not.
 
+        A reported value at a range limit (within 1% of the half-range) is a
+        SATURATED warm start: with ``saturation_restart`` (default) the next
+        :meth:`solve` also solves from 0 in that channel and keeps whichever
+        start ends at the lower residual (v1.7.0).
+
         Takes scalars for a single member, arrays of length M for a fleet.
         """
         M = self.n_members
@@ -1221,5 +1321,6 @@ class DifferentiablePlant:
         self._target = np.zeros((M, 2))
         self._singular = np.zeros(M, dtype=bool)
         self._cost = np.zeros(M)
+        self._restarted = np.zeros(M, dtype=bool)
         self._has_solved = False
         self._pending_a = None

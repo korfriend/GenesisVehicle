@@ -17,7 +17,7 @@ import genesis as gs
 from genesis.utils.geom import transform_by_quat
 
 from ._version import __version__
-from .config import ResolvedConfig, VehicleConfig, resolve
+from .config import ResolvedConfig, VehicleConfig, check_rolling_resistance_cr, resolve
 from ._gs_compat import apply_links_wrench, check_genesis_floor
 from ._hotset import prime_derived
 from ._pipeline import compute_wheel_step, pw, pw3
@@ -242,13 +242,18 @@ class PipelineContext:
     v0.5.0: now batched over wheels — F_long/F_lat/N/v_long/v_lat are all
     (n_envs, n_wheels) tensors, not (n_envs,) per-wheel scalars. Hook
     implementations have a single `apply_post_tire(ctx)` call per step
-    (no `wheel_idx` argument)."""
+    (no `wheel_idx` argument). v1.7.0: a POST_TIRE hook also gets one
+    `apply_pre_tire(ctx)` call per step, before the tyre."""
     # Batched per-wheel state (all (n_envs, n_wheels))
     F_long: Optional[torch.Tensor] = None
     F_lat: Optional[torch.Tensor] = None
     N: Optional[torch.Tensor] = None
     v_long: Optional[torch.Tensor] = None
     v_lat: Optional[torch.Tensor] = None
+    # In apply_pre_tire: the pre-step omega. In apply_post_tire: omega AFTER
+    # the pre-tire resisting torque (T_resist) was applied -- the omega the
+    # tyre and PipelineResult.kappa / last_kappa were evaluated at; equal to
+    # the pre-step omega only when no hook set T_resist (v1.7.0).
     omega: Optional[torch.Tensor] = None
     air_mask: Optional[torch.Tensor] = None     # (n_envs, n_wheels) bool
     omega_override: Optional[Any] = None         # _OmegaOverride with (n_envs, n_wheels) bool
@@ -266,6 +271,19 @@ class PipelineContext:
     dt: float = 0.0
     # WheelMeta with batched per-wheel coefficients (for hooks/tire to read).
     wheel_meta: Any = None
+    # Per-wheel AXLE resisting torque (v1.7.0), (n_envs, n_wheels), N*m, with
+    # the SAME sign as ``omega`` (a positive value opposes positive spin).
+    # Reset to None by ``_pipeline.compute_wheel_step`` before the hooks run; a
+    # hook ACCUMULATES into it in ``apply_pre_tire`` ONLY (``RollingResistance``
+    # does) -- a write in ``apply_post_tire`` raises RuntimeError (an in-place
+    # one is not detected under torch.inference_mode()). The pipeline
+    # caps it at ``|omega| * i_wheel / dt`` (``dynamics.cap_resist_torque``) and
+    # subtracts it from omega BEFORE the tyre; the brake is then capped
+    # together with it and only the remainder enters the F_long overshoot
+    # clamp and the omega update. None = no resisting torque, which is the
+    # exact pre-1.7.0 code path. Appended LAST so any positional
+    # construction of this dataclass keeps its meaning.
+    T_resist: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -1112,6 +1130,7 @@ class VehiclePhysics:
     @staticmethod
     def _build_wheel_meta_impl(resolved: ResolvedConfig, d, f) -> WheelMeta:
         wheels = resolved.wheels
+        check_rolling_resistance_cr(wheels)
         n = len(wheels)
         positions = torch.tensor([w.position for w in wheels], device=d, dtype=f)
         side_L = torch.tensor([w.side == "L" for w in wheels], device=d, dtype=torch.bool)

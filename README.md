@@ -104,7 +104,9 @@ from `VehicleScene.init_backend` / every `VehicleScene(init_genesis=True)` and
 from `VehiclePhysics.__init__` (which the batched driver also reaches), and
 `GENESIS_VEHICLE_QUIET` does not silence it; a `VehicleScene(init_genesis=False)`
 that never builds a vehicle is not covered. 1.4.0 still runs and still passes the
-suite (the final v1.6.9 tree: 633 passed / 3 skipped, CHANGELOG 1.6.9 §1.2). The
+suite (the final v1.6.9 tree: 633 passed / 3 skipped, CHANGELOG 1.6.9 §1.2);
+v1.7.0 was not run on 1.4.0, and its contact-path identity test has no 1.4.0
+baseline any more, so it skips there. The
 `<= 1.3.3` branches in `_gs_compat.py` (the force API, the link inertial reads,
 the `Scene.sim_options` name) and in `vehicle_scene.py` are still there and
 still taken on 1.3.3 — **dead weight to be removed in a later release, not a
@@ -349,7 +351,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-634 tests covering URDF parsing, config resolve, suspension sizing, strategy
+712 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity check on
@@ -369,14 +371,18 @@ windows of deliberately unequal length), the genesis-world
 supported-floor warning and the coarse-SDF material for SDK-owned collision
 bodies (v1.6.9 — version parsing, both call sites, the post-build non-convex
 check, a real-engine 16-node grid, and every server obstacle branch building
-only convex geoms), and the server subpackage surface.
+only convex geoms), rolling resistance as an axle torque applied before the tyre
+and the server wheel overrides that reach the physics (v1.7.0 — closed-form
+coast-down, no wheel-spin alternation on a free coast, the rolling-resistance coefficient guard, the
+`DifferentiablePlant` saturated-warm-start restart, the per-step input copy),
+and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v1.6.10 tree, `634 passed, 3 skipped in 88.17s` (CPU/WSL2, genesis-world 1.4.5,
+v1.7.0 tree, `712 passed, 3 skipped in 89.31s` (CPU/WSL2, genesis-world 1.4.5,
 `pytest tests/ -q -p no:cacheprovider --ignore=tests/test_fusion_probe.py`, one
-run; v1.6.9 was 633 in 58.69 s — the time difference is not a release effect,
-v1.6.10 adds one lookup-only test; the 3 skips are the env-gated live server tests, run them with
+run; the 3 skips are the env-gated live server tests, run them with
 `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`). Earlier:
+`634 passed, 3 skipped in 88.17s` at v1.6.10, 633 in 58.69 s at v1.6.9,
 `605 passed, 3 skipped in 135.07s` at v1.6.8 (genesis-world 1.4.0),
 `578 passed, 1 skipped in 137.19s` at v1.6.7, `544 passed in 144.45s` at
 v1.6.6, `519 passed in 144.33s` at v1.6.5,

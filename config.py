@@ -5,6 +5,7 @@ parsed URDF, then from module-level defaults.
 """
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, Optional
@@ -136,8 +137,10 @@ class ChassisConfig:
     # frontal area, m^2); 0.0 = no drag (default, back-compat). When set, a
     # chassis force ``F = -0.5 * air_density * drag_area * |v_h| * v_h`` opposes
     # the HORIZONTAL chassis velocity, so top speed emerges from a traction-vs-
-    # drag balance instead of only the drive-omega cap. Vertical velocity is
-    # excluded so drag never fights the suspension.
+    # resistance balance (drag plus, since v1.7.0, the "control" profile's
+    # RollingResistance, sum(cr * N) at the contact patches) instead of only the
+    # drive-omega cap. Vertical velocity is excluded so drag never fights the
+    # suspension.
     drag_area: float = 0.0
     air_density: float = 1.225   # kg/m^3, sea-level air
 
@@ -367,6 +370,38 @@ def _fill_defaults(w: WheelConfig) -> WheelConfig:
     return out
 
 
+def check_rolling_resistance_cr(wheels) -> None:
+    """Raise :class:`ConfigError` (a ``ValueError``) when any wheel's
+    ``rolling_resistance_cr`` is negative or not finite (v1.7.0).
+
+    Since v1.7.0 :class:`~genesis_vehicle.strategies.RollingResistance` turns
+    ``cr`` into an axle torque of the sign of ``omega`` that OPPOSES the spin;
+    a negative ``cr`` would flip it into a torque that PROPELS the wheel (through
+    1.6.10 the ``F_long`` overshoot clamp happened to neutralise it). A
+    non-finite ``cr`` turns the torque into NaN at ``omega == 0``.
+
+    Called from :func:`resolve` and from ``core.build_wheel_meta`` (which every
+    driver build, ``mark_config_dirty()`` rebuild and ``DifferentiablePlant``
+    goes through), so a cfg mutated after ``resolve`` is checked too. NOT
+    covered: writing ``wheel_meta.rolling_resistance_cr`` (the tensor) directly.
+    ``None`` is skipped (``resolve`` fills it from the default)."""
+    for i, w in enumerate(wheels):
+        cr = getattr(w, "rolling_resistance_cr", None)
+        if cr is None:
+            continue
+        try:
+            v = float(cr)
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"WheelConfig {getattr(w, 'name', None)!r} (index {i}): rolling_resistance_cr must "
+                f"be a finite number >= 0, got {cr!r}") from None
+        if not math.isfinite(v) or v < 0.0:
+            raise ConfigError(
+                f"WheelConfig {getattr(w, 'name', None)!r} (index {i}): rolling_resistance_cr must "
+                f"be a finite number >= 0, got {cr!r} (a negative cr would make "
+                f"RollingResistance a propelling axle torque)")
+
+
 def _warn_if_undersprung(
     parsed: Any, wheels: list[WheelConfig], urdf_path: str, gravity: float = 9.81
 ) -> None:
@@ -441,6 +476,8 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
     chassis = config.chassis
     if chassis.mass is None and parsed.chassis_mass is not None:
         chassis = replace(chassis, mass=parsed.chassis_mass)
+
+    check_rolling_resistance_cr(merged)
 
     _warn_if_undersprung(parsed, merged, config.urdf_path)
 

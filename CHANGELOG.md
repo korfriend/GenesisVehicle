@@ -10,6 +10,456 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.7.0] — 2026-11-19
+
+**`RollingResistance` takes effect for the first time.** Through v1.6.10 the
+`F_long` overshoot clamp erased it, so every preset's default `"control"`
+profile coasted with aero drag only. It is now an axle resisting torque applied
+to the wheel spin ω BEFORE the tyre, through a new optional hook phase
+`StabilityHook.apply_pre_tire(ctx)`. **The default vehicle's trajectory moves**
+(§1.4). The same release fixes a `DifferentiablePlant` that stayed at a
+saturated warm start (§2), makes `VehicleScene.step` hand the driver a fresh
+`VehicleInputs` per step (§3), and makes seven OSC server wheel-override keys
+reach the physics after they had been silently dropped (§4). The server change
+is visible to UE clients; read §4.2 before deploying.
+
+**Why a minor version.** This release changes public behaviour: the default
+vehicle's trajectory, seven server keys that now take effect, a new hook phase
+(`apply_pre_tire`), a new `DifferentiablePlant` kwarg (`saturation_restart`) and a
+new `ConfigError` on a negative or non-finite `rolling_resistance_cr`. It was
+prepared as 1.6.11 and renumbered before release. `RAY_MISS_THRESHOLD`, whose
+removal was targeted at 1.7.0 since 1.5.2, is NOT removed here; the target
+moves to 1.8.0.
+
+| abbr | meaning |
+|---|---|
+| RR | rolling resistance (`strategies.RollingResistance`) |
+| cr | rolling-resistance coefficient (`WheelConfig.rolling_resistance_cr`) |
+| N | wheel normal load (N) |
+| r | wheel radius (m) |
+| ω, ω′ | wheel spin rate (rad/s) before / after the pre-tyre resisting torque of this step |
+| `T_resist` | `PipelineContext.T_resist`, the per-wheel axle resisting torque a pre-tire hook sets (N·m, sign of ω) |
+| `T_rr` | `cap_resist_torque(T_resist, ω)`, the part of `T_resist` applied to ω before the tyre |
+| `F_long` | longitudinal tyre force |
+| M_eff | effective coast mass, `M + sum(i_wheel / r^2)` |
+| κ | longitudinal slip ratio (`last_kappa`) |
+| k | `cr * N * r^2 * dt / (tanh_scale * i_wheel)`, the explicit RR gain in the linear region of the `tanh` |
+| SFL | `StaticFrictionLock` stability hook |
+| LSR | `LowSpeedRegularizer` stability hook |
+| UE | Unreal Engine (the OSC server's client) |
+| OSC | Open Sound Control (the server's UDP wire protocol) |
+| alt | alternation: consecutive ω changes of opposite sign, both above 1e-4 rad/s unless a row says otherwise |
+| rise | a step on which chassis forward speed increased by more than 1e-5 m/s |
+| WSL2 | Windows Subsystem for Linux 2 (the measurement host) |
+| μ | tyre-ground friction coefficient |
+| B, C, E | Pacejka magic-formula stiffness, shape and curvature factors (`pb_*`, `pc_*`, `pe_*`) |
+| i_wheel | wheel spin moment of inertia (kg·m²) |
+| dt | simulation step duration (s) |
+| M | chassis mass (kg) |
+| Cd·A | aerodynamic drag coefficient times frontal area (m²) |
+| CSV | comma-separated values (the sweep table file format) |
+
+Every measurement below: CPU backend, WSL2, genesis-world 1.4.5, torch 2.11.0,
+Python 3.12.3, one fresh process per run. "1.6.10" is HEAD `a71b2a6` run from a
+`git archive`, "1.7.0" is this tree. The defect list came from a field team
+(their #1, #4, #8); the reproduction harness is their
+`PathFollower_MPC/tools/sdk_issue_checks.py`, which lives outside this repo.
+
+### 1. Rolling resistance is an axle torque applied before the tyre
+
+#### 1.1 What was wrong (1.6.10 and every earlier release)
+
+`RollingResistance.apply_post_tire` subtracted `cr * N * tanh(v_long / scale)`
+from `F_long`. The `F_long` overshoot clamp (v0.6.0, `physics-contracts.md`
+§7.7) runs AFTER every hook. On a freely rolling wheel its limit is close to
+zero, so the subtracted force was cut back to zero. While driving, the same
+`F_long` also entered the wheel update as `r * F_long`, so the wheel spun up,
+the slip re-balanced and the tyre returned the force. The hook ran, its
+docstring and four docs described the force, and none of it reached the chassis.
+
+Coast-down on a flat plane. Harness `.pm_r1/coast_measure.py` (method copied
+from the field harness): dual_scene, per_vehicle solver, dt 0.025 x 4
+substeps, plane μ 1.0, default `"control"` profile. Settle 0.5 s, set v0 with
+the wheels rolling, coast 0.5 s, then measure over a 2 s window. Closed form
+`(cr*M*g + F_aero(v_mean)) / M_eff`, evaluated over each run's own window:
+
+| vehicle | v0 (m/s) | 1.6.10 decel (m/s²) | 1.7.0 decel (m/s²) | closed form, 1.7.0 window | ratio |
+|---|---|---|---|---|---|
+| `car_4w.urdf`, `car_4w_rwd_ackermann` (M 1330 kg, M_eff 1392.4, cr 0.015, Cd·A 0.66) | 5 | 0.0073 | **0.1473** | 0.1472 | 1.0008 |
+| same | 10 | 0.0288 | 0.1683 | 0.1681 | 1.0007 |
+| `tank_ray.urdf`, `tank_skid_belt` (M 58200 kg, M_eff 59750, cr 0.05, no aero) | 5 | -0.0001 | **0.4779** | 0.4778 | 1.0004 |
+| same | 10 | -0.0001 | 0.4779 | 0.4778 | 1.0004 |
+
+The 1.6.10 car closed form for its own window is 0.1478, higher only because
+that car was faster in the window. With the hook removed, the car measures
+0.0073 on both trees: the no-hook path did not change. The field harness, run
+unmodified with `--car sdk` on 1.7.0, gives 0.147 / 0.168 / 0.203 m/s² at
+5 / 10 / 15 m/s (the field reported 0.007 / 0.029 / 0.064). Its own "expected"
+column, 0.154 / 0.176 / 0.213, ignores wheel inertia; dividing by M_eff accounts
+for the difference.
+
+The closed form holds only above two thresholds: rolling speed `|ω| * r` well
+above `tanh_scale` (0.5 m/s), and chassis speed at or above LSR's `v_kin_com`
+(0.5 m/s). Below either, the deceleration is smaller.
+
+#### 1.2 What the SDK does now
+
+* `RollingResistance` keeps `slots = ("POST_TIRE",)`. It does all its work in
+  the new `apply_pre_tire(ctx)`: `T = cr * N * r * tanh(ω * r / tanh_scale)`,
+  ADDED to `ctx.T_resist`. The `tanh` argument is now the wheel rolling speed
+  `ω * r`; it was the contact-point speed `v_long`. A locked wheel (ω = 0)
+  gets no RR, and an airborne wheel (N = 0) gets none.
+* `_pipeline.compute_wheel_step` calls `apply_pre_tire` on every hook of the
+  POST_TIRE list before the tyre. If `T_resist` is set, it snapshots it
+  (`clone()`), caps it with the new `dynamics.cap_resist_torque`
+  (`sign(t) * min(|t|, |ω| * i_wheel / dt)`), giving `T_rr`, and applies it at
+  once: `ω′ = ω - T_rr * dt / i_wheel`. The tyre, the POST_TIRE hooks, the
+  overshoot clamp, the ω update and the airborne branch all start from ω′.
+* The brake is still evaluated on the pre-step ω. The brake + resistance sum is
+  capped as one torque, and only the remainder enters the clamp:
+  `cap_resist_torque(T_brake_eff + T_resist, ω) - T_rr`. So brake plus RR
+  cannot reverse ω in one step. That guard does not bound the drive torque, the
+  tyre friction torque or a hook's ω pull.
+* With no `T_resist` set, ω′ IS ω (the same tensor object) and the code path is
+  the 1.6.10 one, operation for operation.
+* On a freely rolling wheel whose tyre request reaches the clamp limit, the
+  clamp passes exactly `-T_rr / r` to the chassis on the same step and ω ends at
+  rolling. That is pinned for the reference car and tank at v = 2, 5 and -2 m/s
+  by `test_a_rolling_wheel_stays_rolling_and_the_chassis_gets_the_rr_force`. A
+  tyre whose request stays below that limit passes less.
+
+The design shipped is the second one tried. The first added `T_resist` to the
+brake inside the overshoot clamp. Because the tyre was evaluated at an ω the
+resistance then changed, and the clamp's target (exact rolling) is not the
+resistance equilibrium, ω alternated step to step between rolling and
+`rolling - T_rr*dt/i_wheel`. It never shipped. Its numbers are in the 1.3 table
+for comparison only.
+
+#### 1.3 Free coast: no alternation, no speed rise
+
+Harness `.pm_r1/tank_flutter_d2.py 0.025 4 1.0 20`: dual_scene, per_vehicle,
+dt 0.025 x 4 substeps, plane μ 1.0, default `"control"` profile. Settle 1 s at
+rest, set the chassis to 1.0 m/s with ω = v/r, coast 20 s. Per wheel, maximum
+over wheels:
+
+| vehicle (k at static N) | tree | alt | max ω step (rad/s) | rises | v at 20 s (m/s) |
+|---|---|---|---|---|---|
+| tank (k 0.92) | 1.6.10 | 0 | 0.0073 | 13 | 0.99992 (no RR) |
+| tank | first design, not shipped | 281 | 1.237 | 133 | 0.0091 |
+| tank | **1.7.0** | **0** | **0.0316** | **0** | **0.00026** |
+| car (k 0.16) | 1.6.10 | 7 | 0.0034 | 7 | 0.994 (no RR) |
+| car | first design, not shipped | 798 | 0.227 | 315 | 0.0318 |
+| car | **1.7.0** | **0** | **0.0124** | **0** | **0.0063** |
+
+ω never reached 0 in these runs and neither vehicle reversed. This is measured,
+not enforced. What the code enforces is narrower: the cap keeps ω′ at ω's sign
+or zero at any k (for a `T_resist` of ω's sign, up to float rounding). At
+k ≥ 1 the cap engages and ω′ is 0 for that step. **The k ≥ 1 regime is not
+measured in a stable configuration**: the reference tank reaches k > 1 only at
+dt 0.05, where its suspension is already past the bump-stop stability limit and
+1.6.10 diverges as well (ends at -2.78 m/s with no RR change involved).
+
+`test_coast_is_monotone_and_omega_does_not_alternate` pins the car and the tank
+over 10 s at an alternation amplitude of 0.01 rad/s, not 1e-4.
+
+#### 1.4 Behaviour changes you will see
+
+| what | 1.6.10 | 1.7.0 | conditions |
+|---|---|---|---|
+| default identity rollout, final x | 5.920430660247803 m | **5.224289894104004 m** (-0.6961 m) | `tests/test_fan_default_identity.py`'s `_drive`: reference car, full `"control"` profile, one car per scene, batched solver, dual_scene, dt 0.025 x 10 substeps, μ 1.0, 60 brake + 140 throttle-0.5 steps. Two cars in one scene under both solvers: dx 0.6961, identical. |
+| `samples/quickstart.py`, 200 steps | x +12.00 m, 4.75 m/s | **x +10.51 m, 4.12 m/s** | default args, headless, one run each |
+| cruise throttle at 2 m/s, `path_follow_demo` | -0.00 | +0.13 | holding speed now needs throttle against RR |
+| tank sweep table, flat coast cells (throttle 0, steer 0, pitch 0, roll 0) | a ≈ 0 at every v | a = -0.1680 / -0.3272 / -0.4381 / -0.4423 at v = +0.5 / +1 / +2 / +4 m/s, mirrored in reverse, +0.0001 at 0 | `samples/data/tank_sweep_signed.csv`; `samples/tank_tuning.py` sets `i_wheel=100`, which raises M_eff, so the cells sit below the 0.478 of the plain tank |
+
+* **Any sweep table measured before 1.7.0 is stale for the default profile.**
+  `samples/data/tank_sweep_signed.csv` is re-measured (§5).
+* Top speed under drag is lower: it is now a balance of traction against drag
+  plus `sum(cr * N)`.
+* `ctx.omega` in a POST_TIRE hook is ω′ (after `T_rr`) whenever an RR hook is
+  present, which is the default `"control"` profile on every preset.
+  `PipelineResult.kappa` and `last_kappa` are taken at ω′ too, and
+  `last_F_long` now carries the same-step RR force. Without `T_resist` they are
+  unchanged.
+* **Writing `ctx.T_resist` in `apply_post_tire` raises `RuntimeError`**, and the
+  message names `apply_pre_tire`. A rebinding is always detected. An in-place
+  write is detected through the tensor's version counter, which inference-mode
+  tensors do not have, so **under `torch.inference_mode()` an in-place write is
+  not detected**. The pipeline uses its own snapshot either way, so such a write
+  cannot change the physics.
+* **Duck-typed hooks are now looked up per phase.** Both `apply_pre_tire` and
+  `apply_post_tire` are called through `getattr`. A hook object that defines
+  only one of them gets only that call. In 1.6.10 a hook listing `"POST_TIRE"` in
+  its `slots` but lacking `apply_post_tire` raised `AttributeError`; it is now
+  skipped for that phase.
+  `StabilityHook` subclasses inherit no-op defaults for both and are
+  unaffected.
+* The identity test's genesis-world 1.4.0 baseline is gone (§6), so that test
+  skips on 1.4.0.
+
+#### 1.5 Migration: remove any rolling-resistance workaround
+
+Anyone who worked around this defect by adding their own rolling resistance now
+counts it twice. The field team's `install_rolling_resistance`
+(`car/our_car.py` in `PathFollower_MPC`, a chassis force
+`cr * m * g * tanh(|v_h| / 0.5)` added by wrapping `dynamics.aero_drag_force`)
+is one such workaround. **Remove it.** Left in place it roughly doubles the
+rolling-resistance part of the coast deceleration; the implementation report
+estimates about 0.29 m/s² total for the reference car. That figure is an
+estimate, not a measured run.
+
+#### 1.6 Under braking
+
+With brake 0.6 from 10 m/s, RR adds its closed-form deceleration on top of the
+brake. Harness `.pm_r1/brake_heavy.py`: an RR car and a no-RR car in one
+scene, 12 m apart, per_vehicle, 4 substeps, wheels rolling at launch, 0.25 s
+lead-in, then a 1.0 s window in which both stay above 0.6 m/s:
+
+| vehicle | decel with RR - without RR (m/s²) | RR closed form | ratio | 1.6.10 ratio |
+|---|---|---|---|---|
+| car | 3.1666 - 3.0260 = +0.1406 | 0.1406 | 1.0001 | 0.0001 |
+| tank | 1.2360 - 0.7557 = +0.4803 | 0.4778 | 1.0054 | 0.0010 |
+
+The first (unshipped) design was ALSO additive in this window (car 0.9988, tank
+1.0032), so this is not something the final design fixed relative to it.
+
+One side effect, measured in this window only, cause not established: on the
+tank the brake-path ω alternation disappears when RR is present. Alternations
+per wheel over 40 steps (maximum over wheels, tolerance 1e-4): tank 1.7.0 with
+RR 0 (max ω step 0.083 rad/s), tank without RR 38 (1.81 rad/s), first design
+with RR 38 (2.99 rad/s). The car alternates 38 times in every configuration
+(1.6.10, first design, 1.7.0; with or without RR; max ω step 5.6 to 5.9 rad/s).
+
+#### 1.7 New validation of `cr`
+
+A negative or non-finite `rolling_resistance_cr` raises `ConfigError` (a
+`ValueError`). As an axle torque, a negative `cr` would PROPEL the wheel, and an
+infinite one gives NaN at ω = 0. Enforced in `config.check_rolling_resistance_cr`,
+called from `config.resolve` and from `core._build_wheel_meta_impl`, which every
+driver build, `mark_config_dirty()` rebuild and `DifferentiablePlant` goes
+through. `None` is skipped (resolve fills the default). **Not guarded:** a
+direct write to the `wheel_meta.rolling_resistance_cr` tensor. No preset,
+sample or bundled vehicle uses a negative `cr` (presets: car 0.015, tank 0.05;
+`GeneVehicle_JMK` 0.0, `GeneVehicle_KDU` 0.05).
+
+### 2. `DifferentiablePlant`: a saturated warm start no longer traps the solve
+
+**What was wrong.** `solve()` linearises at the previous command. At a range
+limit the local Jacobian can point back into the limit, and the chord
+iterations never left it. The field team's harness, reference car, v +2 m/s,
+target a -3 m/s², previous command +1: 1.6.10 returned throttle +1.00, the
+wrong direction.
+
+**Change.** New constructor kwarg `saturation_restart=True` and property
+`last_restarted`. If any member's warm start is within 1% of the half-range of a
+limit in either channel (throttle ≤ -0.99 or ≥ +0.99 on the default range),
+every member gets a second start with its saturated channels set to 0. Both
+starts run in the same batched unroll and line search. Per member, the lower
+final weighted residual wins; a tie keeps the warm start, and a member whose own
+warm start was not saturated always keeps it. `last_restarted` reports, per
+member, whether the zero restart's answer was returned. `saturation_restart=False`
+reproduces the 1.6.10 single-start solve.
+
+* With no member saturated, the solve runs the single-start code path exactly.
+* In a mixed fleet every member runs the two-start path, and an unsaturated
+  member's result is NOT bit-identical to its solo solve. It agrees within
+  rel 1e-4 / abs 1e-5, which `test_a_mixed_fleet_restarts_each_member_as_it_would_alone`
+  checks.
+* Cost: two starts per member in one batch, only on a step where some member is
+  saturated. Not timed.
+
+Reference tank, Genesis-free fake state (`tests/test_differentiable_plant.py`),
+target +3 m/s² at -2 m/s:
+
+| `saturation_restart` | warm start | throttle | residual | `last_restarted` |
+|---|---|---|---|---|
+| False | -1 | -1.0000 | 5.5905 | False |
+| False | 0 | +0.7384 | 0.4086 | False |
+| True | -1 | +0.7384 | 0.4086 | True |
+| True | 0 | +0.7384 | 0.4086 | False |
+
+The field harness on 1.7.0 (`--car sdk`): all 12 cells give the same throttle
+sign regardless of the warm start; the v +2 / a -3 case returns -1.00 in every
+cell.
+
+### 3. `VehicleScene.step` passes a fresh `VehicleInputs` each step
+
+**What was wrong.** `VehicleScene.step` handed the driver the same
+`veh._inputs` object every step. A wrapper around `physics.step` that rewrote a
+field (a traction-control throttle cut, say) therefore replaced what
+`set_inputs` had set, and the rewrite persisted into every later step.
+
+**Change.** New `Vehicle._step_inputs()` builds a shallow copy per vehicle per
+step, used in both solver modes. Limits, stated in the `set_inputs` docstring:
+
+* The copy is SHALLOW. An in-place write to a tensor field
+  (`inputs.throttle.mul_(0.5)`) still persists; replace the attribute instead.
+  `test_an_in_place_tensor_write_still_persists` pins that limit.
+* Only the `VehicleScene.step` path is covered. A caller driving
+  `VehiclePhysics.step` / `MultiVehiclePhysics.step` directly passes its own
+  object.
+* Cost: 0.14 to 0.18 µs per vehicle per step over a plain attribute read
+  (`timeit`, two separate measurements, one of them the median of 5 x 200k calls
+  over 3 runs; machine-dependent, not a bound). A quickstart step costs 10 to
+  12 ms.
+
+The `add_vehicle` docstring now also states the preset call signature,
+`preset(urdf_path, stability=...)`: a preset wrapper without a `stability`
+keyword raises `TypeError` there (field defect list §8).
+
+### 4. Server: seven wheel-override keys reach the physics
+
+#### 4.1 What was wrong (every release through 1.6.10)
+
+`server/vehicle_builder.build_cfg` wrote seven UE `wheelOverrides` keys to
+attribute names `WheelConfig` does not declare. `WheelConfig` is a plain
+dataclass, so `setattr` with a wrong name creates an attribute nobody reads.
+The values never reached the physics:
+
+| UE key | written to (1.6.10, dead) | now written to |
+|---|---|---|
+| `rollingResistance` | `rolling_resistance` | `rolling_resistance_cr` |
+| `pbX` | `bx` | `pb_x` |
+| `pcX` | `cx` | `pc_x` |
+| `peX` | `ex` | `pe_x` |
+| `pbY` | `by` | `pb_y` |
+| `pcY` | `cy` | `pc_y` |
+| `peY` | `ey` | `pe_y` |
+
+Measured on 1.6.10, preset and generic build branches alike: with overrides of
+0.031 / 11.5 / 1.55 / 0.25 / 9.25 / 1.45 / 0.15, all seven resolved values
+stayed at the un-overridden 0.015 / 10.0 / 1.65 / 0.4 / 8.0 / 1.3 / 0.4.
+(`rollingResistance` would have had no effect anyway, §1.1.) The capitalised
+forms (`RollingResistance`, `PbX`, ...) are accepted as before.
+
+#### 4.2 What changes, and the UE caution
+
+* The seven keys are LIVE from 1.7.0.
+* Invalid values are rejected: a non-finite value, `cr < 0`, or a Pacejka
+  B or C ≤ 0 (`pbX`, `pcX`, `pbY`, `pcY`; `peX` / `peY` need only be finite).
+  The server prints `[WARN] wheelOverrides '<wheel>': <key>=<value> rejected
+  (must be <rule>) - keeping <field>=<value>` and keeps the previous value.
+* Every wheel-override write in `build_cfg` now goes through
+  `_set_wheel_field`, which raises `AttributeError` on a name `WheelConfig`
+  does not declare. The names are literals in that module, so this catches a
+  developer typo, not a UE value.
+
+**CAUTION for UE deployments.** A UE project that sends any of these keys now
+gets the tyre or rolling resistance it asks for. If the client serialises
+these fields with default values on every vehicle, those defaults now OVERWRITE
+the preset-tuned values: for example, a tank preset's `cr` 0.05 becomes whatever
+the client sends. **We could not verify what the UE client sends.** Check the
+`wheelOverrides` block a vehicle sends (the server prints
+`Applied overrides to wheel: ...` per wheel at startup) before deploying, and
+stop sending the keys you do not intend to set.
+
+Server checks on 1.7.0: both modes (`--headless`, `--multi-env --headless`)
+start and wait for UE; the opt-in live server tests
+(`GENESIS_VEHICLE_LIVE_SERVER_TEST=1`) pass, 3 in 117 s. Both were run on the
+first design; the final design made no server code change.
+
+### 5. Tank sweep table re-measured
+
+`samples/data/tank_sweep_signed.csv` (used by `path_follow_demo --plant sweep`
+and `samples/tank_tuning.py`) is fully re-measured with
+`python -u -m genesis_vehicle.control.sweep_measure --urdf
+genesis_vehicle/samples/urdf/tank_ray.urdf --preset tank_skid_belt --config
+genesis_vehicle/samples/tank_tuning.py` (default `--n-envs 500`, CPU, 35 chunks,
+about 9 minutes). 17325 rows, same grid as 1.6.10 (columns 0-4 equal), all
+finite. A spot check of 32 random cells (seed 1611) re-measured with
+`control.sweep_measure.run_sweep` matches the new file exactly to its 6
+printed decimals. Against the 1.6.10 file, over all cells: `a_measured` changes
+by -1.152 to +1.151 m/s² (mean +0.0001, median |Δ| 0.129), `omega_z_measured`
+by -0.250 to +0.250 rad/s (median |Δ| 0.033).
+
+### 6. Identity test re-anchored
+
+`tests/test_fan_default_identity.py` proves the `"point"` contact path did not
+move by one bit. Its rollout used the full `"control"` profile, so the RR fix
+would have broken it for a reason unrelated to contact. It now runs
+`_contact_path_cfg()`, the `"control"` profile minus `RollingResistance`.
+
+* The `("1.4.5", "linux-x86_64")` baseline was re-captured from a `git archive`
+  of `37b8b79` on genesis-world 1.4.5. That archive, run with the full profile,
+  reproduces the deleted entry bit for bit (final x 5.920430660247803), so the
+  capture method is the one used before. Contact path, final pose
+  `(5.920469284057617, -0.030104611068964005, 0.11141446977853775)`; 1.6.10 and
+  1.7.0 both match it bit for bit.
+* **The 1.4.0 entry is deleted**: that engine cannot be re-captured here.
+* `test_contact_path_cfg_drops_only_rolling_resistance` checks that the
+  contact-path config differs from the default only by RR.
+  `test_default_control_profile_rolling_resistance_is_live` (batched,
+  per_vehicle) requires the full profile to end 0.3 to 1.2 m short of the
+  contact path in one scene; on 1.6.10 it measures 0.0000 m and fails.
+* The test docstrings no longer call the default vehicle bit-identical to
+  earlier releases. Only its contact path is.
+
+### 7. Path-following demos
+
+Headless, default args, run 3 or 4 at a time in parallel (so no timing is
+quoted), every exit code 0:
+
+| demo | 1.6.10 | 1.7.0 |
+|---|---|---|
+| `path_follow_reverse_demo --plant jacobian` | **FAIL** pos_err 1.50 m, yaw_err 0.43 rad (limit 0.4); deterministic over a re-run | PASS 1.49 m / 0.33 rad |
+| `path_follow_reverse_demo --plant sweep` | PASS 1.48 m / 0.34 rad | PASS 1.49 m / 0.30 rad |
+| `path_follow_demo --plant jacobian` | PASS err 1.45 m, mean deviation 0.358 m | PASS 1.47 m, 0.352 m |
+| `path_follow_demo --plant sweep` | PASS 1.46 m, 0.387 m | PASS 1.46 m, 0.314 m |
+| `fleet_follow_demo` | not run | PASS; jacobian 8/8, max err 1.48 m; sweep 8/8, 1.45 m |
+
+**This release is not claimed to fix the reverse jacobian demo.** 1.6.10 fails
+it on genesis-world 1.4.5 by 0.03 rad, for a reason not established. 1.7.0
+passes it with a margin of 0.07 rad. The 1.6.10 reverse sweep row used
+1.6.10's own CSV.
+
+### 8. Still open
+
+* **A step-to-step ω alternation remains on the contact path under any throttle
+  or brake.** It exists in 1.6.10 and this release does not change it. The
+  cause is the same as in the first RR design: the drive and brake torques go
+  through the overshoot clamp with the tyre evaluated at the pre-step ω.
+  Measured on the contact path without RR, which is the 1.6.10 code path
+  (`.pm_r1/flutter_probe/run_drive.py`, same conditions as §1.3): throttle
+  0.15 gives the car 798 alternations in 800 steps, max ω step 0.92 rad/s, speed
+  rising on 400 of 800 steps; the tank 798, 1.36 rad/s. Brake 0.05: car 798,
+  0.47 rad/s; tank 798, 0.16 rad/s. Applying every axle torque before the tyre
+  removed it in a probe, but it moves the contact-path baseline (5.9204 →
+  6.0155 m), so it needs its own release. Not decided. Whether the sweep
+  tables' window averages hide it is not established.
+* **`DifferentiablePlant.jacobian` returns NaN at v = 0, ω = 0.** Reproduced on
+  1.6.10 and 1.7.0 with the Genesis-free fake state of
+  `tests/test_differentiable_plant.py`, `jacobian(0, 0)`: the reference car's
+  throttle column is NaN, and the reference tank's whole Jacobian is NaN. With
+  `StaticFrictionLock` removed from the hook list both are finite (car
+  d(a)/d(throttle) 0.298, tank 0.954). The suspected cause is the `sqrt` of
+  the friction-ellipse norm in SFL's post-tire path (`strategies/stability.py`
+  line 412), whose gradient at zero is undefined; that line is not proven to be
+  the source. Pre-existing, not fixed.
+* The k ≥ 1 RR regime is not measured in a stable configuration (§1.3).
+* Not run on 1.7.0: GPU, `raycast_mode="single_scene"`,
+  `wheel_contact="swept_envelope"`, and the `GeneVehicle_KDU` /
+  `GeneVehicle_JMK` demos (KDU sets `cr` 0.05, so its behaviour moves).
+* `dynamics.cap_resist_torque` is not re-exported from the package root (unlike
+  `brake_torque_signed`). Import it from `genesis_vehicle.dynamics`.
+
+### Tests
+
+`python -m pytest genesis_vehicle/tests/ -q -p no:cacheprovider
+--ignore=genesis_vehicle/tests/test_fusion_probe.py`: **712 passed, 3 skipped
+in 89.31 s** (one run; wall time varies run to run). 1.6.10 collected 637 (634 passed + 3 skipped). The +78:
+`test_rolling_resistance.py` 40 (new), `test_server_wheel_overrides.py` 14
+(new), `test_vehicle_scene_inputs.py` 4 (new), `test_differentiable_plant.py`
++17 (33 → 50), `test_fan_default_identity.py` +3 (4 → 7). Each new behavioural
+test was run against the 1.6.10 tree and fails there; the tests that fail on
+1.6.10 only because a new name is missing each have a behavioural partner. A
+bare run that also collects the untracked `test_fusion_probe.py` gives 765
+passed, 3 skipped in 78.82 s.
+
+The `_FakeSource` test helper used to overwrite a passed `omega=` with its
+per-member default, so the argument was silently ignored. It now honours it
+(`test_the_fake_source_honours_a_given_omega`).
+
+---
+
 ## [1.6.10] — 2026-11-04
 
 Test-only release: the default-path bit-identity baseline is now bound to the

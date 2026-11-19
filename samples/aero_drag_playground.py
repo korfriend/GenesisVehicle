@@ -13,8 +13,11 @@ The GUI needs Tk (`python3-tk`) and a display. Without either, or with
 ``--sweep``, the sample instead steps Cd·A through a scripted sequence and prints
 the resulting top speed — the same point, headless.
 
-Top speed here is set by drag AND the drive-omega cap together: with drag 0 the
-car runs up to its cap; add drag and it settles lower where traction = drag.
+Top speed here is set by drag, rolling resistance AND the drive-omega cap
+together: with drag 0 the car runs up to its cap (unless traction cannot beat
+rolling resistance first); add drag and it settles lower where traction = drag +
+rolling resistance. (Rolling resistance in the default "control" profile only
+takes effect since v1.7.0.)
 """
 from __future__ import annotations
 

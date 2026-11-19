@@ -34,6 +34,12 @@ class _FakeSource:
 
     Mirrors `_StateSource`'s surface exactly (the plant only ever touches these
     attributes), with the chassis parked level and every wheel evenly loaded.
+
+    ``omega`` (rad/s), when given, is the wheel speed of EVERY wheel of every
+    member; left None, each member's wheels run ``DEFAULT_SLIP`` over that
+    member's own rolling speed. Through v1.6.10 the per-member default below
+    overwrote a given ``omega`` unconditionally, so the argument was silently
+    ignored (a probe that passed ``omega=v/r`` actually ran 2% overspeed).
     """
 
     #: Wheel overspeed of the default state, as a fraction of rolling speed.
@@ -66,6 +72,7 @@ class _FakeSource:
         M = self.n_members
         self._dist = (rest_d - 0.5 * stroke).reshape(1, n).expand(M, n).clone()
         self._comp = (0.5 * stroke).reshape(1, n).expand(M, n).clone()
+        omega_given = omega is not None
         if omega is None:
             omega = (1.0 + self.DEFAULT_SLIP) * v_long / self.wheel_meta.radius
         self._omega = torch.as_tensor(omega, dtype=self.fdt).expand(M, n).clone()
@@ -73,8 +80,11 @@ class _FakeSource:
         self.post_tire_hooks = list(self.resolved.stability_hooks)
         self.pre_loop_hooks = [h for h in self.pre_loop_hooks
                                if hasattr(h, "apply_pre_loop")]
+        # Both hook phases are looked up with getattr by the pipeline
+        # (v1.7.0), so a hook with either method belongs on this list.
         self.post_tire_hooks = [h for h in self.post_tire_hooks
-                                if hasattr(h, "apply_post_tire")]
+                                if hasattr(h, "apply_post_tire")
+                                or hasattr(h, "apply_pre_tire")]
         # Mass properties consistent with THIS urdf. A fixed constant would
         # give the 58 t reference tank a 1.5 t chassis, and its drive torque
         # (sized for the real mass) would then predict 70 m/s^2 accelerations
@@ -98,8 +108,9 @@ class _FakeSource:
             self._quat[i] = [cp * cr, cp * sr, sp * cr, -sp * sr]
             self._vel[i] = [v_long + 0.5 * i, v_lat, 0.0]
             self._ang[i] = [0.0, 0.0, wz + 0.02 * i]
-            self._omega[i] = (1.0 + self.DEFAULT_SLIP) * (
-                v_long + 0.5 * i) / self.wheel_meta.radius
+            if not omega_given:
+                self._omega[i] = (1.0 + self.DEFAULT_SLIP) * (
+                    v_long + 0.5 * i) / self.wheel_meta.radius
 
     # -- the _StateSource surface --
     def chassis(self):
@@ -142,6 +153,18 @@ def _plant(cfg, **kw):
     plant_kw.setdefault("izz", src.izz_kgm2)
     plant_kw.setdefault("com", (0.0, 0.0, 0.5))
     return DifferentiablePlant(src, **plant_kw)
+
+
+def test_the_fake_source_honours_a_given_omega():
+    # Through v1.6.10 the per-member default overwrote `omega=` unconditionally.
+    cfg = car_4w_rwd_ackermann(CAR_URDF)
+    for M in (1, 3):
+        src = _FakeSource(cfg, v_long=4.0, omega=7.25, n_members=M)
+        assert torch.equal(src.omega(), torch.full_like(src.omega(), 7.25))
+    default = _FakeSource(cfg, v_long=4.0).omega()
+    r = float(_FakeSource(cfg).wheel_meta.radius.mean())
+    assert float(default.mean()) == pytest.approx(
+        (1.0 + _FakeSource.DEFAULT_SLIP) * 4.0 / r, rel=1e-6)
 
 
 def test_the_fake_source_satisfies_the_documented_surface():
@@ -332,6 +355,158 @@ def test_reset_clears_the_warm_start():
     p.reset()
     assert p.last_u == (0.0, 0.0)
     assert p.last_jacobian is None and p.last_response is None
+
+
+# --- saturated warm start (v1.7.0) --------------------------------------------
+#
+# A warm start pinned at a range limit can sit where the local Jacobian points
+# back into the limit; the chord iterations then never leave it (SDK_ISSUES #4).
+# `saturation_restart` (default True) also solves from 0 in the saturated
+# channel, in the same batched unroll, and keeps the lower residual. The tank
+# cases are the reference tank with the Genesis-free fake state; each one has a
+# warm start that, with the restart OFF, stays at the wrong limit.
+
+_TANK_SAT_CASES = [(-2.0, 3.0), (-2.0, -3.0), (2.0, 3.0), (2.0, -3.0)]
+
+
+def _solve_from(cfg, v, a_t, w_t, warm, **kw):
+    p = _plant(cfg, v_long=v, **kw)
+    p.set_applied(*warm)
+    thr, steer = p.solve(v, a_t, w_t)
+    return p, thr, steer
+
+
+def _spy_cands(p):
+    """Record the ``cands`` (= starts per member) of every Jacobian solve."""
+    seen = []
+    orig = p._jacobian_rows
+
+    def wrapped(thr, st, snap, cands=1):
+        seen.append(cands)
+        return orig(thr, st, snap, cands)
+    p._jacobian_rows = wrapped
+    return seen
+
+
+@pytest.mark.parametrize("v, a_t", _TANK_SAT_CASES)
+def test_a_saturated_warm_start_never_ends_worse_than_a_zero_start(v, a_t):
+    p0, t0, _ = _solve_from(tank_skid_belt(TANK_URDF), v, a_t, 0.0, (0.0, 0.0))
+    for warm in (-1.0, 1.0):
+        p, t, _ = _solve_from(tank_skid_belt(TANK_URDF), v, a_t, 0.0, (warm, 0.0))
+        assert p.last_cost <= p0.last_cost + 1e-6, (
+            f"v={v} a={a_t} warm={warm}: residual {p.last_cost:.3f} vs "
+            f"{p0.last_cost:.3f} from a zero start")
+        assert np.sign(t) == np.sign(t0), (v, a_t, warm, t, t0)
+
+
+@pytest.mark.parametrize("v, a_t", _TANK_SAT_CASES)
+def test_the_saturated_warm_start_defect_is_real_with_the_restart_off(v, a_t):
+    """Pins that every case above exercises the defect: with
+    ``saturation_restart=False`` (the pre-1.7.0 solve) one of the two
+    saturated warm starts stays at the wrong limit, at a residual several
+    times the zero start's."""
+    p0, t0, _ = _solve_from(tank_skid_belt(TANK_URDF), v, a_t, 0.0, (0.0, 0.0),
+                            saturation_restart=False)
+    worst = max(
+        (_solve_from(tank_skid_belt(TANK_URDF), v, a_t, 0.0, (w, 0.0),
+                     saturation_restart=False) for w in (-1.0, 1.0)),
+        key=lambda r: r[0].last_cost)
+    p, t, _ = worst
+    assert t == pytest.approx(-np.sign(t0), abs=1e-9)   # pinned at the far limit
+    assert p.last_cost > 3.0 * p0.last_cost
+
+
+def test_a_saturated_warm_start_that_is_right_is_kept():
+    """Negative control: same-side saturation is sometimes the right answer.
+    The restart runs (two starts per member) but the warm start wins, so the
+    command equals the restart-off solve's."""
+    v, a_t, warm = -2.0, -3.0, (-1.0, 0.0)
+    p = _plant(tank_skid_belt(TANK_URDF), v_long=v)
+    starts = _spy_cands(p)
+    p.set_applied(*warm)
+    thr, steer = p.solve(v, a_t, 0.0)
+    _, thr_off, steer_off = _solve_from(tank_skid_belt(TANK_URDF), v, a_t, 0.0,
+                                        warm, saturation_restart=False)
+    assert starts == [2]                      # the restart really ran
+    assert p.last_restarted is False
+    assert thr == pytest.approx(thr_off, rel=1e-6, abs=1e-9)
+    assert steer == pytest.approx(steer_off, rel=1e-6, abs=1e-9)
+
+
+@pytest.mark.parametrize("kind", ["car", "tank"])
+def test_a_saturated_steer_warm_start_is_restarted(kind):
+    """Steer channel: +0.5 at a +0.5 limit while +omega_z (LEFT, i.e. negative
+    steer) is asked for. Judged against the restart-off solves, not a fixed
+    number: no worse than the zero start, strictly better than staying put."""
+    cfg, urdf = ((car_4w_rwd_ackermann, CAR_URDF) if kind == "car"
+                 else (tank_skid_belt, TANK_URDF))
+    kw = dict(steer_range=(-0.5, 0.5))
+    p_sat_off, _, s_sat_off = _solve_from(cfg(urdf), 3.0, 0.0, 0.6, (0.0, 0.5),
+                                          saturation_restart=False, **kw)
+    p_zero_off, _, _ = _solve_from(cfg(urdf), 3.0, 0.0, 0.6, (0.0, 0.0),
+                                   saturation_restart=False, **kw)
+    p, _, steer = _solve_from(cfg(urdf), 3.0, 0.0, 0.6, (0.0, 0.5), **kw)
+    assert s_sat_off == pytest.approx(0.5)               # the defect, restart off
+    assert steer < 0.0
+    assert p.last_restarted is True
+    assert p.last_cost <= p_zero_off.last_cost + 1e-6
+    assert p.last_cost < p_sat_off.last_cost
+
+
+@pytest.mark.parametrize("warm, target", [
+    ((0.3, 0.1), (0.5, -0.05)), ((-0.6, -0.2), (-0.4, 0.1)), ((0.98, 0.0), (1.0, 0.0)),
+])
+def test_an_unsaturated_warm_start_takes_the_single_start_path(warm, target):
+    """No saturation -> S == 1, which is the pre-1.7.0 code path: identical
+    (``==``) to the restart-off solve, and no second start was run."""
+    out = {}
+    for flag in (True, False):
+        p = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=4.0,
+                   saturation_restart=flag)
+        starts = _spy_cands(p)
+        p.set_applied(*warm)
+        out[flag] = (p.solve(4.0, *target), p.last_cost, p.last_jacobian.copy(),
+                     p.last_restarted, starts)
+    (u_on, c_on, J_on, r_on, s_on), (u_off, c_off, J_off, _, _) = out[True], out[False]
+    assert s_on == [1]
+    assert r_on is False
+    assert u_on == u_off and c_on == c_off
+    assert np.array_equal(J_on, J_off)
+
+
+def test_a_mixed_fleet_restarts_each_member_as_it_would_alone():
+    """M = 4 tanks, saturated and unsaturated warm starts mixed: the batched
+    two-start solve gives every member what solving it alone gives. Tolerance
+    as in the other fleet-vs-solo tests."""
+    M = 4
+    src = _FakeSource(tank_skid_belt(TANK_URDF), v_long=-2.0, n_members=M)
+    kw = dict(mass=src.mass_kg, izz=src.izz_kgm2, com=(0.0, 0.0, 0.5),
+              steer_range=(-0.5, 0.5))
+    warm_t = np.array([-1.0, 0.0, 1.0, 0.3])
+    warm_s = np.array([0.0, 0.5, 0.0, 0.0])
+    a_t = np.array([3.0, 0.5, -3.0, 1.0])
+    w_t = np.array([0.0, 0.3, 0.0, -0.1])
+    fleet = DifferentiablePlant(src, **kw)
+    fleet.set_applied(warm_t, warm_s)
+    thr, steer = fleet.solve(np.zeros(M), a_t, w_t)
+    restarted = fleet.last_restarted
+    assert restarted.shape == (M,)
+    assert restarted.any() and not restarted.all()
+    for i in range(M):
+        solo = DifferentiablePlant(src.member(i), **kw)
+        solo.set_applied(float(warm_t[i]), float(warm_s[i]))
+        t_i, s_i = solo.solve(0.0, float(a_t[i]), float(w_t[i]))
+        assert thr[i] == pytest.approx(t_i, rel=1e-4, abs=1e-5), i
+        assert steer[i] == pytest.approx(s_i, rel=1e-4, abs=1e-5), i
+        assert bool(restarted[i]) == solo.last_restarted, i
+        assert fleet.last_cost[i] == pytest.approx(solo.last_cost, rel=1e-4, abs=1e-5)
+
+
+def test_reset_clears_last_restarted():
+    p, _, _ = _solve_from(tank_skid_belt(TANK_URDF), -2.0, 3.0, 0.0, (-1.0, 0.0))
+    assert p.last_restarted is True
+    p.reset()
+    assert p.last_restarted is False
 
 
 # --- PathFollower integration -------------------------------------------------

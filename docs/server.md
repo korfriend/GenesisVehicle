@@ -1158,6 +1158,12 @@ scene with many dynamic obstacles. If a UE scenario depends on a vehicle
 pulling away from a stop on time, measure it on your build rather than relying
 on this table.
 
+These numbers were measured on SDK v1.6.9. v1.7.0 made `RollingResistance`
+(part of the `"control"` profile used here) take effect, which is expected to
+change the distances in the table; the table was NOT re-measured on v1.7.0, so read it as a
+1.4.0-vs-1.4.5 and hib-vs-no-hib comparison on v1.6.9, not as distances a
+v1.7.0 server reproduces.
+
 `docs/differentiable-sot.md` §7 notes that a `requires_grad` scene bans
 hibernation; that is unrelated to the delay above.
 
@@ -1407,9 +1413,40 @@ and PascalCase both accepted):
 | `brakeBiasFrontRatio` | float | front brake fraction (rest to rear) |
 | `topSpeed` | float | **top speed in m/s** (v1.2.4) — radius-independent; the server converts it to the drive omega cap via the mean wheel radius. Preferred over `omegaMaxDrive`. e.g. `18.6` ≈ 67 km/h |
 | `omegaMaxDrive` | float | drive omega cap in **rad/s** (the raw cap; `topSpeed` wins if both are sent) |
-| `dragArea` | float | aero drag Cd·A in m² (v1.2.4); 0 = off. Top speed then comes from drag + the omega cap together |
+| `dragArea` | float | aero drag Cd·A in m² (v1.2.4); 0 = off. Top speed then comes from drag + the omega cap together (plus rolling resistance since v1.7.0, when it started taking effect) |
 | `airDensity` | float | air density kg/m³ (v1.2.4, default 1.225) |
-| `wheelOverrides` | `[{wheelName, radius, mass, stiffness, bumpStiffness, muLong, pbX, …}]` | per-wheel physical / Pacejka overrides. `wheelName` matches exact/position/substring against ANY name in the wheel's URDF joint chain (wheel link, spin, suspension, steer joint); `"*"` / `"all"` = every wheel (v1.1.26). An entry that matches nothing is skipped **with a warning** naming the URDF's wheel links. `bumpStiffness` (v1.2.6) = bump-stop rate beyond `restStroke`, 0 = off — keep `(k_susp+k_bump)·dt²/m_share` under ~0.7 or the suspension chatters |
+| `wheelOverrides` | `[{wheelName, radius, mass, stiffness, bumpStiffness, muLong, pbX, …}]` | per-wheel physical / Pacejka overrides. `wheelName` matches exact/position/substring against ANY name in the wheel's URDF joint chain (wheel link, spin, suspension, steer joint); `"*"` / `"all"` = every wheel (v1.1.26). An entry that matches nothing is skipped **with a warning** naming the URDF's wheel links. `bumpStiffness` (v1.2.6) = bump-stop rate beyond `restStroke`, 0 = off — keep `(k_susp+k_bump)·dt²/m_share` under ~0.7 or the suspension chatters. **`rollingResistance`, `pbX`, `pcX`, `peX`, `pbY`, `pcY`, `peY` are live only since v1.7.0** — see the note below |
+
+> **Seven override keys were silently dropped through v1.6.10, and are live
+> since v1.7.0.** `build_cfg` wrote them to attribute names `WheelConfig` does
+> not declare (`rolling_resistance`, `bx`, `cx`, `ex`, `by`, `cy`, `ey`); a
+> plain dataclass accepts such a `setattr` and nothing reads it. This table
+> listed `pbX` as an override through v1.6.10 without saying it had no effect.
+> They now map to:
+>
+> | key (also capitalised: `RollingResistance`, `PbX`, ...) | `WheelConfig` field | accepted values |
+> |---|---|---|
+> | `rollingResistance` | `rolling_resistance_cr` | finite, >= 0 |
+> | `pbX` / `pcX` | `pb_x` / `pc_x` (longitudinal Pacejka B / C) | finite, > 0 |
+> | `peX` | `pe_x` (longitudinal Pacejka E) | finite |
+> | `pbY` / `pcY` | `pb_y` / `pc_y` (lateral Pacejka B / C) | finite, > 0 |
+> | `peY` | `pe_y` (lateral Pacejka E) | finite |
+>
+> A rejected value prints `[WARN] wheelOverrides '<wheel>': <key>=<value>
+> rejected (must be <rule>) - keeping <field>=<value>` and the previous value
+> stays. (`rollingResistance` would have had no effect even if it had arrived:
+> rolling resistance itself only takes effect since v1.7.0, CHANGELOG 1.7.0
+> §1.) Every wheel-override write now goes through `_set_wheel_field`, which
+> raises `AttributeError` on an undeclared name — a guard against a developer
+> typo in `vehicle_builder.py`, not against a UE value.
+>
+> **CAUTION for UE projects.** If the client serialises these fields with
+> DEFAULT values on every vehicle, those defaults now OVERWRITE the preset's
+> tuned values (a `tank_skid_belt` vehicle's rolling-resistance coefficient 0.05, for example, becomes
+> whatever the client sends). What the shipped UE client sends has NOT been
+> verified. Before deploying v1.7.0, check the server's startup log
+> (`Applied overrides to wheel: ...` per wheel) and stop sending keys you do not
+> mean to set.
 
 > **Choosing `wheelName` for a tracked / numbered vehicle:** position matching
 > (`FL`, `FR`, `RL`, `RR`, `front_left`, …) only fires on wheels whose URDF

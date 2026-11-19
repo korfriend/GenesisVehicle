@@ -14,7 +14,7 @@ model*, not a plug-in the user has to remember to enable.
 
 | Profile | Hooks materialized (car) | Hooks materialized (tank) | Use case |
 |---|---|---|---|
-| `"control"` (default) | `RollingResistance`, `LowSpeedRegularizer(disable_when_control_active=False)`, `StaticFrictionLock(brake_thr=0.3, v_thr=0.5, k_spring=500_000, k_damp=20_000)` | same as car (v0.5.8 unified — was tank-only pre-v0.5.8) | **Recommended for almost everyone**: RL / MPPI / general control / Real2Sim. The regularizer is active even under throttle (the v0.3.0 footgun fix). `StaticFrictionLock` (v0.5.7) is a position-anchored stick-slip model — zero drift on any slope up to the physical friction limit (μ ≈ tan(slope_angle)). See [`../samples/slope_hold.py`](../samples/slope_hold.py) for a regression check. |
+| `"control"` (default) | `RollingResistance`, `LowSpeedRegularizer(disable_when_control_active=False)`, `StaticFrictionLock(brake_thr=0.3, v_thr=0.5, k_spring=500_000, k_damp=20_000)` | same as car (v0.5.8 unified — was tank-only pre-v0.5.8) | **Recommended for almost everyone**: RL / MPPI / general control / Real2Sim. The regularizer is active even under throttle (the v0.3.0 footgun fix). `StaticFrictionLock` (v0.5.7) is a position-anchored stick-slip model — zero drift on any slope up to the physical friction limit (μ ≈ tan(slope_angle)). See [`../samples/slope_hold.py`](../samples/slope_hold.py) for a regression check. `RollingResistance` takes effect only since v1.7.0 (through v1.6.10 the `F_long` overshoot clamp erased it); a coast now decelerates at `sum(cr*N)/M_eff` (cr = rolling-resistance coefficient, N = wheel load, M_eff = mass plus wheel-inertia equivalent) when rolling speed is well above 0.5 m/s (smaller below), and holding a speed needs throttle. |
 | `"raw"` | _empty_ | _empty_ | Raw ray-wheel + Pacejka with NO numerical stabilization. For debugging the bare dynamics or running hook-ablation studies. Not a general-purpose default. |
 | `"research"` | _empty_ | _empty_ | Caller assembles `cfg.stability_hooks` manually (advanced). |
 
@@ -64,8 +64,21 @@ Not for general Real2Sim. Use `"raw"` only when:
 
 ## Hook ordering inside a profile
 
-Hooks run in the list order returned by `stability_hooks_for_profile`. The
-`"control"` profile keeps `RollingResistance` first and
-`StaticFrictionLock` last so the lock has the final word on `F_long` at
-rest. If you build a custom hook stack via `"research"`, follow the same
-convention.
+Hooks run in the list order returned by `stability_hooks_for_profile`,
+once per phase. Since v1.7.0 a `POST_TIRE` hook gets two calls per step:
+every hook's `apply_pre_tire` runs (in list order) before the tyre, then every
+hook's `apply_post_tire` runs (in list order) after it
+([`pipeline-and-hooks.md`](pipeline-and-hooks.md)). The `"control"` profile
+keeps `StaticFrictionLock` last so the lock has the final word on `F_long` at
+rest; that is still what the order buys.
+
+**Correction (v1.7.0).** This section used to say the profile keeps
+`RollingResistance` first as part of the same rationale, implying its position
+decided what happened to `F_long`. That was wrong: through v1.6.10 the hook's
+`F_long` edit was erased by the overshoot clamp regardless of order, so its
+position had no effect. Since v1.7.0 `RollingResistance` does all its work in
+`apply_pre_tire` (it adds to `ctx.T_resist`, an axle torque applied before the
+tyre), which runs before every hook's `apply_post_tire` whatever the list
+order. Its list position now matters only relative to other pre-tire hooks,
+and `T_resist` contributions add. If you build a custom hook stack via
+`"research"`, keep `StaticFrictionLock` last.

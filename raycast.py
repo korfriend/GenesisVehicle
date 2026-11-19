@@ -56,7 +56,7 @@ _logger = logging.getLogger(__name__)
 #: structure you expect within the margin above the wheel (tunnel ceilings).
 RAY_UP_OFFSET = 1.0
 
-#: DEPRECATED since v1.5.2, removal targeted v1.7.0. Unexported fallback
+#: DEPRECATED since v1.5.2, removal targeted v1.8.0 (was v1.7.0; not removed in 1.7.0). Unexported fallback
 #: threshold used only when the miss sentinel of a sensor cannot be determined
 #: (a stub/foreign sensor exposing no ``_options``). It is pinned to the
 #: raycaster's DEFAULT ``max_range`` of 20.0, so it silently misjudges any

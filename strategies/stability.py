@@ -5,6 +5,11 @@ index. All wheels are processed in a single batched tensor op per hook.
 ``ctx.F_long``/``ctx.F_lat``/``ctx.N``/``ctx.v_long``/``ctx.v_lat`` are now
 ``(n_envs, n_wheels)``; per-wheel coefficients are read from
 ``ctx.wheel_meta`` (the cached batched tensors).
+
+v1.7.0: a hook in the ``'POST_TIRE'`` slot gets TWO calls per step --
+``apply_pre_tire(ctx)`` before the tyre (the only phase that may set
+``ctx.T_resist``) and ``apply_post_tire(ctx)`` after it. Both default to no-ops
+on :class:`StabilityHook`.
 """
 
 from __future__ import annotations
@@ -15,11 +20,13 @@ from typing import Any
 import torch
 
 from .._hotset import derived, row_tensor, square_f64
+from .._pipeline import pw
 
 
 class StabilityHook(ABC):
     """Base class. Subclasses set ``slots`` to a subset of
-    ``{'PRE_LOOP', 'POST_TIRE'}``."""
+    ``{'PRE_LOOP', 'POST_TIRE'}``. A ``'POST_TIRE'`` hook receives both
+    :meth:`apply_pre_tire` and :meth:`apply_post_tire` every step."""
 
     slots: tuple[str, ...] = ()
 
@@ -28,12 +35,45 @@ class StabilityHook(ABC):
         ``ctx.moving``, ``ctx.throttle``, ``ctx.brake``, ``ctx.vel``,
         ``ctx.ang``."""
 
+    def apply_pre_tire(self, ctx: Any) -> None:
+        """Called once per step BEFORE the tire model (v1.7.0), on every hook
+        whose ``slots`` contain ``'POST_TIRE'`` (the pipeline calls it on each
+        hook of the POST_TIRE list; a duck-typed hook without the method is
+        skipped). Valid fields: ``ctx.N``, ``ctx.v_long``, ``ctx.v_lat``,
+        ``ctx.omega`` (the pre-step ω), ``ctx.air_mask``, ``ctx.wheel_meta``,
+        ``ctx.dt``; ``ctx.F_long`` / ``ctx.F_lat`` are ``None`` here (the tyre
+        has not run).
+
+        This is the ONLY phase that may set ``ctx.T_resist``: a per-wheel axle
+        resisting torque, ``(n_envs, n_wheels)``, same sign as ``ctx.omega``,
+        ``None`` until a hook sets it -- add to it, do not overwrite another
+        hook's value. The pipeline caps it with
+        ``dynamics.cap_resist_torque`` and subtracts it from ω before the tyre,
+        so the tyre (and the F_long overshoot clamp) start from the ω it
+        leaves. Default: no-op."""
+
     def apply_post_tire(self, ctx: Any) -> None:
         """Called once per step after the tire model. All per-wheel tensors
         on ctx are ``(n_envs, n_wheels)`` — mutate ``ctx.F_long``,
         ``ctx.F_lat``, set ``ctx.omega_override`` /
         ``ctx.omega_pull_factor`` / ``ctx.omega_pull_target`` to influence
-        the omega update."""
+        the omega update.
+
+        ``ctx.omega`` here is the ω AFTER any pre-tire resisting torque
+        (``ctx.T_resist``, e.g. ``RollingResistance``) was applied -- the ω the
+        tyre was evaluated at -- and equals the pre-step ω only when no hook set
+        ``T_resist``. ``PipelineResult.kappa`` (``last_kappa``) is taken at that
+        same ω.
+
+        Writing ``ctx.T_resist`` here -- rebinding it or mutating it in place
+        -- raises ``RuntimeError`` from the pipeline (the in-place check
+        cannot see an inference-mode tensor; the pipeline uses its own
+        snapshot either way); set it in :meth:`apply_pre_tire`.
+
+        NB the ``F_long`` overshoot clamp runs AFTER every hook, so a hook's
+        ``F_long`` is a request the clamp may still cut (to zero on a freely
+        rolling wheel). A resistance that must survive the clamp belongs in
+        ``ctx.T_resist`` (set in :meth:`apply_pre_tire`). Default: no-op."""
 
 
 # ---------------------------------------------------------------------------
@@ -42,18 +82,119 @@ class StabilityHook(ABC):
 
 
 class RollingResistance(StabilityHook):
-    """Apply rolling resistance: ``F_long -= cr * N * tanh(v_long / scale)``.
-    ``cr`` is per-wheel from ``wheel_meta.rolling_resistance_cr``."""
+    """Rolling resistance as an AXLE RESISTING TORQUE (v1.7.0).
+
+    ``T_rr = cr * N * r * tanh(omega * r / tanh_scale)`` per wheel, accumulated
+    into ``ctx.T_resist`` in :meth:`apply_pre_tire` (the hook keeps
+    ``slots = ("POST_TIRE",)``; every POST_TIRE hook receives both the pre-tire
+    and the post-tire call, and this one does all its work in the pre-tire
+    one). ``cr`` is ``wheel_meta.rolling_resistance_cr``,
+    ``N`` the wheel's own normal load this step (so an airborne wheel, N = 0,
+    gets none), ``r`` its radius. Physically this is the moment ``N * e`` of a
+    contact pressure centre shifted forward by ``e = cr * r``. The pipeline
+    caps it at ``|omega| * i_wheel / dt`` (``dynamics.cap_resist_torque``) and
+    subtracts it from ω BEFORE the tyre, ``omega' = omega - T_rr * dt /
+    i_wheel``; the tyre, the other hooks, the F_long overshoot clamp and the ω
+    update all start from ``omega'``, so on a freely rolling wheel the tyre
+    carries the matching ``-T_rr / r`` (``-cr * N`` above ``tanh_scale``) to
+    the chassis on the same step, provided its request reaches the overshoot
+    clamp's limit (it did on both reference vehicles; see
+    ``_pipeline``'s module docstring for the test that pins it). The brake is
+    capped together with it (``cap_resist_torque(T_brake + T_rr)``, the part
+    already applied subtracted), so brake + rolling resistance together cannot
+    reverse ω in one step (the drive torque, the tyre friction torque and the
+    other hooks' ω pulls are not bounded by that cap).
+    A free coast decelerates at ``sum(cr * N) / M_eff`` with
+    ``M_eff = M + sum(i_wheel / r^2)`` ONLY in this regime: the rolling speed
+    ``|omega| * r`` is well above ``tanh_scale`` (0.5 m/s by default; below it
+    the ``tanh`` is linear and the torque shrinks with speed), and
+    ``LowSpeedRegularizer`` is not active (chassis speed at or above its
+    ``v_kin_com``, 0.5 m/s by default; below it the tyre force is scaled down
+    and ω is pulled toward rolling). Below either threshold the deceleration is
+    smaller than the closed form (measured from 1.0 m/s, 20 s: reference car
+    0.0063 m/s, reference tank 0.0003 m/s at the end; never reversed). A locked wheel
+    (ω = 0) gets no rolling resistance — sliding friction is already acting
+    there, so nothing is counted twice.
+
+    ``cr`` must be finite and ``>= 0``: a negative ``cr`` would turn this into
+    a torque that PROPELS the wheel. Enforced by
+    ``config.check_rolling_resistance_cr``, called from ``config.resolve`` and
+    ``core.build_wheel_meta`` (every driver build, ``mark_config_dirty()``
+    rebuild and ``DifferentiablePlant``); the OSC server additionally rejects a
+    negative ``rollingResistance`` override. NOT guarded: writing the
+    ``wheel_meta.rolling_resistance_cr`` tensor directly.
+
+    Explicit-step behaviour. Per step this hook removes ``dw = min(T_rr,
+    |omega| * i_wheel / dt) * dt / i_wheel`` from ω before the tyre; in the
+    linear region of the ``tanh`` that is ``k * |omega|`` with
+    ``k = cr * N * r^2 * dt / (tanh_scale * i_wheel)``. Enforced by the cap
+    (for a ``T_resist`` of ω's sign, up to float rounding -- a capped step can
+    land a few ulp past zero): ``omega'`` keeps ω's sign or is zero, at any ``k``; at ``k >= 1`` the cap
+    engages and ``omega'`` is 0 for that step before the tyre spins the wheel
+    back up (not measured in a stable regime: the reference tank reaches
+    ``k > 1`` only at dt 0.05, where its suspension is already outside the
+    bump-stop stability limit). Not enforced, measured: on a free coast ω
+    does not alternate step to step and chassis speed does not rise. CPU/WSL2,
+    genesis-world 1.4.5, dual_scene, per_vehicle, flat μ 1.0, dt 0.025 x 4
+    substeps, coast from 1.0 m/s for 20 s, default ``"control"`` profile:
+    reference tank (``tank_ray.urdf``, ``tank_skid_belt``, k = 0.92 at static
+    N) 0 alternations per wheel (consecutive ω steps of opposite sign, both
+    > 1e-4 rad/s), max step change 0.032 rad/s, no step where speed rose by
+    more than 1e-5 m/s, 0.0003 m/s at 20 s; reference car (``car_4w.urdf``,
+    ``car_4w_rwd_ackermann``, k = 0.16) 0 alternations, max 0.012 rad/s, no
+    rise, 0.0063 m/s at 20 s. The intermediate 1.7.0 design (``T_resist``
+    added to the brake inside the overshoot clamp instead of before the tyre)
+    measured, same runs: tank 281 alternations up to 1.24 rad/s and 133 rising
+    steps, car 798 alternations up to 0.23 rad/s and 315 rising steps -- the
+    tyre was evaluated at an ω the resistance then changed, and the clamp's
+    target (exact rolling) is not the resistance equilibrium. The drive and
+    brake torques still go through the clamp the old way, and the same kind of
+    step-to-step alternation under throttle or brake is pre-1.7.0 behaviour
+    this hook does not change (one measured exception: the reference tank
+    under brake 0.6, slowing from 9.7 to 8.5 m/s over a 40-step window, shows
+    0 alternations per wheel with this hook present and 38 without it).
+
+    ``tanh_scale`` is still in m/s; its argument is now the wheel ROLLING speed
+    ``omega * r`` (it was the contact-point speed ``v_long`` through 1.6.10).
+
+    **Through 1.6.10 this hook had no effect, and its docstring
+    (``F_long -= cr * N * tanh(v_long / scale)``) described a force that did
+    not reach the chassis.** Two mechanisms removed it:
+    (i) on a freely rolling wheel the ``F_long`` overshoot clamp (which runs
+    after every hook) cut the subtracted force to zero, and (ii) while driving,
+    the same ``F_long`` also entered the wheel update as ``r * F_long``, so the
+    wheel spun up, the slip re-balanced and the tyre returned ``+cr * N``.
+    Measured on the reference car (``samples/urdf/car_4w.urdf``,
+    ``car_4w_rwd_ackermann(stability="control")``, CPU, genesis-world 1.4.5,
+    dt 0.025 x 4 substeps, flat μ 1.0, per_vehicle solver, dual_scene): a
+    5 m/s coast decelerated at 0.0073 m/s^2 both with and without the hook
+    (equal to 4 decimals; 2 s window after 0.5 s of coasting), against a
+    closed-form ``(cr*M*g + F_aero) / M_eff`` of 0.1478 at the window's mean
+    speed. v1.7.0 measures 0.1473 against a closed form of 0.1472 (lower
+    than 0.1478 only because the car is now slower in the window, so its aero
+    term is smaller); the reference tank (``tank_ray.urdf``,
+    ``tank_skid_belt``, no aero) went from -0.0001 to 0.4779 against 0.4778.
+    The 200-step brake-then-throttle rollout of
+    ``tests/test_fan_default_identity.py`` moved 0.04 mm when the hook was
+    removed through 1.6.10, and 0.70 m since v1.7.0 (0.6961 m, both
+    solvers; 0.69 m under the intermediate 1.7.0 design).
+    """
 
     slots = ("POST_TIRE",)
 
     def __init__(self, tanh_scale: float = 0.5):
         self.tanh_scale = float(tanh_scale)
 
-    def apply_post_tire(self, ctx: Any) -> None:
-        cr = ctx.wheel_meta.rolling_resistance_cr.unsqueeze(0)   # (1, n_wheels)
-        sign_v = torch.tanh(ctx.v_long / self.tanh_scale)         # (n_envs, n_wheels)
-        ctx.F_long = ctx.F_long - cr * ctx.N * sign_v
+    def apply_pre_tire(self, ctx: Any) -> None:
+        # Pre-tire phase: ctx.omega is the pre-step omega; the pipeline caps
+        # this torque and applies it to omega before the tyre.
+        wm = ctx.wheel_meta
+        r = pw(wm.radius)                                         # (1|B, n_wheels)
+        # cr >= 0 by config.check_rolling_resistance_cr (resolve / build_wheel_meta)
+        crN = pw(wm.rolling_resistance_cr) * ctx.N                # (B, n_wheels), >= 0
+        t_rr = crN * r * torch.tanh(ctx.omega * r / self.tanh_scale)
+        prev = getattr(ctx, "T_resist", None)
+        ctx.T_resist = t_rr if prev is None else prev + t_rr
 
 
 # ---------------------------------------------------------------------------

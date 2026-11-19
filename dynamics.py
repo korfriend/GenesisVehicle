@@ -6,6 +6,8 @@ The functions encode the physical contracts the SDK promises:
   - `brake_torque_signed`: convert a positive brake magnitude to a signed
     torque opposing the wheel's current rotation (so -T_brake_eff always
     decelerates the wheel).
+  - `cap_resist_torque`: cap the brake + rolling-resistance axle torque sum
+    so one step cannot reverse the wheel (v1.7.0).
   - `suspension_normal_force`: per-wheel asymmetric damper + non-negative
     clamp + air-mask zero. Normal force can never pull the wheel down.
   - `aero_drag_force`: chassis aero drag opposing horizontal velocity.
@@ -115,6 +117,44 @@ def brake_torque_signed(
             torch.abs(smooth_signed), T_cap,
         )
     return smooth_signed
+
+
+def cap_resist_torque(
+    t_signed: torch.Tensor,
+    omega: torch.Tensor,
+    dt: float,
+    i_wheel: torch.Tensor,
+) -> torch.Tensor:
+    """Cap a signed axle RESISTING torque so one step cannot reverse the wheel.
+
+    ``sign(t) * min(|t|, |omega| * i_wheel / dt)`` — the same cap
+    :func:`brake_torque_signed` puts on the brake alone
+    (``docs/physics-contracts.md`` §7.1), applied to the SUM the pipeline
+    builds since v1.7.0: the capped brake torque plus every hook's
+    ``ctx.T_resist`` (rolling resistance). ``_pipeline.compute_wheel_step``
+    applies it TWICE: once to ``T_resist`` alone (``T_rr``, subtracted from
+    ω before the tyre) and once to brake + ``T_resist``; the clamp and the ω
+    update get the DIFFERENCE of the two, which has ω's sign and magnitude at
+    most ``|omega - T_rr*dt/i_wheel| * i_wheel / dt`` (up to float rounding). Both terms carry the sign of
+    ``omega`` (the rolling-resistance term only because ``cr >= 0``, which
+    ``config.check_rolling_resistance_cr`` enforces at ``resolve`` and
+    ``build_wheel_meta``; a hook adding its own ``T_resist`` must keep that
+    sign itself), so the sum does too, and its magnitude is at least the brake's;
+    capping the sum therefore can never make braking weaker than the
+    brake-only cap made it, and it bounds the COMBINED brake + resistance
+    deceleration so those two torques stop ω at zero instead of flipping it in
+    one explicit-Euler step. It does not bound the other terms of the ω update
+    (drive torque, tyre friction torque, hook ω pulls).
+
+    Args
+    ----
+    t_signed : signed resisting torque, ``(B, n_wheels)``; sign of ``omega``.
+    omega    : wheel angular velocity, same shape.
+    dt       : step duration (s), > 0.
+    i_wheel  : spin inertia, ``(n_wheels,)`` or broadcastable.
+    """
+    T_cap = torch.abs(omega) * i_wheel / dt
+    return torch.sign(t_signed) * torch.minimum(torch.abs(t_signed), T_cap)
 
 
 def suspension_normal_force(

@@ -115,8 +115,10 @@ TRUCK_TOP_SPEED = 27.8    # ~100 km/h (heavy truck)
 TANK_TOP_SPEED = 18.6     # ~67 km/h (M1A2 road; ~48 km/h off-road = 13.3 m/s)
 
 # Aerodynamic drag Cd*A (m^2) — v1.2.4. With drag on, top speed emerges from a
-# traction-vs-drag balance and the omega cap is the ceiling above it. Tracked
-# vehicles are off (their resistance is track/steer loss, not aero).
+# traction-vs-resistance balance (drag plus the "control" profile's rolling
+# resistance, which only takes effect since v1.7.0) and the omega cap is the
+# ceiling above it. Tracked vehicles are off (their resistance is track/steer
+# loss and rolling resistance, not aero).
 CAR_DRAG_AREA = 0.66      # sedan: Cd ~0.30 x frontal area ~2.2 m^2
 TRUCK_DRAG_AREA = 6.0     # box truck: Cd ~0.8 x ~7.5 m^2
 TANK_DRAG_AREA = 0.0      # off

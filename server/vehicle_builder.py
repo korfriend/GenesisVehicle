@@ -25,6 +25,8 @@ from genesis_vehicle import (
     RollingResistance, LowSpeedRegularizer
 )
 from genesis_vehicle._gs_compat import COARSE_SDF_MATERIAL_KW
+from genesis_vehicle.config import WheelConfig
+from dataclasses import fields as _dataclass_fields
 
 created_temp_urdfs = []
 
@@ -89,6 +91,48 @@ def apply_monkey_patches(rigid_solver):
                 position = position.reshape(-1)
         return orig_control_dofs_pos(position, dofs_idx, envs_idx, **kwargs)
     rigid_solver.control_dofs_position = patched_control_dofs_pos
+
+
+#: Every field name ``WheelConfig`` declares. ``WheelConfig`` is a plain
+#: dataclass without ``__slots__``, so ``setattr`` with a misspelt name does not
+#: fail — it creates a new attribute nobody reads. That is how the UE
+#: ``rollingResistance`` / ``pbX``..``peY`` wheel overrides were silently dropped
+#: through v1.6.10 (written to ``rolling_resistance`` / ``bx``..``ey``).
+_WHEEL_CONFIG_FIELDS = frozenset(f.name for f in _dataclass_fields(WheelConfig))
+
+
+def _set_wheel_field(w, name, value):
+    """Set ``WheelConfig`` field ``name`` on ``w``, refusing a name the
+    dataclass does not declare (v1.7.0).
+
+    Server-local on purpose: it guards the wheel-override writes in
+    :func:`build_cfg`, which come from string keys, without changing
+    ``WheelConfig`` itself for every other caller. A refused name is a bug in
+    THIS module (the names are literals here), so it raises instead of warning.
+    """
+    if name not in _WHEEL_CONFIG_FIELDS:
+        raise AttributeError(
+            f"WheelConfig has no field {name!r}; a write to it would be "
+            f"silently ignored by resolve(). Fields: {sorted(_WHEEL_CONFIG_FIELDS)}")
+    setattr(w, name, value)
+
+
+#: UE wheelOverrides keys that became LIVE in v1.7.0 -> (WheelConfig field,
+#: validity test). Through v1.6.10 these were written to attributes WheelConfig
+#: does not have and never reached the physics. The tests mirror the guards the
+#: neighbouring overrides use (muLong/muLat must be > 0): a UE-side placeholder
+#: of 0 for a Pacejka B or C would otherwise zero that wheel's tyre force, and a
+#: negative rolling-resistance coefficient would propel the vehicle.
+_LIVE_TIRE_OVERRIDES = (
+    (("rollingResistance", "RollingResistance"), "rolling_resistance_cr",
+     lambda v: math.isfinite(v) and v >= 0.0, ">= 0"),
+    (("pbX", "PbX"), "pb_x", lambda v: math.isfinite(v) and v > 0.0, "> 0"),
+    (("pcX", "PcX"), "pc_x", lambda v: math.isfinite(v) and v > 0.0, "> 0"),
+    (("peX", "PeX"), "pe_x", math.isfinite, "finite"),
+    (("pbY", "PbY"), "pb_y", lambda v: math.isfinite(v) and v > 0.0, "> 0"),
+    (("pcY", "PcY"), "pc_y", lambda v: math.isfinite(v) and v > 0.0, "> 0"),
+    (("peY", "PeY"), "pe_y", math.isfinite, "finite"),
+)
 
 
 def is_wheel_match_fuzzy(override_wheel_name, wheel_config):
@@ -477,52 +521,51 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
                     # Wheel physical dimensions
                     if 'radius' in override or 'Radius' in override:
                         val = float(override.get('radius', override.get('Radius', -1.0)))
-                        if val > 0: w.radius = val
+                        if val > 0: _set_wheel_field(w, 'radius', val)
                     if 'mass' in override or 'Mass' in override:
                         val = float(override.get('mass', override.get('Mass', -1.0)))
-                        if val > 0: w.mass = val
+                        if val > 0: _set_wheel_field(w, 'mass', val)
                     if 'inertia' in override or 'Inertia' in override:
                         val = float(override.get('inertia', override.get('Inertia', -1.0)))
                         # WheelConfig's spin-inertia field is `i_wheel` —
                         # `w.inertia` was a dead attribute (silent no-op).
-                        if val > 0: w.i_wheel = val
+                        if val > 0: _set_wheel_field(w, 'i_wheel', val)
 
                     # Suspension properties
                     if 'stiffness' in override or 'Stiffness' in override:
-                        w.k_susp = float(override.get('stiffness', override.get('Stiffness', w.k_susp)))
+                        _set_wheel_field(w, 'k_susp', float(override.get('stiffness', override.get('Stiffness', w.k_susp))))
                     if 'compressionDamping' in override or 'CompressionDamping' in override:
-                        w.c_compression = float(override.get('compressionDamping', override.get('CompressionDamping', w.c_compression)))
+                        _set_wheel_field(w, 'c_compression', float(override.get('compressionDamping', override.get('CompressionDamping', w.c_compression))))
                     if 'extensionDamping' in override or 'ExtensionDamping' in override:
-                        w.c_extension = float(override.get('extensionDamping', override.get('ExtensionDamping', w.c_extension)))
+                        _set_wheel_field(w, 'c_extension', float(override.get('extensionDamping', override.get('ExtensionDamping', w.c_extension))))
                     if 'restStroke' in override or 'RestStroke' in override:
-                        w.rest_stroke = float(override.get('restStroke', override.get('RestStroke', w.rest_stroke)))
+                        _set_wheel_field(w, 'rest_stroke', float(override.get('restStroke', override.get('RestStroke', w.rest_stroke))))
                     if 'bumpStiffness' in override or 'BumpStiffness' in override:
                         # Bump-stop rate beyond rest_stroke (v1.2.6); 0 = off.
-                        w.k_bump = float(override.get('bumpStiffness', override.get('BumpStiffness', w.k_bump)))
+                        _set_wheel_field(w, 'k_bump', float(override.get('bumpStiffness', override.get('BumpStiffness', w.k_bump))))
 
                     # Friction properties
                     if 'muLong' in override or 'MuLong' in override:
                         val = float(override.get('muLong', override.get('MuLong', -1.0)))
-                        if val > 0.0: w.mu_long = val
+                        if val > 0.0: _set_wheel_field(w, 'mu_long', val)
                     if 'muLat' in override or 'MuLat' in override:
                         val = float(override.get('muLat', override.get('MuLat', -1.0)))
-                        if val > 0.0: w.mu_lat = val
-                    if 'rollingResistance' in override or 'RollingResistance' in override:
-                        w.rolling_resistance = float(override.get('rollingResistance', override.get('RollingResistance', 0.015)))
+                        if val > 0.0: _set_wheel_field(w, 'mu_lat', val)
 
-                    # Pacejka parameters (Bx, Cx, Ex, By, Cy, Ey)
-                    if 'pbX' in override or 'PbX' in override:
-                        w.bx = float(override.get('pbX', override.get('PbX', 10.0)))
-                    if 'pcX' in override or 'PcX' in override:
-                        w.cx = float(override.get('pcX', override.get('PcX', 1.65)))
-                    if 'peX' in override or 'PeX' in override:
-                        w.ex = float(override.get('peX', override.get('PeX', 0.4)))
-                    if 'pbY' in override or 'PbY' in override:
-                        w.by = float(override.get('pbY', override.get('PbY', 8.0)))
-                    if 'pcY' in override or 'PcY' in override:
-                        w.cy = float(override.get('pcY', override.get('PcY', 1.30)))
-                    if 'peY' in override or 'PeY' in override:
-                        w.ey = float(override.get('peY', override.get('PeY', 0.4)))
+                    # Rolling resistance + Pacejka (Bx, Cx, Ex, By, Cy, Ey).
+                    # Through v1.6.10 these wrote `w.rolling_resistance` and
+                    # `w.bx`..`w.ey`, attributes WheelConfig does not have, so
+                    # every one of them was silently dropped (v1.7.0 fix).
+                    for keys, field_name, valid, rule in _LIVE_TIRE_OVERRIDES:
+                        if keys[0] in override or keys[1] in override:
+                            val = float(override.get(keys[0], override.get(keys[1])))
+                            if valid(val):
+                                _set_wheel_field(w, field_name, val)
+                            else:
+                                print(f" [Genesis] [WARN] wheelOverrides "
+                                      f"'{override_w_name}': {keys[0]}={val} "
+                                      f"rejected (must be {rule}) - keeping "
+                                      f"{field_name}={getattr(w, field_name)}")
 
                     print(f"   - Applied overrides to wheel: {override_w_name} (matched to URDF link: {w.name})")
 
