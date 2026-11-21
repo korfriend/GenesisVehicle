@@ -4,8 +4,11 @@ Every preset takes a ``stability`` keyword (``"control" | "raw" | "research"``)
 that selects which numerical stabilization hooks the resulting config carries.
 
   - ``"control"`` (default) — RL/MPPI-friendly. Bundles RollingResistance +
-    LowSpeedRegularizer (active under throttle/brake, see footgun note in
-    CHANGELOG v0.3.0) + StaticFrictionLock for tanks. **For Real2Sim too**:
+    LowSpeedRegularizer (OFF while the user throttles or brakes:
+    ``disable_when_control_active=True``, since v0.5.1, which reverted the
+    v0.3.0 setting) + StaticFrictionLock, on every vehicle kind. (Through
+    1.7.0 this line said the regularizer was "active under throttle/brake" and
+    the lock was "for tanks"; both were wrong since v0.5.1 / v0.5.8.) **For Real2Sim too**:
     fitting and deployment must share the same forward model, and that
     forward model includes the hooks.
   - ``"raw"`` — empty hook list (raw ray-wheel + Pacejka, no numerical
@@ -108,8 +111,14 @@ def stability_hooks_for_profile(
 
 
 # Target top speeds (m/s — the SDK interface unit; km/h shown for humans only).
-# These set the drive-omega governor via omega = top_speed / mean_wheel_radius,
-# so the resulting top speed is the SAME across URDFs regardless of wheel size.
+# These set the drive-omega governor via omega = top_speed / mean_wheel_radius.
+# They are NOT the top speed a vehicle reaches when a lower cap binds first:
+# the wheel spin clamp ``ChassisConfig.omega_max`` (100 rad/s in every preset)
+# caps the rolling speed at about omega_max * r. On the reference car (r 0.358)
+# that ceiling is 35.59 m/s at dt 0.025 and 0.0125 (CPU/WSL2, genesis-world
+# 1.4.5, SDK 1.8.0, throttle 1.0 on a plane), far below CAR_TOP_SPEED.
+# (Through 1.7.0 this comment said the resulting top speed is the same across
+# URDFs regardless of wheel size; that was wrong whenever omega_max binds.)
 CAR_TOP_SPEED = 55.6      # ~200 km/h
 TRUCK_TOP_SPEED = 27.8    # ~100 km/h (heavy truck)
 TANK_TOP_SPEED = 18.6     # ~67 km/h (M1A2 road; ~48 km/h off-road = 13.3 m/s)
@@ -176,6 +185,9 @@ def car_4w_rwd_ackermann(
     """4-wheel RWD car with front Ackermann steering (reference-car tuning).
 
     ``top_speed`` (m/s) governs the drive-omega cap (v1.2.3); default ~200 km/h.
+    The wheel spin clamp ``chassis.omega_max`` (100 rad/s) binds first on the
+    reference car: its ceiling is 35.59 m/s (see the ``CAR_TOP_SPEED``
+    comment).
     """
     return VehicleConfig.from_urdf(
         urdf_path,
@@ -207,6 +219,9 @@ def car_4w_fwd_ackermann(
     """4-wheel FWD car with front Ackermann steering (typical passenger car).
 
     ``top_speed`` (m/s) governs the drive-omega cap (v1.2.3); default ~200 km/h.
+    The wheel spin clamp ``chassis.omega_max`` (100 rad/s) caps the rolling
+    speed at about ``omega_max * r`` first (derived; measured only on the RWD
+    preset, see the ``CAR_TOP_SPEED`` comment).
     """
     return VehicleConfig.from_urdf(
         urdf_path,
@@ -238,6 +253,9 @@ def car_4w_awd_ackermann(
     """4-wheel AWD car with front Ackermann steering.
 
     ``top_speed`` (m/s) governs the drive-omega cap (v1.2.3); default ~200 km/h.
+    The wheel spin clamp ``chassis.omega_max`` (100 rad/s) caps the rolling
+    speed at about ``omega_max * r`` first (derived; measured only on the RWD
+    preset, see the ``CAR_TOP_SPEED`` comment).
     """
     return VehicleConfig.from_urdf(
         urdf_path,

@@ -220,7 +220,23 @@ def test_omega_max_drive_is_still_live_after_the_cap_was_derived():
 
 def _sfl_f_long(hook, wm, n_calls: int = 5) -> list[float]:
     """SFL's contribution to ctx.F_long after `n_calls` steps at
-    v_long=0.7, brake=0.5, N=3000 — the G6 observable."""
+    v_long=0.7, brake=0.5, N=3000."""
+    return _sfl_run(hook, wm, n_calls)[0]
+
+
+def _sfl_engaged(hook, wm, n_calls: int = 5) -> list[bool]:
+    """Which wheels the lock ENGAGED on (its ω override) after `n_calls` steps
+    at v_long=0.7, brake=0.5, N=3000 — the G6 observable since v1.8.0.
+
+    Through 1.7.0 the G6 observable was the force the lock wrote into
+    ctx.F_long (-3000 N once engaged). Since 1.8.0 the lock replaces the tyre
+    force only after the contact comes to REST (A6), and a contact held at
+    0.7 m/s never does, so the force stays 0 either way; `v_thr` now decides
+    only engagement, which the ω override mask shows."""
+    return _sfl_run(hook, wm, n_calls)[1]
+
+
+def _sfl_run(hook, wm, n_calls):
     ctx = types.SimpleNamespace()
     for _ in range(n_calls):
         ctx.brake = torch.tensor([0.5])
@@ -233,23 +249,25 @@ def _sfl_f_long(hook, wm, n_calls: int = 5) -> list[float]:
         ctx.F_lat = torch.zeros(1, wm.n_wheels)
         ctx.omega_override = None
         hook.apply_post_tire(ctx)
-    return _row(ctx.F_long)
+    return _row(ctx.F_long), [bool(x) for x in ctx.omega_override.active.reshape(-1)]
 
 
 def test_g6_v_thr_below_the_speed_leaves_the_lock_inactive():
     _resolved, wm = _built(car_4w_rwd_ackermann)
     hook = StaticFrictionLock(brake_thr=0.3, v_thr=0.5)
-    assert _sfl_f_long(hook, wm) == [0.0] * wm.n_wheels
+    assert _sfl_engaged(hook, wm) == [False] * wm.n_wheels
+    assert _sfl_f_long(StaticFrictionLock(brake_thr=0.3, v_thr=0.5), wm) == [0.0] * wm.n_wheels
 
 
 def test_g6_v_thr_is_still_live_after_the_square_was_derived():
     """The gate for the `_v_thr_sq` hoist, in the shape `TankTuning` uses it
-    (write v_thr on the constructed hook). Derive first, then write."""
+    (write v_thr on the constructed hook). Derive first, then write. Observed
+    through the engagement mask (see `_sfl_engaged`)."""
     _resolved, wm = _built(car_4w_rwd_ackermann)
     hook = StaticFrictionLock(brake_thr=0.3, v_thr=0.5)
-    assert _sfl_f_long(hook, wm) == [0.0] * wm.n_wheels
+    assert _sfl_engaged(hook, wm) == [False] * wm.n_wheels
     hook.v_thr = 5.0                          # TankTuning's value
-    assert _sfl_f_long(hook, wm) == [-3000.0] * wm.n_wheels
+    assert _sfl_engaged(hook, wm) == [True] * wm.n_wheels
 
 
 def test_g6_the_square_is_computed_in_double_and_stored_per_row():
@@ -302,9 +320,12 @@ def test_a_derived_cache_is_invisible_to_a_generic_attribute_sweep():
             f"{type(obj).__name__} grew an attribute: "
             f"{set(vars(obj)) - names}")
     tensors = {k for k, v in hook.__dict__.items() if torch.is_tensor(v)}
-    assert tensors == {"_d_long", "_d_lat", "_was_active"}, (
+    # v1.8.0: the rest-anchor state joined the integrator state (STATE_ATTRS).
+    assert tensors == set(StaticFrictionLock.STATE_ATTRS) == {
+        "_d_long", "_d_lat", "_was_active",
+        "_s_eng", "_rested", "_rest", "_v_prev_sq"}, (
         "the only tensor attributes of a hook may be its INTEGRATOR state — "
-        "the three control/plant._sync_hooks row-slices and interleaves. A "
+        "the ones control/plant._sync_hooks row-slices and interleaves. A "
         f"config tensor in here would be sliced as if it were state: {tensors}")
 
 

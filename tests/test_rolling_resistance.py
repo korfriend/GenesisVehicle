@@ -8,13 +8,16 @@ the reference car decelerated at 0.0073 m/s^2 against a closed-form 0.1478).
 Since v1.7.0 the hook sets ``ctx.T_resist = cr * N * r * tanh(omega * r /
 tanh_scale)`` in its ``apply_pre_tire`` phase, and
 ``_pipeline.compute_wheel_step`` caps it with ``dynamics.cap_resist_torque`` and
-subtracts it from ω BEFORE the tyre; the brake is capped together with it and
-only the remainder enters the overshoot clamp. (An intermediate, unreleased
-1.7.0 design added ``T_resist`` to the brake INSIDE the clamp instead; ω then
-alternated step to step between rolling and rolling minus ``T_rr*dt/i`` --
-measured on the reference tank up to 1.24 rad/s, on 281 of 800 steps -- and the
-plant's prediction depended on whether its horizon was odd or even. The tests
-marked "flutter" below pin the fix.)
+subtracts it from ω BEFORE the tyre. In v1.7.0 the brake was then capped
+together with it and only the remainder entered the overshoot clamp; since
+v1.8.0 the drive torque and the brake (``dynamics.brake_projection``, a Coulomb
+projection toward zero) are ALSO applied to ω before the tyre, after the
+resisting torque, and nothing of the brake enters the clamp as a torque. (An
+intermediate, unreleased 1.7.0 design added ``T_resist`` to the brake INSIDE
+the clamp instead; ω then alternated step to step between rolling and rolling
+minus ``T_rr*dt/i`` -- measured on the reference tank up to 1.24 rad/s, on 281
+of 800 steps -- and the plant's prediction depended on whether its horizon was
+odd or even. The tests marked "flutter" below pin the fix.)
 
 Three layers:
 
@@ -168,10 +171,18 @@ def test_presets_resolve_with_a_non_negative_cr(preset, urdf):
     assert bool((wm.rolling_resistance_cr >= 0.0).all())
 
 
-def test_t_resist_is_the_last_pipeline_context_field():
-    """Appended at the END so a positional construction keeps its meaning."""
-    assert dataclasses.fields(PipelineContext)[-1].name == "T_resist"
-    assert PipelineContext().T_resist is None
+def test_t_resist_is_followed_only_by_the_1_8_0_context_fields():
+    """``T_resist`` was appended at the END in v1.7.0 so a positional
+    construction keeps its meaning; v1.8.0 appended its four fields after it,
+    in this order, all defaulting to None (so positional construction up to
+    ``T_resist`` still means what it meant)."""
+    names = [f.name for f in dataclasses.fields(PipelineContext)]
+    i = names.index("T_resist")
+    assert names[i:] == ["T_resist", "F_long_bounds", "F_long_deadbeat",
+                         "hold_applied", "deadbeat_scale"]
+    ctx = PipelineContext()
+    for name in names[i:]:
+        assert getattr(ctx, name) is None, name
 
 
 def test_no_hook_leaves_t_resist_none():
@@ -242,8 +253,9 @@ def test_the_cap_never_weakens_braking():
     omega = (torch.rand(4096, generator=g) - 0.5) * 40.0
     i_w = torch.rand(4096, generator=g) * 5.0 + 0.1
     dt = 0.025
-    tb = brake_torque_signed(torch.rand(4096, generator=g) * 3000.0, omega,
-                             dt=dt, i_wheel=i_w)
+    with pytest.warns(DeprecationWarning):          # deprecated since 1.8.0
+        tb = brake_torque_signed(torch.rand(4096, generator=g) * 3000.0, omega,
+                                 dt=dt, i_wheel=i_w)
     trr = torch.rand(4096, generator=g) * 200.0 * torch.tanh(omega / 0.5)
     tot = cap_resist_torque(tb + trr, omega, dt, i_w)
     assert bool((tot.abs() >= tb.abs() - 1e-4).all())
@@ -287,9 +299,12 @@ def test_a_rolling_wheel_stays_rolling_and_the_chassis_gets_the_rr_force(kind, v
 
 
 def test_brake_plus_rr_never_reverses_omega():
-    """Brake + rolling resistance cannot reverse ω in one step (the guard:
-    ``cap_resist_torque`` on ``T_resist`` before the tyre, then the cap of the
-    brake + resistance sum, of which only the remainder enters the clamp).
+    """Brake + rolling resistance cannot reverse ω in one step (the guards:
+    ``cap_resist_torque`` on ``T_resist`` before the tyre, then, since v1.8.0,
+    the brake as ``dynamics.brake_projection`` — a projection toward zero that
+    cannot cross it — and the remaining brake capacity applied to the ω update
+    the same way; through v1.7.0 the second guard was the cap of the brake +
+    resistance sum, of which only the remainder entered the clamp).
     Deterministic grid over ω, cr, brake torque and chassis speed (rolling, or
     a stopped chassis under a spinning wheel)."""
     cfg = car_4w_rwd_ackermann(CAR_URDF)
@@ -308,8 +323,8 @@ def test_brake_plus_rr_never_reverses_omega():
 
 
 def test_zero_cr_rolling_resistance_is_value_identical_to_no_hook():
-    """``cr = 0`` gives ``T_resist = 0``: ω before the tyre is unchanged, the
-    brake remainder equals the brake, every output equals the no-hook step."""
+    """``cr = 0`` gives ``T_resist = 0``: ω before the tyre (after the brake
+    projection) is unchanged, every output equals the no-hook step."""
     cfg = car_4w_rwd_ackermann(CAR_URDF)
     for tb in (0.0, 200.0):
         a, _, _ = _step(cfg, omega=10.0, v_long=3.5, hooks=[RollingResistance()],
@@ -382,25 +397,34 @@ def test_a_duck_typed_hook_with_one_phase_method_gets_only_that_call():
     assert calls == [("pre", True), ("post", True)]
 
 
+@pytest.mark.parametrize("throttle", [0.0, 0.3])
 @pytest.mark.parametrize("kind", ["car", "tank"])
-def test_plant_prediction_does_not_depend_on_horizon_parity(kind):
-    """flutter: under the intermediate 1.7.0 design ω alternated inside the
-    plant's unroll too, so ``predict`` / ``jacobian`` depended on whether the
-    horizon was odd or even (reference tank at 5 m/s: coast a -0.148 at h3 vs
-    -0.219 at h4, d a / d throttle 2.56 vs 3.78). Now h3 and h4 agree within 1%."""
+def test_plant_prediction_does_not_depend_on_horizon_parity(kind, throttle):
+    """flutter / N4: under the intermediate 1.7.0 design ω alternated inside
+    the plant's unroll too, so ``predict`` / ``jacobian`` depended on whether
+    the horizon was odd or even. Now h3 and h4 agree within 1%, at coast AND
+    under throttle 0.3.
+
+    The throttle row is new in v1.8.0: on the released 1.7.0 the drive torque
+    still went through the clamp the old way and the parity held at coast only.
+    The values this test compares, on the 1.8.0 tree (Genesis-free
+    ``_FakeSource``, its explicit masses, v 5 m/s, ω = v/r, CPU): d a /
+    d throttle at throttle 0.3, h3 vs h4 — car 1.0707 vs 1.0679, tank
+    3.7665 vs 3.7585. The fake source passes explicit mass properties, so the
+    plant's rigid-body deadbeat scale (Z) is active here."""
     preset, urdf = _kind(kind)
     v = 5.0
     r = float(_FakeSource(preset(urdf), v_long=v).wheel_meta.radius.mean())
     out = {}
     for h in (3, 4):
         p = _plant(preset(urdf), v_long=v, omega=v / r, horizon=h)
-        a, _ = p.predict(0.0, 0.0)
-        j = float(p.jacobian(0.0, 0.0)[0][0, 0])
+        a, _ = p.predict(throttle, 0.0)
+        j = float(p.jacobian(throttle, 0.0)[0][0, 0])
         out[h] = (a, j)
     for i, name in enumerate(("predict a", "d a / d throttle")):
         x3, x4 = out[3][i], out[4][i]
         assert abs(x3 - x4) <= 0.01 * abs(x4), (
-            f"{kind}: {name} h3 {x3:+.5f} vs h4 {x4:+.5f}")
+            f"{kind} throttle {throttle}: {name} h3 {x3:+.5f} vs h4 {x4:+.5f}")
 
 
 # --- 3. a real CPU scene ------------------------------------------------------

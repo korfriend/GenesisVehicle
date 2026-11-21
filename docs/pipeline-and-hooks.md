@@ -9,7 +9,11 @@ The 5-step pipeline with every strategy and stability-hook seam marked.
 | SFL | `StaticFrictionLock` |
 | M | `contact_samples` — rays per wheel in a swept-envelope fan |
 | RR | rolling resistance (`RollingResistance`) |
-| ω, ω′ | wheel spin rate before / after this step's pre-tire resisting torque |
+| ω, ω′ | wheel spin rate before / after this step's pre-tire resisting torque (ω′ = `omega_r` since v1.8.0) |
+| `omega_d`, `omega_t`, `omega_e` | v1.8.0: ω after the drive torque / after the brake projection / `omega_t` clipped to ±`OMEGA_MAX` |
+| `B_rem` | brake capacity left on a wheel the brake stopped this step (N·m) |
+| D / Y / Z, `s` | held-wheel deadbeat / lateral deadbeat / their rigid-body scale (physics-contracts.md §7.16) |
+| B2 | `F_lat` and κ taken at the transmitted (clamped) `F_long` (`TireModel.at_long_force`) |
 | `T_resist` / `T_rr` | the axle resisting torque a pre-tire hook sets / its capped value `cap_resist_torque(T_resist, ω)` |
 | R, `radius` | wheel radius (m) |
 | `DT`, dt | simulation step duration (s) |
@@ -63,28 +67,33 @@ VehiclePhysics.step(inputs)
         # bump_stop_force is 0 where k_bump == 0. (S7.13)
     (B) wheel-frame fwd/lat using steer_per_wheel[:, i]
     (B') PRE-TIRE phase (v1.7.0) — ctx.T_resist = None, F_long/F_lat = None
+        s = deadbeat_scale(N, yaw_inertia)           # Z (v1.8.0, S7.16); ctx.deadbeat_scale
         for hook in stability_hooks if POST_TIRE in hook.slots:
             hook.apply_pre_tire(ctx)  if present     # RollingResistance
-        if ctx.T_resist is not None:                 # (S7.15)
-            T_res  = ctx.T_resist.clone()            # snapshot
-            T_rr   = cap_resist_torque(T_res, omega)  # |.| <= |omega|*I_wheel/DT
-            omega' = omega - T_rr * DT / I_wheel
-        else:
-            omega' = omega                           # same object: 1.6.10 path
-    (C) F_long, F_lat = TireModel(..., v_roll = R * omega')
+    (P) axle torques BEFORE the tyre (v1.8.0)
+        omega_r = omega - cap_resist_torque(T_resist, omega) * DT / I_wheel   # if T_resist set (S7.15)
+        omega_d = omega_r + DT * T_drive / I_wheel
+        omega_t, B_rem = brake_projection(omega_d, T_brake)   # Coulomb, cannot cross 0 (S7.1)
+        omega_e = clamp(omega_t, ±OMEGA_MAX)                  # M2
+    (Q) bounds, fixed before the tyre
+        L = (omega_t - v_long/R) * I_wheel / (DT * R)
+        [lo, hi] = [min(0,L) - B_rem/R, max(0,L) + B_rem/R]   # ctx.F_long_bounds (S7.7)
+        D = s * (N/g) * |v_long - R*omega_t| / DT  where B_rem > 0, else inf   # ctx.F_long_deadbeat
+    (C) F_long, F_lat, kappa = TireModel(..., v_roll = R * omega_e)
+        where clamp(F_long, lo, hi, ±D) binds:                # B2 (S7.7)
+            F_lat, kappa = tire.at_long_force(..., F_long_target = clamped F_long)
         for hook in stability_hooks if POST_TIRE in hook.slots:
-            hook.apply_post_tire(ctx)  if present    # ctx.omega = omega'
+            hook.apply_post_tire(ctx)  if present    # ctx.omega = omega_t; SFL may set ctx.hold_applied
         # a write to ctx.T_resist here raises RuntimeError
-    (D) T_brake_eff = brake_torque_signed(T_brake_pw[:, i], omega[:, i])  (S7.1)
-        if T_resist set:                             # brake capped as remainder
-            T_brake_eff = cap_resist_torque(T_brake_eff + T_res, omega) - T_rr
-        # F_long overshoot clamp (v0.6.0, S7.7): cap so friction cannot carry
-        # the wheel past rolling (omega_target = v_long/R) in one step.
-        omega_nofric = omega' + DT*(T_drive - T_brake_eff)/I_wheel
-        F_long_limit = (omega_nofric - v_long/R) * I_wheel / (DT * R)
-        F_long = clamp_toward_rolling(F_long, F_long_limit)  # see physics-contracts.md S7.7
-        domega = (T_drive - T_brake_eff - R * F_long) / I_wheel
-        omega[:, i] = clamp(omega' + DT*domega, ±OMEGA_MAX)
+    (D) F_long = clamp(F_long, lo, hi, ±D)          # held wheels (ctx.hold_applied): [lo, hi] only
+        omega = omega_t - DT * R * F_long / I_wheel, then |omega| -= B_rem*DT/I_wheel (not past 0)
+        airborne: omega = omega_t
+        F_lat = clamp(F_lat, ±s*(N/g)*|v_lat|/DT)    # Y, not on held wheels (S7.16)
+        omega[:, i] = clamp(omega, ±OMEGA_MAX); LSR pull; SFL omega override
+        # Through v1.7.0 (D) was: T_brake_eff = brake_torque_signed(T_brake, omega)
+        # (a tanh brake), capped with T_resist, and the drive and brake torques went
+        # through the overshoot clamp with the tyre at omega' (pre-step omega less RR). That
+        # ordering made omega alternate step to step under throttle or brake.
     (E) accumulate F_world, torque into total_F, total_T
 
 [4] CouplingStrategy.apply(omega, meta)              # post-loop, pre-force-apply
@@ -108,9 +117,9 @@ attribute (a tuple containing some of `"PRE_LOOP"`, `"POST_TIRE"`).
 
 | Hook | Slots | What it does |
 |---|---|---|
-| `RollingResistance` | `("POST_TIRE",)` | Pre-tire phase (v1.7.0): adds the axle torque `cr * N * r * tanh(ω * r / tanh_scale)` to `ctx.T_resist`; the pipeline caps it and applies it to ω before the tyre. No post-tire work. **Through v1.6.10 this row said it "subtracts `cr * N * tanh(v_long / scale)` from `F_long`". That was what the code did, but it was wrong as a description of an effect: the overshoot clamp ran after the hook and cut the force back to zero, so the hook changed nothing (measured coast decel 0.0073 m/s² with or without it on the reference car; CHANGELOG 1.7.0 §1.1).** |
+| `RollingResistance` | `("POST_TIRE",)` | Pre-tire phase (v1.7.0): adds the axle torque `cr * N * r * tanh(ω * r / tanh_scale)` to `ctx.T_resist`; the pipeline caps it and applies it to ω first, before the drive torque, the brake and the tyre (v1.8.0 order). No post-tire work. **Through v1.6.10 this row said it "subtracts `cr * N * tanh(v_long / scale)` from `F_long`". That was what the code did, but it was wrong as a description of an effect: the overshoot clamp ran after the hook and cut the force back to zero, so the hook changed nothing (measured coast decel 0.0073 m/s² with or without it on the reference car; CHANGELOG 1.7.0 §1.1).** |
 | `LowSpeedRegularizer` | `("PRE_LOOP", "POST_TIRE")` | Pre-loop: compute `moving ∈ [0,1]` from chassis speed. Post-tire: scale `F_long`/`F_lat` by `moving`; record an omega pull target so core blends ω toward `v_long / radius`. |
-| `StaticFrictionLock` | `("POST_TIRE",)` | When `brake > thr` and planar speed `sqrt(v_long² + v_lat²) < thr`: 2D stick-slip lock with per-wheel position anchor. Stores anchor at lock engagement; computes `F = -K_spring·displacement - K_damp·velocity` in both axes; projects onto the per-wheel friction ellipse (same form as `pacejka.py`); requests `omega = 0` via `ctx.omega_override`. v0.5.7 — replaced v0.5.6's tanh velocity damper with proper position-anchored stick-slip. Vehicle holds with **zero drift** on any slope up to `μ ≈ tan(slope_angle)` (truck preset with μ=1.0: rock-solid up to ~30°, vehicle rolls over physically beyond ~35°). |
+| `StaticFrictionLock` | `("POST_TIRE",)` | Engages when `brake > brake_thr` and planar contact speed `sqrt(v_long² + v_lat²) < v_thr`: requests `omega = 0` via `ctx.omega_override` from the first engaged step. Since v1.8.0 it replaces the tyre force only once the contact is at REST (speed < `REST_SPEED` 0.05 m/s, or a creep equilibrium); before that the anchor follows the contact and the brake does the stopping. Then a 2D spring-damper `F = -K_spring·displacement - D·velocity`, `D = max(k_damp, critical)` and bounded by the one-step deadbeat, projected onto the per-wheel friction ellipse and limited to `ctx.F_long_bounds`; the wheels it holds go into `ctx.hold_applied`. Holds the point where the contact came to rest ([`physics-contracts.md` §7.17](physics-contracts.md)). **This row said, through v1.7.0, "stores anchor at lock engagement" and "holds with zero drift on any slope up to μ ≈ tan(slope_angle) (truck preset … rock-solid up to ~30°)". The second was wrong: the hold is limited by the brake capacity (the tank preset does not hold 10°), and on 1.7.0 the reference car crept down 10° under full brake (CHANGELOG 1.8.0 §2.2). The ~30° truck figure was not re-measured for 1.8.0.** |
 
 **Hook config stays live (v1.6.4).** `StaticFrictionLock`'s speed threshold is
 now squared once at build (`v_thr²`, in double, then cast) instead of on every
@@ -130,17 +139,25 @@ object that lacks one of them is skipped for that phase (in v1.6.10 a missing
 no-ops. In `apply_pre_tire`, `ctx.N`, `v_long`, `v_lat`, `omega` (the pre-step
 ω), `air_mask`, `wheel_meta` and `dt` are valid; `F_long` / `F_lat` are `None`.
 It is the only phase that may set `ctx.T_resist` (add to it, do not overwrite
-another hook's value). In `apply_post_tire`, `ctx.omega` is ω′ whenever a hook
-set `T_resist`, and `PipelineResult.kappa` / `last_kappa` are taken at ω′ too.
+another hook's value). In `apply_post_tire`, `ctx.omega` is `omega_t` (v1.8.0:
+after the resisting torque, the drive torque and the brake projection; through
+v1.7.0 it was ω′, after the resisting torque only); `ctx.F_lat` is already the
+B2 value where the clamp binds; `ctx.F_long_bounds`, `ctx.F_long_deadbeat` and
+`ctx.deadbeat_scale` are read-only (the pipeline keeps its own copies);
+`ctx.hold_applied` is the one field a hook writes (OR its mask in).
+`PipelineResult.kappa` / `last_kappa` are the slip at `omega_e` (`omega_t` clipped to ±`omega_max`, the speed the tyre is evaluated at), replaced by
+the slip of the transmitted force where the clamp binds.
 A rebinding of `ctx.T_resist` there raises `RuntimeError`; an in-place write
 raises too, except under `torch.inference_mode()`, where it goes undetected but
 cannot change the physics because the pipeline already took a snapshot.
 `physics-contracts.md` §7.15.
 
-**A hook's `F_long` edit may not survive.** The overshoot clamp runs after every
-POST_TIRE hook, so a hook's `F_long` is a request the clamp can still cut, to
-zero on a freely rolling wheel. A resistance that must reach the chassis
-belongs in `ctx.T_resist`.
+**A hook's `F_long` / `F_lat` edit may not survive.** The overshoot clamp runs
+after every POST_TIRE hook, so a hook's `F_long` is a request the clamp can
+still cut, to zero on a freely rolling wheel; and since v1.8.0 a hook's `F_lat`
+is a request the lateral deadbeat Y can cut, on every wheel not in
+`ctx.hold_applied`. A resistance that must reach the chassis belongs in
+`ctx.T_resist`.
 
 Hook order is the list order (see
 [`stability-profiles.md`](stability-profiles.md#hook-ordering-inside-a-profile)

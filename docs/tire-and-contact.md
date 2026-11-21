@@ -54,7 +54,7 @@ tire forces analytically (as one chassis wrench — see
 | Criterion | Pacejka | Coulomb |
 |---|---|---|
 | Realism | **Industry standard** — slip-curve peak & saturation, separate long/lat, friction-circle (combined slip) | Crude — μN always opposes slip, no peak/saturation, single isotropic μ, unrealistic combined slip |
-| Compute cost | slightly heavier (sin/atan ×6 + friction-circle) | slightly lighter |
+| Compute cost | slightly heavier per call (sin/atan ×6 + friction-circle); called ONCE per step, its v1.8.0 `at_long_force` is a closed form | lighter per call, but since v1.8.0 called THREE times per step (`TireModel.at_long_force`'s generic K = 16 grid adds one call with 16× the rows and one more), so no longer cheaper per step — not timed |
 | **Effective wall-clock** | **practically identical** — tire is a tiny fraction of step cost (dominated by `scene.step()` + state I/O) | identical |
 | Numerical stability | smooth saturation → stable | discontinuity at zero slip → **low-speed chatter** risk |
 

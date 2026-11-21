@@ -138,11 +138,20 @@ interceptor works. Examples:
   factor) and once per wheel post-tire (scales `F_long`/`F_lat` by `moving`
   and pulls `omega` toward rolling-without-slip).
 - `StaticFrictionLock` runs post-tire when `brake > thr` and planar
-  wheel speed `< thr`; engages a per-wheel position anchor and applies
-  a 2D spring-damper `F = -K_spring·displacement - K_damp·velocity`,
-  projected onto the per-wheel friction ellipse, then forces `omega = 0`.
-  Stuck = vehicle is truly stationary; slipping = anchor advances along
-  the friction limit (kinetic mode).
+  wheel speed `< thr`: it forces `omega = 0` at once, and once the contact
+  is at REST (v1.8.0) it replaces the tyre force with a 2D spring-damper
+  `F = -K_spring·displacement - D·velocity` around the point where the
+  contact stopped, projected onto the per-wheel friction ellipse and limited
+  to what the brake can transmit. Stuck = held at that point; slipping =
+  anchor advances along the limit (kinetic mode). Through v1.7.0 it anchored
+  where it engaged and replaced the force from there on.
+
+Since v1.8.0 the pipeline itself (not a hook) also bounds the force on a
+braked-and-held wheel and the lateral force at low speed by one-step
+"deadbeat" limits, scaled for the vehicle's yaw inertia
+([`physics-contracts.md` §7.16](physics-contracts.md)), and applies the drive
+and brake torques to `omega` before the tire, the brake as a Coulomb projection
+that holds a stopped wheel (§7.1).
 
 Selecting which hooks are active is done via a **stability profile**
 (`"control"` / `"raw"` / `"research"`), not by assembling a free-form list.

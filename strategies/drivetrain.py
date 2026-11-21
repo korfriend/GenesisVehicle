@@ -20,10 +20,15 @@ class DrivetrainStrategy(ABC):
     """Maps user (throttle, brake) to per-wheel (T_drive, T_brake)."""
 
     #: Drive-side wheel angular-velocity cap (rad/s); ``None`` = uncapped.
-    #: This is the de-facto top-speed governor: with negligible aero drag a
-    #: driven wheel spins up to this cap, so top speed = omega_max_drive x
-    #: wheel_radius. Presets set it from a target top speed (m/s) via
-    #: ``genesis_vehicle.units.omega_from_top_speed``. (v1.2.3)
+    #: With negligible aero drag a driven wheel spins up to this cap, so top
+    #: speed = omega_max_drive x wheel_radius -- unless the wheel spin clamp
+    #: ``ChassisConfig.omega_max`` is lower, which then sets the ceiling
+    #: instead (the car presets: omega_max 100 rad/s gives the reference car
+    #: 35.59 m/s while its omega_max_drive targets 55.6 m/s). Presets set it
+    #: from a target top speed (m/s) via
+    #: ``genesis_vehicle.units.omega_from_top_speed``. (v1.2.3; through 1.7.0
+    #: this comment called it "the de-facto top-speed governor" without that
+    #: exception, which was wrong for every car preset.)
     omega_max_drive: Optional[float] = None
 
     @abstractmethod

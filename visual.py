@@ -55,8 +55,9 @@ def _susp_visual_target(d, mesh_radius, l_susp, clamp, prev, dt, miss=None):
 
     Air is ``raycast.is_ray_hit_corrected`` negated — the SAME predicate
     ``core._susp_visual_offset`` uses, tested against the sensor's OWN miss
-    sentinel ``miss`` (``None`` = the deprecated ``RAY_MISS_THRESHOLD``
-    fallback, correct only at the default ``max_range=20.0``). ``d`` is a
+    sentinel ``miss`` (``None`` raises ``ValueError`` since v1.8.0; through
+    1.7.x it fell back to the deprecated ``RAY_MISS_THRESHOLD``, correct only at
+    the default ``max_range=20.0``, removed in 1.8.0). ``d`` is a
     CORRECTED distance (the high-cast offset already removed), so the
     unpopulated-sensor zero is NOT detectable here and is not tested for; this
     helper only runs inside a full step, past the first-step protection.
@@ -139,7 +140,8 @@ class WheelJointInternalSync:
         self.n_wheels = len(self.wheels)
         # Ray-miss sentinel of the sensor feeding `distances`; VehiclePhysics
         # sets it (and keeps it current through set_ray_miss_value). None =
-        # RAY_MISS_THRESHOLD fallback.
+        # not set yet; a step with it None raises ValueError (v1.8.0: the
+        # RAY_MISS_THRESHOLD fallback was removed).
         self.ray_miss = None
         self.spin_enabled = bool(getattr(resolved, "visual_spin_enabled", True))
 

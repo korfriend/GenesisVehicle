@@ -95,6 +95,7 @@ import torch
 
 from .._gs_compat import link_inertial
 from .._pipeline import compute_wheel_step
+from ..dynamics import yaw_inertia_from_mass_props
 
 
 __all__ = ["DifferentiablePlant", "PlantMassProperties", "plant_mass_properties",
@@ -477,10 +478,17 @@ class DifferentiablePlant:
             members are the cartesian product of ``source`` x ``env_idx``,
             env-major.
         horizon: unroll length in SIM STEPS, and the plant's cost knob (the
-            solve is linear in it). Throttle reaches the ground only after the
-            wheel-omega update — omega first, slip second, force third — so a
-            1-step unroll sees the response only through the overshoot clamp
-            and is rejected. The default 4 (0.1 s at 40 Hz) measured both
+            solve is linear in it). Must be >= 2. Since 1.8.0 the drive torque
+            acts on the wheel spin BEFORE the tyre within the same step, so a
+            1-step unroll does see throttle authority (Genesis-free fake
+            reference car, v 5 m/s, throttle 0.3: d a / d throttle 1.093 at
+            h1 vs 1.068 at h4; 1.7.0: 0 at h1). Through 1.7.0 this text said
+            throttle reached the ground only after the wheel-omega update so
+            a 1-step unroll saw it only through the overshoot clamp; that is
+            no longer true. One step is still refused: a single explicit step
+            carries no tyre transient at all (slip settles over several
+            steps), and the response a controller inverts is the one over its
+            control period. The default 4 (0.1 s at 40 Hz) measured both
             faster AND tighter than 8 on the reference tank course: a
             controller running every step wants the near-term response, and a
             longer horizon also drifts further from the frozen-normal-load
@@ -545,7 +553,15 @@ class DifferentiablePlant:
             otherwise composed from the entity's links. Giving both
             `mass` and `izz` skips that read entirely, and `com` then
             defaults to the base-link origin. Shared by every member, which is
-            what "one kind" means.
+            what "one kind" means. Since 1.8.0 they also set the PLANT'S OWN
+            inputs of the rigid-body deadbeat scale
+            (``dynamics.deadbeat_scale``), passed to ``compute_wheel_step``
+            by keyword: a plant built with explicit values runs the same
+            pipeline as the simulator with different deadbeat inputs, so its
+            prediction can differ from the simulator by design. The plant
+            never writes them into the live driver's wheel meta. Raises
+            ``ValueError`` if the yaw inertia about the centre of mass they
+            imply (``izz - mass*(cx^2 + cy^2)``) is not positive.
 
     Example::
 
@@ -583,11 +599,11 @@ class DifferentiablePlant:
                  saturation_restart: bool = True):
         if horizon < 2:
             raise ValueError(
-                "horizon must be >= 2: within a single step the tyre force is "
-                "computed from the wheel omega the vehicle already has, so a "
-                "1-step unroll reports throttle authority only through the "
-                "F_long overshoot clamp — a numerical guard, not the response "
-                "the controller is trying to invert")
+                "horizon must be >= 2: a 1-step unroll carries no tyre "
+                "transient (the slip a throttle change builds settles over "
+                "several steps), so its gain is the single-step response, not "
+                "the response over a control period the controller is trying "
+                "to invert")
         self.src = source if is_state_source(source) else _StateSource(source, env_idx)
         self.n_members = int(getattr(self.src, "n_members", 1))
         self.horizon = int(horizon)
@@ -622,6 +638,15 @@ class DifferentiablePlant:
             # the vehicle's mass and yaw inertia.
             com = (0.0, 0.0, 0.0)
         self.mass_props = PlantMassProperties(mass, com, izz)
+        # The rigid-body deadbeat scale's inputs (v1.8.0), PLANT-LOCAL: built
+        # from `self.mass_props` and the source's ray origins and passed to
+        # compute_wheel_step by keyword in `_unroll`. Never written into
+        # `src.wheel_meta`, which this plant shares with the live driver
+        # (`_StateSource._bind`). Raises ValueError for mass properties whose
+        # yaw inertia about the centre of mass is not positive.
+        self._yaw_inertia = None
+        self._yaw_inertia_wm = None
+        self._plant_yaw_inertia(self.src.wheel_meta)
 
         # Prediction-only hook copies: the live hooks own cross-step state
         # (StaticFrictionLock anchors its stick-slip springs), which an
@@ -650,6 +675,18 @@ class DifferentiablePlant:
         self.last_iters = 0
         self._pending_a: Optional[float] = None
         self._has_solved = False
+
+    def _plant_yaw_inertia(self, wm):
+        """This plant's ``dynamics.YawInertia``: ``self.mass_props`` with the
+        squared distances taken from ``wm.positions``. Recomputed when the
+        source's wheel meta is a different object (a rebind after a driver
+        rebuild); otherwise the cached value."""
+        if self._yaw_inertia is None or self._yaw_inertia_wm is not wm:
+            mp = self.mass_props
+            self._yaw_inertia = yaw_inertia_from_mass_props(
+                mp.mass, mp.com, mp.izz, wm.positions)
+            self._yaw_inertia_wm = wm
+        return self._yaw_inertia
 
     # -- freshness -------------------------------------------------------------
 
@@ -863,6 +900,9 @@ class DifferentiablePlant:
         m = self.mass_props.mass
         cx, cy = self.mass_props.com[0], self.mass_props.com[1]
         m3_inv = torch.as_tensor(self.mass_props.m3_inv, device=dev, dtype=fdt)
+        # Plant-local deadbeat-scale inputs (v1.8.0), by keyword: they take
+        # precedence over the shared wheel meta's (the live driver's).
+        yaw_inertia = self._plant_yaw_inertia(wm)
 
         steering = resolved.steering
         drivetrain = resolved.drivetrain
@@ -891,7 +931,7 @@ class DifferentiablePlant:
                 wheel_meta=wm, resolved=resolved,
                 wheel_body_b=wheel_body_b, up_world=up,
                 post_tire_hooks=self._pred_post_hooks, ctx=ctx,
-                dt=DT, B=B, n=n,
+                dt=DT, B=B, n=n, yaw_inertia=yaw_inertia,
             )
 
             # Planar Newton-Euler about the base-link origin. The wrench comes
@@ -1023,13 +1063,21 @@ class DifferentiablePlant:
 
         # Secant rescue for a channel whose derivative is degenerate.
         #
-        # The plant has genuine dead zones: the v0.6.0 F_long overshoot clamp
-        # pins the tyre force to exactly zero whenever friction could not carry
-        # the wheel past rolling within one step, and `torch.where` hands back
-        # a zero gradient there. The DERIVATIVE is then honestly zero while the
-        # SECANT over a control-sized command change is not — a tank cruising
-        # in reverse sat in exactly that state and froze the controller, since
-        # a zero Jacobian means "no authority, do not move".
+        # The plant has genuine dead zones, where `torch.where` / a clamp hands
+        # back a zero gradient. Since v1.8.0 the ones known are: a wheel the
+        # brake HOLDS (the brake projection pins its spin at 0 for any small
+        # command change, and the held-wheel deadbeat bounds its force by the
+        # contact slip); and the overshoot clamp's zero end, reached where the
+        # force the hooks hand it has the opposite sign of the wheel's slip (a
+        # hook rewriting F_long, e.g. StaticFrictionLock; a custom tyre whose
+        # force sign disagrees with its slip) or where the wheel sits at
+        # exactly rolling with no axle torque. Through 1.7.0 the drive torque
+        # itself went through the overshoot clamp, which pinned the tyre force
+        # to exactly zero whenever friction could not carry the wheel past
+        # rolling within one step — a tank cruising in reverse sat in that
+        # state and froze the controller. The DERIVATIVE is then honestly zero
+        # while the SECANT over a control-sized command change is not, and a
+        # zero Jacobian means "no authority, do not move".
         #
         # So: where a column of a row's Jacobian vanishes, replace it with a
         # one-sided difference over `probe_delta`, large enough to step out of

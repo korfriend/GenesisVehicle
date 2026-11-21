@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from genesis_vehicle.raycast import (
-    RAY_MISS_THRESHOLD, RAY_UP_OFFSET, WheelRayPattern, read_distances,
+    RAY_UP_OFFSET, WheelRayPattern, read_distances,
     sensor_up_offset, set_sensor_up_offset, single_scene_up_offset,
 )
 from genesis_vehicle.urdf import self_collision_ceiling
@@ -116,6 +116,8 @@ def _ensure_backend():
         VehicleScene.init_backend("cpu")
 
 
+# (Since 1.8.0 a stub sensor with no sentinel must be read with an explicit
+# ``miss=`` -- the RAY_MISS_THRESHOLD fallback was removed -- so these pass 20.0.)
 class _StubSensor:
     def __init__(self, distances):
         self._d = torch.as_tensor(distances, dtype=torch.float32)
@@ -128,28 +130,28 @@ def test_read_distances_subtracts_the_offset_the_sensor_carries():
     s = _StubSensor([[1.30, 1.30]])
     set_sensor_up_offset(s, 0.28)
     assert sensor_up_offset(s) == pytest.approx(0.28)
-    assert read_distances(s, 1)[0].tolist() == pytest.approx([1.02, 1.02])
+    assert read_distances(s, 1, miss=20.0)[0].tolist() == pytest.approx([1.02, 1.02])
 
 
 def test_read_distances_falls_back_to_the_default_offset():
     """A sensor built outside VehicleScene was never stamped."""
     s = _StubSensor([[1.30, 1.30]])
     assert sensor_up_offset(s) == RAY_UP_OFFSET
-    assert read_distances(s, 1)[0].tolist() == pytest.approx([0.30, 0.30])
+    assert read_distances(s, 1, miss=20.0)[0].tolist() == pytest.approx([0.30, 0.30])
 
 
 def test_read_distances_leaves_misses_at_their_sentinel():
     s = _StubSensor([[20.0, 1.30]])
     set_sensor_up_offset(s, 0.28)
-    out = read_distances(s, 1)[0]
-    assert out[0] >= RAY_MISS_THRESHOLD          # untouched
+    out = read_distances(s, 1, miss=20.0)[0]
+    assert out[0] == pytest.approx(20.0)         # untouched sentinel
     assert out[1] == pytest.approx(1.02)
 
 
 def test_read_distances_explicit_offset_still_wins():
     s = _StubSensor([[1.30, 1.30]])
     set_sensor_up_offset(s, 0.28)
-    assert read_distances(s, 1, up_offset=1.0)[0].tolist() == pytest.approx([0.30, 0.30])
+    assert read_distances(s, 1, up_offset=1.0, miss=20.0)[0].tolist() == pytest.approx([0.30, 0.30])
 
 
 def _urdf(*, collision_box: str, collision_z: str) -> str:

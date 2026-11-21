@@ -124,6 +124,68 @@ def test_link_inertial_returns_none_without_mass():
     assert link_inertial(object()) is None
 
 
+# --- check_link_inertial_api (v1.8.0): either spelling, else AttributeError ---
+
+@pytest.mark.parametrize("link", [_OldLink(), _NewLink(), _MasslessLink()])
+def test_check_link_inertial_api_accepts_both_engine_shapes(link):
+    """<= 1.3.3 (`inertial_mass`) and >= 1.4.0 (`desc`) both pass — including
+    a massless >= 1.4.0 link: the check is about the API, not the mass."""
+    from genesis_vehicle._gs_compat import check_link_inertial_api
+    check_link_inertial_api(link)
+
+
+def test_check_link_inertial_api_names_both_spellings_on_an_unknown_engine():
+    """A link with neither spelling is an unknown engine. link_inertial alone
+    would read it as massless (None), indistinguishable from a link that
+    carries no mass; the check raises instead, naming both spellings."""
+    from genesis_vehicle._gs_compat import check_link_inertial_api
+    with pytest.raises(AttributeError, match=r"'desc'.*'inertial_mass'"):
+        check_link_inertial_api(object())
+
+
+@pytest.mark.parametrize("branch, drop", [
+    ("new", "inertia"), ("new", "inertial_quat"), ("new", "mass"), ("new", "inertial_pos"),
+    ("old", "inertial_i"), ("old", "inertial_quat"), ("old", "inertial_pos"),
+])
+def test_check_link_inertial_api_names_a_missing_field_per_engine_branch(branch, drop):
+    """C15 (v1.8.0): the container alone is not enough. A >= 1.4.0 ``desc``
+    without ``inertia`` (or a <= 1.3.3 link without ``inertial_i``) would make
+    ``link_inertial`` read zero link inertia -- a silently wrong yaw inertia
+    feeding the deadbeat scale. The check raises and names the missing field."""
+    from genesis_vehicle._gs_compat import check_link_inertial_api
+    if branch == "new":
+        fields = {k: getattr(_Desc, k) for k in
+                  ("mass", "inertial_pos", "inertial_quat", "inertia") if k != drop}
+        link = type("L", (), dict(desc=type("D", (), fields)()))()
+    else:
+        fields = {k: getattr(_OldLink, k) for k in
+                  ("inertial_mass", "inertial_pos", "inertial_quat", "inertial_i")
+                  if k != drop}
+        link = type("L", (), fields)()
+    with pytest.raises(AttributeError, match=rf"lacks \['{drop}'\]"):
+        check_link_inertial_api(link)
+
+
+def test_check_link_inertial_api_picks_the_branch_link_inertial_reads():
+    """F2-6 (1.8.0): a link carrying ``inertial_mass = None`` AND a ``desc`` is
+    read by ``link_inertial`` through ``desc``, so the check must validate
+    ``desc`` too (it used to pick the <= 1.3.3 names on ``hasattr`` alone).
+    Without ``desc`` such a link is checked on the <= 1.3.3 names."""
+    from genesis_vehicle._gs_compat import check_link_inertial_api
+    old_none = dict(inertial_mass=None, inertial_pos=None, inertial_quat=None,
+                    inertial_i=None)
+    both = type("L", (), dict(old_none, desc=_Desc()))()
+    check_link_inertial_api(both)                          # desc complete: passes
+    assert link_inertial(both).mass == pytest.approx(1200.0)
+    bad_desc = type("D", (), dict(mass=1.0, inertial_pos=None, inertial_quat=None))()
+    with pytest.raises(AttributeError, match=r"link\.desc.*lacks \['inertia'\]"):
+        check_link_inertial_api(type("L", (), dict(old_none, desc=bad_desc))())
+    check_link_inertial_api(type("L", (), old_none)())     # old names, massless
+    with pytest.raises(AttributeError, match=r"the link .*lacks \['inertial_i'\]"):
+        check_link_inertial_api(type("L", (), {k: v for k, v in old_none.items()
+                                               if k != "inertial_i"})())
+
+
 def test_link_inertial_principal_axis_form_reconstructs_the_link_tensor():
     """genesis >= 1.4.0 diagonalizes an authored tensor onto its principal axes
     and carries the rotation in `inertial_quat`. R I R^T must give the authored

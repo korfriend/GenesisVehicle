@@ -33,7 +33,7 @@ from genesis_vehicle.inputs import VehicleInputs
 from genesis_vehicle._gs_compat import sensor_miss_value as engine_miss_value
 from genesis_vehicle.core import _susp_visual_offset
 from genesis_vehicle.raycast import (
-    RAY_MISS_THRESHOLD, RAY_UP_OFFSET, WheelRayPattern, check_miss_supported,
+    RAY_UP_OFFSET, WheelRayPattern, check_miss_supported,
     is_ray_hit, is_ray_hit_corrected, ray_miss_value, read_distances,
     set_sensor_miss_value, set_sensor_up_offset,
 )
@@ -119,7 +119,6 @@ def test_is_ray_hit_rejects_the_unpopulated_zero():
     """`Vehicle.distances` is a ZERO tensor before the first step, so a naive
     `d < threshold` passes vacuously."""
     assert is_ray_hit(0.0, 20.0) is False
-    assert is_ray_hit(0.0) is False                  # legacy-fallback branch
     hit = is_ray_hit(torch.tensor([0.0, 0.5, 20.0]), 20.0)
     assert hit.tolist() == [False, True, False]
 
@@ -128,7 +127,9 @@ def test_is_ray_hit_uses_equality_not_a_threshold():
     """A miss at max_range=10.0 is UNDER the old 19.9 threshold."""
     d = torch.tensor([10.0, 9.5])
     assert is_ray_hit(d, 10.0).tolist() == [False, True]
-    assert is_ray_hit(d).tolist() == [True, True]    # what 1.5.1 believed
+    # (Through 1.7.x `is_ray_hit(d)` with no sentinel fell back to the 19.9
+    # threshold and returned [True, True] here -- what 1.5.1 believed. Since
+    # 1.8.0 the sentinel is required: see test_miss_none_raises_on_every_predicate.)
 
 
 def test_is_ray_hit_equality_is_exact_for_an_unrepresentable_sentinel():
@@ -176,12 +177,54 @@ def test_read_distances_needs_raw_equality_when_the_sentinel_is_zero(cpu_genesis
     assert hit[0].tolist() == [False, True]
 
 
-def test_read_distances_falls_back_to_the_threshold_without_options():
-    """A stub/foreign sensor exposing no options keeps the pre-1.5.2 behaviour."""
+def test_read_distances_refuses_a_sensor_without_a_sentinel():
+    """v1.8.0: a stub/foreign sensor exposing no options and nothing stamped
+    has no miss sentinel. Through 1.7.x this fell back to the 19.9
+    ``RAY_MISS_THRESHOLD`` (removed in 1.8.0); now it raises, and an explicit
+    ``miss=`` (or a stamp) is the way through."""
     s = _StubSensor([[20.0, 1.30]])
-    out = read_distances(s, 1)[0]
-    assert out[0] >= RAY_MISS_THRESHOLD
+    with pytest.raises(ValueError, match="RAY_MISS_THRESHOLD` was removed in 1.8.0"):
+        read_distances(s, 1)
+    out = read_distances(s, 1, miss=20.0)[0]
+    assert out[0] == pytest.approx(20.0)
     assert out[1] == pytest.approx(0.30)
+
+
+def test_ray_miss_threshold_is_gone():
+    """R1: the deprecated constant was removed in 1.8.0 (removal announced
+    since 1.5.2 and retargeted to 1.8.0 by 1.7.0)."""
+    import genesis_vehicle
+    from genesis_vehicle import raycast
+    assert not hasattr(raycast, "RAY_MISS_THRESHOLD")
+    assert not hasattr(genesis_vehicle, "RAY_MISS_THRESHOLD")
+
+
+_C6 = (r"`miss is None`: the sensor exposes no miss sentinel; `RAY_MISS_THRESHOLD` "
+       r"was removed in 1\.8\.0\. Pass the sensor's sentinel "
+       r"\(`genesis_vehicle\.sensor_miss_value\(sensor\)`\) or stamp one with "
+       r"`set_sensor_miss_value\(sensor, miss\)`\. A `VehiclePhysics` built with "
+       r"`sensor=None` and fed `step\(distances=\)` needs "
+       r"`physics\.set_ray_miss_value\(miss\)` before its first step\.")
+
+
+def test_miss_none_raises_on_every_predicate():
+    """C6 (v1.8.0): ``is_ray_hit`` / ``is_ray_hit_corrected`` take ``miss`` as
+    a REQUIRED argument; an explicit ``None`` raises ``ValueError`` with the
+    message naming the removal and the way out. The same guard covers the fan
+    fill and the two visual helpers (which forward ``miss``)."""
+    import inspect
+    d = torch.tensor([[0.5, 20.0]])
+    for fn in (is_ray_hit, is_ray_hit_corrected):
+        p = inspect.signature(fn).parameters["miss"]
+        assert p.default is inspect.Parameter.empty, fn.__name__
+        with pytest.raises(ValueError, match=_C6):
+            fn(d, None)
+        with pytest.raises(TypeError):
+            fn(d)                                   # required
+    with pytest.raises(ValueError, match=_C6):
+        _susp_visual_offset(d, 0.4, 0.1)
+    with pytest.raises(ValueError, match=_C6):
+        _susp_visual_target(d, 0.4, 0.1, None, None, 0.0)
 
 
 # --- the unsupported configuration raises ------------------------------------
@@ -234,19 +277,22 @@ def test_read_layer_core_and_visual_agree_at_a_non_default_range(cpu_genesis):
     assert air_core.tolist() == air_read.tolist()
     assert air_vis.tolist() == air_read.tolist()
 
-    # ... and the legacy threshold path is the bug being fixed: it calls the
-    # 10.0 sentinel a hit and drives the wheel mesh to a bogus pose.
-    legacy = _susp_visual_offset(d, mesh_r, l_susp, 0.19, None)
-    assert float(legacy[0][0]) != pytest.approx(-l_susp)
+    # (Through 1.7.x `miss=None` took the legacy 19.9 threshold, which called
+    # the 10.0 sentinel a hit and drove the wheel mesh to a bogus pose -- the
+    # bug this test was written for. Since 1.8.0 `None` raises.)
+    with pytest.raises(ValueError):
+        _susp_visual_offset(d, mesh_r, l_susp, 0.19, None)
 
 
 def test_susp_helpers_keep_their_legacy_positional_signature():
     """core._susp_visual_offset / visual._susp_visual_target gained `miss` as a
-    trailing optional; existing positional callers must be unaffected."""
+    trailing argument; the positional order is unchanged. (Since 1.8.0 the
+    trailing `miss` must be given -- its `None` default raises -- so this
+    passes the default range's sentinel 20.0.)"""
     d = torch.tensor([[0.4, 0.5, 20.0]], dtype=torch.float64)
-    off = _susp_visual_offset(d, 0.4, 0.1)
+    off = _susp_visual_offset(d, 0.4, 0.1, 0.19, 20.0)
     assert [round(float(x), 6) for x in off[0]] == [0.0, -0.1, -0.1]
-    tgt = _susp_visual_target(d, 0.4, 0.1, None, None, 0.0)
+    tgt = _susp_visual_target(d, 0.4, 0.1, None, None, 0.0, 20.0)
     assert [round(float(x), 6) for x in tgt[0]] == [0.0, -0.1, -0.1]
 
 
@@ -558,10 +604,20 @@ def test_set_ray_miss_value_rejects_a_sentinel_that_is_not_a_distance(cpu_genesi
         with pytest.raises(ValueError, match="no_hit_value"):
             p.set_ray_miss_value(bad)
     assert p._ray_miss == good                  # unchanged by the refusals
-    p.set_ray_miss_value(None)                  # None = legacy-threshold opt-out
-    assert p._ray_miss is None
+    with pytest.raises(ValueError, match="removed in 1.8.0"):
+        p.set_ray_miss_value(None)              # through 1.7.x: legacy-threshold opt-out
+    assert p._ray_miss == good                  # unchanged by the refusal
     p.set_ray_miss_value(good)
     assert p._ray_miss == pytest.approx(good)
+    # C19 / F2-2 (1.8.0): a sensor-less driver that was never given a sentinel
+    # (here forced, as a hand-built VehiclePhysics(sensor=None) would be) raises
+    # on step(distances=) -- through 1.7.x it silently used the 19.9 fallback --
+    # and the message names the fix for THIS caller, set_ray_miss_value.
+    p._ray_miss = None
+    with pytest.raises(ValueError, match=_C6):
+        p.step(VehicleInputs(throttle=0.0, brake=0.0, steer=0.0),
+               distances=torch.full((1, 4), 0.5))
+    p.set_ray_miss_value(good)
 
 
 def test_set_ray_miss_value_checks_against_the_source_sensor(cpu_genesis):
@@ -627,7 +683,8 @@ def test_check_miss_supported_rejects_zero_and_negative_on_a_stub(cpu_genesis):
             set_sensor_miss_value(s, bad)
     assert not hasattr(s, "_gv_ray_miss")
     # ... and the legitimate "this stub exposes nothing" case still returns
-    # None rather than raising (readers fall back to RAY_MISS_THRESHOLD).
+    # None rather than raising (since 1.8.0 its READERS raise instead of
+    # falling back to the removed RAY_MISS_THRESHOLD).
     assert set_sensor_miss_value(s) is None
 
 

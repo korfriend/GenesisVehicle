@@ -18,7 +18,8 @@ from genesis.utils.geom import transform_by_quat
 
 from ._version import __version__
 from .config import ResolvedConfig, VehicleConfig, check_rolling_resistance_cr, resolve
-from ._gs_compat import apply_links_wrench, check_genesis_floor
+from ._gs_compat import apply_links_wrench, check_genesis_floor, check_link_inertial_api
+from .dynamics import YawInertia, yaw_inertia_from_mass_props
 from ._hotset import prime_derived
 from ._pipeline import compute_wheel_step, pw, pw3
 from .inputs import VehicleInputs, VehicleStepInputs
@@ -80,9 +81,10 @@ def _susp_visual_offset(distance: torch.Tensor, mesh_radius: float,
     is not visually muted) — pass a ``(n_wheels,)`` / broadcastable tensor.
     A scalar is also accepted (the helper's unit-test default is 0.19).
 
-    ``miss`` is the sensor's ray-miss sentinel; ``None`` falls back to the
-    deprecated ``raycast.RAY_MISS_THRESHOLD`` (correct only at the default
-    ``max_range=20.0``)."""
+    ``miss`` is the sensor's ray-miss sentinel; ``None`` raises ``ValueError``
+    since v1.8.0 (through 1.7.x it fell back to the deprecated
+    ``raycast.RAY_MISS_THRESHOLD``, correct only at the default
+    ``max_range=20.0``; the constant was removed in 1.8.0)."""
     # Air = ray MISS, i.e. the sensor's own sentinel. ONE definition, shared
     # with visual._susp_visual_target: raycast.is_ray_hit_corrected — the
     # CORRECTED-distance predicate, because `distance` here is post-offset
@@ -233,6 +235,19 @@ class WheelMeta:
     pb_y: torch.Tensor               # (n_wheels,)
     pc_y: torch.Tensor               # (n_wheels,)
     pe_y: torch.Tensor               # (n_wheels,)
+    # Inputs of the rigid-body deadbeat scale (v1.8.0; dynamics.YawInertia:
+    # composite yaw inertia about the centre of mass + squared horizontal
+    # distance of each ray origin from it). None until the OWNING driver
+    # computes it: VehiclePhysics._ensure_yaw_inertia(), once, on its first
+    # step() (a batched kind computes it on its proto, the same object). It is
+    # NOT recomputed later (a tank's composite inertia read moves by 2.7e-4
+    # relative after 40 steps of driving, as its turret links settle; the
+    # first-step value is kept), and a config rebuild re-derives it from the
+    # carried mass properties and the rebuilt positions. A DifferentiablePlant
+    # passes its OWN inputs to compute_wheel_step by keyword and never writes
+    # this field (it shares this object with the live driver). Appended LAST
+    # (keyword default) so the positional fields above keep their order.
+    yaw_inertia: Optional[YawInertia] = None
 
 
 @dataclass
@@ -250,10 +265,12 @@ class PipelineContext:
     N: Optional[torch.Tensor] = None
     v_long: Optional[torch.Tensor] = None
     v_lat: Optional[torch.Tensor] = None
-    # In apply_pre_tire: the pre-step omega. In apply_post_tire: omega AFTER
-    # the pre-tire resisting torque (T_resist) was applied -- the omega the
-    # tyre and PipelineResult.kappa / last_kappa were evaluated at; equal to
-    # the pre-step omega only when no hook set T_resist (v1.7.0).
+    # In apply_pre_tire: the pre-step omega. In apply_post_tire (v1.8.0):
+    # ``omega_t``, the omega after this step's resisting torque, drive torque
+    # and brake projection, before tyre friction; the tyre was evaluated at it
+    # clipped to +-omega_max. Through 1.7.0 this comment said it was the omega
+    # after the resisting torque only and equal to the pre-step omega when no
+    # hook set T_resist; that is no longer true.
     omega: Optional[torch.Tensor] = None
     air_mask: Optional[torch.Tensor] = None     # (n_envs, n_wheels) bool
     omega_override: Optional[Any] = None         # _OmegaOverride with (n_envs, n_wheels) bool
@@ -277,13 +294,48 @@ class PipelineContext:
     # hook ACCUMULATES into it in ``apply_pre_tire`` ONLY (``RollingResistance``
     # does) -- a write in ``apply_post_tire`` raises RuntimeError (an in-place
     # one is not detected under torch.inference_mode()). The pipeline
-    # caps it at ``|omega| * i_wheel / dt`` (``dynamics.cap_resist_torque``) and
-    # subtracts it from omega BEFORE the tyre; the brake is then capped
-    # together with it and only the remainder enters the F_long overshoot
-    # clamp and the omega update. None = no resisting torque, which is the
-    # exact pre-1.7.0 code path. Appended LAST so any positional
-    # construction of this dataclass keeps its meaning.
+    # caps it at ``|omega| * i_wheel / dt`` (``dynamics.cap_resist_torque``)
+    # against the pre-step omega and subtracts it from omega FIRST, before the
+    # drive torque, the brake projection and the tyre. (Through 1.7.0 the brake
+    # was then capped together with it and only the remainder entered the
+    # overshoot clamp; since 1.8.0 the brake is ``dynamics.brake_projection``
+    # and nothing of T_resist enters the clamp.) None = no resisting torque.
+    # Appended after the fields above so positional construction keeps its
+    # meaning.
     T_resist: Optional[torch.Tensor] = None
+    # --- v1.8.0, reset to None by the pipeline every step. F_long_bounds,
+    # F_long_deadbeat and deadbeat_scale are set for the hooks and are
+    # READ-ONLY for them: the pipeline computes with its own copies, so
+    # rebinding them or writing them in place changes nothing it computes
+    # (``deadbeat_scale`` is set before the PRE_TIRE phase, the other two
+    # before the POST_TIRE phase). hold_applied is the one a hook WRITES. ---
+    # ``(lo, hi)``, each (n_envs, n_wheels), N: the interval of tyre F_long the
+    # wheel can transmit this step before the held-wheel deadbeat -- the
+    # overshoot clamp widened by the brake capacity left on a held wheel
+    # (``B_rem / r`` both ways). Always contains 0. ``StaticFrictionLock``
+    # limits its hold force to it.
+    F_long_bounds: Optional[tuple] = None
+    # (n_envs, n_wheels), N: the held-wheel deadbeat |F_long| bound,
+    # ``s * (N / g) * |v_long - r * omega| / dt`` on a wheel the brake holds
+    # (B_rem > 0), +inf elsewhere. ``StaticFrictionLock`` uses it to detect a
+    # creep equilibrium.
+    F_long_deadbeat: Optional[torch.Tensor] = None
+    # (n_envs, n_wheels) bool, or None: wheels whose force a hook REPLACED with
+    # a position-anchored hold (``StaticFrictionLock`` after rest). A hook ORs
+    # its mask into it (do not overwrite another hook's). Those wheels get the
+    # clamp WITHOUT the held-wheel deadbeat and no lateral deadbeat. None (no
+    # hook set it) = no wheel is exempt.
+    hold_applied: Optional[torch.Tensor] = None
+    # The rigid-body deadbeat scale s (dynamics.deadbeat_scale), set before
+    # the PRE_TIRE phase. A (B, 1) tensor, B = the pipeline's batch rows:
+    # n_envs for VehiclePhysics, n_envs*K in a batched kind, plant members x
+    # candidates in DifferentiablePlant. Value in (0, 1], computed from THIS
+    # step's N, so a row with every wheel airborne reads 1.0. It is the python
+    # float 1.0 only when compute_wheel_step ran with no yaw-inertia inputs
+    # (a direct caller). A copy: writing it changes nothing the pipeline
+    # computes. Hooks that bound a force by a one-step deadbeat multiply their
+    # mass share ``N / g`` by it (``StaticFrictionLock``'s damper bound does).
+    deadbeat_scale: Optional[Any] = None
 
 
 @dataclass
@@ -333,6 +385,16 @@ RUNTIME_STATE_SCALARS = ("_prev_init",)
 #: instance's good capture with that None would break the visual getters.
 REST_POSE_ATTRS = ("_rest_wheel_pos_local", "_rest_wheel_quat_local")
 
+#: Composite planar mass properties (``control.plant.PlantMassProperties``)
+#: read ONCE, on the driver's first ``step()``, for the rigid-body deadbeat
+#: scale (v1.8.0). Carried across a config rebuild like the rest pose (a
+#: re-read mid-drive sees displaced suspension and turret links and differs in
+#: the last bits); after the load ``wheel_meta.yaw_inertia`` is rebuilt from
+#: them with the squared distances recomputed from the REBUILT
+#: ``wheel_meta.positions``. ``load_runtime_state`` skips a ``None`` source (a
+#: driver that never stepped).
+MASS_PROPS_ATTRS = ("_mass_props",)
+
 
 class VehiclePhysics:
     """Top-level vehicle physics driver. One instance per vehicle entity."""
@@ -358,6 +420,9 @@ class VehiclePhysics:
         self.scene = scene
         self.entity = entity
         self.sensor = sensor
+        # Planar mass properties for the deadbeat scale (v1.8.0), read on the
+        # first step() by _ensure_yaw_inertia (the entity is built by then).
+        self._mass_props = None
         #: Identifier for messages about THIS driver's config (the dt-stability
         #: warning). ``VehicleScene`` passes the ``Vehicle.name`` the user gave
         #: ``add_vehicle``; a direct ``VehiclePhysics(...)`` / plain
@@ -593,7 +658,7 @@ class VehiclePhysics:
         alone was bit-identical only for a batch that steps uniformly."""
         return bool(self._stepped_once.any())
 
-    def set_ray_miss_value(self, miss: Optional[float], *,
+    def set_ray_miss_value(self, miss: float, *,
                            sensor: Optional[Any] = None) -> None:
         """Tell this driver which distance means "the ray hit NOTHING".
 
@@ -601,8 +666,9 @@ class VehiclePhysics:
         because ``VehicleScene``'s ``dual_scene`` mode builds ``VehiclePhysics``
         with ``sensor=None`` (the rays live in a SEPARATE scene) and feeds
         ``step(distances=...)`` from there; the scene injects that sensor's
-        value here. ``None`` falls back to the deprecated
-        ``raycast.RAY_MISS_THRESHOLD``.
+        value here. ``None`` raises ``ValueError`` since v1.8.0 (through 1.7.x
+        it fell back to the deprecated ``raycast.RAY_MISS_THRESHOLD``, removed
+        in 1.8.0).
 
         VALIDATED, not merely stored (v1.5.2 — it used to keep ``float(miss)``
         unchecked while its docstring pointed at the stamp path's rule, so
@@ -627,10 +693,13 @@ class VehiclePhysics:
         See :func:`genesis_vehicle.raycast.set_sensor_miss_value` for why a
         sentinel below the raycaster's ``max_range`` is unsupported."""
         if miss is None:
-            self._ray_miss = None
-        else:
-            src = sensor if sensor is not None else self.sensor
-            self._ray_miss = check_miss_supported(src, float(miss))
+            raise ValueError(
+                "set_ray_miss_value(None): a driver needs the miss sentinel of "
+                "the sensor its distances come from; RAY_MISS_THRESHOLD, the "
+                "None fallback, was removed in 1.8.0. Pass the sensor's "
+                "sentinel (genesis_vehicle.sensor_miss_value(sensor)).")
+        src = sensor if sensor is not None else self.sensor
+        self._ray_miss = check_miss_supported(src, float(miss))
         if self.visual is not None:
             self.visual.ray_miss = self._ray_miss
 
@@ -658,6 +727,77 @@ class VehiclePhysics:
         """``(n_envs,)`` bool — True where EVERY wheel of that env found ground.
         The question "is this vehicle actually on the terrain?"."""
         return self.wheels_grounded.all(dim=1)
+
+    def _ensure_yaw_inertia(self) -> None:
+        """Compute ``wheel_meta.yaw_inertia`` once (v1.8.0).
+
+        The inputs of the rigid-body deadbeat scale (``dynamics.YawInertia``):
+        the composite yaw inertia about the centre of mass and each ray
+        origin's squared horizontal distance from it, from
+        ``control.plant.plant_mass_properties(self.entity)`` (a walk over every
+        link's authored inertial; the base link's own inertia is rotated back
+        from the principal axes genesis >= 1.4.0 stores it on). Called at the
+        top of :meth:`step` and of ``MultiVehicleKindPhysics.step`` (on the
+        kind's proto), so it runs on the FIRST step of every driver, before the
+        first-step early return; afterwards it is one attribute test.
+
+        Failure handling, exactly:
+
+        * an entity with no ``links`` raises ``AttributeError`` naming the
+          requirement (new in 1.8.0: through 1.7.0 the step path never read
+          ``entity.links``, so a duck-typed non-genesis entity could be
+          stepped; it now needs ``links`` or a ``wheel_meta.yaw_inertia`` set
+          before the first step);
+        * a root link exposing neither ``desc`` (genesis >= 1.4.0) nor
+          ``inertial_mass`` (<= 1.3.3), or missing one of its branch's four
+          inertial fields, raises ``AttributeError``
+          (``_gs_compat.check_link_inertial_api``) — an unknown engine, not a
+          massless vehicle;
+        * a ``ValueError`` from the mass walk (no link carries mass) or from
+          the inputs (yaw inertia about the centre of mass not positive) sets
+          ``s = 1`` for this driver (``YawInertia(inf, ...)``: each wheel's
+          deadbeat on its own mass share, unscaled) and logs ONE
+          ``[genesis_vehicle:deadbeat-scale]`` WARNING naming
+          ``self.vehicle_name``. Nothing else is caught.
+
+        Carried mass properties (a config rebuild, ``MASS_PROPS_ATTRS``) are
+        used instead of a fresh read."""
+        wm = self.wheel_meta
+        if wm.yaw_inertia is not None:
+            return
+        mp = self._mass_props
+        try:
+            if mp is None:
+                from .control.plant import plant_mass_properties
+                links = getattr(self.entity, "links", None)
+                if not links:
+                    raise AttributeError(
+                        f"vehicle '{self.vehicle_name}': the entity "
+                        f"({type(self.entity).__name__}) exposes no 'links'. "
+                        "Since 1.8.0 VehiclePhysics reads the vehicle's mass "
+                        "properties from entity.links on its first step (the "
+                        "yaw-inertia inputs of the low-speed deadbeat bounds); "
+                        "through 1.7.0 the step path did not need it. Pass a "
+                        "genesis rigid entity, or set wheel_meta.yaw_inertia "
+                        "(dynamics.yaw_inertia_from_mass_props) before the "
+                        "first step.")
+                check_link_inertial_api(links[0])
+                mp = plant_mass_properties(self.entity)
+            yi = yaw_inertia_from_mass_props(mp.mass, mp.com, mp.izz, wm.positions)
+        except ValueError as exc:
+            import logging
+            logging.getLogger("genesis_vehicle").warning(
+                "[genesis_vehicle:deadbeat-scale] vehicle '%s': could not build "
+                "the yaw-inertia inputs of the low-speed deadbeat bounds (%s); "
+                "using s = 1 (each wheel's own mass share, no rigid-body "
+                "scale). A vehicle whose wheels sit far from its centre of "
+                "mass relative to its yaw inertia can then alternate in yaw at "
+                "low speed.", self.vehicle_name, exc)
+            wm.yaw_inertia = YawInertia(
+                float("inf"), torch.zeros_like(wm.positions[..., 0]))
+            return
+        self._mass_props = mp
+        wm.yaw_inertia = yi
 
     def reset(self, env_ids: Optional[torch.Tensor] = None) -> None:
         if env_ids is None:
@@ -712,12 +852,18 @@ class VehiclePhysics:
         driver being discarded.
 
         What is in it: :data:`RUNTIME_STATE_ATTRS`,
-        :data:`RUNTIME_STATE_ROW_ATTRS`, :data:`RUNTIME_STATE_SCALARS` and
-        :data:`REST_POSE_ATTRS`, plus ``n_wheels`` / ``n_rows`` so
+        :data:`RUNTIME_STATE_ROW_ATTRS`, :data:`RUNTIME_STATE_SCALARS`,
+        :data:`REST_POSE_ATTRS` and (v1.8.0) :data:`MASS_PROPS_ATTRS` — the
+        mass properties the deadbeat scale was built from, ``None`` if this
+        driver never stepped — plus ``n_wheels`` / ``n_rows`` so
         :meth:`load_runtime_state` can reject a mismatched target. NOT in it:
         anything re-derived from the config (``resolved``, ``wheel_meta``,
         hooks, ``dt``, the ray-miss sentinel) — re-resolution is the point of a
-        rebuild."""
+        rebuild. ``wheel_meta.yaw_inertia`` is one such derived value: it is
+        not carried itself, :meth:`load_runtime_state` rebuilds it from the
+        carried mass properties and the NEW ``wheel_meta.positions``. (Through
+        1.7.0 this said only "NOT in it: ... ``wheel_meta``"; the mass
+        properties are the one ``wheel_meta`` input that is carried.)"""
         idx = self._row_index(rows)
 
         def _g(t):
@@ -732,6 +878,9 @@ class VehiclePhysics:
         for name in REST_POSE_ATTRS:
             v = getattr(self, name, None)
             state[name] = None if v is None else v.detach().clone()
+        for name in MASS_PROPS_ATTRS:
+            # PlantMassProperties: python floats + numpy arrays nobody mutates.
+            state[name] = getattr(self, name, None)
         state["n_wheels"] = int(self.wheel_meta.n_wheels)
         state["n_rows"] = int(self.n_envs if idx is None else int(idx.numel()))
         # Wheel IDENTITY, in column order. Every per-wheel tensor above is
@@ -793,6 +942,15 @@ class VehiclePhysics:
                 continue
             setattr(self, name, src.detach().clone().to(device=self.dev,
                                                         dtype=self.fdt))
+        for name in MASS_PROPS_ATTRS:
+            src = state.get(name)
+            if src is None:
+                continue
+            setattr(self, name, src)
+            # Rebuild the deadbeat-scale inputs from the CARRIED mass
+            # properties and THIS driver's wheel positions (v1.8.0).
+            self.wheel_meta.yaw_inertia = None
+            self._ensure_yaw_inertia()
 
     def link_transforms(self, frame: str = "parent", *, envs_idx: Optional[Any] = None):
         """Per-link transforms of this vehicle's entity in ``frame``.
@@ -1002,6 +1160,10 @@ class VehiclePhysics:
             ``docs/dual-scene-raycast.md``). When ``None`` (default) the sensor
             is read exactly as before — fully backward compatible.
         """
+        # Deadbeat-scale inputs, once per driver, on the first call (the
+        # entity is built by then); one attribute test afterwards.
+        self._ensure_yaw_inertia()
+
         steering = self.resolved.steering
         if not isinstance(inputs, steering.InputType):
             if isinstance(inputs, VehicleInputs):

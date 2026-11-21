@@ -18,6 +18,9 @@
 | M | number of members |
 | L2 / L3 | batching axes: K interacting vehicles / `n_envs` parallel scenarios |
 | kind | vehicles sharing a URDF + resolved config |
+| h | `DifferentiablePlant` horizon (steps) |
+| E0 / E1 / E2 | envelope rule used to judge a release's closed-loop change: every run passes its own criterion / worst run ≤ the previous release's worst / median ≤ the previous release's third quartile |
+| DONE | the follower's final state: within `arrival_goal` of the last waypoint |
 
 Give a path — a list of `(x, y, z, target_speed)` waypoints — and get
 per-step `(throttle, steer, brake)` for any URDF + preset vehicle. The
@@ -35,7 +38,7 @@ Two inverse plants ship with the SDK, interchangeable in the same argument:
 | survives a plant change (mass, friction, `i_wheel`, dt) | yes, automatically | no — silently stale until re-measured |
 | operating point | the LIVE state: per-wheel normal loads, wheel speeds, attitude | grid interpolation on (v, pitch, roll) |
 | needs a live simulator | yes | no — numpy only |
-| cost per control step | ~20 ms for one 10-wheel tank, ~0.9 ms each across a fleet of 30 (CPU, `horizon=4`) | ~0.2 ms, per vehicle |
+| cost per control step | v1.8.0: 25.5 ms median `solve` for one 10-wheel tank (Genesis-free, idle CPU, `horizon=4`; 1.7.0: 14.3 ms; measured before the last two 1.8.0 fix rounds, not re-measured on the final tree) — over a 25 ms control step; about 2 ms each across a fleet of 30 in a noisy session (see "Tuning knobs") | 0.16 ms for both channels, per vehicle (pre-1.8.0 measurement, not repeated; a table lookup that does not run the pipeline) |
 
 Use the sweep table when the controller runs in a process with no
 simulator (a game client driving the vehicle over OSC), or when the
@@ -253,7 +256,9 @@ sweep grid's pitch/roll axes bought. Terrain is assumed locally flat over
 the horizon (0.1 s at the default `horizon=4` and 40 Hz).
 
 Measured against the actual simulator (command held for `horizon` steps
-from the live state, `horizon=4`, reference 10-wheel tank and 4-wheel car):
+from the live state, `horizon=4`, reference 10-wheel tank and 4-wheel car;
+**measured before v1.8.0 and not re-measured since** — v1.8.0 changed the force
+model on both sides of this comparison):
 
 | vehicle | max \|Δa\| | max \|Δω_z\| | autodiff vs finite difference |
 |---|---|---|---|
@@ -313,6 +318,40 @@ forward course now takes throttle +0.13 (v1.6.10: -0.00), and **any sweep table
 measured before v1.7.0 is stale** for the default `"control"` profile;
 `samples/data/tank_sweep_signed.csv` is re-measured.
 
+**v1.8.0** changed the brake, the drive-torque order and the friction ellipse
+(CHANGELOG 1.8.0), so **every sweep table measured before v1.8.0 is stale
+again**; the bundled tank table is re-measured. Closed-loop results on v1.8.0
+(CPU/WSL2, genesis-world 1.4.5, headless, default batched solver), judged
+against 1.7.0 by an envelope rule fixed before measuring (horizon {3, 4, 5} ×
+spawn shifts (0,0) / (0,±0.3) m for the jacobian demos, the 3 shifts for the
+sweep demos, each tree with its own table; E0 / E1 / E2):
+
+| demo, metric | 1.7.0 [min, median, Q3, max] | 1.8.0 [min, median, max] | rule |
+|---|---|---|---|
+| forward jacobian, mean deviation (m) | [0.314, 0.451, 0.478, 0.562] | [0.322, 0.376, 0.448] | pass |
+| forward jacobian, final error (m) | [1.46, 1.47, 1.48, 1.49] | [1.45, 1.49, 1.50] | **E1 and E2 not met, by 0.01 m** |
+| reverse jacobian, yaw error (rad) | [0.31, 0.33, 0.34, 0.38] | [0.17, 0.21, 0.23] | pass |
+| forward sweep, mean deviation (m) | [0.273, 0.314, 0.350, 0.386] | [0.289, 0.334, 0.396] | **E1 not met, by 0.010 m** (deterministic: a repeat reproduced it to the digit) |
+| forward sweep, final error (m) | median 1.48, Q3 1.485 | [1.46, 1.49, 1.49] | E2 not met |
+| every run's own PASS criterion (sweep demos) | 5 of 6 (reverse, shift (0,-0.3): position error 69.35 m) | 6 of 6 | — |
+
+The user accepted both results; the rule is not changed and no PathFollower
+retune is in v1.8.0. **The "final error" is the distance to the goal AT THE
+DONE STEP**: the demo stops on the first DONE and reads the pose without
+stepping again, and DONE fires inside `arrival_goal` = 1.5 m, so the value is
+1.5 m minus the depth of the step that crossed the radius (< 0.05 m at 2 m/s).
+It is not a stopping distance — a project reading that attributed the 0.01 m to
+v1.8.0's shorter stop was wrong. At the DONE step, horizon 3 / 4 / 5: 1.8.0
+1.4971 / 1.4982 / 1.4607 m, 1.7.0 1.4694 / 1.4666 / 1.4927 m. With the speed
+and yaw gains varied ±25% the final error spans [1.45, 1.50] on both trees.
+The plant's prediction error against the realised motion (forward demo,
+(0,0)) improved in yaw rate at every horizon (RMS 0.0023 / 0.0028 / 0.0034 vs
+0.0094 / 0.0061 / 0.0092 rad/s) and in acceleration bias; acceleration RMS is
+better at h 3 / h 5 but slightly worse at h 4 (0.317 vs 0.306 m/s²), and the
+acceleration |max| is worse at h 3 / h 4 (5.82 / 4.41 vs 3.43 / 3.98 m/s²).
+`fleet_follow_demo`: PASS in both modes; mean cross-track deviation 0.581 m
+(jacobian), 0.366 m (sweep, with the re-measured table).
+
 ### Tuning knobs
 
 | kwarg | default | effect |
@@ -327,8 +366,44 @@ measured before v1.7.0 is stale** for the default `"control"` profile;
 | `scale_a` / `scale_w` | 1.0 / 0.2 | what counts as "one unit of error" in each channel |
 | `mass` / `izz` / `com` | read off the entity | override the planar mass properties |
 
-`horizon` is what the plant's cost buys, and it buys it linearly. Measured on
-the reference 10-wheel tank, CPU, one `solve()` call:
+`horizon` is what the plant's cost buys, and it buys it roughly linearly.
+
+**v1.8.0 cost (accepted by the user).** v1.8.0 applies the drive and brake torques
+before the tyre, takes the friction ellipse at the transmitted force and adds
+the low-speed deadbeats (CHANGELOG 1.8.0 §1–§6), and every one of those runs in
+the plant's unroll. Fail-closed, idle CPU, Genesis-free fake tank of
+`tests/test_differentiable_plant.py`, `horizon=4`, one `solve()` on a fresh
+plant: **14.25 ms on 1.7.0 → 25.49 ms on 1.8.0, ratio 1.811 [1.676 .. 1.897]**
+(6 alternating repeats; car `solve` 21.65 → 29.54 ms, ratio not published,
+interval [1.343 .. 1.444]). This was measured on the tree before the last two
+1.8.0 fix rounds (the Pacejka Newton-divisor floor changed afterwards) and was
+not re-measured on the final tree. **A 10-wheel tank at `horizon=4` therefore
+does not fit a 25 ms (40 Hz) control step on the measured machine** — the
+Genesis-free solve alone exceeds it, before the live-state snapshot a real
+vehicle adds. Smaller horizons were not measured on an idle machine (the noisy
+table below is no evidence for a 25 ms budget), so no horizon is recommended
+for that loop; the measured option is a `SweepTable`. A horizon sweep re-run for
+v1.8.0 on the same fake tank (median of 25 fresh plants per point, 4
+alternating repeats, one CPU; a noisier session whose absolute times were about
+twice the idle figures, so read the ratios, not the milliseconds):
+
+| `horizon` | 1.7.0 median | 1.8.0 median | 1.8.0 / 1.7.0, range over repeats |
+|---|---|---|---|
+| 2 | 16.7 ms | 24.9 ms | 0.92 .. 2.15 |
+| 3 | 21.9 ms | 35.9 ms | 1.02 .. 2.21 |
+| 4 | 28.5 ms | 59.7 ms | 1.51 .. 2.52 (published 1.918) |
+| 6 | 53.0 ms | 86.4 ms | 1.09 .. 2.03 |
+| 8 | 92.7 ms | 128.1 ms | 0.97 .. 1.51 |
+| 12 | 120.2 ms | 161.1 ms | 1.30 .. 1.76 |
+
+A 30-member fleet at `horizon=4` measured 1.62 → 2.17 ms per member in the same
+session (the "~0.9 ms each" this page quoted before was not reproduced on
+either tree in it).
+
+**The table below is the pre-v1.7.0 measurement** (reference 10-wheel tank,
+real vehicle, CPU, one `solve()` call; harness not in the repo) and was kept
+as this page's original figure. It is NOT the v1.8.0 cost; through v1.7.0 this
+page presented it as current. Measured then:
 
 | `horizon` | predicted ahead | per solve | vs a 25 ms control step |
 |---|---|---|---|
@@ -354,11 +429,16 @@ are not discarded — the chord iterations re-evaluate the full coupled
 response at the updated command, which is the useful half of the coupling
 without the pathology.
 
-**The plant has dead zones where the derivative is honestly zero.** The
-v0.6.0 `F_long` overshoot clamp pins tyre force to exactly zero whenever
-friction could not carry the wheel past rolling within one step, and a zero
-Jacobian reads as "no authority, do not move" — which froze the controller
-mid-manoeuvre on the reverse course. Where a whole Jacobian column
+**The plant has dead zones where the derivative is honestly zero.** Through
+v1.7.0 the drive torque went through the `F_long` overshoot clamp, which pinned
+the tyre force to exactly zero whenever friction could not carry the wheel past
+rolling within one step, and a zero Jacobian reads as "no authority, do not
+move" — which froze the controller mid-manoeuvre on the reverse course. Since
+v1.8.0 the drive torque acts before the tyre, and the dead zones known are a
+wheel the brake HOLDS (its spin is pinned at 0 for any small command change)
+and the clamp's zero end where a hook's force opposes the wheel's slip (on a
+240-state grid including brake 0.5, the count of all-zero d a / d throttle
+columns went from 9 car / 6 tank on 1.7.0 to 0 / 0; CHANGELOG 1.8.0 §7.2). Where a whole Jacobian column
 vanishes, the plant re-estimates it with a one-sided **secant** over
 `probe_delta` of command, large enough to step out of the dead zone. The
 derivative is a local object; the secant over a control-sized step is not.
@@ -436,7 +516,8 @@ the diagnostics per-member.
 (`compute_wheel_step` is); that axis simply carried candidate commands, and
 now carries `M x candidates`. At these tensor sizes the unroll is dominated by
 torch's per-op dispatch rather than arithmetic, so widening it barely costs
-anything — measured forward unroll, 10-wheel tank, `horizon=4`:
+anything — measured forward unroll, 10-wheel tank, `horizon=4` (before
+v1.8.0; absolute times rose with v1.8.0, see "Tuning knobs"):
 
 | batch | ms/call | ms per item |
 |---|---|---|

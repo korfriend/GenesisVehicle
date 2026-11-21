@@ -1164,6 +1164,17 @@ change the distances in the table; the table was NOT re-measured on v1.7.0, so r
 1.4.0-vs-1.4.5 and hib-vs-no-hib comparison on v1.6.9, not as distances a
 v1.7.0 server reproduces.
 
+**Re-measured for v1.8.0** (harness `.pm_r2/f_probe/hib3.py` of the 1.8.0
+release work, outside this repo: the L2 server's `RigidOptions`, the reference
+car, batched solver, genesis-world 1.4.5, CPU/WSL2). Distance over the
+throttle window: v1.7.0 3.2612 m with hib vs 3.8675 m without (-15.7%, one
+run); **v1.8.0 3.9683 m vs 3.9684 m** (seven runs per arm, identical across
+runs). The 46 / 100 zero-velocity steps of the rest window are still there, but
+since v1.8.0 they fall inside the brake HOLD (the brake now holds a stopped
+wheel, CHANGELOG 1.8.0 §2), and the start lag no longer shows in the distance.
+The cause of the sleep / wake cycling is still not established, L3 with
+`n_envs > 1` is still not measured, and hibernation stays ON.
+
 `docs/differentiable-sot.md` §7 notes that a `requires_grad` scene bans
 hibernation; that is unrelated to the delay above.
 
@@ -1364,6 +1375,16 @@ After build, the server also emits topology once:
 | `…/TargetControl/AddLocalRotation` · `AddWorldRotation` | `id:i, qw,qx,qy,qz` | relative rotate |
 | `…/TargetControl/AddWorldForce` · `AddWorldImpulse` · `AddWorldTorque` | `id:i, x,y,z` | per-vehicle external wrench (L2 mode only) |
 | `/Genesis/Obstacle/Transform` | `id:i, Px,Py,Pz, Qx,Qy,Qz,Qw` | drive a dynamic obstacle from the client |
+
+> **Brake input semantics changed in SDK v1.8.0 (client-visible).** The
+> `brake` field now applies its full torque down to standstill as a Coulomb
+> projection that holds a stopped wheel (`physics-contracts.md` §7.1): stops
+> are shorter (reference car, brake 1.0 from about 8.7 m/s: 9.450 → 7.295 m),
+> a braked vehicle holds on a slope (car 10° / 20°), and `throttle` + `brake`
+> stops the vehicle when the brake torque exceeds the drive torque per wheel
+> (1.7.0 crept at 0.728 m/s under throttle 1.0 + brake 1.0). A client tuned
+> against 1.7.0's fading brake will feel a stronger brake. The wire schema is
+> unchanged. CHANGELOG 1.8.0 §2.
 
 ### 4.5 Runtime — server → client
 

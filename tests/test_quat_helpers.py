@@ -60,10 +60,11 @@ def test_quat_mul_noncommutative():
 def test_susp_offset_grounded_and_air():
     mesh_r, l_susp = 0.4, 0.1
     # touch, droop, air(sentinel). `d` is an OFFSET-CORRECTED distance, so air
-    # is the sensor's miss sentinel — the legacy default RAY_MISS_THRESHOLD
-    # branch is taken here (miss=None).
+    # is the sensor's miss sentinel, passed explicitly (20.0, the default
+    # range's): since 1.8.0 miss=None raises (the legacy RAY_MISS_THRESHOLD
+    # branch these helpers used to take here was removed).
     d = torch.tensor([0.4, 0.5, 20.0], dtype=torch.float64)
-    off = _susp_visual_offset(d, mesh_r, l_susp)
+    off = _susp_visual_offset(d, mesh_r, l_susp, miss=20.0)
     # grounded at d=mesh_r → 0 ; d=0.5 → -0.1 ; air → -l_susp
     assert abs(float(off[0]) - 0.0) < 1e-7
     assert abs(float(off[1]) - (-0.1)) < 1e-7
@@ -72,7 +73,7 @@ def test_susp_offset_grounded_and_air():
 
 def test_susp_offset_clamped():
     # very close hit → large positive offset clamped to +0.19
-    off = _susp_visual_offset(torch.tensor([0.05], dtype=torch.float64), 0.4, 0.1)
+    off = _susp_visual_offset(torch.tensor([0.05], dtype=torch.float64), 0.4, 0.1, miss=20.0)
     assert abs(float(off[0]) - 0.19) < 1e-7
 
 
@@ -81,7 +82,7 @@ def test_susp_offset_negative_distance_is_overcompression_not_air():
     # the wheel attachment point (deep over-compression) — a VALID reading.
     # It must produce the clamped compression offset, NOT the air pose
     # (-l_susp): the old d <= 1e-6 air test misclassified it.
-    off = _susp_visual_offset(torch.tensor([-0.3], dtype=torch.float64), 0.4, 0.1)
+    off = _susp_visual_offset(torch.tensor([-0.3], dtype=torch.float64), 0.4, 0.1, miss=20.0)
     assert abs(float(off[0]) - 0.19) < 1e-7      # clamped up, not -l_susp
     # An exact 0.0 is likewise a REAL reading here (v1.5.2): a hit at exactly
     # the high-cast offset corrects to 0.0. The `!= 0.0` term that used to make
@@ -89,7 +90,7 @@ def test_susp_offset_negative_distance_is_overcompression_not_air():
     # distances; on corrected ones it reported a fully compressed wheel as
     # airborne. The unpopulated-sensor case it exists for is gated by
     # VehiclePhysics._stepped_once instead — see raycast.is_ray_hit_corrected.
-    off0 = _susp_visual_offset(torch.tensor([0.0], dtype=torch.float64), 0.4, 0.1)
+    off0 = _susp_visual_offset(torch.tensor([0.0], dtype=torch.float64), 0.4, 0.1, miss=20.0)
     assert abs(float(off0[0]) - 0.19) < 1e-7     # 0.4 - 0.0, clamped
 
 
@@ -104,11 +105,11 @@ def test_susp_offset_accepts_a_per_row_l_susp():
     mesh_r = 0.4
     d = torch.tensor([[0.4, 20.0], [0.4, 20.0]], dtype=torch.float64)
 
-    scalar = _susp_visual_offset(d, mesh_r, 0.1)
+    scalar = _susp_visual_offset(d, mesh_r, 0.1, miss=20.0)
     assert torch.equal(
         scalar, torch.tensor([[0.0, -0.1], [0.0, -0.1]], dtype=torch.float64))
 
     per_row = _susp_visual_offset(
-        d, mesh_r, torch.tensor([[0.1], [0.05]], dtype=torch.float64))
+        d, mesh_r, torch.tensor([[0.1], [0.05]], dtype=torch.float64), miss=20.0)
     assert torch.equal(
         per_row, torch.tensor([[0.0, -0.1], [0.0, -0.05]], dtype=torch.float64))

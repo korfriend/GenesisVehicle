@@ -283,7 +283,8 @@ def verdicts(r: dict) -> "list[tuple[str, bool, str]]":
     #     the read layer on the RAW distances where it can be (single_scene) and
     #     from the sentinel alone on injected, offset-corrected ones
     #     (dual_scene); the has-stepped gate covers the difference. It replaces this
-    #     sample's old hand-rolled `d0_max < RAY_MISS_THRESHOLD and d0_min > 0`,
+    #     sample's old hand-rolled `d0_max < RAY_MISS_THRESHOLD and d0_min > 0`
+    #     (that constant was removed in v1.8.0),
     #     which was only valid at the DEFAULT raycaster_max_range=20.0 — at a
     #     lower range a miss came back UNDER 19.9 and the check passed forever.
     #     Measured on the centred terrain: d0 = [0.411, 0.411, 0.412, 0.412].

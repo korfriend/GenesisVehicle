@@ -8,7 +8,9 @@ is visible rather than argued:
   unrolled batch per step for the whole fleet.
 - ``sweep`` — ONE :class:`SweepTable`, shared by K independent
   :class:`PathFollower` s. The table is stateless, so a fleet of one kind
-  needs exactly one of it; the inversion is per-vehicle but ~0.16 ms each.
+  needs exactly one of it; the inversion is per-vehicle, 0.16 ms each for
+  the table lookup alone (a pre-1.8.0 measurement, not repeated; the lookup
+  does not run the physics pipeline).
 
     python -m genesis_vehicle.samples.fleet_follow_demo [--k 8]
         [--plant {both,jacobian,sweep}] [--viewer] [--gpu] [--mp4 [PATH]]
@@ -22,23 +24,32 @@ What the comparison actually shows
 ----------------------------------
 **Cost scales differently.** The jacobian plant pays per FLEET — one unrolled
 batch however many vehicles — so its per-vehicle cost falls as the fleet
-grows. The sweep table pays per vehicle, but so little (~0.4 ms) that it does
-not matter at these sizes. What the table does not show is the large offline
+grows. The sweep table pays per vehicle, but so little that it does
+not matter at these sizes: this demo's own summary line ("control ... per
+vehicle") times the WHOLE sweep control step — each PathFollower's pursuit
+law plus its table lookup — at 0.37 ms per vehicle (SDK 1.8.0, default 8
+tanks, CPU/WSL2, genesis-world 1.4.5, one run); the lookup alone is the
+0.16 ms quoted above. What the table does not show is the large offline
 measurement it already paid, and has to pay again on any change to the
 vehicle: the bundled CSV is valid only for this exact (URDF, preset,
 override) triple, and the ``TankTuning`` constants below reproduce the
 overrides it was measured with. Edit any of them and the table is silently
 stale while the jacobian plant stays correct.
 
-**Tracking is course-dependent, and not in one plant's favour.** On this
-continuous S-curve the sweep table holds a tighter line (mean cross-track
-~0.34 m vs ~0.61 m at 4 tanks); on ``path_follow_demo``'s straights-and-
-corners course the jacobian plant is the tighter of the two (0.370 m vs
-0.384 m). Both stay far inside the 3 m criterion in both cases.
+**Tracking is course-dependent.** On this continuous S-curve the sweep table
+holds a tighter line: SDK 1.8.0, default 8 tanks, mean cross-track 0.366 m
+(sweep, the re-measured table) vs 0.581 m (jacobian); CPU/WSL2, genesis-world
+1.4.5, headless. (This paragraph quoted ~0.34 m vs ~0.61 m at 4 tanks through
+1.7.0.) On ``path_follow_demo``'s straights-and-corners course this paragraph
+said the jacobian plant was the tighter of the two (0.370 m vs 0.384 m, a
+pre-1.7.0 measurement); that no longer holds: default args, the sweep plant
+measured 0.314 m vs 0.352 m (jacobian) on 1.7.0 and 0.334 m vs 0.374 m on
+1.8.0. Both plants stay far inside the 3 m criterion in every case.
 
 The gap here is NOT the plant missing its target: raising the outer heading
 gain (``--k-w 3.0`` -> 0.695 m) and letting the inversion converge harder
-(``--newton-iters 5`` -> 0.607 m) both leave it where it was, so it is
+(``--newton-iters 5`` -> 0.607 m) both leave it where it was (measured before
+1.7.0 at 4 tanks, not re-measured since), so it is
 neither an outer-loop P limit nor an unconverged inverse. An accurate inverse
 delivers exactly the `(a, omega_z)` the pursuit law asks for; whether that
 keeps the vehicle ON the line is the pursuit law's business, and on sustained

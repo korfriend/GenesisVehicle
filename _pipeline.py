@@ -13,52 +13,132 @@ The function is batch-shape-agnostic: every tensor is `(B, n_wheels)` or
 with. It performs no I/O (no entity reads, no solver writes, no visual) —
 the caller does all of that around it.
 
-Axle resisting torque (v1.7.0). Hooks run in TWO phases per step, both over
-the ``post_tire_hooks`` list the caller passes (a hook whose class lacks one
-of the two methods is skipped for that phase):
+Hook phases (v1.7.0). Hooks run in TWO phases per step, both over the
+``post_tire_hooks`` list the caller passes (a hook whose class lacks one of the
+two methods is skipped for that phase):
 
 1. ``apply_pre_tire(ctx)`` -- BEFORE the tyre. The only phase that may set
    ``ctx.T_resist`` (``(B, n)``, sign of ``omega``; ``RollingResistance``
-   does). The pipeline caps it against the pre-step ω with
-   ``dynamics.cap_resist_torque`` (``T_rr``) and applies it to ω at once:
-   ``omega' = omega - T_rr * dt / i_wheel``. The tyre, the POST_TIRE hooks, the
-   F_long overshoot clamp, the ω update and the airborne branch all start from
-   ``omega'``. So the tyre sees the ω the resisting torque leaves. On a
-   freely rolling wheel whose tyre request reaches the overshoot-clamp limit,
-   the clamp passes exactly ``-T_rr / r`` to the chassis on the SAME step and
-   ω ends at rolling (pinned for the reference car and tank at +-2 and 5 m/s
-   by ``test_a_rolling_wheel_stays_rolling_and_the_chassis_gets_the_rr_force``;
-   a tyre whose request stays below that limit passes less). (The
-   intermediate 1.7.0 design added ``T_resist`` to the brake inside the clamp
-   instead; the clamp target is exact rolling, which is not the resistance
-   equilibrium, and ω alternated step to step between rolling and
-   rolling - ``T_rr*dt/i``.)
-2. ``apply_post_tire(ctx)`` -- after the tyre, as before. Writing
-   ``ctx.T_resist`` here raises ``RuntimeError`` -- a rebinding always, an
-   in-place write except under ``torch.inference_mode()`` (where the
-   ``_version`` read is skipped; the physics still uses the pre-tyre snapshot).
+   does).
+2. ``apply_post_tire(ctx)`` -- after the tyre. Writing ``ctx.T_resist`` here
+   raises ``RuntimeError`` -- a rebinding always, an in-place write except
+   under ``torch.inference_mode()`` (where the ``_version`` read is skipped;
+   the physics still uses the pre-tyre snapshot).
 
-The brake is still evaluated on the PRE-step ω and capped together with the
-resisting torque exactly as before: ``cap_resist_torque(T_brake +
-T_resist, omega) - T_rr`` is what enters the clamp. Brake + resisting torque
-therefore cannot reverse ω in one step -- guarded by ``cap_resist_torque`` on
-``T_resist`` in phase 1 plus the cap of the sum here (the remainder is at most
-``|omega'| * i_wheel / dt`` and has ω's sign, for a ``T_resist`` of ω's sign
-and up to float rounding -- a capped step can land a few ulp past zero). That guard does not bound the
-drive torque, the tyre friction torque or a hook's ω pull. With no
-``T_resist`` set, ``omega'`` IS ``omega`` (the same tensor object) and the
-code path is the pre-1.7.0 one, operation for operation.
+Axle torques before the tyre (v1.8.0). Per wheel, in this order, all applied
+to the wheel spin BEFORE the tyre is evaluated:
+
+* resisting torque: ``T_rr = cap_resist_torque(T_resist, omega)`` against the
+  pre-step ω, ``omega_r = omega - T_rr * dt / i_wheel`` (the v1.7.0 ω′ line);
+* drive torque: ``omega_d = omega_r + T_drive * dt / i_wheel``;
+* brake (B1): ``dynamics.brake_projection`` -- the full brake MAGNITUDE (no
+  ``tanh``) as a projection toward zero that cannot cross it, giving
+  ``omega_t``. Where the brake could stop the wheel this step
+  (``T_brake > 0`` and ``T_brake >= |omega_d| * i_wheel / dt``) the wheel is
+  HELD: ``omega_t = 0`` and ``B_rem`` (the capacity left) widens the clamp
+  both ways and resists spin-up in the ω update. A zero brake never holds.
+
+The tyre is evaluated at ``r * clamp(omega_t, +-omega_max)`` (M2: a wheel
+speed the ω update can actually reach). The POST_TIRE hooks get
+``ctx.omega = omega_t``.
+
+**What was wrong in this docstring through 1.7.0, said here explicitly:** it
+stated that the brake is evaluated on the pre-step ω and "capped together with
+the resisting torque ... ``cap_resist_torque(T_brake + T_resist, omega) -
+T_rr`` is what enters the clamp", and that with no ``T_resist`` set "``omega'``
+IS ``omega`` ... and the code path is the pre-1.7.0 one, operation for
+operation". Neither is true since 1.8.0: the brake is the projection above,
+nothing of the brake or of ``T_resist`` enters the clamp as a torque, and the
+tyre is evaluated at ``omega_t`` (which includes this step's drive and brake),
+not at the pre-step ω, whether or not ``T_resist`` is set.
+
+The clamp and the bounds (each a guard, with what it does NOT bound):
+
+* Overshoot clamp (v0.6.0, rewritten 1.8.0): the hooked ``F_long`` is limited
+  to ``[min(0, L) - B_rem/r, max(0, L) + B_rem/r]`` with
+  ``L = (omega_t - v_long/r) * i_wheel / dt / r`` -- the friction torque
+  cannot carry the wheel past rolling in one step, and a held wheel may
+  transmit its leftover brake capacity. Exposed as ``ctx.F_long_bounds``.
+* D, held-wheel deadbeat: on a wheel with ``B_rem > 0``,
+  ``|F_long| <= s * (N/g) * |v_long - r * omega_t| / dt`` -- the force that
+  stops the contact slip in one step on the wheel's mass share. Exposed as
+  ``ctx.F_long_deadbeat``. Not applied on wheels a hook holds
+  (``ctx.hold_applied``).
+* B2, friction ellipse on the transmitted force: where the clamp binds on the
+  RAW tyre force, ``F_lat`` and ``kappa`` are taken from
+  ``tire.at_long_force`` at the clamped force (a closed form for
+  ``PacejkaAnisotropic``, a grid otherwise). The hooks still receive the raw
+  ``F_long``; their ``ctx.F_lat`` is already this value where the clamp binds.
+* Y, lateral deadbeat: ``|F_lat| <= s * (N/g) * |v_lat| / dt`` on every wheel
+  a hook does not hold -- the lateral counterpart of D, against the explicit
+  low-speed lateral 2-cycle of the tyre (per-step gain
+  ``G = B_y*C_y*mu*g*dt / max(|v_long|, eps_v)``; ``G > 2`` alternates step
+  to step; measured gone with Y + Z on the reference car and tank, the HJW demo
+  car and ``tests/data/low_yaw_inertia_car.urdf``, other vehicles untested). It
+  binds where the tyre's own explicit gain exceeds ``s``: at static load only
+  at low speed (below about ``B_y*C_y*mu*g*dt*(N/N_static)/s``: 2.98 m/s for
+  the reference car at dt 0.025, mu 1.0, s 0.856), but under a wheel-load
+  spike it binds AT SPEED too (a
+  landing, a washboard): it then removes the part of the spike force that
+  would reverse the contact's lateral velocity within one step. A hook's
+  ``F_lat`` is a request Y may cut.
+* Z, rigid-body scale: ``s = min(1, I_cg / sum_i (N_i/g) * rho_i^2)``
+  (``dynamics.deadbeat_scale``; ``s = 1`` when no inputs exist) makes D, Y
+  and ``StaticFrictionLock``'s damper bound deadbeat in every PLANAR mode, the
+  yaw mode included. It does NOT cover the pitch / roll coupling of the
+  horizontal contact forces through the contact height, nor loads that are
+  not in moment balance about the centre of mass.
+* ``g`` is the constant ``dynamics.DEADBEAT_G`` = 9.81, not the scene's
+  gravity. Off 9.81 every bound is ``|g|/9.81`` times the same bound computed
+  with the true mass share ``N/|g|``: TIGHTER under a weaker gravity (D and Y
+  over-limit, the SFL damper floor is under-critical), LOOSER under a
+  stronger one -- the unconservative side. The one-step TRANSLATIONAL factor
+  is ``1 - s*|g|/9.81``, which stops removing the 2-cycle at
+  ``|g| >= 2*9.81/s`` (derived); the YAW mode stays deadbeat at any ``|g|``
+  while the computed ``s < 1`` (``s`` absorbs the ratio). At |g| 24.5 on the
+  reference car (translational ``s*|g|/9.81`` about 2.14) the measured
+  lateral-kick and brake cases showed no 2-cycle (one 0.01 rad/s omega
+  alternation in one case), see ``dynamics.DEADBEAT_G``. (The first 1.8.0 implementation said "every bound scales by
+  ``9.81/|g|``" here, the reverse direction; that was wrong.)
+
+None of these bound the drive torque (it acts within the step), the
+``LowSpeedRegularizer`` ω pull or ``StaticFrictionLock``'s ω override, which
+act on the ω update AFTER the clamp, as before.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from genesis.utils.geom import transform_by_quat
 
-from .dynamics import brake_torque_signed, cap_resist_torque
+from .dynamics import (
+    DEADBEAT_G, YawInertia, brake_projection, cap_resist_torque, deadbeat_scale,
+)
+from .tire_models import TireModel
+
+_NO_YAW_INERTIA_WARNED = False
+
+
+def _warn_no_yaw_inertia() -> None:
+    """One WARNING per process when ``compute_wheel_step`` runs with no
+    yaw-inertia inputs at all (neither the keyword nor ``wheel_meta.yaw_inertia``),
+    i.e. at ``s = 1``. A ``VehiclePhysics`` always has them after its first
+    step (or logged its own per-vehicle warning and set ``s = 1`` explicitly),
+    and a ``DifferentiablePlant`` always passes its own, so this fires only for
+    a direct caller of the pipeline."""
+    global _NO_YAW_INERTIA_WARNED
+    if _NO_YAW_INERTIA_WARNED:
+        return
+    _NO_YAW_INERTIA_WARNED = True
+    import logging
+    logging.getLogger("genesis_vehicle").warning(
+        "[genesis_vehicle:deadbeat-scale] compute_wheel_step ran with no "
+        "yaw-inertia inputs (no yaw_inertia= keyword and wheel_meta.yaw_inertia "
+        "is None): the low-speed deadbeat bounds use s = 1 (no rigid-body "
+        "scale). Logged once per process.")
 
 
 def pw(t: torch.Tensor) -> torch.Tensor:
@@ -140,16 +220,34 @@ def compute_wheel_step(
     dt: float,
     B: int,
     n: int,
+    yaw_inertia: Optional[YawInertia] = None,
 ) -> PipelineResult:
     """Sections A–E of the ray-wheel pipeline. Pure compute; mutates only
     ``ctx`` (for the hooks) and returns a ``PipelineResult``.
 
     ``ctx.T_resist`` (reset to None here, set only in a hook's
-    ``apply_pre_tire``) is the per-wheel axle resisting torque (v1.7.0): it is
-    capped and applied to ω BEFORE the tyre, and the brake is capped as the
-    remainder in section (D) -- see the module docstring. When it is set,
-    ``ctx.omega`` in the POST_TIRE phase and the returned ``kappa`` are taken
-    at that post-resistance ω, not at the ω passed in."""
+    ``apply_pre_tire``) is the per-wheel axle resisting torque (v1.7.0). It,
+    the drive torque and the brake are applied to ω BEFORE the tyre (v1.8.0,
+    see the module docstring); ``ctx.omega`` in the POST_TIRE phase is that ω
+    (``omega_t``), not the ω passed in. Through 1.7.0 this docstring said
+    the brake was "capped as the remainder in section (D)"; since 1.8.0 it is
+    not.
+
+    ``yaw_inertia`` (v1.8.0, keyword, default None): the inputs of the
+    rigid-body deadbeat scale (``dynamics.YawInertia``). Precedence: this
+    keyword, then ``wheel_meta.yaw_inertia`` (the inputs the driver that owns
+    the wheel meta computed), else ``s = 1`` (one
+    ``[genesis_vehicle:deadbeat-scale]`` warning per process).
+    ``DifferentiablePlant`` passes its OWN inputs here (from its mass
+    properties) and never writes the wheel meta it shares with the live
+    driver, so a plant built with explicit ``mass=`` / ``izz=`` / ``com=`` runs
+    this same code with different Z inputs and its prediction can differ from
+    the simulator by design.
+
+    The returned ``kappa`` is the tyre's slip at ``omega_t`` (clipped to
+    ``+-omega_max``), replaced by ``kappa_eq`` (the slip of the transmitted
+    force on the tyre's own curve) where the clamp binds. ``F_long`` /
+    ``F_lat`` are the clamped / deadbeat-limited forces actually applied."""
     wm = wheel_meta
     DT = dt
 
@@ -212,6 +310,16 @@ def compute_wheel_step(
     i_w = pw(wm.i_wheel)
     radius_b = pw(wm.radius)
 
+    # [Z] Rigid-body scale of the low-speed deadbeat bounds (v1.8.0), per row,
+    # from this step's N. Precedence: the keyword, then the wheel meta's own
+    # inputs (set by the driver that owns it), else s = 1 (logged once).
+    yi = yaw_inertia if yaw_inertia is not None else getattr(wm, "yaw_inertia", None)
+    if yi is None:
+        _warn_no_yaw_inertia()
+        s = 1.0
+    else:
+        s = deadbeat_scale(N, yi)                        # (B, 1)
+
     # PRE_TIRE hook phase (v1.7.0). Every per-step hook output is reset here,
     # before EITHER phase, so a pre-tire hook never sees last step's values.
     # F_long / F_lat do not exist yet in this phase.
@@ -221,6 +329,8 @@ def compute_wheel_step(
     ctx.omega_override = None
     ctx.omega_pull_factor = None; ctx.omega_pull_target = None
     ctx.T_resist = None
+    ctx.F_long_bounds = None; ctx.F_long_deadbeat = None; ctx.hold_applied = None
+    ctx.deadbeat_scale = s.clone() if torch.is_tensor(s) else s   # hooks get a copy
     ctx.dt = float(DT)
     for hook in post_tire_hooks:
         pre = getattr(hook, "apply_pre_tire", None)
@@ -237,18 +347,73 @@ def compute_wheel_step(
         T_resist_ver = (None if T_resist_obj.is_inference()
                         else T_resist_obj._version)
         T_resist = T_resist_obj.clone()
-        # Axle resisting torque applied to omega BEFORE the tyre, capped so it
-        # alone cannot reverse the wheel.
-        T_rr = cap_resist_torque(T_resist, omega, DT, i_w)
-        omega_t = omega - T_rr * DT / i_w
     else:
         T_resist = None
         T_resist_ver = None
-        omega_t = omega     # same object: the no-resistance path is unchanged
-    v_roll = pw(wm.radius) * omega_t
+
+    # (P) Axle torques BEFORE the tyre (v1.8.0): the resisting torque (capped
+    # against the pre-step omega, exactly the v1.7.0 omega'), then the drive,
+    # then the brake as a Coulomb projection toward zero that cannot cross it
+    # (dynamics.brake_projection). B_rem = the brake capacity left on a wheel
+    # the brake stopped this step; it holds the wheel below.
+    if T_resist is not None:
+        T_rr = cap_resist_torque(T_resist, omega, DT, i_w)
+        omega_r = omega - T_rr * DT / i_w
+    else:
+        omega_r = omega
+    omega_d = omega_r + T_drive_pw / i_w * DT
+    omega_t, B_rem = brake_projection(omega_d, T_brake_pw, DT, i_w)
+    # [M2] The tyre sees a wheel speed that can exist: omega_t clipped to
+    # +-omega_max (the omega update below is clipped the same way); the clamp
+    # budget keeps the unclipped omega_t.
+    omega_max = float(resolved.chassis.omega_max)
+    omega_e = torch.clamp(omega_t, -omega_max, omega_max)
+
+    # (Q) Bounds on the tyre's F_long, fixed BEFORE the tyre and the hooks.
+    # Overshoot clamp: friction cannot carry the wheel past rolling in one
+    # step; widened both ways by B_rem / r on a held wheel. Always contains 0.
+    omega_target = v_long / radius_b
+    F_long_limit = (omega_t - omega_target) * i_w / DT / radius_b
+    zeros_f = torch.zeros_like(F_long_limit)
+    B_rem_f = B_rem / radius_b
+    F_lo = torch.minimum(zeros_f, F_long_limit) - B_rem_f
+    F_hi = torch.maximum(zeros_f, F_long_limit) + B_rem_f
+    # [D] Held-wheel deadbeat: on a wheel the brake holds, |F_long| <= the
+    # force that stops its contact slip in one step on its (Z-scaled) mass
+    # share.
+    F_db = torch.where(
+        B_rem > 0,
+        N * s / DEADBEAT_G * torch.abs(v_long - radius_b * omega_t) / DT,
+        torch.full_like(omega_t, float("inf")))
+    F_lo_d = torch.maximum(F_lo, -F_db)
+    F_hi_d = torch.minimum(F_hi, F_db)
+    # Hook-visible copies (the pipeline keeps its own: a hook writing these
+    # cannot move the clamp).
+    ctx.F_long_bounds = (F_lo.clone(), F_hi.clone())
+    ctx.F_long_deadbeat = F_db.clone()
+    v_roll = radius_b * omega_e
 
     # (C) Tire force — single batched call.
     F_long, F_lat, kappa, alpha = resolved.tire(v_long, v_lat, v_roll, N, wm)
+
+    # [B2] Where the clamp will bind on the RAW tyre force, the lateral force
+    # and the slip are taken on the tyre's own combined curve at the
+    # TRANSMITTED force (TireModel.at_long_force: a closed form for
+    # PacejkaAnisotropic, a grid otherwise). Elsewhere the raw output is kept
+    # bit for bit. The hooks still receive the RAW F_long.
+    F_c = torch.maximum(torch.minimum(F_long, F_hi_d), F_lo_d)
+    bound = F_c != F_long
+    # A tyre that does not subclass TireModel (any callable was accepted as
+    # cfg.tire through 1.7.0) has no at_long_force: it gets the generic grid.
+    at_long_force = getattr(resolved.tire, "at_long_force", None)
+    if at_long_force is None:
+        F_lat_eq, kappa_eq = TireModel.at_long_force(
+            resolved.tire, v_long, v_lat, v_roll, N, wm, F_long_target=F_c)
+    else:
+        F_lat_eq, kappa_eq = at_long_force(
+            v_long, v_lat, v_roll, N, wm, F_long_target=F_c)
+    F_lat = torch.where(bound, F_lat_eq, F_lat)
+    kappa = torch.where(bound, kappa_eq, kappa)
 
     # POST_TIRE stability hooks (batched — one call per hook).
     ctx.F_long = F_long; ctx.F_lat = F_lat
@@ -264,36 +429,36 @@ def compute_wheel_step(
             "torque must be set in apply_pre_tire(ctx), which runs before the "
             "tyre (v1.7.0). A post-tyre write would be silently ignored.")
     F_long, F_lat = ctx.F_long, ctx.F_lat
+    hold = ctx.hold_applied
 
-    # (D) Omega update. brake torque clamped against single-step overshoot.
-    # The brake is evaluated on the PRE-step omega (unchanged); with a
-    # resisting torque present the brake + resistance SUM is capped as before
-    # and only the remainder after the part already applied (T_rr) enters
-    # the clamp: |remainder| <= |omega_t| * i_wheel / dt, sign of omega.
-    T_brake_eff = brake_torque_signed(T_brake_pw, omega, dt=DT, i_wheel=i_w)
-    if T_resist is not None:
-        T_brake_eff = cap_resist_torque(T_brake_eff + T_resist, omega, DT, i_w) - T_rr
+    # (D) The clamp: the hooked F_long into [F_lo_d, F_hi_d] (bounds + held-
+    # wheel deadbeat); on wheels a hook HOLDS (StaticFrictionLock after rest)
+    # into [F_lo, F_hi] only.
+    F_hooked = F_long
+    F_long = torch.maximum(torch.minimum(F_hooked, F_hi_d), F_lo_d)
+    if hold is not None:
+        F_hold = torch.maximum(torch.minimum(F_hooked, F_hi), F_lo)
+        F_long = torch.where(hold, F_hold, F_long)
 
-    # [Overshoot Clamp] Cap F_long so the resulting friction torque cannot
-    # reverse the tire slip direction in one step.
-    omega_target = v_long / radius_b
-    domega_nofric = (T_drive_pw - T_brake_eff) / i_w
-    omega_nofric = omega_t + domega_nofric * DT
-    T_fric_limit = (omega_nofric - omega_target) * i_w / DT
-    F_long_limit = T_fric_limit / radius_b
-    F_long = torch.where(
-        omega_nofric > omega_target,
-        torch.maximum(torch.zeros_like(F_long), torch.minimum(F_long, F_long_limit)),
-        torch.minimum(torch.zeros_like(F_long), torch.maximum(F_long, F_long_limit)),
-    )
-
+    # Omega update: the tyre friction torque on omega_t, then the remaining
+    # brake capacity B_rem resists the spin-up (a projection toward zero that
+    # cannot cross it). Airborne: omega_t (drive/brake/resistance only).
     T_friction = radius_b * F_long
-    domega = (T_drive_pw - T_brake_eff - T_friction) / i_w
+    domega = -T_friction / i_w
     new_omega = omega_t + domega * DT
-    domega_air = (T_drive_pw - T_brake_eff) / i_w
-    new_omega_air = omega_t + domega_air * DT
-    new_omega = torch.where(air_mask, new_omega_air, new_omega)
-    omega_max = float(resolved.chassis.omega_max)
+    rem = torch.abs(new_omega) - B_rem / i_w * DT
+    new_omega = torch.where(
+        B_rem > 0, torch.sign(new_omega) * torch.clamp(rem, min=0.0), new_omega)
+    new_omega = torch.where(air_mask, omega_t, new_omega)
+
+    # [Y] Lateral deadbeat: |F_lat| <= the force that stops the contact's
+    # lateral velocity in one step on the wheel's (Z-scaled) mass share; not
+    # on wheels a hook holds.
+    F_lat_db = N * s / DEADBEAT_G * torch.abs(v_lat) / DT
+    if hold is not None:
+        F_lat_db = torch.where(hold, torch.full_like(F_lat_db, float("inf")), F_lat_db)
+    F_lat = torch.maximum(torch.minimum(F_lat, F_lat_db), -F_lat_db)
+
     new_omega = torch.clamp(new_omega, -omega_max, omega_max)
 
     if ctx.omega_pull_factor is not None and ctx.omega_pull_target is not None:

@@ -12,7 +12,10 @@ TankTuning`) and as a sweep-measurement config file (module-level
         --output tank_sweep.csv --gpu
 
 The sweep table is only valid for the exact (URDF, preset, overrides)
-triple — change anything here and re-measure.
+triple AND the SDK version it was measured on — change anything here, or
+upgrade the SDK, and re-measure. The bundled table was re-measured on SDK
+1.8.0 (every pre-1.8.0 table is stale: 1.8.0 changed the brake, the drive
+torque order and the friction ellipse).
 """
 from __future__ import annotations
 
@@ -23,9 +26,23 @@ class TankTuning:
     T_BRAKE_MAX = 200_000.0     # N*m total — brake can out-torque tire friction
     I_WHEEL = 100.0             # kg*m^2 — damps brake-friction oscillation
     MU_LAT = 0.5                # flat lateral friction — responsive skid spin
-    SFL_V_THR = 5.0             # StaticFrictionLock enables right below cruise
+    # StaticFrictionLock ENGAGES (brake > 0.3) below 5 m/s planar contact
+    # speed, i.e. right below cruise. Since SDK 1.8.0 that only forces the
+    # braked wheels' spin to 0; the lock's spring-damper takes over the tyre
+    # force only once the contact is at REST (StaticFrictionLock.REST_SPEED /
+    # creep test). Through 1.7.0 it replaced the tyre force from 5 m/s down,
+    # anchored where it engaged. Value unchanged in 1.8.0.
+    SFL_V_THR = 5.0
     SFL_K_SPRING = 1_000_000.0
-    SFL_K_DAMP = 200_000.0      # ~1.35x critical -> over-damped hold
+    # Since 1.8.0 a FLOOR: the lock damps with max(k_damp, 2*sqrt(k_spring*N/g)),
+    # bounded by the one-step deadbeat s*(N/g)*|v|/dt. Measured static share of
+    # this tank under this config: 5780..5861 kg per wheel (10 wheels), so the
+    # critical floor is 152.0k..153.1k and 200k is 1.31x critical (it is the
+    # value used); the deadbeat bound caps the coefficient at about 216k..219k
+    # (s 0.935, dt 0.025), above 200k. CPU/WSL2, genesis-world 1.4.5, brake 1.0
+    # settle 3 s. (Through 1.7.0 this comment said "~1.35x critical" with no
+    # basis given; the measured ratio is 1.31x.)
+    SFL_K_DAMP = 200_000.0
 
     @classmethod
     def apply_config(cls, cfg):

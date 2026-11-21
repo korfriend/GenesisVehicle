@@ -56,14 +56,29 @@ _logger = logging.getLogger(__name__)
 #: structure you expect within the margin above the wheel (tunnel ceilings).
 RAY_UP_OFFSET = 1.0
 
-#: DEPRECATED since v1.5.2, removal targeted v1.8.0 (was v1.7.0; not removed in 1.7.0). Unexported fallback
-#: threshold used only when the miss sentinel of a sensor cannot be determined
-#: (a stub/foreign sensor exposing no ``_options``). It is pinned to the
-#: raycaster's DEFAULT ``max_range`` of 20.0, so it silently misjudges any
-#: sensor built with a different range — which is the whole reason
-#: :func:`is_ray_hit` now tests the sensor's own sentinel instead. Do not add
-#: new uses.
-RAY_MISS_THRESHOLD = 19.9
+# ``RAY_MISS_THRESHOLD`` (19.9, deprecated since v1.5.2) was REMOVED in v1.8.0.
+# It was the fallback when a sensor exposed no miss sentinel, pinned to the
+# raycaster's DEFAULT ``max_range`` of 20.0 and therefore wrong at any other
+# range. A ``miss`` of ``None`` now raises ``ValueError`` (:func:`_require_miss`)
+# wherever a predicate needs the sentinel.
+
+#: The ``ValueError`` message for a missing sentinel (v1.8.0).
+_MISS_NONE_MSG = (
+    "`miss is None`: the sensor exposes no miss sentinel; `RAY_MISS_THRESHOLD` "
+    "was removed in 1.8.0. Pass the sensor's sentinel "
+    "(`genesis_vehicle.sensor_miss_value(sensor)`) or stamp one with "
+    "`set_sensor_miss_value(sensor, miss)`. A `VehiclePhysics` built with "
+    "`sensor=None` and fed `step(distances=)` needs "
+    "`physics.set_ray_miss_value(miss)` before its first step.")
+
+
+def _require_miss(miss):
+    """``miss`` unchanged, or ``ValueError`` (:data:`_MISS_NONE_MSG`) when it
+    is ``None``. The single guard every miss predicate goes through (v1.8.0:
+    the ``RAY_MISS_THRESHOLD`` fallback it replaces is gone)."""
+    if miss is None:
+        raise ValueError(_MISS_NONE_MSG)
+    return miss
 
 
 #: Half-width of the swept-envelope ray fan, in WHEEL RADII: sample ``j`` sits
@@ -494,13 +509,15 @@ def set_sensor_miss_value(sensor: "object",
     enforce them too.
 
     Returns the stamped value, or ``None`` if the sensor exposes no sentinel at
-    all (a stub) — in which case readers fall back to
-    :data:`RAY_MISS_THRESHOLD`."""
+    all (a stub) and none was passed. Since v1.8.0 such a sensor's readers
+    RAISE ``ValueError`` (through 1.7.x they fell back to the removed
+    ``RAY_MISS_THRESHOLD``): pass ``miss`` explicitly for a stub sensor."""
     if miss is None:
         miss = sensor_miss_value(sensor)
     if miss is None:
-        _logger.debug("sensor %r exposes no miss sentinel; readers will fall "
-                      "back to RAY_MISS_THRESHOLD", sensor)
+        _logger.debug("sensor %r exposes no miss sentinel and none was passed; "
+                      "readers will raise ValueError (RAY_MISS_THRESHOLD was "
+                      "removed in 1.8.0)", sensor)
         return None
     miss = check_miss_supported(sensor, float(miss))
     setattr(sensor, _MISS_ATTR, miss)
@@ -578,8 +595,9 @@ def check_miss_supported(sensor: "object", miss: float) -> float:
 def ray_miss_value(sensor: "object") -> "float | None":
     """The miss sentinel to test ``sensor``'s distances against: the value
     stamped by :func:`set_sensor_miss_value` if there is one, else the sensor's
-    own resolved option, else ``None`` (a stub sensor — readers then fall back
-    to :data:`RAY_MISS_THRESHOLD`).
+    own resolved option, else ``None`` (a stub sensor — since v1.8.0 the
+    predicates then raise ``ValueError``; through 1.7.x they fell back to the
+    removed ``RAY_MISS_THRESHOLD``).
 
     Validates through :func:`check_miss_supported` on BOTH paths, so a sentinel
     that is non-finite, non-positive, or below the sensor's ``max_range`` raises
@@ -602,12 +620,10 @@ def ray_miss_value(sensor: "object") -> "float | None":
 def _is_miss(d_raw, miss):
     """The sentinel half of :func:`is_ray_hit` — shared so the offset
     correction in :func:`read_distances` and the hit predicate cannot drift."""
-    if miss is None:
-        return d_raw >= RAY_MISS_THRESHOLD           # legacy fallback
-    return d_raw == miss
+    return d_raw == _require_miss(miss)
 
 
-def is_ray_hit(d_raw, miss: "float | None" = None):
+def is_ray_hit(d_raw, miss: float):
     """True where a wheel ray found ground, tested on a **RAW** sensor distance:
     ``(d_raw != miss) & (d_raw != 0.0)``.
 
@@ -637,14 +653,15 @@ def is_ray_hit(d_raw, miss: "float | None" = None):
     :func:`read_distances` (``return_hit=True``) is the one to carry to
     consumers rather than re-deriving a predicate downstream.
 
-    ``miss=None`` falls back to the deprecated :data:`RAY_MISS_THRESHOLD`, for
-    callers holding a sensor that exposes no sentinel."""
-    if miss is None:
-        return (d_raw < RAY_MISS_THRESHOLD) & (d_raw != 0.0)   # legacy fallback
+    ``miss`` is REQUIRED (v1.8.0) and an explicit ``None`` raises
+    ``ValueError``. Through 1.7.x it defaulted to ``None``, which fell back to
+    the deprecated ``RAY_MISS_THRESHOLD`` (19.9, correct only at the default
+    ``max_range`` of 20.0); that constant was removed in 1.8.0."""
+    miss = _require_miss(miss)
     return (d_raw != miss) & (d_raw != 0.0)
 
 
-def is_ray_hit_corrected(d, miss: "float | None" = None):
+def is_ray_hit_corrected(d, miss: float):
     """True where a wheel ray found ground, tested on an **OFFSET-CORRECTED**
     distance: ``d != miss``.
 
@@ -677,12 +694,14 @@ def is_ray_hit_corrected(d, miss: "float | None" = None):
     batch-wide ``.any()`` lets them through (the v1.5.2 defect this note
     exists to prevent recurring).
 
-    ``miss=None`` falls back to the deprecated :data:`RAY_MISS_THRESHOLD`.
+    ``miss`` is REQUIRED (v1.8.0) and an explicit ``None`` raises
+    ``ValueError``; through 1.7.x ``None`` fell back to the removed
+    ``RAY_MISS_THRESHOLD``.
 
-    .. versionadded:: 1.5.2"""
-    if miss is None:
-        return d < RAY_MISS_THRESHOLD                          # legacy fallback
-    return d != miss
+    .. versionadded:: 1.5.2
+    .. versionchanged:: 1.8.0
+       ``miss`` required; ``None`` raises."""
+    return d != _require_miss(miss)
 
 
 def read_distances(sensor: "object", n_envs: int,
@@ -704,7 +723,9 @@ def read_distances(sensor: "object", n_envs: int,
     :func:`set_sensor_up_offset` (:data:`RAY_UP_OFFSET` if it never was), so a
     ``single_scene`` vehicle whose offset is capped reads back correctly without
     the caller knowing. ``miss`` likewise defaults to the sensor's own sentinel
-    (:func:`ray_miss_value`).
+    (:func:`ray_miss_value`); a sensor that exposes none (a stub, nothing
+    stamped) raises ``ValueError`` since v1.8.0 (through 1.7.x it fell back to
+    the removed ``RAY_MISS_THRESHOLD``).
 
     ``return_hit=True`` additionally returns the ``(n_envs, n_wheels)`` bool
     mask from :func:`is_ray_hit`, evaluated on the RAW distances — the only
@@ -802,9 +823,9 @@ def _read_distances_fan(sensor, d_raw, fan_m: int, fan_c, up_offset, miss,
     if miss is None:
         miss = ray_miss_value(sensor)
     # A miss sentinel is required as the FILL value for a wheel whose whole fan
-    # missed; a stub sensor exposing none falls back to the deprecated threshold,
-    # exactly as the hit predicate does.
-    miss_fill = float(RAY_MISS_THRESHOLD if miss is None else miss)
+    # missed; a stub sensor exposing none raises, exactly as the hit predicate
+    # does (v1.8.0; through 1.7.x both fell back to RAY_MISS_THRESHOLD).
+    miss_fill = float(_require_miss(miss))
 
     c = torch.as_tensor(fan_c)
     if c.device != d_raw.device or c.dtype != d_raw.dtype:

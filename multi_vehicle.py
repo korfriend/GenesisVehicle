@@ -148,6 +148,18 @@ class MultiVehicleKindPhysics:
                             MPPI / RL.
 
     Use ``MultiVehiclePhysics`` to dispatch across multiple kinds.
+
+    Mass properties (v1.8.0). The rigid-body scale of the low-speed deadbeat
+    bounds (``dynamics.deadbeat_scale``) needs the vehicle's composite yaw
+    inertia; a kind reads it ONCE, on its first ``step()``, from
+    ``entities[0]`` (the proto's entity) and applies it to all K vehicles. The
+    kind key (``VehicleScene._kind_key``) does NOT include ``morph=`` or
+    ``material``, so vehicles of one URDF whose masses differ (a scaled morph)
+    can share a kind and then get ``entities[0]``'s inertia, not their own —
+    not detected. The inputs are not refreshed afterwards (the reference
+    tank's read moves by 2.7e-4 relative after 40 steps, its turret links
+    settling; the first-step value is kept), and a config rebuild carries them
+    (``core.MASS_PROPS_ATTRS``).
     """
 
     def __init__(
@@ -487,6 +499,11 @@ class MultiVehicleKindPhysics:
         assert len(inputs_list) == self.K, (
             f"expected K={self.K} inputs, got {len(inputs_list)}")
         p = self._proto
+        # Deadbeat-scale inputs (v1.8.0), once, on the proto: this step never
+        # goes through p.step(), so the proto's own first-step call does not
+        # happen here. The proto's entity is entities[0] — see the class
+        # docstring for what that means for a kind of mixed-mass vehicles.
+        p._ensure_yaw_inertia()
         K = self.K
         N = self.n_envs
         NK = self.NK

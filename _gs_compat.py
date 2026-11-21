@@ -24,6 +24,14 @@ Currently shimmed:
     ACCEPTS ``sim_options=``, so scene construction is unaffected and the
     breakage is read-side only.
 
+``check_link_inertial_api``
+    Genesis <= 1.3.3 exposed a link's inertial values as ``RigidLink.inertial_*``;
+    genesis >= 1.4.0 moved them onto ``RigidLink.desc``. :func:`link_inertial`
+    reads either and returns ``None`` for a massless link, so on an engine that
+    renamed BOTH, every link would read as massless. This check raises
+    ``AttributeError`` naming both spellings instead (used before the
+    deadbeat-scale mass read, v1.8.0).
+
 ``check_genesis_floor``
     Warn-only guard (once per process) when the installed genesis is older than
     the SDK's supported floor ``GENESIS_FLOOR`` (1.4.5). It never raises.
@@ -46,7 +54,8 @@ from typing import Any, NamedTuple, Optional
 import numpy as np
 
 __all__ = ["apply_links_wrench", "has_wrench_api", "link_inertial",
-           "LinkInertialProps", "scene_sim_options", "sensor_miss_value",
+           "LinkInertialProps", "check_link_inertial_api",
+           "scene_sim_options", "sensor_miss_value",
            "GENESIS_FLOOR", "check_genesis_floor", "COARSE_SDF_MATERIAL_KW",
            "coarse_sdf_nonconvex_geoms", "warn_coarse_sdf_on_nonconvex"]
 
@@ -122,6 +131,61 @@ def link_inertial(link: Any) -> Optional[LinkInertialProps]:
     return LinkInertialProps(mass, pos, quat, inertia)
 
 
+def check_link_inertial_api(link: Any) -> None:
+    """Raise ``AttributeError`` unless ``link`` exposes ALL FOUR inertial
+    values under a spelling :func:`link_inertial` knows (v1.8.0).
+
+    Genesis <= 1.3.3: ``RigidLink.inertial_mass`` / ``inertial_pos`` /
+    ``inertial_quat`` / ``inertial_i``. Genesis >= 1.4.0 (checked on 1.4.0 and
+    1.4.5): ``RigidLink.desc`` with ``.mass`` / ``.inertial_pos`` /
+    ``.inertial_quat`` / ``.inertia``. The branch is chosen the way
+    :func:`link_inertial` chooses it -- ``inertial_mass`` present AND not
+    ``None`` -> the <= 1.3.3 names, else ``desc`` when the link has one --
+    and every field of that branch must exist (its VALUE may be ``None``: a
+    massless link passes). A link whose ``inertial_mass`` is ``None`` and that
+    has no ``desc`` (which :func:`link_inertial` reads as massless) is checked
+    on the <= 1.3.3 names. The message names the missing ones. (Through the
+    first 1.8.0 implementation the check tested only ``hasattr(link,
+    "inertial_mass")``, so a link carrying ``inertial_mass = None`` plus a
+    ``desc`` was checked on the branch :func:`link_inertial` does not read;
+    unreachable on genesis >= 1.4.0, which has no ``inertial_*``.)
+
+    Why every field and not only the container: since 1.8.0 these values feed
+    the physics (the yaw-inertia inputs of the low-speed deadbeat bounds), not
+    only a plant prediction. :func:`link_inertial` reads each field with
+    ``getattr(..., None)``, so a renamed ``inertia`` would read as zero link
+    inertia and a renamed ``inertial_quat`` would skip the principal-axis
+    rotate-back -- a silently wrong yaw inertia, no error. And a link with
+    neither spelling would read as massless, so the caller would report "no
+    mass" instead of "unknown engine". Call it on the ROOT link before a mass
+    walk. Pattern of :func:`scene_sim_options`.
+    """
+    old = (link, _OLD_INERTIAL_FIELDS, "the link (genesis <= 1.3.3)")
+    if getattr(link, "inertial_mass", None) is not None:        # genesis <= 1.3.3
+        owner, names, where = old
+    elif hasattr(link, "desc"):                                 # genesis >= 1.4.0
+        owner, names, where = link.desc, _NEW_INERTIAL_FIELDS, "link.desc (genesis >= 1.4.0)"
+    elif hasattr(link, "inertial_mass"):                        # <= 1.3.3, mass None
+        owner, names, where = old
+    else:
+        raise AttributeError(
+            f"{type(link).__name__} exposes neither 'desc' (genesis >= 1.4.0) nor "
+            "'inertial_mass' (genesis <= 1.3.3); this genesis version's link "
+            "inertial values are not recognized by genesis_vehicle._gs_compat."
+            "link_inertial")
+    missing = [n for n in names if not hasattr(owner, n)]
+    if missing:
+        raise AttributeError(
+            f"{type(link).__name__}: {where} lacks {missing} (expected all of "
+            f"{list(names)}); this genesis version's link inertial values are "
+            "not recognized by genesis_vehicle._gs_compat.link_inertial")
+
+
+#: The inertial field names :func:`check_link_inertial_api` requires per branch.
+_OLD_INERTIAL_FIELDS = ("inertial_mass", "inertial_pos", "inertial_quat", "inertial_i")
+_NEW_INERTIAL_FIELDS = ("mass", "inertial_pos", "inertial_quat", "inertia")
+
+
 def scene_sim_options(scene: Any) -> Any:
     """The ``SimOptions`` object a ``gs.Scene`` was CONSTRUCTED with.
 
@@ -168,7 +232,9 @@ def sensor_miss_value(sensor: Any) -> Optional[float]:
     after ``scene.build()`` — which matters because the SDK stamps it at
     ``add_sensor`` time. An engine shape that only carries ``max_range``
     (a hypothetical older/other raycaster) falls back to it; a stub sensor with
-    neither returns ``None`` and callers keep the legacy threshold.
+    neither returns ``None``; since v1.8.0 the SDK's miss predicates then
+    raise ``ValueError`` (through 1.7.x callers kept the legacy
+    ``RAY_MISS_THRESHOLD``, removed in 1.8.0).
 
     The ``is None`` test below is deliberate and must not become ``or``: a
     ``no_hit_value`` of ``0.0`` is legitimate and would otherwise silently fall

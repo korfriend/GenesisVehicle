@@ -10,6 +10,941 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [1.8.0] — 2026-11-21
+
+**Every axle torque now acts on the wheel spin BEFORE the tyre, and the brake
+is a Coulomb projection that holds a stopped wheel.** Through 1.7.0 the drive
+and brake torques went through the `F_long` overshoot clamp with the tyre
+evaluated at the pre-step ω, so ω alternated step to step under any throttle or
+brake (798 alternations in 800 steps on the reference car at throttle 0.15),
+and the `tanh` brake faded to zero at standstill, so **a car under full brake
+on a 10° downhill crept at 0.907 m/s and on 20° ran away** (§2.2). Fixing that
+exposed a second, older defect — an explicit low-speed lateral 2-cycle of the
+tyre — and the friction ellipse had to be moved onto the transmitted force; both
+are handled here (§3, §5). `StaticFrictionLock` now holds the point where the
+contact came to rest (§6). `RAY_MISS_THRESHOLD` is removed (§10). **The default
+vehicle's trajectory moves, the bundled tank sweep table is re-measured, and
+every pre-1.8.0 sweep table or identified parameter set is stale** (§8, §9).
+
+**What this release costs, stated plainly** (each in its section):
+`DifferentiablePlant` is slower: of the six fail-closed comparisons only two
+passed the publication gate — tank `solve` 1.811× and `compute_wheel_step` at
+B = 1 1.617× — and the other four were not published (intervals 1.21–1.71×);
+measured on the tree before the last two fix rounds, not re-measured on the
+final tree. A 10-wheel tank at `horizon=4` does not fit a 25 ms control step on
+the measured machine (§7.1); on a low-yaw-inertia
+vehicle flat-ground cornering is FARTHER from the small-dt reference than on
+1.7.0 at every measured speed and the body slip angle is 15–17% too small at
+3–5 m/s (§5.5); the lateral bound clips force at wheel-load spikes on rough
+ground and raises the path's sensitivity to initial conditions (§5.4); the
+path-follow envelope rule is not met on two metrics, accepted by the user
+(§12).
+
+**Why a minor version.** Strict SemVer would call items 1–8 below breaking;
+this project bumps the minor version for observable public behaviour changes
+and names them instead. The `RAY_MISS_THRESHOLD` fallback that item 1 removes
+never warned at runtime in 1.5.2 … 1.7.0, so code relying on it got no notice
+before this release.
+
+*Breaking (strict SemVer):*
+
+1. `raycast.RAY_MISS_THRESHOLD` removed (§10). It was never in `__all__`; 0
+   importers found in the workspace. Do: `sensor_miss_value(sensor)`.
+2. A miss sentinel is required everywhere (§10): `is_ray_hit` /
+   `is_ray_hit_corrected` take a REQUIRED `miss` and `None` raises;
+   `set_ray_miss_value(None)` raises; `read_distances` on a stub sensor with no
+   sentinel raises; **a `VehiclePhysics(sensor=None)` stepped with
+   `step(distances=)` and never given `set_ray_miss_value` raises on its first
+   step** (1.7.0 silently used 19.9). Do: pass `miss`, or call
+   `physics.set_ray_miss_value(miss)`.
+3. `TireModel` gains `at_long_force` (§3). A non-Pacejka model, or a
+   `PacejkaAnisotropic` subclass that overrides `__call__`, is called THREE
+   times per step (B, K·B, B rows), so it must be stateless and accept any
+   batch size. A plain callable that does not subclass `TireModel` still works,
+   through the same grid.
+4. POST_TIRE hook context: `ctx.omega` is `omega_t` (after resisting torque,
+   drive and brake); `ctx.F_lat` is already the friction-ellipse value where
+   the clamp binds; a hook's `F_lat` is a request the lateral deadbeat may cut
+   (§3, §5, `physics-contracts.md` §7.16).
+5. `last_kappa` / `PipelineResult.kappa` is `kappa_eq` (the slip of the
+   TRANSMITTED force on the tyre's own curve) wherever the clamp binds (§3.2).
+6. `StaticFrictionLock` (§6): `k_damp` is a FLOOR (`max(k_damp, critical)`)
+   and the damper is deadbeat-bounded; `v_thr` now gates only the ω lock, and
+   the force takeover waits for rest; the hold is brake-limited (the 1.7.0
+   docstring claim was wrong); four new state tensors. Code that copies the
+   lock's state by a hard-coded name list is SILENTLY wrong — two such copiers
+   exist outside this repo (`PathFollower_MPC/ours/vehicle/step2_golden_mining_dualscene.py:429-434`,
+   `Learning Samples/mppi_sdk_v32/code/step2_golden_mining_sdk.py:280,310`).
+   Do: copy every name in `StaticFrictionLock.STATE_ATTRS`.
+7. `DifferentiablePlant` raises `ValueError` for explicit `mass=` / `izz=` /
+   `com=` whose yaw inertia about the centre of mass (`izz - mass*(cx²+cy²)`)
+   is not positive. A driver whose own mass read gives such a value instead
+   uses `s = 1` and warns (§5.3). Do: pass `izz` about the base-link ORIGIN.
+8. An entity without `links` raises `AttributeError` on the first
+   `VehiclePhysics.step` (`core.py`, `_ensure_yaw_inertia`). Reachable only by
+   hand-built stub entities (0 in the workspace); `VehicleScene` and the OSC
+   server always pass genesis entities. Do: pass a genesis rigid entity, or set
+   `wheel_meta.yaw_inertia` before the first step.
+
+*Behaviour, no signature change:*
+
+9. The brake is a Coulomb projection before the tyre: full torque to
+   standstill, shorter stops, a braked wheel is held, both pedals stop the car
+   when brake > drive per wheel (§2).
+10. The drive torque acts on ω before the tyre: a 1-step plant unroll now sees
+    throttle authority; the `horizon >= 2` rule stays, with a new reason (§7.2).
+11. New low-speed bounds D / Y / Z and the ω_max-consistent tyre M2 (§4, §5).
+    Y binds at every step below `v*` on flat ground and also at speed under
+    wheel-load spikes.
+12. The deadbeat bounds assume `|g|` = 9.81 (`dynamics.DEADBEAT_G`); under
+    another gravity they scale by `|g|/9.81` (§5.6).
+13. A batched kind reads its mass properties once, from `entities[0]`;
+    vehicles of one kind with different masses are not detected (§5.3).
+14. The default rollout is not bit-identical to 1.7.0; the identity test is now
+    a 1.8.0 regression lock, not evidence (§9).
+15. `DifferentiablePlant` cost rose (§7.1).
+16. New log lines: `[genesis_vehicle:deadbeat-scale]` (§5.3).
+17. `samples/data/tank_sweep_signed.csv` re-measured; every table built before
+    1.8.0 is SDK-version-bound and stale (§8).
+
+*Deprecated / additive:*
+
+18. `brake_torque_signed` emits a `DeprecationWarning` on every call, removal
+    in 2.0.0. The pipeline no longer calls it. `brake_projection` is NOT a
+    drop-in replacement (different inputs and outputs).
+19. Additive: `WheelMeta.yaw_inertia` (last field, default `None`);
+    `compute_wheel_step(..., yaw_inertia=None)` (keyword); `PipelineContext`
+    fields `F_long_bounds`, `F_long_deadbeat`, `hold_applied`,
+    `deadbeat_scale`; `core.MASS_PROPS_ATTRS`; `dynamics.YawInertia`,
+    `DEADBEAT_G`, `deadbeat_scale`, `yaw_inertia_from_mass_props`,
+    `brake_projection`; `TireModel.at_long_force`, `AT_LONG_FORCE_GRID`;
+    `StaticFrictionLock.REST_SPEED`, `CREEP_RATIO`, `STATE_ATTRS`;
+    `_gs_compat.check_link_inertial_api`. None is re-exported from the package
+    root; import them from their modules.
+
+*Still open:* §15.
+
+| abbr | meaning |
+|---|---|
+| ω | wheel spin rate (rad/s) |
+| ω_r, ω_d, ω_t, ω_e | ω after the capped rolling resistance / after the drive torque / after the brake projection (`omega_t`) / `omega_t` clipped to ±`omega_max` |
+| B_rem | brake capacity left on a wheel the brake stopped this step (N·m) |
+| F | the axle-torque order of this release: resisting, drive and brake torques on ω before the tyre |
+| B1 | the Coulomb brake projection (`dynamics.brake_projection`) |
+| B2 | friction ellipse taken at the TRANSMITTED (clamped) `F_long` (`TireModel.at_long_force`) |
+| M2 | tyre evaluated at ω clipped to ±`omega_max` |
+| D | held-wheel deadbeat: `|F_long| <= s·(N/g)·|v_long - r·ω_t|/dt` on a braked-and-held wheel |
+| Y | lateral deadbeat: `|F_lat| <= s·(N/g)·|v_lat|/dt` on wheels no hook holds |
+| Z, s | rigid-body scale `s = min(1, I_cg / Σ_i (N_i/g)·ρ_i²)` applied to D, Y and the SFL damper bound |
+| I_cg | composite yaw inertia about the centre of mass (kg·m²) |
+| ρ_i | horizontal distance from the centre of mass to wheel i's ray origin (m) |
+| k² | `I_cg / m`, the squared yaw radius of gyration |
+| G | explicit per-step lateral gain of the tyre on a wheel's mass share, `B_y·C_y·μ·g·dt / max(|v_long|, eps_v)` |
+| v* | speed below which Y binds on flat ground at static load, `B_y·C_y·μ·g·dt / s` |
+| κ, κ_eq | longitudinal slip / the slip at which the tyre's own combined curve gives the transmitted `F_long` |
+| α, β | tyre slip angle / chassis body slip angle (rad or °) |
+| B_y, C_y, E | Pacejka lateral stiffness and shape factors / longitudinal curvature factor `pe_x` |
+| K | `TireModel.AT_LONG_FORCE_GRID` (16) |
+| B | batch rows of one `compute_wheel_step` call |
+| eps_v | Pacejka low-speed floor on `|v_long|` (0.5 m/s) |
+| μ | tyre-ground friction coefficient |
+| N | wheel normal load (N); `N/g` its mass share |
+| g | 9.81 m/s² (`dynamics.DEADBEAT_G`) |
+| r | wheel radius (m) |
+| dt | simulation step duration (s); dt_ref = 0.003125 s, the small-dt reference step |
+| e | relative error of a dt-0.025 mean curvature against the dt_ref reference |
+| SE | across-launch standard deviation / √5, as % of the reference |
+| SFL / LSR / RR | `StaticFrictionLock` / `LowSpeedRegularizer` / `RollingResistance` |
+| A / A6 / C / L | SFL changes: re-anchor at the first reversal / take over only at rest / damping at least critical / force limited to the clamp bounds |
+| ζ | damping ratio |
+| back / vmin | back-travel after the first `|v| < 0.05 m/s` / the minimum speed along the travel direction after it |
+| alt | alternations: consecutive ω changes of opposite sign, both above the stated tolerance (1e-4 rad/s unless stated) |
+| rise / fall | a step on which chassis forward speed rose / fell by more than 1e-5 m/s |
+| flip_vlat / flip_flat / alt_wz | lateral 2-cycle counts: v_lat sign flips (both > 1e-3 m/s) / per-wheel F_lat sign flips / yaw-rate change sign flips |
+| pv / pb | `VehicleScene(solver="per_vehicle")` / `"batched"` (the default) |
+| HJW / KDU / JMK | the `GeneVehicle_HJW` / `_KDU` / `_JMK` demo vehicles (outside this repo) |
+| E0 / E1 / E2 | envelope rule: every run passes its own criterion / worst ≤ 1.7.0 worst / median ≤ 1.7.0 third quartile |
+| h | `DifferentiablePlant` horizon (steps) |
+| UE / OSC | Unreal Engine / Open Sound Control (the physics server's client and wire protocol) |
+| WSL2 | Windows Subsystem for Linux 2 (the measurement host) |
+| CSV | comma-separated values (the sweep table format) |
+| Q3 | third quartile (75th percentile) of a set of runs |
+| p95 / p99 | 95th / 99th percentile |
+| RMS | root mean square |
+| ULP | unit in the last place (one float32 step) |
+| M | `contact_samples`, rays per wheel in a swept-envelope fan |
+| θ | slope angle |
+| PD13 | the post-stop back-travel matrix of §6.2 (named after the decision that fixed its gate) |
+| SemVer | Semantic Versioning |
+| AWD / GPU | all-wheel drive / graphics processor (the GPU backend) |
+| Truck6w | the `GeneVehicle_Truck6w` demo vehicle (outside this repo) |
+| a / a_lat | chassis longitudinal / lateral acceleration (m/s²) |
+| ω_z | chassis yaw rate (rad/s) |
+| L2 / L3 | batching axes: K interacting vehicles in one scene / `n_envs` parallel scenarios |
+| ctx | `PipelineContext`, the per-step object the pipeline hands to stability hooks |
+| DONE | the path follower's final state: within `arrival_goal` (1.5 m) of the last waypoint |
+
+**Conditions for every number below unless a row says otherwise:** CPU backend,
+WSL2, genesis-world 1.4.5, torch 2.11.0, `dual_scene`, dt 0.025 × 4 substeps,
+ground plane μ 1.0, the preset's default `"control"` profile, one fresh process
+per run. Reference car = `samples/urdf/car_4w.urdf` + `car_4w_rwd_ackermann`
+(r 0.358, `i_wheel` 2.0, brake 750/750/500/500 N·m at pedal 1); reference tank
+= `samples/urdf/tank_ray.urdf` + `tank_skid_belt` (10 wheels, r 0.4, `i_wheel`
+24.8, 3000 N·m brake per wheel). Slopes are emulated by tilting gravity with
+`VehicleScene.set_gravity`. "1.7.0" is a `git archive` of `af879d3` run on the
+same engine; "1.8.0" is this tree. The harnesses are the release-verification
+scripts under `.pm_r2/` in the development workspace, **outside this repo** (as
+`.pm_r1/` was for 1.7.0); each table names its script. Every scenario row was
+run on both solvers: on the 121 scenario rows `per_vehicle` and `batched` give
+identical JSON (and, at the final tree, impl-review re-ran 121/121 rows on
+`per_vehicle` and a 44-row `batched` subset bit-identical to the earlier runs).
+"Design probe" rows were measured on a patched 1.7.0 before implementation;
+the implemented tree reproduced every probe scenario row, the identity
+rollout and the plant gates bit for bit, so those numbers are the shipped
+behaviour.
+
+### 1. Axle torques before the tyre (F)
+
+**What was wrong (1.7.0; 1.6.10 measured the same, CHANGELOG 1.7.0 §8).** The drive and
+brake torques entered the ω update together with the tyre friction torque,
+with the tyre evaluated at the pre-step ω and the `F_long` overshoot clamp
+targeting exact rolling. The tyre never saw the wheel speed the torques were
+about to produce, so ω alternated step to step under any throttle or brake.
+CHANGELOG 1.7.0 §8 recorded this as open.
+
+**Now.** Per wheel, in this order, all on ω before the tyre
+(`_pipeline.compute_wheel_step`): rolling resistance `T_rr` capped against the
+pre-step ω (`ω_r = ω - T_rr·dt/i_wheel`, the 1.7.0 ω′ line), then the drive
+torque (`ω_d = ω_r + T_drive·dt/i_wheel`), then the brake projection (§2),
+giving `ω_t`. The tyre is evaluated at `r·ω_e`. Nothing of the drive, the brake
+or `T_resist` enters the clamp as a torque.
+
+Alternation and monotonicity, harness `.pm_r2/f_probe/scen3.py` (20 s from
+1 m/s unless noted; "contact path" = no RR; values alt@1e-4 / alt@0.01 / max
+ω step (rad/s) / rises / falls):
+
+| scenario | 1.7.0 | 1.8.0 |
+|---|---|---|
+| coast, car | 0 / 0 / 0.0102 / 0 / 799 | 0 / 0 / 0.0101 / 0 / 799 |
+| coast, tank | 0 / 0 / 0.0316 / 0 / 330 | identical |
+| throttle 0.15, car | 798 / 798 / 0.716 / 400 / 399 | **0 / 0 / 0.0118 / 799 / 0** |
+| throttle 0.15, tank | 228 / 228 / 1.338 / 342 / 457 | **0 / 0 / 0.0172 / 799 / 0** |
+| throttle 0.15 contact path, car / tank | 798 / 798 / 0.921; 798 / 798 / 1.361 | 0 / 0 / 0.0219; 0 / 0 / 0.0469 |
+| brake 0.05, car | 601 / 0 / 0.029 / 0 / 256 | 0 / 0 / 0.0287 / 2 / 127 |
+| brake 0.05 contact path, car / tank | 798 / 313 / 0.469; 798 / 798 / 0.159 | 0 / 0 / 0.0247; 1 / 0 / 0.0078 |
+| brake 1.0 / 0.3 from 10 m/s, car | 93 / 93 / 9.62; 497 / 205 / 3.04 | 0 / 0 / 1.58; 0 / 0 / 0.228 |
+| full throttle from rest, car / tank | 780 / 780 / 6.17; 605 / 535 / 8.72 | 0 / 0 / 0.149; 0 / 0 / 0.262 |
+| tank steady skid turn, throttle 0.3 steer 0.2 | 222 / 222 / 11.1 | 27 / 9 / 7.58 (reduced, not removed; skid-steer) |
+
+Drive response against the closed form (harness `.pm_r2/f_probe/cruise3.py`,
+ratio measured / closed form over the window): car throttle 1.0, 5→15 m/s
+0.9812 → **1.0014**; car throttle 0.3, 3→10 m/s 0.9936 → 1.0004; tank throttle
+1.0, 3→10 m/s 1.0001 → 1.0001. Tank governor speed at 20 s (v* = 17.892 m/s)
+17.43 (-2.6%) → **17.89**. Cruise at the equilibrium speed, car throttle
+0.15 / 0.3, mean acceleration over 4 s: -0.0004 / -0.0013 → 0.0000 m/s². Start
+from rest to 10 m/s: car 6.100 → 5.975 s, tank 3.075 → 3.025 s (design probe).
+
+### 2. The brake is a Coulomb projection (B1)
+
+#### 2.1 Semantics
+
+`dynamics.brake_projection(omega_d, t_brake, dt, i_wheel)`: the FULL brake
+magnitude (no `tanh`) moves ω toward zero and cannot cross it. Where the brake
+can stop the wheel this step (`t_brake > 0` and `t_brake >= |ω_d|·i_wheel/dt`)
+the wheel is HELD: `ω_t = 0`, and the capacity left over, `B_rem`, widens the
+clamp both ways (`± B_rem / r`) and resists spin-up in the ω update. A zero
+brake never holds; that `t_brake > 0` term has no forward effect, only a
+gradient one (without it a plant's d a / d throttle at throttle 0, ω 0, 2 m/s
+drops to 0.881 car / 2.825 tank against 1.141 / 3.758 at throttle 0.01;
+guarded by `test_n22_*`).
+
+Enforced: `ω_t` never has the opposite sign of `ω_d` (up to float rounding);
+brake, drive and rolling resistance together never reverse ω in one step
+(`test_n10_brake_drive_and_rr_never_reverse_omega`, a random grid). Not
+bounded: the tyre friction torque, the `LowSpeedRegularizer` ω pull, the SFL ω
+override.
+
+**UE-visible.** The OSC server's brake input now stops shorter, holds on a
+slope, and throttle + brake stops the vehicle when brake > drive per wheel. A
+client tuned against 1.7.0's fading brake will feel a stronger brake.
+
+#### 2.2 The 1.7.0 downhill and both-pedal defects this fixes
+
+1.7.0's `T_brake·tanh(ω/0.5)`, capped at `|ω|·i_wheel/dt`, tends to zero as
+ω → 0, so the brake could not hold a wheel against gravity or against the drive
+torque. Harness `.pm_r2/f_probe/scen3.py`:
+
+| case | 1.7.0 | 1.8.0 |
+|---|---|---|
+| car 10° downhill, brake 1.0 from 3 m/s | **never stops, creeps 0.907 m/s** | stops in 0.95 s, holds ≤ 6e-6 m/s |
+| car 20° downhill, brake 1.0 from 3 m/s | **runs away, 3.48 m/s** | stops in 1.575 s, holds ≤ 6e-6 m/s |
+| car 10° / 20° downhill from rest; 10° uphill from rest | creeps 0.907 / 1.787 / 0.907 m/s | holds ≤ 7e-6 m/s |
+| car 10°, brake 0.3 from 3 m/s | 2.817 m/s at 10 s | 2.817 (brake < gravity + RR: physics) |
+| tank 5° from rest, brake 1.0 | creeps 0.803 m/s | holds 7e-6 m/s |
+| tank 10° from rest / 10°, 20° from 3 m/s | 1.599 / 2.336 / 18.64 m/s | 0.389 creep / 2.336 / 18.64 (brake capacity, below) |
+| car throttle 0.5 / 1.0 + brake 1.0 | stops at 5.33 s, then holds 0.066 m/s / creeps 0.728 m/s | stops at 1.175 / 1.55 s; last 5 s max \|v\| 3e-6 / 6e-6 m/s |
+| car throttle 0.5 + brake 0.5; 0.3 + 0.5 | stops at 6.05 / 5.28 s | 2.9 / 2.375 s; holds ≤ 7e-6 m/s |
+| car throttle 1.0 + brake 0.3 (drive > brake) | 6.27 m/s at 10 s, a(2→5 s) 0.133 m/s² | 6.435 m/s, 0.151 m/s² |
+| tank throttle 0.3 + brake 1.0 | never stops (1.09 m/s) | stops at 8.75 s; last 5 s of a 20 s run 9.7e-6 m/s |
+| car 3°, brake 0.1 from rest | creeps 0.298 m/s | creeps 0.0173 m/s (known limitation, §15) |
+
+The tank's 10° creep is preset brake CAPACITY, not this mechanism:
+`tank_skid_belt`'s 10 × 3000 N·m at r 0.4 is 75 kN against a 99 kN slope load.
+The preset is unchanged.
+
+#### 2.3 Stop distances and closed forms
+
+Stop distance, harness `.pm_r2/f_probe/stopdist.py` (`v_a` = speed 0.25 s after
+launch; band = the brake closed form integrated from `v_a` down to 0.10 / 0.05
+m/s; gate `0.99·s(0.10) <= s <= 1.01·s(0.05)`, fixed before the 1.8.0 runs):
+
+| case | 1.7.0 s / band / gate | 1.8.0 s / band / gate |
+|---|---|---|
+| car brake 1.0 from 10 m/s | 9.450 / [7.340, 7.341] / FAIL | **7.295** / [7.321, 7.322] / pass |
+| car brake 0.6 | 14.496 / [13.374, 13.375] / FAIL | 13.360 / [13.390, 13.392] / pass |
+| car brake 0.3 | 27.938 / [27.718, 27.720] / pass | 27.644 / [27.674, 27.676] / pass |
+| tank brake 1.0 from 5 m/s | 6.698 / [6.047, 6.050] / FAIL | 6.012 / [6.047, 6.050] / pass |
+| tank brake 0.3 | 13.724 / [13.492, 13.500] / FAIL | 13.463 / [13.492, 13.500] / pass |
+
+1.8.0 sits 0.12–0.63% UNDER the upper end `s(0.05)` on every case and passes
+only through the 0.99 margin on `s(0.10)`; the cause of that systematic offset
+is not established.
+
+Brake windows against the closed form (`cruise3.py`): car brake 1.0 / 0.6 /
+0.3, 8→3 m/s: 0.8729 / 0.9838 / 1.0014 → 1.0000 / 1.0000 / 1.0000; tank brake
+1.0, 4→1.5 m/s: 0.9982 → 0.9999. The low-speed "cap regime", 3→0.6 m/s (car
+1.5→0.6 for the tank): car brake 1.0 / 0.6 / 0.3 0.4045 / 0.6093 / 0.9639 →
+0.9996 / 1.0006 / 1.0005; tank brake 1.0 0.6098 → 1.0043.
+
+### 3. Friction ellipse on the transmitted force (B2)
+
+#### 3.1 What and why
+
+Through 1.7.0 the tyre's friction circle cut `F_lat` against the RAW
+longitudinal force, and the overshoot clamp then cut `F_long` — so where the
+clamp bound, the lateral grip was reduced for a longitudinal force that never
+reached the road. Since F (§1) makes the clamp bind on every drive or brake
+transient, that would have cost grip everywhere. Where the clamp binds on the
+raw force, `F_lat` and `κ` are now taken on the tyre's own combined curve at
+the TRANSMITTED force, through the new `TireModel.at_long_force(v_long, v_lat,
+v_roll, N, wheel_meta, *, F_long_target)`:
+
+* `PacejkaAnisotropic`: a closed form (pure lateral inside the ellipse, the
+  ellipse remainder outside; κ by 3 Newton steps on the pure magic formula).
+  The tyre is still called ONCE per step. Against a K = 512 grid of the same
+  combined law (harness `.pm_r2/impl_f/b2acc.py`, random car states; test bound
+  1e-3): κ relative error 4.0e-4, `F_lat` error 4.3e-5 of μN.
+* Any other `TireModel`, a `PacejkaAnisotropic` subclass that overrides
+  `__call__`, and a plain callable: the default K = 16 grid, two more tyre
+  calls (K·B rows, then B rows). Same harness: κ relative error up to 0.2305
+  (p99 0.0564), `F_lat` error up to 2.88% of μN. This is the accuracy, not a
+  bound proven for every model; the grid assumes `F_long` monotone in the
+  rolling speed between rolling and `v_roll`.
+* Where the clamp does not bind, the raw tyre output is kept bit for bit.
+* The POST_TIRE hooks still get the raw `F_long`; their `ctx.F_lat` is already
+  the B2 value where the clamp binds.
+
+The Newton divisor of the closed form is floored at magnitude 1e-3 with its sign
+kept. No preset reaches the floor (min |divisor| 0.707 car, 0.696 tank;
+`test_preset_tyres_never_reach_the_newton_divisor_floor`). At `pe_x > 1`
+(accepted by the config and the OSC server, unused by every preset) the floor
+is a FINITENESS guard, not an accuracy one: κ and its gradients stay finite, but
+where no root exists κ is not meaningful and can take the opposite sign to the
+force. `F_lat` does not depend on it.
+
+#### 3.2 `last_kappa` is the slip of the transmitted force
+
+Reference car, 5 m/s, wheels rolling, rear drive 50 / 150 / 467.8 N·m: the
+reported κ is 0.00242 / 0.00729 / 0.02379, equal within 0.1% to the pure-curve
+slip of the transmitted force (`test_n15_*`). 1.7.0 reported the raw slip of a
+force whose transmitted value on that step was 0.
+
+#### 3.3 Cornering under power and braking
+
+Harness `.pm_r2/f_probe/corner3.py`: power-on ramp at steer 0.15 / 0.3, max
+sideslip 3.35° / 5.70°, no collapse through 20 s (1.7.0 collapses at steer 0.3);
+braking in a turn, lateral acceleration 3.734 / 3.088 / 2.360 m/s², +0.2 /
+-0.5 / -1.9% from 1.7.0. Tank skid turn, mean sideslip over the last 2 s:
+54.47° → 12.19°.
+
+### 4. The tyre sees a wheel speed that can exist (M2)
+
+The tyre is evaluated at `ω_t` clipped to ±`chassis.omega_max` (the ω update is
+clipped the same way); the clamp budget keeps the unclipped `ω_t`. The ceiling
+becomes `≈ r·omega_max/(1 + κ_eq)` and dt-independent: reference car steady
+speed at full throttle, dt 0.025 / 0.0125, 35.52 / 35.56 → **35.59 / 35.59
+m/s**; acceleration 33.5→35.3 m/s against the closed form 0.8948 → 1.0015.
+
+**A top-speed doc claim was wrong, corrected in place.** `presets.py` and
+`strategies/drivetrain.py` said the drive-ω governor `omega_max_drive` set the
+top speed ("the SAME across URDFs regardless of wheel size", "the de-facto
+top-speed governor"). On every car preset the wheel spin clamp
+`chassis.omega_max = 100 rad/s` binds first: the reference car's ceiling is
+35.59 m/s while `CAR_TOP_SPEED` targets 55.6 m/s. The values are unchanged; the
+comments now say which cap binds.
+
+### 5. Low-speed deadbeats D / Y and their rigid-body scale Z
+
+#### 5.1 A pre-existing lateral 2-cycle
+
+Linearised, the tyre's lateral force on a wheel's mass share has the explicit
+per-step gain `G = B_y·C_y·μ·g·dt / max(|v_long|, eps_v)`. `G > 2` alternates
+the sign of `v_lat` every step until the force saturates. Reference car (B_y 8,
+C_y 1.3, μ 1.0, dt 0.025, eps_v 0.5): G = 5.1 below 0.5 m/s and 2 at
+1.28 m/s; reference tank G 0.69. 1.7.0 had no lateral counterpart of the
+`F_long` clamp, and LSR is off under throttle or brake, so nothing bounded it.
+It exists on 1.7.0 with and without F and B1 (design probe), so it is NOT caused
+by this release; B2 raised its amplitude by 25–35% because 1.7.0's circle-
+against-the-raw-force had partly masked it.
+
+Harness `.pm_r2/f_probe/lat3.py` (reference car at rest with a v_lat 0.05 m/s /
+ω_z 0.02 rad/s kick unless stated, 100 steps; flip_vlat / flip_flat / alt_wz /
+max |v_lat| m/s):
+
+| case | 1.7.0 | 1.8.0 |
+|---|---|---|
+| car throttle 0.3, kick / no kick | 99 / 99 / 66 / 0.110; 99 / 99 / 73 / 0.146 | 0 / 0 / 0 / 0.0000 (both) |
+| car throttle 0.3 steer 0.3; slow turn | 54 / 99 / 53 / 0.195; 0 / 219 / 218 / 0.111 | 0 / 0 / 0 / 0.144; 0 / 0 / 0 / 0.099 |
+| car brake 0.5 / 0.1 | 99 / 99 / 98 / 0.038; 99 / 99 / 0 / 0.146 | 0 / 0 / 0 / 0.0001 (both) |
+| car 1 m/s coast | 59 / 59 / 0 / 0.098 | 0 / 0 / 0 / 0.0001 |
+| car side slope 10° / 20°, brake 0.5 | 77 / 56 / 69; 100 / 58 / 99 | 0 / 0 / 0 (both) |
+| tank throttle 0.3 / turn | 0 / 99 / 98; 0 / 3 / 87 | 0 / 0 / 0 (both) |
+| HJW settle / accel / turn phases (`hjw_flip.py`) | 142 / 470 / 316 flips | 0 / 0 / 2 |
+
+**The HJW "settle drift" was this cycle, in yaw**: heading at the end of the
+settle phase (step 79) +1.574° → **+0.000°**, at step 199 -1.068° → +0.000°;
+the demo's right-turn check still passes (yaw -13.86°) and the car ends at rest.
+
+#### 5.2 The bounds
+
+* **D**, held-wheel deadbeat: on a wheel the brake holds (`B_rem > 0`),
+  `|F_long| <= s·(N/g)·|v_long - r·ω_t|/dt` — the force that stops the contact
+  slip in one step on the wheel's mass share.
+* **Y**, lateral deadbeat: `|F_lat| <= s·(N/g)·|v_lat|/dt` on every wheel a
+  hook does not hold (`ctx.hold_applied`).
+* **Z**: with every wheel acting at once the contact velocities update as
+  `(I - W·G)`; for loads in moment balance the yaw mode's factor is
+  `1 - Σ(N_i/g)·ρ_i²/I_cg`, which overshoots for `ρ²/k² > 2` (HJW 3.9). Z
+  scales every bound by `s = min(1, I_cg / Σ_i (N_i/g)·ρ_i²)` so no PLANAR mode
+  overshoots. Measured s at static load: HJW 0.254, reference car 0.856,
+  reference tank 0.935, `tests/data/low_yaw_inertia_car.urdf` (new; base izz
+  600, ρ²/k² 3.47) 0.288.
+* Not covered: pitch / roll coupling of the contact forces through the contact
+  height; loads not in moment balance; with ONE wheel grounded s overestimates
+  that wheel's effective mass by up to 2×. Measured adequate only on the HJW
+  demo car, the reference car and tank, the low-yaw-inertia test car, and (by
+  review) the Truck6w and AWD car.
+
+Contract: `physics-contracts.md` §7.16.
+
+#### 5.3 Where Z's inputs come from
+
+`VehiclePhysics._ensure_yaw_inertia()` reads the composite mass properties
+once, on the driver's first `step()` (`control.plant.plant_mass_properties`),
+into the new `WheelMeta.yaw_inertia` (`dynamics.YawInertia(i_cg, rho_sq)`). A
+batched kind calls it on its proto, so it uses `entities[0]`'s mass for all K
+vehicles — a kind of vehicles with different masses is NOT detected (the kind
+key ignores `morph=` / `material`). The inputs are not refreshed (the tank's
+read moves 2.7e-4 relative after 40 steps as its turret links settle); a
+`mark_config_dirty()` rebuild carries the mass properties
+(`core.MASS_PROPS_ATTRS`) and recomputes ρ² from the rebuilt positions.
+Failure handling: no `links` → `AttributeError`; an unrecognised link inertial
+API → `AttributeError` (`_gs_compat.check_link_inertial_api`); a `ValueError`
+from the mass walk or a non-positive `I_cg` → `s = 1` for that driver and one
+`[genesis_vehicle:deadbeat-scale]` WARNING naming the vehicle. A direct
+`compute_wheel_step` caller with no inputs gets `s = 1` and the same tag once
+per process. `DifferentiablePlant` passes its OWN inputs (from its mass
+properties) by keyword and never writes the live driver's wheel meta
+(`test_n28_*`: the driver's next 40 steps are bit-identical to a twin that
+built no plant, both solvers).
+
+#### 5.4 At speed: Y binds at wheel-load spikes (rough ground)
+
+At static load Y binds only where `G·(N/N_static) > s`, i.e. below
+`B_y·C_y·μ·g·dt·(N/N_static)/s` — 2.98 m/s for the reference car. Under a
+wheel-load spike it binds AT SPEED: on a raycast-only washboard (0.6 m bumps
+every 2 m) at 6.35 m/s, steer 0.1, throttle 0.15, the reference car's Y binds
+on 18–20 of 240 steps per run (0.04 m bumps) and removes the part of the spike
+force that would reverse the contact's lateral velocity within one step.
+
+Against a dt-refinement reference (harness `.pm_r2/impl_f/bump.py` = the
+reviewer's washboard harness plus a dt argument, per_vehicle, launches V0 ∈
+{5.98, 5.99, 6.00, 6.01, 6.02} m/s, same simulated window at every dt;
+reference = 1.7.0 and 1.8.0 at dt_ref 0.003125 × 4; "Y off" = 1.8.0 with Y
+disabled by a harness-side patch that does not ship). An ordering between two
+trees is claimed only where `|Δe| > 2 ×` the combined SE:
+
+| case | e 1.7.0 | e Y off | e 1.8.0 | ordering |
+|---|---|---|---|---|
+| car, flat | 0.00% | 0.00% | 0.00% | all within 1e-6 of the reference |
+| car, 0.04 m washboard | 5.01 ± 1.72% | 2.38 ± 1.67% | 0.99 ± 4.27% | **UNRESOLVED** (1.7.0 − 1.8.0: 4.02 vs 9.20; Y off − 1.8.0: 1.39 vs 9.16) |
+| tank, flat | 18.95 ± 0.37% | 1.20 ± 0.26% | 1.20 ± 0.26% | 1.7.0 farther (17.75 vs 0.91) |
+| tank, 0.04 m washboard, vs 1.7.0's / 1.8.0's reference | 22.19% / 29.93% | — | 4.54% / 1.51% | 1.7.0 farther against either reference |
+| car, 0.08 m washboard (reported only) | 67.24 ± 14.72% | 85.67 ± 22.04% | 82.60 ± 14.23% | none: not converged (per tree dt 0.00625 vs dt_ref 60% / 59%) and Y binds 13–15 steps per run even at dt_ref |
+
+Convergence at V0 6.00: car 0.04 m per tree 0.36% / 0.11%, across trees 0.07%;
+tank flat 0.17% / 0.17%, across trees 0.10%. On the tank 0.04 m washboard the
+two trees' references differ by 6.41%, cause not established.
+
+What this does and does not say:
+
+* **Nothing here shows Y or 1.8.0 closer to the reference on the 0.04 m car
+  washboard.** (A development plan said "Y brings the path closer"; that was
+  wrong under this rule and was withdrawn.)
+* **Y raises rough-ground cornering sensitivity to initial conditions**: on the
+  0.04 m car washboard 1.8.0's across-launch standard deviation is 2.5× Y off's
+  (0.002536 vs 0.000992 1/m).
+* The tank's flat-ground skid-turn curvature moves -14.9% from 1.7.0, and on
+  FLAT ground 1.7.0's value was the discretisation error (18.95% vs 1.20% from
+  the reference). The tank's Y binds 0 steps on these washboards; its change is
+  F and B1, not Y.
+
+#### 5.5 Known cost: flat cornering of a low-yaw-inertia vehicle
+
+Y binds on EVERY step below `v* = B_y·C_y·μ·g·dt/s` on flat ground — derived
+8.9 m/s for `tests/data/low_yaw_inertia_car.urdf` (s 0.288), about 10 m/s for
+the HJW demo car. Measured there (harness `.pm_r2/impl_f/bump.py`, no bumps,
+per_vehicle, throttle 0.15, steer 0.1, 6 s, `car_4w_rwd_ackermann` on that
+URDF, five launches at V0 ± 0.02 m/s; reference dt_ref 0.003125 × 4, converged
+≤ 0.001% per tree and 0.000% across trees):
+
+| V0 (m/s) | e 1.7.0 | e 1.8.0 | Y binding steps / run | β 1.7.0 / 1.8.0 / reference | a_lat 1.8.0 vs reference (m/s²) |
+|---|---|---|---|---|---|
+| 3 | 0.2446% | **0.3915%** | 240 of 240 | -1.80° / **-1.55°** / -1.83° | 0.3131 vs 0.3145 |
+| 5 | 0.0005% | **0.1850%** | 240 | -1.58° / **-1.31°** / -1.58° | 0.7550 vs 0.7578 |
+| 8 | 0.0011% | 0.0037% | 240 | -1.00° / -0.94° / -1.00° | 1.7557 vs 1.7527 |
+| 12 | 0.0045% | 0.0059% | 0 | +0.15° / +0.15° / +0.14° | — |
+
+* **1.8.0 is FARTHER from the small-dt reference than 1.7.0 at all four
+  speeds.** It passes its acceptance criterion only on the "e ≤ 2%" clause, not
+  on ordering.
+* **The body slip angle is 15.2% / 17.1% / 5.9% smaller than the reference at
+  3 / 5 / 8 m/s** — a dt-discretisation error 1.7.0 does not have (1.4% / 0.0% /
+  0.3%). It is not a physical "cut": at small dt the bound stops binding.
+* What 1.8.0 buys there: at 3 m/s, flip_vlat at dt 0.025 is 796 on 1.7.0 and 0
+  on 1.8.0.
+* HJW demo car (implementer's run, not re-run by review; its demo URDF, dt
+  0.025 × 50 substeps): e 0.12% / 0.01% at 5 / 8 m/s; β -1.25° vs -1.62° (5 m/s)
+  and -0.84° vs -1.07° (8 m/s) against the reference.
+
+The reference car (s 0.856, v* 2.98 m/s) and tank are not in this regime at
+cruising speed.
+
+#### 5.6 Gravity
+
+`g` in every bound is the constant `dynamics.DEADBEAT_G = 9.81`, not the
+scene's gravity. Under `|g| ≠ 9.81` (`VehicleScene(gravity=)`, `set_gravity`,
+the OSC gravity message) every bound is `|g|/9.81` times the bound with the
+true mass share: TIGHTER under weaker gravity (D and Y over-limit; the SFL
+damper floor is under-critical), LOOSER under stronger. The translational
+one-step factor is `1 - s·|g|/9.81`, which stops removing the 2-cycle at
+`|g| >= 2·9.81/s` (derived); the yaw mode stays deadbeat while `s < 1`.
+Measured (reference car, per_vehicle, gravity set with `set_gravity`; reported,
+not a gate):
+
+| \|g\| (m/s²) | lateral-kick flips, 1.8.0 | brake 1.0 from 10 m/s, 1.8.0 | 1.7.0 |
+|---|---|---|---|
+| 4.905 | 0 | back 0 mm, vmin -0.0047 m/s | 41–44 flips (throttle 0.3 kick), 218 yaw-rate flips (turn) |
+| 9.81 | 0 | back 0 mm, vmin -2.7e-5 m/s | 99 / 99 / 66 |
+| 24.5 | 0 (one 0.01 rad/s ω alternation in the 1 m/s steer-0.3 case) | back 0 mm, vmin -7.7e-5 m/s | 214 / 219 / 129 (turn) |
+
+The predicted translational 2-cycle at 24.5 (`s·|g|/9.81` ≈ 2.14) was not
+observed in these cases. A first 1.8.0 draft of the `dynamics.py` comment
+stated the reverse direction ("too loose under weaker gravity"); that was wrong
+and was corrected before release.
+
+### 6. `StaticFrictionLock` holds the rest point (A, A6, C, L)
+
+#### 6.1 What broke once the brake became strong
+
+1.7.0's lock zeroed its anchor on engagement (`v_planar < v_thr`: 0.5 m/s car,
+5.0 m/s for the tank via `samples/tank_tuning.py`) and replaced the tyre force
+from there on. With B1 the BRAKE finishes the stop, so the spring was stretched
+by the whole post-engagement stopping distance and pulled the vehicle back
+toward the engagement point at rest (design probe, reference car brake 1.0 from
+10 m/s: reverse speed -0.107 m/s; on 1.7.0 itself, whose brake faded, +2e-7).
+
+#### 6.2 Now (`physics-contracts.md` §7.17)
+
+* **A6 — take over only at rest.** The lock still forces an engaged wheel's ω to
+  0 from the first engaged step, but it REPLACES the tyre force only once the
+  contact is at rest: planar contact speed below `REST_SPEED` (0.05 m/s), or a
+  creep equilibrium — the held-wheel deadbeat binds on the raw tyre force and
+  the planar speed did not fall this step (`v² >= CREEP_RATIO·v_prev²`,
+  `CREEP_RATIO` 0.96). The creep test is what stops a car on a downhill, where
+  the deadbeat-limited brake balances gravity at `v ≈ g·sinθ·dt/s` (0.050 m/s
+  at 10°, 0.098 m/s at 20° on the car). Before rest the anchor follows the
+  contact; the takeover step anchors at the END of the step.
+* **A — re-anchor at the first reversal**: the first step after engagement on
+  which `s_eng·v_long <= 0` resets the longitudinal anchor at the contact.
+* **C — damping at least critical** for the wheel's mass share:
+  `max(k_damp, 2·sqrt(k_spring·N/g))`, and the damper force is bounded by the
+  Z-scaled one-step deadbeat, so it cannot reverse a contact in any planar mode.
+* **L — the hold force is limited to `ctx.F_long_bounds`**, what the wheel can
+  transmit this step including the brake capacity left; where limited the anchor
+  moves so the spring asks for exactly the limit.
+* Wheels whose force the lock replaced are ORed into `ctx.hold_applied` and
+  exempt from D and Y.
+
+PD13 matrix (harness `.pm_r2/f_probe/scen3.py`; gate fixed before the runs:
+back ≤ 2 mm and vmin ≥ -0.01 m/s):
+
+| case | 1.7.0 back / vmin | 1.8.0 back / vmin | gate |
+|---|---|---|---|
+| car brake 0.5 / 1.0 from 10 m/s | 0 / -6e-6; 0 / +2e-7 | 0 / -0.0021; 0 / -2.7e-5 | pass |
+| car throttle 0.5 + brake 1.0 | 0 / +6e-4 | 0 / -0.0012 | pass |
+| **car throttle 1.0 + brake 1.0** | never stops | 0 / **-0.01036** | **accepted exception** (below) |
+| car throttle 0.5 + brake 0.5; 0.3 + 0.5 | — | 0 / -0.0071; 0 / -0.0004 | pass |
+| car brake 1.0 from -5 m/s; with throttle -0.5 | 0 / -4e-6; 0 / +6e-4 | 0 / -2e-5; 0 / -0.0021 | pass |
+| car reversing 10° downhill, brake 1.0 from -3 m/s | never stops | 4e-5 m / -0.0047 | pass |
+| car 10° downhill, brake 1.0 from 3 m/s | never stops | 4e-5 m / -0.0046 | pass |
+| tank brake 0.5 / 1.0 from 5 m/s | 0 / +2e-6; 0 / +4e-5 | 0 / -0.0017; 0 / -0.0016 | pass |
+| tank throttle 0.3 + brake 1.0 | never stops | 0 / -0.0011 | pass |
+| tank brake 1.0 from -5 m/s | 0 / +3e-5 | 0 / -0.0016 | pass |
+| tank 5° downhill, brake 1.0 from 2 m/s | never stops | 0 / -8e-6 | pass |
+| car 20° downhill from 3 m/s; from rest (reported) | never stops; creeps | 0 / -0.0208; 0.81 mm / -0.0258 | reported |
+
+**Accepted by the user, documented with its value:** car throttle 1.0 +
+brake 1.0 reaches -0.01036 m/s at the base link for ONE step with zero
+back-travel (3.6% past the gate). The 20° rows: the creep test takes over at
+about 0.098 m/s, one step of gravity then loads the spring, and it settles back
+at -0.02 m/s.
+
+#### 6.3 Docstring claims that were wrong, corrected in place
+
+* "The vehicle truly stops when external force ≤ μ·N" (SFL docstring, since
+  v0.5.7): **wrong**. The hold is also limited by what the wheel can transmit —
+  on 1.7.0 by the inertia term (the car could not hold 10°), since 1.8.0 by the
+  brake capacity (the tank preset does not hold 10°: 99 kN slope load against
+  75 kN of brake).
+* "`k_damp` default 20 000 is ~half-critical for a 5-ton chassis": **matched
+  neither reference vehicle** — ζ ≈ 0.78 on the car's wheel share, 0.185 on the
+  tank's 5.8 t share. It is now a floor.
+* `samples/tank_tuning.py` "`SFL_K_DAMP` ~1.35× critical": measured 1.31× (10
+  wheels, static share 5780–5861 kg per wheel; values unchanged).
+* `docs/stability-profiles.md` and `docs/pipeline-and-hooks.md` "zero drift on
+  any slope up to μ ≈ tan(slope)": **wrong** (brake-limited; see above).
+
+The field team's issue harness (`PathFollower_MPC/tools/sdk_issue_checks.py
+--car sdk`, outside this repo, check [2]): the PathFollower stop's minimum speed
+is +0.05 m/s on 1.7.0 and **+0.01 m/s** on 1.8.0. (During development a -0.08
+m/s reverse touch there was attributed to the follower's negative throttle;
+it was the engagement-anchor back-slide of §6.1, which A + A6 removes.)
+
+Linear single-step stability of the explicit spring (derived, not measured):
+`c + 2b < 4` and `b < 2` with `c = k_spring·dt²/m_share`, `b = D·dt/m_share`;
+the deadbeat bound keeps `b <= s`, so `c < 4 - 2s` suffices — at the defaults
+and dt 0.025 a wheel share above about 156 kg (137 kg at s 0.856).
+
+New per-wheel state `_s_eng`, `_rested`, `_rest`, `_v_prev_sq`
+(`STATE_ATTRS`). Like the old anchors it survives every reset (known gap, §15);
+a stale `_rest = True` re-applies the hold at once on the stale anchor, and a
+stale `_v_prev_sq` can trigger one early creep takeover.
+
+### 7. `DifferentiablePlant`
+
+#### 7.1 Cost (accepted by the user)
+
+Measured fail-closed by the implementation on an idle machine, **on the tree
+as it stood after implementation round 1 — before fix rounds 1 and 2, which
+changed (among text and guards) the Newton-divisor floor of the Pacejka closed
+form; not re-measured on the final tree** (harness
+`.pm_r2/impl_f/pd14_bench.py`: Genesis-free fake source of
+`tests/test_differentiable_plant.py` with explicit masses, `horizon=4`, torch 1
+thread; `solve` = median of 15 calls each on a fresh plant, `jacobian` = median
+of 30 calls after 3 warm-ups; 6 repeats, each running 1.7.0 and 1.8.0 in fresh
+processes with alternating slot order; a ratio is published only if each
+slot-order group's median lies inside the other group's range):
+
+| metric | 1.7.0 median | 1.8.0 median | ratio interval (n 6) | published ratio |
+|---|---|---|---|---|
+| tank `solve` | 14.25 ms | 25.49 ms | [1.676 .. 1.897] | **1.811** |
+| tank `jacobian` | 18.65 ms | 29.91 ms | [1.279 .. 1.669] | not published |
+| car `solve` | 21.65 ms | 29.54 ms | [1.343 .. 1.444] | not published |
+| car `jacobian` | 21.91 ms | 35.07 ms | [1.429 .. 1.705] | not published |
+| `compute_wheel_step`, B = 1 (car) | 481.29 µs | 775.64 µs | [1.506 .. 1.703] | **1.617** |
+| `compute_wheel_step`, B = 512 (car) | 1509.62 µs | 1954.79 µs | [1.214 .. 1.341] | not published |
+
+(Log: `.pm_r2/impl_f/logs/pd14_bench_R6.txt`. B = batch rows of one call.)
+
+A horizon sweep re-run for these docs (harness
+`.pm_r2/impl_f/docs_bench/hz_one.py`, same fake tank and `solve` shape, median of
+25 fresh plants per point, 4 alternating repeats pinned to one CPU) was too noisy
+to publish a ratio except at h 4 (1.918 [1.511 .. 2.524]), and its absolute
+times were about twice the idle-machine figures above (1.7.0 h 4: 28.52 ms);
+its medians grow roughly linearly in h on both trees and 1.8.0's are higher at
+every h (2 / 3 / 4 / 6 / 8 / 12: 1.7.0 16.7 / 21.9 / 28.5 / 53.0 / 92.7 /
+120.2 ms, 1.8.0 24.9 / 35.9 / 59.7 / 86.4 / 128.1 / 161.1 ms). A 30-member
+fleet at h 4 measured 1.62 → 2.17 ms per member in the same run (interval
+[1.043 .. 1.587], not published).
+
+**A 10-wheel tank at `horizon=4` does not fit a 25 ms (40 Hz) control step on
+the measured machine**: the Genesis-free solve alone is 25.49 ms there (tree
+before the last two fix rounds, see above), before the live-state snapshot a
+real vehicle adds. Smaller horizons were NOT measured on an idle machine (the
+noisy session above gave 24.9 ms at h 2 and 35.9 ms at h 3, which shows
+nothing about a 25 ms budget), so no horizon is recommended for that loop here.
+The measured option is `SweepTable` (its inversion is a table lookup that does not run the pipeline; 0.16 ms for both channels, a pre-1.8.0 measurement not repeated on 1.8.0). The user accepted this cost; no
+reduced plant pipeline was added (the plant stays the single source).
+Where it comes from (design probe, single runs, noisy): the axle-torque
+order and B1 about +4 ms on the tank's 14 ms solve, the B2 closed form about
++3 ms (the generic K = 16 grid would cost more), D + Y + Z about +3 ms, L and
+the other SFL changes about +2 ms. `docs/path-following.md`'s "~20 ms for one
+10-wheel tank at `horizon=4`" and its horizon table were 1.7.0-and-earlier
+figures and are marked so in place.
+
+#### 7.2 Prediction
+
+The plant runs the same `compute_wheel_step`, with its own Z inputs. Harnesses
+`.pm_r2/f_probe/plant4.py` / `warm_chk3.py` (Genesis-free fake source of
+`tests/test_differentiable_plant.py` with the vehicles' real explicit mass
+properties: car m 1330 kg, I_cg 2714.4 kg·m²; tank m 58200 kg, I_cg 354462.4
+kg·m²; v 5 m/s, throttle 0.3):
+
+| check | 1.7.0 | 1.8.0 |
+|---|---|---|
+| d a / d throttle at h 2 / 3 / 4 / 5, car | 1.898 / 1.230 / 1.847 / 1.457 | 1.863 / 1.847 / 1.838 / 1.833 |
+| same, tank | 3.866 / 2.577 / 3.814 / 3.052 | 3.814 / 3.798 / 3.790 / 3.785 |
+| tank at -2 m/s, throttle -1.0 / -0.8 / -0.5 → a (m/s²) | -2.3787 / -2.7154 / -1.6965 (non-monotone) | -3.1131 / -2.8228 / -1.6858 (monotone) |
+| 240-state grid incl. brake 0.5: zero d a / d throttle columns | 9 car / 6 tank | 0 / 0 |
+| warm vs cold start residual (tank, -3 m/s, target -3.5) | 0.62670 vs 0.85879 | 0.01536 vs 0.02312 |
+
+**A doc claim was wrong, corrected in place:** `physics-contracts.md` §7.15 and
+`docs/testing.md` said the 1.7.0 plant's prediction was "independent of horizon
+parity within 0.3% at h 3 vs 4". That was measured at throttle 0 only; under
+throttle 0.3 the 1.7.0 plant gave 1.230 vs 1.847 (car) and 2.577 vs 3.814
+(tank). 1.8.0 is within 0.5% (car) / 0.2% (tank), and the parity test now runs
+at throttle 0.3 too.
+
+The drive torque now acts within the step, so a 1-step unroll sees throttle
+authority (fake reference car, 5 m/s, throttle 0.3: d a / d throttle 1.093 at h
+1 vs 1.068 at h 4; 1.7.0: 0 at h 1). `horizon >= 2` stays; its error message
+and docstring now give the actual reason (a 1-step unroll carries no tyre
+transient), and the old reason ("throttle reaches the ground only after the
+ω update") is said to be no longer true. The v = 0, ω = 0 NaN of 1.7.0 §8 is
+unchanged.
+
+### 8. Sweep tables re-measured
+
+`samples/data/tank_sweep_signed.csv` is re-measured with the 1.7.0 §5 command
+(`python -m genesis_vehicle.control.sweep_measure --urdf
+genesis_vehicle/samples/urdf/tank_ray.urdf --preset tank_skid_belt --config
+genesis_vehicle/samples/tank_tuning.py`, n_envs 500, CPU): 17325 rows, same grid.
+impl-review re-ran the command on the final tree and got a byte-identical file.
+Against the 1.7.0 file over all cells: |Δ`a_measured`| median 0.073, p95 0.278,
+max 0.860 m/s² (6297 cells over 0.1; the largest moves are drive-against-slope
+and full-throttle cells); |Δ`omega_z_measured`| median 0.008, max 0.237 rad/s.
+The 11 flat coast cells (throttle, steer, pitch, roll all 0) move by at most
+2e-6 m/s².
+
+**Every sweep table and identified parameter set measured before 1.8.0 is
+stale**: 1.8.0 changed the brake, the drive-torque order and the friction
+ellipse. `samples/tank_tuning.py` now says a table is bound to the SDK version
+too.
+
+**Note on CHANGELOG 1.7.0 §8**, which said "whether the sweep tables' window
+averages hide [the ω alternation] is not established": the tank table moved by
+the amounts above under the WHOLE 1.8.0 change set (axle-torque order, brake,
+friction ellipse, deadbeats, SFL) at once. The diff does not isolate the
+alternation's share, so whether the window averages hid it is still not
+established.
+
+Sweep-plant path following (`samples/path_follow_demo.py` /
+`path_follow_reverse_demo.py --plant sweep`, each tree with its own table, spawn
+shifts (0,0) / (0,±0.3) m) — see §12.2.
+
+### 9. Identity baseline re-captured; what each identity test proves
+
+* **New contact-path baseline** (`tests/test_fan_default_identity.py`,
+  `_contact_path_cfg()` = `"control"` minus RR, reference car, batched,
+  dual_scene, dt 0.025 × 10 substeps, 60 brake + 140 throttle-0.5 steps):
+  final pose `(6.018499851226807, -1.9554846630853717e-07,
+  0.11140478402376175)` (1.7.0: `(5.920469284057617, -0.030104611068964005,
+  0.11141446977853775)`). Full `"control"` profile: final x
+  **5.349795818328857** (1.7.0: 5.224289894104004); contact minus full 0.6687 m
+  (1.7.0: 0.6961). impl-review captured both independently, bit-identical.
+  `test_contact_path_rollout_matches_its_1_8_0_capture` (renamed) is a
+  REGRESSION LOCK for later releases, not evidence for 1.8.0; it fails on the
+  1.7.0 tree and on a one-ULP perturbation of one checkpoint.
+* **New cross-tree witness** `test_witness_rollout_is_bit_identical_to_the_37b8b79_tree`:
+  reference car, contact path, per_vehicle, spawned at the settled height with
+  vx 10 m/s and wheels rolling, 200 steps at steer 0 and 0.05, no throttle or
+  brake. Bit-identical across 37b8b79 (v1.5.0), 1.7.0 and 1.8.0. It proves that
+  the raycast, suspension, rolling-tyre force and force application are
+  unchanged WHERE NO 1.8.0 MECHANISM ACTS; it says nothing about driving,
+  braking, low speed, saturation or the fan. At 5 m/s or with a spawn drop the
+  landing load spike makes Y bind and the rollouts differ.
+* `test_point_contact_equals_a_degenerate_fan_bit_for_bit` proves only that the
+  M = 3 fan degenerates to the point contact on the SAME tree.
+* 1.7.0 §8 quoted the contact-path baseline of "applying every axle torque
+  before the tyre" as 6.0155 m; that was a probe without Z and the other
+  bounds. The shipped value is 6.0185 m.
+* `samples/quickstart.py`, 200 steps, batched: x +10.51 m, 4.12 m/s → **x
+  +10.72 m, 4.17 m/s**.
+
+### 10. `RAY_MISS_THRESHOLD` removed
+
+Deprecated since 1.5.2, removal retargeted to 1.8.0 by 1.7.0. It was the 19.9 m
+fallback for a sensor exposing no miss sentinel, correct only at the default
+`max_range` 20.0. It never warned at runtime. Now one guard,
+`raycast._require_miss`, raises `ValueError` wherever a predicate needs the
+sentinel and has `None`; the message names `sensor_miss_value(sensor)`,
+`set_sensor_miss_value(sensor, miss)` and, for a driver built with
+`sensor=None`, `physics.set_ray_miss_value(miss)`.
+
+| call | 1.7.0 | 1.8.0 |
+|---|---|---|
+| `from genesis_vehicle.raycast import RAY_MISS_THRESHOLD` | 19.9 | `ImportError` |
+| `is_ray_hit(d)` / `is_ray_hit_corrected(d)` | threshold fallback | `TypeError` (`miss` required); `miss=None` → `ValueError` |
+| `read_distances(stub_sensor, n)` (no sentinel) | threshold fallback | `ValueError`; pass `miss=` |
+| `VehiclePhysics.set_ray_miss_value(None)` | reset to the fallback | `ValueError` |
+| `VehiclePhysics(sensor=None)` + `step(distances=)`, never injected | silent 19.9 | `ValueError` on the first step |
+| `set_sensor_miss_value(stub)` | returns `None`, readers fall back | returns `None`, readers raise |
+
+Two of these were never announced before this release: `miss` becoming
+required and `set_ray_miss_value(None)` raising. `VehicleScene` gets a
+sentinel on every path it builds, from the real Genesis raycaster it created:
+it stamps each sensor (`vehicle_scene.py:1242`, `:1273`); a `per_vehicle`
+`dual_scene` driver is built with `sensor=None` and injected
+(`vehicle_scene.py:1427`); a `single_scene` driver reads its own sensor
+(`core.py:439`); the batched kind's proto is built with `sensors[0]`
+(`vehicle_scene.py:1722-1724`, `multi_vehicle.py:194-195`) and reads it the same
+way. The OSC server builds its vehicles through `VehicleScene`
+(`server/physics_server.py:645`, `server/l3_runtime.py`). Those paths are
+unaffected; a stub sensor exposing no sentinel would raise on any of them. **A
+direct `MultiVehiclePhysics` given a `None` sensor has no public setter** for
+the sentinel (it lives on the private proto); still open (§15).
+
+### 11. Server hibernation start lag
+
+`use_hibernation=True` (both server modes) delayed a start from rest on
+genesis-world 1.4.5 (CHANGELOG 1.6.9). Harness `.pm_r2/f_probe/hib3.py` (L2
+server `RigidOptions`, reference car, batched): 1.7.0 distance over the
+throttle window 3.2612 m with hibernation vs 3.8675 m without (-15.7%, one run);
+1.8.0 3.9683 vs 3.9684 m (seven runs per arm, deterministic). The 46/100
+zero-velocity steps of the rest window remain, but now fall inside the brake
+hold. Cause still not established; L3 with `n_envs > 1` not measured.
+Hibernation stays ON by user decision.
+
+### 12. Path following
+
+#### 12.1 Jacobian-plant envelope (accepted by the user)
+
+The decision rule was fixed before measuring (forward and reverse demos ×
+horizon {3, 4, 5} × spawn shifts (0,0) / (0,±0.3) m; E0 / E1 / E2) and is
+NOT changed. On 1.8.0 every run passes its own criterion (E0) and every metric
+passes E1 and E2 except **forward final error, which fails E1 and E2 by 0.01
+m**: 1.8.0 [min 1.45, median 1.49, max 1.50] vs 1.7.0 [1.46, 1.47, Q3 1.48,
+max 1.49] m. Forward mean deviation [0.322, 0.376, 0.448] vs 1.7.0 [0.314,
+0.451, Q3 0.478, 0.562]; reverse yaw error [0.17, 0.21, 0.23] vs Q3 0.34; JMK
+collapse onset 8.23 → 8.95 m/s.
+
+**What "final error" is — an earlier reading was wrong.** The forward demo
+breaks on the first DONE step and reads the pose without stepping again
+(`samples/path_follow_demo.py`), and DONE fires at distance < `arrival_goal`
+1.5 m. So the printed error is the distance AT THE DONE STEP: 1.5 m minus the
+depth of the step that crossed the radius (< 0.05 m at 2 m/s). **It is NOT a
+stopping distance**; the project reading that attributed the 0.01 m to a
+shorter post-DONE stop was wrong. Measured at the DONE step, horizon 3 / 4 / 5:
+1.8.0 1.4971 / 1.4982 / 1.4607 m, 1.7.0 1.4694 / 1.4666 / 1.4927 m; the step
+that crossed the radius was 0.0499 / 0.0500 m deep. The 0.01 m failure is the
+phase of that crossing.
+
+Diagnostics (forward demo, (0,0), h 3 / 4 / 5, predicted vs realised):
+ω_z RMS 0.0023 / 0.0028 / 0.0034 rad/s on 1.8.0 vs 0.0094 / 0.0061 / 0.0092
+on 1.7.0, and ω_z max better at every horizon; acceleration bias ≤ |0.0015|
+vs -0.051 / -0.009 / -0.014 m/s²; acceleration RMS 0.341 / 0.317 / 0.263 vs
+0.493 / 0.306 / 0.413 m/s² (better at h 3 and h 5, **slightly worse at h 4**);
+acceleration |max| worse at h 3 / h 4 (5.82 / 4.41 vs 3.43 / 3.98 m/s²), better
+at h 5. Gain sensitivity (h 4, speed and yaw gains ±25%): final error [1.45,
+1.50] on BOTH trees, so the 0.01 m is inside the spread a ±25% gain change
+produces. No PathFollower retune in 1.8.0.
+
+#### 12.2 Sweep-plant envelope (accepted by the user)
+
+Same rule, each tree with its own table: forward mean deviation 1.8.0 [0.289,
+0.334, 0.396] vs 1.7.0 [0.273, median 0.314, Q3 0.350, max 0.386] m — **E1 not
+met by 0.010 m**, deterministic (a repeated run reproduced 0.396 / 0.386 to
+the digit; 1.8.0 is worse at every shift, by 0.010–0.020 m); forward final error
+1.8.0 [1.46, 1.49, 1.49] vs 1.7.0 Q3 1.485 — E2 not met (the DONE-step quantity
+of §12.1). Every 1.8.0 run passes its own criterion (E0, 6 of 6); **1.7.0 fails
+one** — the reverse run at shift (0,-0.3), position error 69.35 m.
+
+`samples/fleet_follow_demo.py`: PASS in both modes on 1.8.0; mean cross-track
+deviation 0.581 m (jacobian) and 0.366 m (sweep, re-measured table). A 0.353 m
+sweep figure seen during development was 1.8.0 physics on the stale 1.7.0
+table.
+
+### 13. Other behaviour you will see
+
+| what | 1.7.0 | 1.8.0 | conditions |
+|---|---|---|---|
+| tank pivot from rest (`pivot_tank`), final ω_z | -0.001 rad/s | **-3.68 rad/s** | per_vehicle, `scen3.py`; the pivot now spins up because the drive torque acts within the step; no LSR change |
+| tank flat skid-turn curvature | -0.0575 1/m | -0.0489 1/m (-14.9%) | §5.4 |
+| `samples/quickstart.py` | x +10.51 m, 4.12 m/s | x +10.72 m, 4.17 m/s | default args, headless |
+| GeneVehicle demos and samples | — | no new FAIL token | scenario-run; HJW "z anchored" and the JMK circle check fail on both trees |
+| HJW brake-phase hold yaw jitter | 612 / 792 flips, final 0.0024 m/s | 526 / 792, final 0.0004 m/s | SFL's spring in the yaw mode; reported, not gated |
+
+### 14. Documentation corrected in place
+
+Besides the claims named in §4, §6.3 and §7.2: `physics-contracts.md` §7.1 and
+§7.7 (brake and clamp formulas), §7.11 (what the identity tests prove), §7.12
+(the SFL reset gap, with a stale line citation), §7.15 (the "operation for
+operation" and "drive and brake still go through the clamp" claims, true only
+through 1.7.0); new §7.16 and §7.17; `docs/stability-profiles.md` (the
+`"control"` profile's LSR is `disable_when_control_active=True`, i.e. OFF
+under throttle or brake, since v0.5.1 — the table said `False` and "active even
+under throttle", which was wrong); `docs/pipeline-and-hooks.md`,
+`docs/concepts.md`, `docs/path-following.md` (the "~20 ms" plant cost and
+its horizon table were 1.7.0-and-earlier figures presented as current),
+`docs/api-reference.md`, `docs/testing.md` (the horizon-parity claim lacked its
+throttle-0 condition), `docs/server.md` (§2.7 hibernation re-measure; a brake
+note in §4), `docs/tire-and-contact.md` (Coulomb is no longer cheaper per step),
+`docs/batching.md` (it still said the pipeline was "mirrored" between the two
+drivers; it has been one function, `_pipeline.compute_wheel_step`, since before
+1.7.0), `docs/index.md`, `README.md`; the `samples/fleet_follow_demo.py`
+docstring (its "the jacobian plant is the tighter on `path_follow_demo`"
+claim was false on 1.7.0 and 1.8.0: sweep 0.314 / 0.334 m vs jacobian 0.352 /
+0.374 m, default args); and the probe-harness citations in the new tests'
+docstrings and in `tire_models/pacejka.py`, re-worded so nothing cites a script
+that is not in the repo.
+
+### 15. Still open
+
+* `core.py` `except Exception: pass` around `estimate_spin_inertia_from_genesis`
+  (`VehiclePhysics.__init__`) is unchanged. If that call fails, the wheel spin
+  inertia silently stays at the config default — and since 1.8.0 that value also
+  feeds the brake projection.
+* A direct `MultiVehiclePhysics` with a `None` sensor has no public setter for
+  the miss sentinel (§10).
+* `StaticFrictionLock` state, old and new, survives every reset (§6.2).
+* Light brake on a shallow slope still creeps (car 3°, brake 0.1: 0.0173 m/s).
+* The tank preset cannot hold 10° (brake capacity, §2.2); the car presets' top
+  speed is capped by `chassis.omega_max` (§4); neither preset value changes.
+* The A6 thresholds (0.05 m/s, 0.96) were chosen on the reference car, tank and
+  HJW; other vehicles untested.
+* Z omits pitch / roll coupling (§5.2); low-yaw-inertia flat cornering error
+  (§5.5).
+* `DifferentiablePlant.jacobian` NaN at v = 0, ω = 0 (1.7.0 §8).
+* The vehicle lifts off near x ≈ 510 m on the default plane (pre-existing, not
+  investigated here).
+* Not run on 1.8.0: GPU, `raycast_mode="single_scene"` and
+  `wheel_contact="swept_envelope"` beyond reported smoke runs, L3 `n_envs > 1`
+  scenarios, and the OSC server beyond a start-up check in both modes.
+
+### Tests
+
+`python -m pytest genesis_vehicle/tests/ -q
+--ignore=genesis_vehicle/tests/test_fusion_probe.py`: **824 passed, 3 skipped
+in 278.5 s** (impl-review, final tree; wall time varies with machine load).
+1.7.0: 712 passed + 3 skipped. The +112 (collected 715 → 827): `test_axle_torque_order.py` 50 (new, Genesis-free), `test_low_speed_deadbeats.py` 42 (new, real CPU scenes; about +90 s of suite time in the implementation's run), `test_gs_compat.py` +12, `test_fan_default_identity.py` +3, `test_ray_miss_and_grounded.py` +2, `test_rolling_resistance.py` +2, `test_dynamics.py` +1. New test data: `tests/data/low_yaw_inertia_car.urdf`. Each new behavioural test was run
+against the 1.7.0 archive and fails there, except those that pass on 1.7.0 by
+design and say so in their docstring (the cross-tree witness, the fan
+degeneracy, the brake-never-reverses grid, the 1.7.0 ω′ equality with no drive
+and no brake, among others).
+
+---
+
 ## [1.7.0] — 2026-11-19
 
 **`RollingResistance` takes effect for the first time.** Through v1.6.10 the
@@ -424,7 +1359,11 @@ passes it with a margin of 0.07 rad. The 1.6.10 reverse sweep row used
   0.47 rad/s; tank 798, 0.16 rad/s. Applying every axle torque before the tyre
   removed it in a probe, but it moves the contact-path baseline (5.9204 →
   6.0155 m), so it needs its own release. Not decided. Whether the sweep
-  tables' window averages hide it is not established.
+  tables' window averages hide it is not established. *(Note added in 1.8.0: the 1.8.0 tank table moved by |Δa| median 0.073, max
+  0.860 m/s² under the whole 1.8.0 change set at once; that does not isolate
+  the alternation, so whether the averages hid it is still not established.
+  The 6.0155 m was a probe without the 1.8.0 bounds; the shipped contact path
+  ends at 6.0185 m. CHANGELOG 1.8.0 §8, §9.)*
 * **`DifferentiablePlant.jacobian` returns NaN at v = 0, ω = 0.** Reproduced on
   1.6.10 and 1.7.0 with the Genesis-free fake state of
   `tests/test_differentiable_plant.py`, `jacobian(0, 0)`: the reference car's

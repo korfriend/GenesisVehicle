@@ -10,14 +10,30 @@ import pytest
 import torch
 
 from genesis_vehicle.dynamics import (
-    brake_torque_signed,
+    brake_torque_signed as _brake_torque_signed,
     suspension_normal_force,
 )
 
 
 # ---------------------------------------------------------------------------
-# brake_torque_signed
+# brake_torque_signed — DEPRECATED since 1.8.0 (removal 2.0.0). Every call in
+# this section goes through `brake_torque_signed` below, which asserts the
+# DeprecationWarning on THAT call; the function's return value is unchanged.
 # ---------------------------------------------------------------------------
+
+
+def brake_torque_signed(*args, **kwargs):
+    with pytest.warns(DeprecationWarning, match="deprecated since 1.8.0"):
+        return _brake_torque_signed(*args, **kwargs)
+
+
+def test_brake_torque_signed_warns_on_every_call():
+    """No once-flag: the second call warns too (precedent: config.py's
+    ``VehicleConfig.dt``)."""
+    omega = torch.tensor([1.0])
+    for _ in range(2):
+        with pytest.warns(DeprecationWarning, match="removed in 2.0.0"):
+            _brake_torque_signed(torch.tensor([10.0]), omega)
 
 
 def test_brake_smoothing_opposes_positive_rotation():

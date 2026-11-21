@@ -219,8 +219,11 @@ def test_jacobian_signs_follow_the_iso_input_contract():
 
 
 def test_horizon_below_two_is_rejected():
-    # One step cannot show a throttle response at all: throttle moves wheel
-    # omega, and only the NEXT step's slip turns that into force.
+    # Kept since v1.8.0 even though a 1-step unroll now DOES see throttle
+    # authority (the drive torque acts on the wheel spin before the tyre within
+    # the step); through 1.7.0 this comment said one step could not show a
+    # throttle response at all, which is no longer true. The rule stays because
+    # a single step carries no tyre transient.
     with pytest.raises(ValueError, match="horizon"):
         _plant(car_4w_rwd_ackermann(CAR_URDF), horizon=1)
 
@@ -419,14 +422,27 @@ def test_the_saturated_warm_start_defect_is_real_with_the_restart_off(v, a_t):
 def test_a_saturated_warm_start_that_is_right_is_kept():
     """Negative control: same-side saturation is sometimes the right answer.
     The restart runs (two starts per member) but the warm start wins, so the
-    command equals the restart-off solve's."""
-    v, a_t, warm = -2.0, -3.0, (-1.0, 0.0)
+    command equals the restart-off solve's.
+
+    The warm start must win STRICTLY (its residual below the zero start's), so
+    the tie branch of the restart rule is not what passes this test. v1.8.0
+    moved the scenario from (v -2, a -3) — where the v1.8.0 force model gives
+    the zero start the lower residual — to (v -3, a -3.5), a strict win
+    (the residuals this test compares, on the 1.8.0 tree, this fake source
+    with its explicit masses, CPU: warm 0.0478 vs zero 0.0706; a one-off
+    check found it a strict win on the 1.7.0 force model as well)."""
+    v, a_t, warm = -3.0, -3.5, (-1.0, 0.0)
     p = _plant(tank_skid_belt(TANK_URDF), v_long=v)
     starts = _spy_cands(p)
     p.set_applied(*warm)
     thr, steer = p.solve(v, a_t, 0.0)
-    _, thr_off, steer_off = _solve_from(tank_skid_belt(TANK_URDF), v, a_t, 0.0,
-                                        warm, saturation_restart=False)
+    p_off, thr_off, steer_off = _solve_from(tank_skid_belt(TANK_URDF), v, a_t,
+                                            0.0, warm, saturation_restart=False)
+    p_zero, _, _ = _solve_from(tank_skid_belt(TANK_URDF), v, a_t, 0.0,
+                               (0.0, 0.0), saturation_restart=False)
+    assert p_off.last_cost < p_zero.last_cost, (
+        f"the warm start must win strictly: warm {p_off.last_cost:.5f} vs zero "
+        f"{p_zero.last_cost:.5f}")
     assert starts == [2]                      # the restart really ran
     assert p.last_restarted is False
     assert thr == pytest.approx(thr_off, rel=1e-6, abs=1e-9)

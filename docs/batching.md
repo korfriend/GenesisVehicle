@@ -364,15 +364,14 @@ correct.
 3. **Composition over a god-class.** `MultiVehiclePhysics` *delegates* to
    `VehiclePhysics`; the physics math has one owner.
 
-**Honest caveat (a real maintenance wart):** the `step()` *pipeline*
-(suspension → tire → omega) is currently **mirrored** between
-`VehiclePhysics.step` and `MultiVehicleKindPhysics.step` because the
-multi-entity I/O is interleaved with the math. A physics fix (e.g. the
-v0.6.0 `F_long` overshoot clamp) must be applied to both. A future
-refactor could extract the shared pipeline into a pure function fed by an
-I/O adapter — removing the duplication **without** merging the two
-public classes. Tracked as a cleanup, not a correctness issue (the
-grouping/dispatch bookkeeping is now unit-tested in
+**The pipeline has one owner.** The `step()` math (suspension → tire →
+omega) lives in `_pipeline.compute_wheel_step`, a pure function that
+`VehiclePhysics.step`, `MultiVehicleKindPhysics.step` and
+`DifferentiablePlant` all call, so a physics fix (e.g. the v1.8.0 brake and
+deadbeat changes) lands in one place. **This paragraph said, until v1.8.0,
+that the pipeline was "currently mirrored" between the two drivers and that a
+fix "must be applied to both"; that was stale — the extraction it proposed had
+already happened** (the grouping/dispatch bookkeeping is unit-tested in
 `tests/test_multi_vehicle_grouping.py`).
 
 ---

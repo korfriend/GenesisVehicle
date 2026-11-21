@@ -334,7 +334,7 @@ genesis_vehicle/
 ├── inputs.py                       VehicleInputs + typed inputs
 ├── urdf.py                         parse_urdf() + URDFParsedConfig
 ├── raycast.py                      WheelRayPattern
-├── dynamics.py                     brake_torque_signed / suspension_normal_force
+├── dynamics.py                     brake_projection / deadbeat_scale / suspension_normal_force
 ├── visual.py                       WheelJointInternalSync (viewer wheel-joint driver)
 ├── tire_models/                    TireModel ABC + Pacejka + Coulomb
 ├── strategies/                     steering / drivetrain / coupling / stability
@@ -351,11 +351,12 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-712 tests covering URDF parsing, config resolve, suspension sizing, strategy
+824 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
-predicates, the swept-envelope wheel contact (including a bit-identity check on
-the DEFAULT contact path), the config-rebuild state carry and the reset
+predicates, the swept-envelope wheel contact (including a bit-identity witness
+of the point contact against the v1.5.0 tree, valid where no v1.8.0 mechanism
+acts, and a regression lock on the driving rollout), the config-rebuild state carry and the reset
 semantics (v1.6.2), the raycast-mode benchmark harness (schedule,
 gates, pairing and publication rule, driven through an injected runner), the
 build-time config derivations staying live under a post-`build()` write
@@ -375,13 +376,21 @@ only convex geoms), rolling resistance as an axle torque applied before the tyre
 and the server wheel overrides that reach the physics (v1.7.0 — closed-form
 coast-down, no wheel-spin alternation on a free coast, the rolling-resistance coefficient guard, the
 `DifferentiablePlant` saturated-warm-start restart, the per-step input copy),
-and the server subpackage surface.
+the axle torques applied before the tyre, the Coulomb brake, the friction
+ellipse at the transmitted force, the low-speed deadbeats and the
+`StaticFrictionLock` rest anchor (v1.8.0 — no ω alternation under throttle or
+brake, both-pedal and downhill stops that hold, the post-stop back-travel
+matrix, the lateral 2-cycle gone on the reference car and a low-yaw-inertia
+test car, the tyre's closed form against a fine grid, a plant that never
+touches the driver), and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v1.7.0 tree, `712 passed, 3 skipped in 89.31s` (CPU/WSL2, genesis-world 1.4.5,
-`pytest tests/ -q -p no:cacheprovider --ignore=tests/test_fusion_probe.py`, one
-run; the 3 skips are the env-gated live server tests, run them with
-`GENESIS_VEHICLE_LIVE_SERVER_TEST=1`). Earlier:
+v1.8.0 tree, `824 passed, 3 skipped in 278.5s` (CPU/WSL2, genesis-world 1.4.5,
+`pytest tests/ -q --ignore=tests/test_fusion_probe.py`, one run on a loaded
+machine; the v1.8.0 real-scene low-speed tests add about 90 s; the 3 skips are
+the env-gated live server tests, run them with
+`GENESIS_VEHICLE_LIVE_SERVER_TEST=1`). Earlier: `712 passed, 3 skipped in
+89.31s` at v1.7.0,
 `634 passed, 3 skipped in 88.17s` at v1.6.10, 633 in 58.69 s at v1.6.9,
 `605 passed, 3 skipped in 135.07s` at v1.6.8 (genesis-world 1.4.0),
 `578 passed, 1 skipped in 137.19s` at v1.6.7, `544 passed in 144.45s` at
@@ -392,9 +401,20 @@ between releases, so treat it as an order of magnitude, not a metric.
 
 ## Releases and Versioning
 
-[Semantic Versioning](https://semver.org/) (pre-1.0, so minor bumps may
-break). Current version: `genesis_vehicle.__version__`. Per-release notes
+[Semantic Versioning](https://semver.org/), with one project rule on top: a
+MINOR bump may change observable public behaviour, and the CHANGELOG names
+every such change (1.8.0 lists eight items strict SemVer would call breaking
+in its "Why a minor version" section). (This line said "pre-1.0, so minor bumps
+may break" — stale since 1.0.) Current version: `genesis_vehicle.__version__`. Per-release notes
 in [`CHANGELOG.md`](CHANGELOG.md).
+
+**Upgrading to 1.8.0:** the brake is now a Coulomb projection that holds a
+stopped wheel, the drive and brake torques act on the wheel spin before the
+tyre, and new low-speed bounds apply — the default trajectory moves, every sweep
+table or identified parameter set measured before 1.8.0 is stale, and
+`RAY_MISS_THRESHOLD` is gone (a `VehiclePhysics(sensor=None)` fed
+`step(distances=)` needs `set_ray_miss_value(miss)`). Read the 1.8.0
+"Why a minor version" list in the CHANGELOG before upgrading.
 
 ## License
 
