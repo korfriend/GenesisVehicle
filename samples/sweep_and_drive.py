@@ -139,7 +139,7 @@ def main():
                          material=gs.materials.Rigid(friction=1.0), name=args.vehicle)
     vs.build()
 
-    follower = PathFollower(path, csv_path)
+    follower = PathFollower(path, csv_path, mpc_model="off")
     T_MAX = int(90.0 / DT)
     goal_r = 3.0
     for step in range(T_MAX):

@@ -148,7 +148,7 @@ def main():
 
     path = build_path()
     goal_xy = (path[-1][0], path[-1][1])
-    follower = PathFollower(path, CSV)
+    follower = PathFollower(path, CSV, mpc_model="off")
     print(f"path: {len(path)} waypoints, goal={goal_xy}")
 
     receiver = StateReceiver()

@@ -147,6 +147,31 @@ Then `import genesis_vehicle` from anywhere.
 
 Dev dependency for running the test suite: `pip install pytest`.
 
+### Optional: the path follower's MPC layer (v2.0.0)
+
+`PathFollower`'s MPC layer — the 2.0.0 default stage 1, see
+[`docs/path-following.md`](docs/path-following.md) §5 — needs packages the
+rest of the SDK does not use, pinned in
+[`requirements-mpc.txt`](requirements-mpc.txt): `casadi==3.8.2` + `do-mpc==5.1.2`
+for the nonlinear MPC (the default), `osqp==1.1.3` + `threadpoolctl>=3` (+ scipy,
+already present) for the linear one. They pull in more (matplotlib, pandas,
+jinja2, joblib, setuptools) and pip may change packages you already have, so
+look first and fall back to `--no-deps` if anything would move:
+
+```bash
+pip install --dry-run --report - -r requirements-mpc.txt
+pip install --no-deps -r requirements-mpc.txt && pip check   # if an installed package would change
+pip install -r requirements-mpc.txt                          # otherwise
+```
+
+`import genesis_vehicle` does not import any of them, and
+`PathFollower(..., mpc_model="off")` (the 1.x follower) never needs them.
+Licences, as facts: casadi LGPL-3.0-or-later (bundles Ipopt EPL-2.0, MUMPS
+CeCILL-C, METIS glue EPL-1.0, OpenBLAS BSD-style), do-mpc LGPL-3.0, osqp
+Apache-2.0, threadpoolctl BSD-3-Clause; they are installed by you, not
+redistributed. The MPC code derives from NVlabs AlpaSim (Apache-2.0) — see
+[`NOTICE`](NOTICE).
+
 ## Getting Started
 
 ```python
@@ -269,7 +294,7 @@ for your own topology. Every preset takes a keyword-only
 
 ## Samples
 
-**20 runnable sample programs** under [`samples/`](samples/) cover the most
+**22 runnable sample programs** under [`samples/`](samples/) cover the most
 common call patterns (counting basis: every `samples/*.py` with a `__main__`
 entry point, excluding the `_hud.py` / `tank_tuning.py` helpers and the
 deprecated `two_scene_terrain` alias). Full catalog with descriptions + viewer
@@ -291,9 +316,9 @@ python -m genesis_vehicle.samples.city_traffic_ego      # 9. ego + traffic highw
 python -m genesis_vehicle.samples.bench_raycast_mode    # 10. raycast_mode benchmark (fail-closed)
 ```
 
-Most scripts accept `--viewer` for an offscreen camera render; the four
+Most scripts accept `--viewer` for an offscreen camera render; the five
 benchmarks (`perf_vectorization`, `perf_multi_vehicle`, `perf_l2_l3_combined`,
-`bench_raycast_mode`) are intentionally headless (rendering would distort the
+`bench_raycast_mode`, `bench_path_follower`) are intentionally headless (rendering would distort the
 numbers). Since v0.7.14 the samples set
 `cfg.enable_wheel_joint_internal_sync = args.viewer` (it defaults to `False` now), so
 headless runs skip the per-step viewer-joint FK and report pure-physics
@@ -308,10 +333,11 @@ Detailed docs live under [`docs/`](docs/):
 | Page | What's in it |
 |---|---|
 | [`docs/index.md`](docs/index.md) | Documentation home — full TOC |
-| [`samples/README.md`](samples/README.md) | Catalog of all 20 runnable samples + viewer support matrix |
+| [`samples/README.md`](samples/README.md) | Catalog of all 22 runnable samples + viewer support matrix |
 | [`docs/quickstart.md`](docs/quickstart.md) | Minimal example, runnable end-to-end |
 | [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855, hook intuition, batched-by-default |
 | [`docs/batching.md`](docs/batching.md) | The L1 / L2 / L3 vectorization axes — when to use which, measured speedups, the L2 × L3 combined pattern |
+| [`docs/path-following.md`](docs/path-following.md) | `PathFollower`: the MPC layer (v2.0.0 default) and the 1.x PD law, the two inverse plants, sweep measurement, identify, migrating from 1.x |
 | [`docs/tire-and-contact.md`](docs/tire-and-contact.md) | Tire model (Pacejka vs Coulomb) & ground-contact mechanism (raycast wheel etc.) — the two axes, standard names, recommendation |
 | [`docs/server.md`](docs/server.md) | OSC physics server for external clients (Unreal / Unity) — purpose, modes, full wire-schema reference |
 | [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default) |
@@ -326,7 +352,9 @@ Detailed docs live under [`docs/`](docs/):
 genesis_vehicle/
 ├── README.md                       <-- you are here
 ├── LICENSE                         Apache 2.0
+├── NOTICE                          AlpaSim (Apache-2.0) attribution for control/mpc/
 ├── CHANGELOG.md                    per-version release notes
+├── requirements-mpc.txt            optional packages of the PathFollower MPC layer
 ├── __init__.py                     single-import public surface
 ├── _version.py                     __version__ / VERSION_INFO source of truth
 ├── core.py                         VehiclePhysics — 5-step pipeline orchestrator
@@ -339,6 +367,7 @@ genesis_vehicle/
 ├── tire_models/                    TireModel ABC + Pacejka + Coulomb
 ├── strategies/                     steering / drivetrain / coupling / stability
 ├── presets.py                      4 ready-to-use VehicleConfig builders
+├── control/                        PathFollower (MPC layer + PD), inverse plants, sweep_measure, identify
 ├── docs/                           the wiki
 └── tests/                          pure-Python unit tests (no Genesis needed)
 ```
@@ -351,7 +380,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-824 tests covering URDF parsing, config resolve, suspension sizing, strategy
+1010 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity witness
@@ -382,14 +411,20 @@ ellipse at the transmitted force, the low-speed deadbeats and the
 brake, both-pedal and downhill stops that hold, the post-stop back-travel
 matrix, the lateral 2-cycle gone on the reference car and a low-yaw-inertia
 test car, the tyre's closed form against a fine grid, a plant that never
-touches the driver), and the server subpackage surface.
+touches the driver), the path follower's MPC layer (v2.0.0 — the 1.x PD
+follower against a golden captured on 1.8.0, the constructor contract and its
+check order, the solve classification on fake and real solvers, a field-parity
+replay that runs only on its capture platform, the optional-package gate),
+and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v1.8.0 tree, `824 passed, 3 skipped in 278.5s` (CPU/WSL2, genesis-world 1.4.5,
-`pytest tests/ -q --ignore=tests/test_fusion_probe.py`, one run on a loaded
-machine; the v1.8.0 real-scene low-speed tests add about 90 s; the 3 skips are
-the env-gated live server tests, run them with
-`GENESIS_VEHICLE_LIVE_SERVER_TEST=1`). Earlier: `712 passed, 3 skipped in
+v2.0.0 tree with the optional MPC packages installed, `1010 passed, 3 skipped`
+in 226.1 s (CPU/WSL2, genesis-world 1.4.5,
+`python -m pytest genesis_vehicle/tests/ -q --ignore=genesis_vehicle/tests/test_fusion_probe.py`;
+impl-review measured 221.5 s; the 3 skips are the env-gated live server tests,
+run them with `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`; without casadi + do_mpc the
+solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `824 passed,
+3 skipped in 278.5s` at v1.8.0, `712 passed, 3 skipped in
 89.31s` at v1.7.0,
 `634 passed, 3 skipped in 88.17s` at v1.6.10, 633 in 58.69 s at v1.6.9,
 `605 passed, 3 skipped in 135.07s` at v1.6.8 (genesis-world 1.4.0),
@@ -404,9 +439,22 @@ between releases, so treat it as an order of magnitude, not a metric.
 [Semantic Versioning](https://semver.org/), with one project rule on top: a
 MINOR bump may change observable public behaviour, and the CHANGELOG names
 every such change (1.8.0 lists eight items strict SemVer would call breaking
-in its "Why a minor version" section). (This line said "pre-1.0, so minor bumps
+in its "Why a minor version" section). 2.0.0 is a major bump: the default
+`PathFollower(path, plant)` call stops working. (This line said "pre-1.0, so minor bumps
 may break" — stale since 1.0.) Current version: `genesis_vehicle.__version__`. Per-release notes
 in [`CHANGELOG.md`](CHANGELOG.md).
+
+**Upgrading to 2.0.0:** `PathFollower(path, plant)` raises `ValueError` for
+every plant type — add `mpc_model="off"` for the 1.x follower (bit-identical to
+1.8.0 on every scenario measured), or install `requirements-mpc.txt`, measure
+the vehicle (`sweep_measure` with the grid flags + `control.identify`) and pass
+`mpc_params=`. `FleetFollower` members must be `"off"`; `extract_state` gains
+`yaw_rate` / `v_lat`; `dynamics.brake_torque_signed` is removed. The nonlinear
+MPC is not guaranteed to fit a 25 ms control step, and an MPC follower started
+facing away from its path can stall (never move) with no warning — a limitation
+inherited from the field code, root cause and fix planned for 2.1.0; start
+aligned with the path. Read the 2.0.0 "Breaking"
+list and `docs/path-following.md` §6 first.
 
 **Upgrading to 1.8.0:** the brake is now a Coulomb projection that holds a
 stopped wheel, the drive and brake torques act on the wheel spin before the

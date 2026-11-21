@@ -1,0 +1,60 @@
+GenesisVehicle (genesis_vehicle)
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software derived from NVlabs/AlpaSim
+(https://github.com/NVlabs/alpasim), Copyright (c) 2026 NVIDIA Corporation,
+licensed under the Apache License, Version 2.0.
+
+The SDK files were derived from a field port of AlpaSim (the field team's
+PathFollower_MPC folder: mpc/alpasim_mpc.py, mpc/alpasim_nmpc.py,
+mpc/mpc_follower.py). That port was made from an upstream revision it did not
+record, so these files are NOT verbatim copies of any published AlpaSim
+revision.
+
+Upstream AlpaSim sources (per the field port's NOTICE):
+  src/controller/alpasim_controller/mpc_impl/nonlinear_mpc.py
+  src/controller/alpasim_controller/mpc_impl/linear_mpc.py
+  src/controller/alpasim_controller/mpc_controller.py
+
+Derived SDK files and what they came from:
+  control/mpc/params.py             <- alpasim_mpc.py (VehicleParams, accel_limits, MPCGains)
+                                       and mpc_follower.py (params_from_json)
+  control/mpc/models.py             <- alpasim_nmpc.py (_build_model)
+  control/mpc/alpasim_nonlinear.py  <- alpasim_nmpc.py (NonlinearMPC)
+  control/mpc/alpasim_linear.py     <- alpasim_mpc.py (LinearMPC)
+  control/mpc/law.py                <- mpc_follower.py (MPCFollower: reference, solve
+                                       cadence, initial state incl. the AlpaSim
+                                       coerce_dynamic_state d0 rule, finish)
+
+Modifications by the GenesisVehicle contributors (summary):
+  - Korean comments translated/rewritten in English; module docstrings added.
+  - Parameters, gains and acceleration limits moved to a numpy-only module, so
+    importing them needs neither casadi/do_mpc nor osqp.
+  - The do_mpc problem is set up at construction (placeholder reference)
+    instead of at the first solve.
+  - casadi's NumPy mode and do_mpc's import-time warning filters are scoped to
+    the calls that need them instead of being set for the whole process.
+  - do_mpc's per-solve history is cleared after every solve.
+  - Solve results carry the IPOPT / OSQP status; each solve is classified
+    (converged / capped / infeasible / other / exception / non-finite) and a
+    policy decides what is applied (control/mpc/law.py).
+  - do_mpc's previous-input cost parameter is reset to the measured state
+    when the MPC restarts (block entry, after a fallback, after set_path).
+  - LinearMPC: QP build and solve under a 1-thread BLAS limit; OSQP setup /
+    solve exceptions caught; solve(raise_error=False) passed explicitly.
+  - The field follower's reference and finish are reused per forward block of
+    a path inside genesis_vehicle.control.PathFollower; reverse blocks are
+    driven by the SDK's PD law.
+  - Optional solve-time options (shifted warm start, OpenBLAS thread cap,
+    extra IPOPT options), all off by default.
+
+The field-authored files (mpc_follower.py, tools/identify.py,
+tools/measure_table.py, demo.py) are used in the SDK with the field team's
+permission (2026-11-21): control/identify.py, the grid flags of
+control/sweep_measure.py and samples/mpc_follow_demo.py derive from them.
+
+Third-party runtime dependencies of the MPC layer (requirements-mpc.txt) are
+installed by the user and NOT redistributed with this SDK:
+  casadi (LGPL-3.0-or-later; bundles Ipopt (EPL-2.0), MUMPS (CeCILL-C),
+  METIS glue (EPL-1.0), OpenBLAS (BSD-style)), do-mpc (LGPL-3.0),
+  osqp (Apache-2.0), threadpoolctl (BSD-3-Clause).

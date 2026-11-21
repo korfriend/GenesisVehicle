@@ -47,11 +47,11 @@ def test_extract_state_pitch_in_degrees():
 
 def test_min_two_waypoints():
     with pytest.raises(ValueError, match="at least 2"):
-        PathFollower([(0, 0, 0, 1.0)], make_table())
+        PathFollower([(0, 0, 0, 1.0)], make_table(), mpc_model="off")
 
 
 def test_backward_waypoint_yaw_flipped():
-    f = PathFollower([(0, 0, 0, -1.0), (10, 0, 0, -1.0)], make_table())
+    f = PathFollower([(0, 0, 0, -1.0), (10, 0, 0, -1.0)], make_table(), mpc_model="off")
     # Travel direction is +X but driven backward -> chassis yaw = pi.
     assert abs(abs(f.yaws[0]) - math.pi) < 1e-9
 
@@ -61,20 +61,20 @@ def test_backward_waypoint_yaw_flipped():
 def test_explicit_yaw_used_verbatim_no_flip():
     # Backward waypoints with an explicit yaw: used as-is (no +pi flip).
     f = PathFollower([(0, 0, 0, -1.0, 0.3), (10, 0, 0, -1.0, 0.3)],
-                     make_table())
+                     make_table(), mpc_model="off")
     assert f.yaws[0] == pytest.approx(0.3)
 
 
 def test_explicit_yaw_none_falls_back_to_tangential():
     f = PathFollower([(0, 0, 0, 2.0, None), (0, 10, 0, 2.0, None)],
-                     make_table())
+                     make_table(), mpc_model="off")
     assert f.yaws[0] == pytest.approx(math.pi / 2)     # tangential +Y
 
 
 def test_explicit_yaw_normalized_and_mixed_tuples():
     # 4-tuples and 5-tuples mix; yaw outside [-pi, pi) is normalized.
     f = PathFollower([(0, 0, 0, 2.0, 2 * math.pi + 0.5), (10, 0, 0, 2.0)],
-                     make_table())
+                     make_table(), mpc_model="off")
     assert f.yaws[0] == pytest.approx(0.5)
 
 
@@ -84,14 +84,14 @@ def test_explicit_yaw_at_cusp_wins_block_end_yaw():
     path = fwd + bwd
     cusp_idx = len(fwd)                      # first waypoint of the bwd leg
     p = list(path[cusp_idx]); path[cusp_idx] = (p[0], p[1], p[2], p[3], -0.25)
-    f = PathFollower(path, make_table())
+    f = PathFollower(path, make_table(), mpc_model="off")
     assert f.blocks[0][1] == cusp_idx
     assert f._block_end_yaw[0] == pytest.approx(-0.25)
 
 
 def test_bad_waypoint_length_raises():
     with pytest.raises(ValueError, match="length 3"):
-        PathFollower([(0, 0, 0), (10, 0, 0)], make_table())
+        PathFollower([(0, 0, 0), (10, 0, 0)], make_table(), mpc_model="off")
 
 
 def test_explicit_yaw_straight_reverse_closed_loop():
@@ -102,7 +102,7 @@ def test_explicit_yaw_straight_reverse_closed_loop():
     bwd = [(x, y, z, s, 0.0) for (x, y, z, s) in
            _densify([(10.0, 0.0, 0.0, -1.0), (5.0, 0.0, 0.0, -1.0)])]
     fwd2 = _densify([(5.0, 0.0, 0.0, 2.0), (15.0, 0.0, 0.0, 2.0)])
-    f = PathFollower(fwd + bwd + fwd2, make_table())
+    f = PathFollower(fwd + bwd + fwd2, make_table(), mpc_model="off")
     x, y, v, modes, done = _run_unicycle(f, 0.0, 0.0, 0.0, max_steps=12000)
     assert done
     assert {"DRV+1", "DRV-1", "BRAKE_TRANS"} <= modes
@@ -150,7 +150,7 @@ def _run_unicycle(follower, x, y, yaw, dt=0.05, max_steps=4000):
 
 def test_follows_straight_path_to_done():
     path = _densify([(0.0, 0.0, 0.0, 2.0), (20.0, 0.0, 0.0, 2.0)])
-    f = PathFollower(path, make_table())
+    f = PathFollower(path, make_table(), mpc_model="off")
     x, y, v, modes, done = _run_unicycle(f, 0.0, 0.0, 0.0)
     assert done, "never reached DONE"
     assert math.hypot(x - 20.0, y) < f.arrival_goal + 0.5
@@ -160,7 +160,7 @@ def test_follows_straight_path_to_done():
 
 def test_follows_l_shaped_path():
     path = _densify([(0.0, 0.0, 0.0, 2.0), (12.0, 0.0, 0.0, 2.0), (12.0, 12.0, 0.0, 2.0)])
-    f = PathFollower(path, make_table())
+    f = PathFollower(path, make_table(), mpc_model="off")
     x, y, v, modes, done = _run_unicycle(f, 0.0, 0.0, 0.0)
     assert done
     assert math.hypot(x - 12.0, y - 12.0) < f.arrival_goal + 0.5
@@ -172,7 +172,7 @@ def test_cusp_stops_then_reverses():
     # cannot trigger while still driving the forward leg.
     fwd = _densify([(0.0, 0.0, 0.0, 1.5), (10.0, 0.0, 0.0, 1.5)])
     bwd = _densify([(10.0, 0.0, 0.0, -1.5), (6.0, -4.0, 0.0, -1.5)])
-    f = PathFollower(fwd + bwd, make_table())
+    f = PathFollower(fwd + bwd, make_table(), mpc_model="off")
     x, y, v, modes, done = _run_unicycle(f, 0.0, 0.0, 0.0, max_steps=8000)
     assert "BRAKE_TRANS" in modes, "cusp transition never triggered"
     assert "DRV-1" in modes, "never drove backward"
@@ -187,7 +187,7 @@ def test_cusp_straight_line_reverse():
     fwd = _densify([(0.0, 0.0, 0.0, 2.0), (10.0, 0.0, 0.0, 2.0)])
     bwd = _densify([(10.0, 0.0, 0.0, -1.0), (5.0, 0.0, 0.0, -1.0)])
     fwd2 = _densify([(5.0, 0.0, 0.0, 2.0), (15.0, 0.0, 0.0, 2.0)])
-    f = PathFollower(fwd + bwd + fwd2, make_table())
+    f = PathFollower(fwd + bwd + fwd2, make_table(), mpc_model="off")
     x, y, v, modes, done = _run_unicycle(f, 0.0, 0.0, 0.0, max_steps=12000)
     assert done
     assert {"DRV+1", "DRV-1", "BRAKE_TRANS"} <= modes
@@ -197,7 +197,7 @@ def test_cusp_straight_line_reverse():
 
 def test_done_immediately_when_at_goal():
     path = _densify([(0.0, 0.0, 0.0, 2.0), (10.0, 0.0, 0.0, 2.0)])
-    f = PathFollower(path, make_table())
+    f = PathFollower(path, make_table(), mpc_model="off")
     thr, steer, brake = f.step((10.0, 0.0), 0.0, 0.0, 0.0, 0.0)
     assert f.last_mode == "DONE"
     assert (thr, steer, brake) == (0.0, 0.0, 1.0)
@@ -213,7 +213,7 @@ def test_block_end_yaw_ignores_a_backwards_cusp_hop():
                (0.0, 10.0, 0.0, 2.0),     # drive +y
                (0.0, 9.7, 0.0, -2.0),     # reverse leg starts 0.3 m BEHIND
                (0.0, 0.0, 0.0, -2.0)]
-    f = PathFollower(_densify(corners), make_table())
+    f = PathFollower(_densify(corners), make_table(), mpc_model="off")
     assert len(f.blocks) == 2
     # Forward block must still arrive heading +y (+90 deg), not -90.
     assert f._block_end_yaw[0] == pytest.approx(math.pi / 2, abs=0.05)
@@ -227,7 +227,7 @@ def test_block_end_yaw_follows_a_genuine_turn():
                (10.0, 8.0, 0.0, 2.0),     # then +y
                (10.0, 7.7, 0.0, -2.0),
                (10.0, 0.0, 0.0, -2.0)]
-    f = PathFollower(_densify(corners), make_table())
+    f = PathFollower(_densify(corners), make_table(), mpc_model="off")
     assert f._block_end_yaw[0] == pytest.approx(math.pi / 2, abs=0.05)
 
 
@@ -238,19 +238,19 @@ def test_explicit_waypoint_yaw_still_wins_at_a_cusp():
         [(0.0, 0.0, 0.0, 2.0), (0.0, 5.0, 0.0, 2.0), (0.0, 10.0, 0.0, 2.0),
          (0.0, 9.7, 0.0, -2.0, 0.25), (0.0, 5.0, 0.0, -2.0),
          (0.0, 0.0, 0.0, -2.0)],
-        make_table())
+        make_table(), mpc_model="off")
     assert f._block_end_yaw[0] == pytest.approx(0.25)
 
 
 def test_param_overrides_respected():
     path = _densify([(0.0, 0.0, 0.0, 2.0), (10.0, 0.0, 0.0, 2.0)])
     f = PathFollower(path, make_table(), lookahead=2.0, arrival_goal=3.0,
-                     steer_cap=0.25)
+                     steer_cap=0.25, mpc_model="off")
     assert f.lookahead == 2.0
     # arrival_goal=3.0 -> DONE already at x=7.5.
     f.step((7.5, 0.0), 0.0, 0.0, 0.0, 0.0)
     assert f.last_mode == "DONE"
     # steer_cap honored even with a big heading error.
-    f2 = PathFollower(path, make_table(), steer_cap=0.25)
+    f2 = PathFollower(path, make_table(), steer_cap=0.25, mpc_model="off")
     _thr, steer, _brk = f2.step((0.0, 3.0), math.pi / 2, 1.0, 0.0, 0.0)
     assert abs(steer) <= 0.25 + 1e-9

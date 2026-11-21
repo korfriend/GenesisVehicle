@@ -5,7 +5,7 @@ Landing page. Pick the document that matches what you're doing.
 | If you want to... | Start here |
 |---|---|
 | Run something in 1 minute | [`quickstart.md`](quickstart.md) |
-| See all 20 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
+| See all 22 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
 | Build a mental model before reading code | [`concepts.md`](concepts.md) |
 | Choose the high-level (`VehicleScene`) vs low-level (`VehiclePhysics`) API | [`concepts.md`](concepts.md#start-here-the-two-api-layers) |
 | Pick the right batching axis (L1 / L2 / L3) for your workflow | [`batching.md`](batching.md) |
@@ -13,7 +13,7 @@ Landing page. Pick the document that matches what you're doing.
 | Choose a tire model (Pacejka vs Coulomb) and understand the ground-contact mechanism | [`tire-and-contact.md`](tire-and-contact.md) |
 | Stop a wheel taking a whole kerb in one step (`wheel_contact="swept_envelope"`, v1.6.0) | [`tire-and-contact.md`](tire-and-contact.md#axis-a-upgrade--the-swept-envelope-wheel_contactswept_envelope-v160) |
 | Drive from one unified `VehicleScene` object, and cut the wheel-raycast cost on heavy static terrain | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
-| Make a vehicle follow a waypoint path (path → Steer/Throttle) | [`path-following.md`](path-following.md) |
+| Make a vehicle follow a waypoint path (path → Steer/Throttle) | [`path-following.md`](path-following.md) — **2.0.0: `PathFollower(path, plant)` raises unless you pass `mpc_model="off"` (the 1.x follower) or `mpc_params=` (the MPC layer); see "Which follower" and §6 "Migrating from 1.x"** |
 | Run the OSC physics server for an external client (Unreal / Unity), or look up the wire schema | [`server.md`](server.md) |
 | Look up a specific class / function / default | [`api-reference.md`](api-reference.md) |
 | Understand WHERE in the simulation step your hook runs | [`pipeline-and-hooks.md`](pipeline-and-hooks.md) |
@@ -51,6 +51,9 @@ from genesis_vehicle import (
     WheelRayPattern, parse_urdf, stability_hooks_for_profile,
     # path following (docs/path-following.md)
     PathFollower, FleetFollower, DifferentiablePlant, SweepTable,
+    # (the MPC layer's MPCVehicleParams / MPCGains / load_mpc_params /
+    #  identify_mpc_params / FollowerPlan / extract_state live in
+    #  genesis_vehicle.control, not the root)
     # per-link transforms (telemetry / animation / attach)
     get_link_transforms, LinkTransforms,
     # version
@@ -69,11 +72,12 @@ The right-hand column is where the full story lives.
 
 | Utility | What it does | Entry point | Details |
 |---|---|---|---|
-| Path following | waypoints + signed target speeds → per-step `(throttle, steer, brake)` by inverting the vehicle's response map; cusps (speed-sign flips) handled as stop-and-reverse | `PathFollower` | [`path-following.md`](path-following.md) |
-| Inverse plant (default) | autodiff through the SDK's own ray-wheel force model → 2×2 Jacobian → Newton solve, every step. No measurement, no CSV, tracks plant edits automatically | `DifferentiablePlant` | [`path-following.md`](path-following.md) §1 |
-| Fleet control | one plant inverts K vehicles × N envs in ONE unrolled batch (26.5× faster than a plant each, at 30 tanks); `plan` → batched `solve` → `finish` | `FleetFollower` | [`path-following.md`](path-following.md) §1 |
+| Path following | waypoints + signed target speeds → per-step `(throttle, steer, brake)` by inverting the vehicle's response map; cusps (speed-sign flips) handled as stop-and-reverse. Since 2.0.0 stage 1 is an MPC layer by default (needs `mpc_params`); `mpc_model="off"` is the 1.x follower | `PathFollower` | [`path-following.md`](path-following.md) |
+| MPC layer (v2.0.0) | Model Predictive Control: the field `PathFollower_MPC` controller (AlpaSim-derived bicycle model; do_mpc + IPOPT, or OSQP) on forward blocks of a path, the 1.x proportional path law (PD) on reverse blocks and after a failed solve; two-axle Ackermann only; optional packages (`requirements-mpc.txt`). The nonlinear solve is NOT guaranteed to fit a 25 ms step (5-24 % of steps over on the measured machine, session-dependent); a follower started facing away from its path can stall (never move) with no warning, inherited from the field code, fix planned for 2.1.0 (§5.3) | `PathFollower(mpc_params=...)`, `python -m genesis_vehicle.control.identify`, `python -m genesis_vehicle.samples.bench_path_follower` | [`path-following.md`](path-following.md) §5 |
+| Inverse plant (no measurement) | autodiff through the SDK's own ray-wheel force model → 2×2 Jacobian → Newton solve, every step. No measurement, no CSV, tracks plant edits automatically | `DifferentiablePlant` | [`path-following.md`](path-following.md) §1 |
+| Fleet control | one plant inverts K vehicles × N envs in ONE unrolled batch (26.5× faster than a plant each, at 30 tanks); `plan` → batched `solve` → `finish`; PD followers only (`mpc_model="off"`, v2.0.0) | `FleetFollower` | [`path-following.md`](path-following.md) §1 |
 | Inverse plant (measured) | a pre-measured (v, throttle, steer, pitch, roll) → (a, ω_z) grid; numpy-only, so a simulator-free process can still path-follow | `SweepTable` | [`path-following.md`](path-following.md) §2 |
-| Sweep measurement | measures that grid in one batched L3 run (build-once, body-frame accurate) — only needed for `SweepTable` | `python -m genesis_vehicle.control.sweep_measure` | [`path-following.md`](path-following.md) §2 |
+| Sweep measurement | measures that grid in one batched L3 run (build-once, body-frame accurate) — only needed for `SweepTable`; v2.0.0 grid flags (`--v-list=...`) for MPC speeds above the default 4 m/s | `python -m genesis_vehicle.control.sweep_measure` | [`path-following.md`](path-following.md) §2 |
 | Stability profiles | maps a use-case profile (`"control"` / `"raw"` / `"research"`) to the right stability-hook stack | `stability_hooks_for_profile` | [`stability-profiles.md`](stability-profiles.md) |
 | Rolling resistance | an axle resisting torque `cr*N*r*tanh(ω r / tanh_scale)` (cr = rolling-resistance coefficient, N = wheel load, r = wheel radius) applied to wheel spin ω before the tyre, through a hook's `apply_pre_tire` and `PipelineContext.T_resist`; part of the default `"control"` profile, and in effect only since v1.7.0 (the overshoot clamp erased it before) | `RollingResistance`, `StabilityHook.apply_pre_tire` | [`physics-contracts.md` §7.15](physics-contracts.md) |
 | Brake, axle-torque order, low-speed bounds | since v1.8.0 the drive and brake torques act on the wheel spin before the tyre; the brake is a Coulomb projection that holds a stopped wheel (downhill and both-pedal stops hold); `F_lat` is taken at the transmitted `F_long`; held-wheel and lateral one-step deadbeats, scaled by the vehicle's yaw inertia, remove the low-speed lateral 2-cycle; `StaticFrictionLock` holds the point where the contact came to rest | `dynamics.brake_projection`, `dynamics.deadbeat_scale`, `TireModel.at_long_force`, `StaticFrictionLock.STATE_ATTRS` | [`physics-contracts.md`](physics-contracts.md) §7.1, §7.16, §7.17 |
@@ -83,7 +87,7 @@ The right-hand column is where the full story lives.
 | Server state-send downsampling | `--send-hz H` gates the L2 state send to H Hz on a wall clock while physics keeps running at `dt`; default OFF and bit-identical when off. A reset is flushed with the exact reset pose, a teleport is not (delayed ≤ `1/H` + one loop interval, ≤ 75 ms at H=20 / dt=25 ms). The cost is LAG, quoted by regime; the measured arrival rate drops 136.4 → 20.0 Hz, and NO speed figure is published (v1.6.7). L2 only — `--multi-env` WARNs | `python -m genesis_vehicle.server --send-hz 20`, `python -m genesis_vehicle.server.benchmark --send-hz 20` | [`server.md`](server.md) §2.6 |
 | Server reporting window | the `[STATS]`/`[SERVE]` window is `--stats-interval` seconds of WALL CLOCK in both modes (default 1.0; a fixed 50 LOOPS through v1.6.7, which collapsed to a median 0.0–0.1 ms on a server with headroom). The publishable metric is the duty cycle `D = Σserve_ms / Σwindow_ms`, plus `S' = Σserve_ms / Σsteps`; `Loop Avg` / `steps/loop` are still diluted by the busy-wait loops and that is NOT fixed. The benchmark's headline columns are now pooled over `loops`, so pre-v1.6.8 tables are not directly comparable (v1.6.8) | `python -m genesis_vehicle.server --stats-interval 1.0`, `python -m genesis_vehicle.server.benchmark --stats-interval 2.0` | [`server.md`](server.md) §2.5 |
 | Raycast-mode benchmark | order-independent, paired, fail-closed comparison of `dual_scene` vs `single_scene` (fresh process per measurement; prints NO ratio when the machine's noise cannot carry one) | `python -m genesis_vehicle.samples.bench_raycast_mode` | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
-| Samples | 20 runnable, self-contained example programs with bundled assets (every `samples/*.py` with a `__main__` entry, minus the `_hud.py` / `tank_tuning.py` helpers and the deprecated `two_scene_terrain` alias) | `python -m genesis_vehicle.samples.<name>` | [`../samples/README.md`](../samples/README.md) |
+| Samples | 22 runnable, self-contained example programs with bundled assets (every `samples/*.py` with a `__main__` entry, minus the `_hud.py` / `tank_tuning.py` helpers and the deprecated `two_scene_terrain` alias) | `python -m genesis_vehicle.samples.<name>` | [`../samples/README.md`](../samples/README.md) |
 
 **Model preparation & scene assembly**
 

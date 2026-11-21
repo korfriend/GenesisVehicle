@@ -532,7 +532,7 @@ _PATH = [(float(i), 0.0, 0.0, 2.0) for i in range(20)]
 
 def test_path_follower_takes_a_plant_and_prefers_the_coupled_solve():
     p = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=4.0)
-    f = PathFollower(_PATH, p)
+    f = PathFollower(_PATH, p, mpc_model="off")
     assert f.plant is p
     assert f.sweep is p                 # pre-v1.3.0 attribute name still works
     assert f._coupled_plant is True
@@ -545,20 +545,20 @@ def test_path_follower_forwards_plant_kwargs_when_it_builds_the_plant():
     # plant option, and the only one that goes through PathFollower.
     src = _FakeSource(car_4w_rwd_ackermann(CAR_URDF))
     f = PathFollower(_PATH, src, plant_kwargs={
-        "horizon": 6, "mass": src.mass_kg, "izz": src.izz_kgm2})
+        "horizon": 6, "mass": src.mass_kg, "izz": src.izz_kgm2}, mpc_model="off")
     assert isinstance(f.plant, DifferentiablePlant)
     assert f.plant.horizon == 6
 
 
 def test_path_follower_tightens_the_plant_steer_range_to_its_own_cap():
     p = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=4.0)
-    PathFollower(_PATH, p, steer_cap=0.35)
+    PathFollower(_PATH, p, steer_cap=0.35, mpc_model="off")
     assert p.steer_range == (-0.35, 0.35)
 
 
 def test_path_follower_reports_the_applied_command_on_every_exit():
     p = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=4.0)
-    f = PathFollower(_PATH, p)
+    f = PathFollower(_PATH, p, mpc_model="off")
     # Sitting on the final waypoint takes the DONE early-return branch.
     thr, steer, brake = f.step((19.0, 0.0), 0.0, 0.0, 0.0, 0.0)
     assert f.last_mode == "DONE" and brake == 1.0
@@ -570,7 +570,7 @@ def test_path_follower_still_accepts_a_sweep_table():
                        "tank_sweep_signed.csv")
     if not os.path.exists(csv):
         pytest.skip("bundled sweep CSV not present")
-    f = PathFollower(_PATH, SweepTable.load(csv))
+    f = PathFollower(_PATH, SweepTable.load(csv), mpc_model="off")
     assert f._coupled_plant is False
     thr, steer, brake = f.step((0.0, 0.0), 0.0, 2.0, 0.0, 0.0)
     assert -1.0 <= thr <= 1.0
@@ -679,8 +679,8 @@ def test_mixed_kinds_in_one_plant_are_refused():
 def test_plan_then_finish_is_exactly_step():
     p1 = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=4.0)
     p2 = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=4.0)
-    f1 = PathFollower(_PATH, p1)
-    f2 = PathFollower(_PATH, p2)
+    f1 = PathFollower(_PATH, p1, mpc_model="off")
+    f2 = PathFollower(_PATH, p2, mpc_model="off")
     state = ((3.0, 0.4), 0.1, 4.0, 0.0, 0.0)
 
     whole = f1.step(*state)
@@ -693,7 +693,7 @@ def test_plan_then_finish_is_exactly_step():
 
 def test_a_decided_plan_needs_no_inversion():
     p = _plant(car_4w_rwd_ackermann(CAR_URDF), v_long=0.0)
-    f = PathFollower(_PATH, p)
+    f = PathFollower(_PATH, p, mpc_model="off")
     plan = f.plan((19.0, 0.0), 0.0, 0.0, 0.0, 0.0)      # on the goal
     assert plan.mode == "DONE" and plan.command == (0.0, 0.0, 1.0)
     assert f.finish(plan, 0.0, 0.0) == (0.0, 0.0, 1.0)
@@ -709,7 +709,7 @@ def test_fleet_follower_drives_every_member_from_one_solve():
     M = 3
     plant, src = _fleet(M, v_long=2.0)
     paths = _fleet_paths(M)
-    fleet = FleetFollower([PathFollower(p, plant) for p in paths], plant)
+    fleet = FleetFollower([PathFollower(p, plant, mpc_model="off") for p in paths], plant)
     assert len(fleet) == M
 
     states = [((0.0, 0.5 * k), 0.0, 2.0 + 0.5 * k, 0.0, 0.0) for k in range(M)]
@@ -731,8 +731,8 @@ def test_fleet_follower_matches_independent_followers():
     M = 3
     plant, src = _fleet(M, v_long=2.0)
     paths = _fleet_paths(M)
-    fleet = FleetFollower([PathFollower(p, plant) for p in paths], plant)
-    solo = [PathFollower(paths[i], DifferentiablePlant(src.member(i), **_FLEET_KW))
+    fleet = FleetFollower([PathFollower(p, plant, mpc_model="off") for p in paths], plant)
+    solo = [PathFollower(paths[i], DifferentiablePlant(src.member(i), **_FLEET_KW), mpc_model="off")
             for i in range(M)]
 
     states = [((1.0 + k, 0.5 * k), 0.05 * k, 2.0 + 0.5 * k, 0.0, 0.0)
@@ -747,18 +747,18 @@ def test_fleet_follower_rejects_a_mismatched_or_unbatched_plant():
     plant, _ = _fleet(3)
     paths = _fleet_paths(2)
     with pytest.raises(ValueError, match="one to one"):
-        FleetFollower([PathFollower(p, plant) for p in paths], plant)
+        FleetFollower([PathFollower(p, plant, mpc_model="off") for p in paths], plant)
 
     csv = os.path.join(os.path.dirname(__file__), "..", "samples", "data",
                        "tank_sweep_signed.csv")
     if os.path.exists(csv):
         table = SweepTable.load(csv)
         with pytest.raises(TypeError, match="batched solve"):
-            FleetFollower([PathFollower(_PATH, table)], table)
+            FleetFollower([PathFollower(_PATH, table, mpc_model="off")], table)
 
 
 def test_path_follower_without_any_plant_is_an_error():
     with pytest.raises(ValueError, match="inverse plant"):
-        PathFollower(_PATH)
+        PathFollower(_PATH, mpc_model="off")
     with pytest.raises(TypeError, match="plant"):
-        PathFollower(_PATH, object())
+        PathFollower(_PATH, object(), mpc_model="off")

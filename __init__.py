@@ -20,7 +20,7 @@ A single import gives you everything:
         # Sensors / utilities
         WheelRayPattern,
         # Dynamics primitives (testable, pure-Python)
-        brake_torque_signed, suspension_normal_force,
+        suspension_normal_force,
         # Presets
         car_4w_rwd_ackermann, car_4w_awd_ackermann,
         truck_6w_partial_ackermann, tank_skid_belt,
@@ -117,7 +117,6 @@ from .urdf import (
     parse_urdf,
 )
 from .dynamics import (
-    brake_torque_signed,
     suspension_normal_force,
 )
 from .strategies import (
@@ -239,7 +238,7 @@ __all__ = [
     "URDFParsedConfig", "parse_urdf",
     "estimate_spin_inertia_from_genesis",
     # Dynamics primitives
-    "brake_torque_signed", "suspension_normal_force",
+    "suspension_normal_force",
     # Strategy ABCs
     "SteeringStrategy", "DrivetrainStrategy", "CouplingStrategy", "StabilityHook",
     # Steering

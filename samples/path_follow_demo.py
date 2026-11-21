@@ -212,7 +212,7 @@ def main():
     else:
         plant = CSV
         print(f"inverse plant: sweep table {os.path.basename(CSV)}")
-    follower = PathFollower(path, plant)
+    follower = PathFollower(path, plant, mpc_model="off")
 
     recorder = None
     REC_EVERY = 2                       # record every 2nd step -> 20 fps

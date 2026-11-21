@@ -10,6 +10,685 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [2.0.0] — 2026-11-21
+
+**`PathFollower` gains an MPC layer, and it is ON by default: a follower
+constructed the 1.x way, `PathFollower(path, plant)`, now raises `ValueError`
+for every plant type.** Add `mpc_model="off"` to keep the 1.x follower — on
+every scenario measured for this release it is bit-identical to 1.8.0 (§2) —
+or measure the vehicle once (a sweep table on a grid that reaches the driving
+speeds, plus `python -m genesis_vehicle.control.identify`) and pass
+`mpc_params=` (§3.2). The MPC layer is the field team's `PathFollower_MPC`
+controller ported into the SDK; that controller is itself derived from NVlabs
+AlpaSim (Apache-2.0, see `NOTICE`). The SDK port reproduces the unmodified
+field controller exactly in a Genesis closed loop (538 steps, max difference
+0.0, §5).
+
+**What this release does NOT give you, stated plainly** (each in its section):
+the nonlinear MPC is **not guaranteed to fit a 25 ms control period** — on the
+measured machine 5.0 % to 24.1 % of control steps overran it, depending on the
+session and the harness, and the cause of that spread is not established (§7);
+**an MPC follower that starts facing away from its path can stall — never
+move — with every solve "converged" and no warning or fallback; inherited from
+the field code, root cause and fix planned for 2.1.0** (§3.3); the closed-loop
+acceptance criterion "NMPC mean CTE ≤ 0.6 × PD mean CTE" is **not met**
+(0.0670 vs limit 0.0641 m) and the NMPC's MAXIMUM deviation is larger than the
+PD's (0.682 vs 0.297 m), accepted by the user with the criterion unchanged
+(§6); the only prediction model is the linear-tyre bicycle model; only
+two-axle Ackermann vehicles on forward blocks are supported. The Pacejka
+prediction model (planned 2.1.0) and a PD correction on the MPC's predicted
+trajectory (planned 2.2.0) are **not in this release**.
+
+| abbr | meaning |
+|---|---|
+| MPC | Model Predictive Control |
+| NMPC | nonlinear MPC: do_mpc + IPOPT (`mpc_impl="nonlinear"`, the default) |
+| LMPC | linear MPC: an OSQP quadratic program (`mpc_impl="linear"`) |
+| IPOPT / OSQP | the nonlinear-program solver bundled with casadi / the quadratic-program solver of the `osqp` package |
+| PD | the 1.x `PathFollower` law (proportional speed and heading feedback on the path); `mpc_model="off"` |
+| CTE | cross-track error: distance from the vehicle to the dense course polyline (m) |
+| tot>25 | share of control steps (first 20 excluded) whose control time plus simulation time exceeds 25 ms |
+| U1 | the `ValueError` a default (MPC) follower raises when it gets no `mpc_params` |
+| R-OFF / R-MPC / R-REV / R-FAIL / CMD | the `PathFollower.regime` values: MPC layer off / MPC on a forward block / PD on a reverse block / PD after a failed solve / DONE or cusp brake with the MPC layer on |
+| CONV / CAP / INFEAS / OTHER / EXC / NAN | solve classes: converged / stopped by an iteration or time cap / infeasible or numerical failure / any other status / the solver raised / a non-finite command |
+| δ, a | front-wheel steering angle (rad) and longitudinal acceleration (m/s²) the MPC commands |
+| ω_z | chassis yaw rate (rad/s) |
+| L | wheelbase (m) |
+| d0, a0 | the vehicle's measured steering angle (AlpaSim rule `atan(ω_z·L/v)` above 0.25 m/s, else 0) and acceleration |
+| C_αf / C_αr | front / rear axle cornering stiffness (N/rad) |
+| τ | first-order time constant (s) |
+| v*, s | lateral-deadbeat speed and rigid-body scale of 1.8.0 (CHANGELOG 1.8.0 §5) |
+| RT | real time: one control step within its 25 ms period |
+| p50 | median (50th percentile) of a per-step time over one run |
+| U5 / RT-1 | the implementation's session-1 screening harness (`u5_bench.py`) / its session-2 paired field-vs-SDK timing harness (`run_rt1.py`); both outside the repo, not shipped |
+| S0-S5 | session-1 SDK solver arms in U5 (S0 = field settings; S1-S5 = the speed options of §7) |
+| UE | Unreal Engine (the external client deployment that updates by `git pull`) |
+| WSL2 | Windows Subsystem for Linux 2 (the measurement machine's Linux environment) |
+| SemVer | Semantic Versioning (major.minor.patch) |
+
+**Conditions of every number in this entry unless a row says otherwise:**
+CPU/WSL2 (Intel Core Ultra 9 285H, 8 logical CPUs), genesis-world 1.4.5,
+dt 0.025 × 4 substeps, casadi 3.8.2 (bundled Ipopt 3.14.19) / do_mpc 5.1.2 /
+osqp 1.1.3, measured 2026-11-21, every process alone. "The demo course" is
+`samples/mpc_follow_demo.py`'s: the reference car (`samples/urdf/car_4w.urdf`,
+`car_4w_rwd_ackermann`, `"control"` profile) from rest, straight 20 m, a 90°
+left turn of 30 m radius, straight 15 m, speed ramped at 1 m/s² to 8 m/s,
+`steer_cap` 0.5, plane and tyre friction 1.0, stage 2 = a sweep table on the
+demo grid (§3.2).
+
+**Why a major version.** Strict SemVer and this project's own rule agree:
+the default constructor call of a public class stops working.
+
+*Breaking:*
+
+1. **U1.** `PathFollower(path, plant)` without `mpc_params` raises
+   `ValueError` for EVERY plant type — `DifferentiablePlant`, a live
+   `Vehicle` / `VehiclePhysics`, `SweepTable`, a sweep-CSV path. The message
+   names both ways out (`mpc_params=` with the identify command, or
+   `mpc_model="off"`). A tank or a three-axle truck gets a different
+   `ValueError` first — "the MPC layer models a 2-axle Ackermann vehicle;
+   this vehicle has SkidSteer/5 axles — pass mpc_model=\"off\"" — when the
+   plant is a live vehicle or a `DifferentiablePlant`; there is no automatic
+   downgrade (user decision). Do: `mpc_model="off"`.
+2. **Error precedence.** The constructor checks, in code order: path length
+   < 2 (`ValueError`); plant missing (`ValueError`); `mpc_model` value
+   (`ValueError`); with `"off"`, any MPC-only argument (`ValueError`); a live
+   vehicle or `DifferentiablePlant` that is not a two-axle Ackermann
+   (`ValueError`); **U1**; `mpc_impl` / `on_solve_failure` values
+   (`ValueError`); optional packages (`ImportError`); the params file
+   (`FileNotFoundError` for a missing file, `ValueError` for a wrong schema,
+   missing keys or a non-Ackermann JSON steering). Only AFTER all of these come
+   the 1.x plant coercion (`TypeError` for an unusable plant object;
+   `FileNotFoundError` for a sweep-CSV path that does not exist) and the
+   waypoint parsing (the waypoint-shape `ValueError`). An `mpc_params` that is
+   neither a path nor an `MPCVehicleParams` raises `TypeError` at the params
+   step. So under the default
+   `mpc_model` a call without `mpc_params` reports U1 where 1.x reported a bad
+   plant object (`PathFollower(path, object())` was `TypeError`) or a malformed
+   waypoint (was the "length" `ValueError`); the first five checks still come
+   before U1. With `mpc_params` given, a missing package or a bad params file
+   is reported before a bad plant object or waypoint. With `mpc_model="off"`
+   the 1.x order is unchanged.
+3. **`FleetFollower` rejects MPC members** with `TypeError` naming
+   `mpc_model="off"`, before it touches any follower. Its step passes no
+   `yaw_rate` / `v_lat`, and N NMPC solves per step do not fit a control
+   period.
+4. **New `last_mode` values** with the MPC layer on: `MPC`, `MPC-HOLD`
+   (standing or rolling back while the plan wants to slow: brake instead of a
+   negative throttle), `MPC-HOLDCMD` (`on_solve_failure="hold"`: the previous
+   command kept), `PD-FALLBACK` (`"pd"`: the PD law after a failed solve).
+   Code that switches on the 1.x set `INIT/DRV±1/STOP/BRAKE_TRANS/DONE` meets
+   values it does not know. `"off"` produces the 1.x set only.
+5. **`extract_state` / `extract_state_from_arrays` gain `yaw_rate` and
+   `v_lat`** — `extract_state` when the object has `get_ang()` (the SDK
+   `Vehicle` and a Genesis entity do; a duck-typed object without it keeps the
+   five 1.x keys), `extract_state_from_arrays` when the new optional
+   `ang_xyz` is passed. The five 1.x values are unchanged; code that compares
+   the whole dict (key-set equality) changes. `extract_state` reads
+   `get_ang()` once more per call.
+6. **Field params JSONs are rejected.** `MPCVehicleParams.from_json` accepts
+   exactly the schema `genesis_vehicle.mpc_params/1`; a JSON written by the
+   field `PathFollower_MPC/tools/identify.py` has no `schema` key and raises
+   `ValueError` ("no schema key — re-run identify"). Do: re-run
+   `python -m genesis_vehicle.control.identify`. Forward rule, fixed now:
+   every 2.x reader keeps accepting `/1`; any other or missing schema is a
+   `ValueError`. `steer_max` comes from the follower's `steer_cap`
+   (`steer_cap × max_steer_rad`), never from the JSON.
+7. **Constructing an MPC follower imports do_mpc**, which imports
+   `matplotlib.pyplot`, `pandas` and `scipy` into your process (2.4 s
+   measured by the api-review's Genesis-free probe script, outside the
+   repo) and would emit two import-time
+   `UserWarning`s (ONNX, opcua) that the SDK silences for that import only.
+   `import genesis_vehicle` imports none of casadi, do_mpc, osqp or
+   threadpoolctl (§10).
+8. **Callers outside this repository break.** Field scripts in the workspace
+   built on `PathFollower(path, plant)` (nine found by grep, none in
+   `server/` or `GeneVehicle_*`) raise U1 until they add `mpc_model="off"` or
+   `mpc_params=`. The UE clone could not be checked.
+9. **`dynamics.brake_torque_signed` is removed** — its own section, §4.
+
+*Additive:* `PathFollower(mpc_params=, mpc_model=, mpc_impl=,
+on_solve_failure=, mpc_gains=, mpc_v_floor=, dt_ctrl=)`; `step` / `plan` take
+keyword-only `yaw_rate=`, `v_lat=`, `t=`; `PathFollower.set_path`,
+`.regime`, `.mpc_stats`, `.last_plan`; `FollowerPlan.regime` / `a_ff` /
+`w_ff` (appended with defaults — positional construction unchanged; on an
+`R-MPC` plan `a_ff` / `w_ff` are the MPC's commanded `a` / `ω_z`, otherwise
+`None` — not the feedforward planned for 2.2.0);
+`genesis_vehicle.control.MPCVehicleParams`, `MPCGains`, `load_mpc_params`,
+`identify_mpc_params` (lazy); `genesis_vehicle.control.mpc`;
+`python -m genesis_vehicle.control.identify`; `sweep_measure` grid flags;
+`samples/mpc_follow_demo.py`, `samples/bench_path_follower.py`;
+`requirements-mpc.txt`, `NOTICE`. None of the new names is re-exported from
+the package root.
+
+*Still open:* §13.
+
+### 1. What the MPC layer is
+
+A control step has two stages since 2.0.0. Stage 1 decides the response the
+vehicle should produce, `(a, ω_z)`; stage 2, the inverse plant (`SweepTable` or
+`DifferentiablePlant`, unchanged), turns it into `(throttle, steer)`. The 1.x
+path state machine (projection, direction blocks, cusp, DONE) runs on every
+step in every regime; what changes is who fills stage 1:
+
+```mermaid
+flowchart TD
+    S["step(pos_xy, yaw, v_long, pitch, roll,<br/>yaw_rate=, v_lat=, t=)"] --> SM["path state machine — every step, every regime<br/>projection, direction blocks, cusp, DONE"]
+    SM -->|"DONE / cusp brake"| CMD["fixed command<br/>regime CMD (R-OFF with the layer off)"]
+    SM --> M{"mpc_model"}
+    M -->|"off"| OFF["1.x PD law — regime R-OFF"]
+    M -->|"bicycle (default)"| B{"active block"}
+    B -->|"reverse"| REV["1.x PD law — regime R-REV"]
+    B -->|"forward"| SOL["MPC solve every 0.1 s,<br/>(δ, a) held in between"]
+    SOL -->|"applicable solve"| RM["a = a_cmd, ω_z = max(v,0)·tan δ / L<br/>regime R-MPC, mode MPC"]
+    SOL -->|"not applicable, on_solve_failure='pd'"| FAIL["1.x PD law until the next applicable solve<br/>regime R-FAIL, mode PD-FALLBACK"]
+    SOL -->|"not applied, 'hold' (see §8)"| HC["previous (δ, a) kept<br/>regime R-MPC, mode MPC-HOLDCMD"]
+    OFF --> PDF["stage 2, then the PD finish:<br/>KICK, caps, brake at rest"]
+    REV --> PDF
+    FAIL --> PDF
+    RM --> MF["stage 2, then the MPC finish:<br/>caps, brake at rest, MPC-HOLD; no KICK"]
+    HC --> MF
+```
+
+- **The MPC** is the field controller's: the AlpaSim kinematic/dynamic
+  bicycle model with linear tyres (`C_αf`, `C_αr`), first-order steering and
+  acceleration lags, 20 horizon nodes at 0.1 s (2 s), re-solved every 0.1 s
+  (every 4th step at dt 0.025), IPOPT capped at 30 iterations (the field
+  setting). The model's known double steering lag
+  (`τ_s = max(steer_yaw_tau, dt_ctrl)` on top of the measured response) is
+  kept for parity, not fixed.
+- **The reference is TIME-based**, per forward block: the block's waypoints
+  are timed at their target speeds (floored at `mpc_v_floor`, effective
+  default 0.5 m/s) from the block-entry time. A vehicle that falls behind is
+  chased by a reference that runs ahead — unlike the PD's position-based
+  lookahead.
+- **Restarts**: at a forward-block entry (the path start included), on the
+  first solve after a fallback, and after `set_path`, do_mpc's previous-input
+  cost parameter (`_u_prev`) is reset to the measured `(d0, a0)`. At a start
+  from rest that is `(0, 0)`, do_mpc's own initial value, so the field's
+  first solve is unchanged.
+- **Reverse blocks are always the PD law** (the MPC does not plan reverse
+  or cusps); a forward block's reference ends in a stop at the cusp waypoint.
+- **Supported**: two-axle Ackermann vehicles (`Ackermann`, or
+  `PartialAckermann` with two axles), forward blocks. A live vehicle or
+  `DifferentiablePlant` that is not raises at construction; a params JSON
+  whose `steering` is not a two-axle Ackermann raises at load. Through a
+  `SweepTable` the code cannot see the steering at all (§8 last bullet).
+- **Inputs**: `yaw_rate=` and `v_lat=` on every step of a forward block
+  (`TypeError` otherwise, raised before any follower state moves, so a retry
+  starts from the same state); `extract_state` returns both. `t=` is
+  optional (an internal clock advances by `dt_ctrl` per call).
+- **Not thread-safe**: casadi's NumPy mode, the casadi OpenBLAS thread count
+  and warning filters are process-global. Several followers in ONE thread are
+  fine (two interleaved NMPCs vs each alone: max |diff| 0.0, one run of the
+  api-review's Genesis-free probe script, outside the repo).
+
+Construction costs 0.64 s for the NMPC (the problem is set up in the
+constructor; the first `step` builds nothing) and about 20 ms for the LMPC
+(implementation measurement). `set_path` with 200 waypoints: median 0.29 ms,
+no rebuild (implementation measurement).
+
+### 2. `mpc_model="off"` — what stays bit-identical to 1.8.0, and where that is proven
+
+`mpc_model="off"` runs the 1.x PD code, moved unchanged (the 1.x plan body
+became `_plan_pd`, path parsing a pure `_parse_path`). Identity was checked on:
+
+| check | scope | result | harness |
+|---|---|---|---|
+| `tests/test_pd_golden.py` (ships) | 19 synthetic scenarios (at-rest, straight, square, tuned square, cusp, explicit-yaw cusp, 13 KICK-threshold sweeps) × {synthetic sweep table, fake coupled plant} = 38 runs, 8928 steps, captured on the 1.8.0 tree | `==` on every output | pytest; the only check that RUNS on every later tree |
+| law-level fuzz (impl-review) | 300 random paths (cusps, explicit and partial yaws, random tunings, noisy states), the bundled tank sweep table and a fake coupled plant, closed and open loop, ~148k steps; plus 5 constructor-error cases, a 3-member `FleetFollower`, the 3-argument `extract_state_from_arrays` | 0 differences against a clean `git archive` of 3810c79 (307 keys, re-run after the fix round) | reviewer script, outside the repo |
+| Genesis demo command sequences | `path_follow_demo` sweep 1258 / jacobian 1282 steps; `path_follow_reverse_demo` (cusp) sweep 621 / jacobian 587 | inputs, outputs and modes identical to the 1.8.0 capture | implementation capture + impl-review re-run, outside the repo |
+| `fleet_follow_demo --plant both --k 4` | 4984 `PathFollower` + 1273 `FleetFollower` steps | outputs and modes identical; the fleet's input dicts differ only by the two new keys | impl-review, outside the repo |
+
+What this does not cover: the off path is not byte-for-byte the 1.8.0 code.
+`extract_state` reads `get_ang()` and returns two more keys (Breaking 5);
+`step` / `plan` accept and ignore the new keyword arguments; the
+`mpc_model` value is validated before the plant is coerced. No other
+observable difference was found, and `"off"` adds no warning.
+
+### 3. Breaking changes in practice — migrating from 1.x
+
+#### 3.1 Keep the 1.x behaviour
+
+```python
+follower = PathFollower(path, vehicle, mpc_model="off")          # was PathFollower(path, vehicle)
+followers = [PathFollower(p, plant, mpc_model="off") for p in paths]   # FleetFollower members
+```
+
+`mpc_model="off"` takes no MPC argument: passing any of `mpc_params`,
+`mpc_impl`, `on_solve_failure`, `mpc_gains`, `mpc_v_floor`, `dt_ctrl` with it
+raises `ValueError` naming them. The PD tuning arguments (`lookahead`, `k_v`,
+`k_w`, ...) keep their names and defaults, and stay valid with the MPC layer on
+(they drive reverse blocks and fallbacks).
+
+#### 3.2 Use the MPC layer
+
+1. Install the optional dependencies (§10): `pip install -r
+   requirements-mpc.txt`, after the dry-run.
+2. Measure a sweep table on a grid that covers your driving speeds. **The
+   default `sweep_measure` grid stops at |v| = 4 m/s**, and a `SweepTable`
+   clamps outside its grid, so an 8-10 m/s course needs the new grid flags.
+   A list whose first value is negative must use the `=` form (argparse reads
+   `--v-list -2,0,...` as two options); the throttle and steer lists must
+   contain 0 (checked before measuring):
+
+   ```bash
+   python -m genesis_vehicle.control.sweep_measure --urdf my_car.urdf --preset car_4w_rwd_ackermann \
+       --v-list=-2,0,2,4,6,8,10,12,14,16 --throttle-list=-1,-0.5,0,0.5,1 \
+       --steer-list=-1,-0.5,0,0.5,1 --pitch-list=-10,-5,0,5,10 --roll-list=0 \
+       --dt 0.025 --substeps 4 --output my_car_sweep.csv
+   ```
+
+   That grid is 1250 combinations. The command as printed (default
+   `--n-envs` 500) took 22 s on CPU in impl-review's run, and its table matched
+   the demo's cached table to 4e-6. With no grid flag the grid is the 1.x
+   default (17325 combinations), and `--quick` output is byte-identical to
+   1.8.0's.
+3. Measure the MPC parameters with the SAME URDF, preset, `--config` /
+   plant overrides, `--dt` and `--substeps` (the code does not check that the
+   table and the params describe the same vehicle):
+
+   ```bash
+   python -m genesis_vehicle.control.identify --urdf my_car.urdf --preset car_4w_rwd_ackermann \
+       --dt 0.025 --substeps 4 --output my_car_mpc_params.json
+   ```
+
+4. Construct and step:
+
+   ```python
+   follower = PathFollower(path, "my_car_sweep.csv", mpc_params="my_car_mpc_params.json")
+   st = extract_state(vehicle)
+   thr, steer, brake = follower.step(st["pos_xy"], st["yaw"], st["v_long"], st["pitch"],
+                                     st["roll"], yaw_rate=st["yaw_rate"], v_lat=st["v_lat"])
+   ```
+
+`samples/mpc_follow_demo.py` runs these four steps end to end and caches both
+files in `samples/data/mpc_cache/` (git-ignored). A cached params file keeps
+the `sdk_version` it was measured with: the cache this release was measured
+from says `"1.8.0"`, because it was written before the version bump.
+
+What the MPC layer does differently from the PD, by design: the reference is
+time-based (above); no low-speed KICK on MPC steps; a stop request at low
+speed becomes a brake (`MPC-HOLD`); a target below `mpc_v_floor` is timed at
+that floor; a failed solve hands the step to the PD (`on_solve_failure`).
+An MPC follower on a live-vehicle plant (`DifferentiablePlant`) warns once:
+the solve and the plant inversion both run inside every control step.
+
+#### 3.3 Known limitation: a misaligned start can stall (inherited from the field code)
+
+With the reference car spawned at (30, 0) facing +X (the default spawn
+orientation) at the start of the path (30, 0) → (10, -8) → (-10, -8) →
+(-30, 0) at 2 m/s, the MPC follower (table and params from the
+`samples/mpc_follow_demo.py` cache) never moved:
+over 1600 steps (40 s) the vehicle stayed at (30.0, -0.0), `last_mode`
+alternated between `MPC` (476 steps) and `MPC-HOLD` (1124 steps) — starting
+MPC ×4, MPC-HOLD ×8, MPC ×12, MPC-HOLD ×4, … — and all 400 solves converged.
+No warning, no fallback: a converged solve never triggers `on_solve_failure`.
+On the same path `mpc_model="off"` turned and drove the course, and the MPC
+follower drove to `DONE` (309 converged solves) when the car was spawned facing
+along the path. **The stall is inherited from the field code**: the unmodified
+field follower, from the same start pose on the same path, behaved identically
+(same end pose, same 476 / 1124 mode counts, 400 solves all `solved`). The
+mechanism is not established; the forward-only model and its ±π/2 horizon yaw
+bound are suspected, not proven. Conditions: impl-review's runs (harness
+outside the repo), CPU/WSL2, genesis-world 1.4.5, 2026-11-21. **Decision:**
+2.0.0 ships with this limitation documented; establishing the root cause and a
+fix are planned for 2.1.0 (a plan, not a promised behaviour). **Do:** start
+the vehicle aligned with the first forward block, or use `mpc_model="off"`.
+Detect it by the vehicle not moving while far from the goal; `last_mode` alone
+is not enough (about 30 % of the stalled steps report `MPC`).
+
+Quick start, run as written (2026-11-21; reference car
+`samples/urdf/car_4w.urdf` + `car_4w_rwd_ackermann` spawned at (0, 0, 0.5) in
+the default orientation, `VehicleScene(dt=0.025, substeps=4, n_envs=1)`, plane
+friction 1.0, CPU/WSL2, genesis-world 1.4.5): `mpc_model="off"` with the live
+vehicle DONE at 30.55 s (1222 steps), end (58.965, -6.922); the CSV variant
+DONE at 30.55 s, end (58.964, -6.928); the MPC variant (default NMPC, `"pd"`,
+the same cache's table and params) DONE at 30.075 s (1203 steps), end
+(58.528, -7.999), 301/301 solves converged, no `MPC-HOLD`.
+
+### 4. `dynamics.brake_torque_signed` removed
+
+The 1.8.0 deprecation (CHANGELOG 1.8.0 item 18: "removal in 2.0.0") is
+carried out: `genesis_vehicle.dynamics.brake_torque_signed` and the root
+`genesis_vehicle.brake_torque_signed` are gone, also from `__all__`. The
+pipeline stopped calling it in 1.8.0. No caller was found in the SDK,
+`server/`, `GeneVehicle_*`, `samples/` or the field folders (grep; the UE
+clone could not be checked). `brake_projection` is NOT a drop-in replacement
+(it takes the post-drive ω and returns `(omega_t, b_rem)`); code that needs the
+1.8.0 formula should copy the function body from 1.8.0.
+`tests/test_rolling_resistance.py` keeps such a private copy for its
+"the cap never weakens braking" assertion; `tests/test_dynamics.py` now asserts
+the symbol is gone from both import paths.
+
+### 5. Field parity: the SDK MPC reproduces the field controller
+
+| arm | scope | result | harness |
+|---|---|---|---|
+| NMPC, `"hold"`, 1 thread and default threads | Genesis closed loop on the demo course, 538 steps | max difference **0.0** over throttle, steer, brake, pose and the solver's held `(δ, a)`; modes equal | impl-review, the UNMODIFIED field `MPCFollower` vs the SDK `PathFollower`; outside the repo |
+| NMPC, `"pd"` (the shipping default), default threads | same, 538 steps, 135/135 solves converged | max difference 0.0 (re-run after the fix round, against a fresh field run and the earlier capture) | same |
+| LMPC, `"hold"` | same, 539 steps | max difference 0.0 | same |
+| identify vs field `tools/identify.py --car sdk` | the reference car on the 1.8.0 plant | C_αf / C_αr relative difference 1.58e-7 / 6.95e-8; mass, yaw inertia, wheelbase, rig offset, τ and every acceleration table equal | impl-review |
+
+Not vacuous (impl-review's parity script, outside the repo): an a0 + 1e-6
+perturbation inside the SDK law shows in the solver output from step 0
+(5.8e-7). At the command level alone a 1e-6
+perturbation was invisible (the table inverse quantises), which is why the
+comparison includes the solver's held command.
+
+What this proves and what it does not:
+
+- It proves the port on ONE course, one vehicle, one machine, where every
+  solve converged. The `PD-FALLBACK` and `MPC-HOLDCMD` branches occurred in no
+  Genesis run measured for this release; they are covered by fake-solver tests
+  only (`test_mpc_status_classes.py`, `test_path_follower_mpc_regimes.py`).
+  `MPC-HOLD` occurred in a Genesis run only in the misaligned-start stall of
+  §3.3 (where the field follower stalled identically), outside the parity
+  comparison of this table.
+- The Genesis comparison is not in the suite (it needs the field folder).
+  What ships is `tests/test_mpc_field_replay.py`: a 200-step, 50-solve replay
+  of the field controller on a synthetic table and a synthetic numpy plant
+  (reaches 5.5 m/s, so the dynamic branch runs; all solves `solved`; no
+  `MPC-HOLD`, no non-converged status), at the law level and through
+  `PathFollower`. **It is keyed to its capture platform** (linux-x86_64,
+  casadi 3.8.2, do_mpc 5.1.2, Intel Core Ultra 9 285H) **and skips anywhere
+  else**, because an IPOPT result is reproducible only there.
+- The SDK clears do_mpc's per-solve history after every solve (the field
+  does not). The exact parity above shows that is output-neutral on this
+  course; it relies on the model having no time-varying parameter that reads
+  do_mpc's clock.
+
+### 6. Closed-loop acceptance: one criterion not met (accepted by the user)
+
+`python -m genesis_vehicle.samples.mpc_follow_demo` and its `--mpc-model off` /
+`--mpc-impl linear` / `--course cusp` variants, the demo course and table:
+
+| follower | DONE | CTE mean | CTE max | solves | notes |
+|---|---|---|---|---|---|
+| NMPC (default) | 13.45 s | **0.06700461 m** | **0.68218 m** (at x 50.68, y 40.64) | 135/135 converged | CTE mean and max identical across runs (2 reviewer runs, 3 implementation runs; the command sequences were not compared) |
+| PD (`mpc_model="off"`) | yes | **0.10677594 m** | **0.29716 m** | — | 3 runs, identical |
+| LMPC | yes | 0.11233 m | 0.24226 m | converged | solve p50 2.64 ms |
+| NMPC, cusp course (forward 20 m at ≤ 4 m/s, cusp, reverse 10 m at -2 m/s) | 11.12 s | 0.020 m | 0.050 m | 62 converged | reverse block entered at step 260 and driven by the PD; cusp stop distance not recorded |
+
+Criteria fixed before measuring: DONE within 40 s, ≥ 95 % converged solves,
+mean CTE ≤ 0.10 m, max CTE ≤ 1.0 m — all met. **"NMPC mean CTE ≤ 0.6 × PD mean
+CTE" is NOT met: 0.06700 m against a limit of 0.6 × 0.10678 = 0.06407 m (ratio
+0.628), deterministic.** The NMPC's maximum deviation (0.682 m, on the turn
+exit) is 2.3 times the PD's (0.297 m). The 0.6 factor was set against a PD
+baseline of 0.197-0.222 m measured on the 1.7.0 plant with an older table; on
+the 1.8.0 plant with this release's table the PD measured 0.1068 m. The user
+accepted the result; **the criterion is not changed**, and 2.0.0 ships the
+field port as it is. Do not read the NMPC as a strict improvement over the PD
+on this course.
+
+### 7. Real time: the NMPC is not guaranteed to fit 25 ms
+
+The user's stop gate, fixed before the port was measured, was "control +
+simulation steps over 25 ms ≤ 1 %" for the default. **It tripped.** The user
+decided to keep the NMPC as the default (field parity), publish the numbers,
+and point a loop that must fit the period at the LMPC; no asynchronous
+solving and no horizon change in 2.0.0.
+
+Three sessions on the same machine, the same day, same course:
+
+| session | harness | NMPC tot>25 per run | summary |
+|---|---|---|---|
+| 1 — implementation, gate screening | the U5 screening harness (`u5_bench.py`, **outside the repo**, not shipped), 5 runs, default threads, the SDK arm bit-identical to the field controller | 24.13 / 19.31 / 20.08 / 16.22 / 20.66 % | median **20.08 %** (field controller: 19.69 %) |
+| 2 — implementation | `python -m genesis_vehicle.samples.bench_path_follower --arms nonlinear,linear,pd --repeats 5` | 6.37 / 5.21 / 6.18 / 5.98 / 6.37 % | **5.2-6.4 %**; the bench DECLINED to publish a median (its two order groups disagree: 6.37 vs 5.6) |
+| 2 — implementation | RT-1, the paired field-vs-SDK timing harness (`run_rt1.py`, **outside the repo**), SDK `PathFollower` arm, 5 rounds × {default, 1 thread} | 10 runs from 5.02 to 9.65 % | **5.0-9.7 %**; no median published by it |
+| 3 — impl-review | same bench, `--arms nonlinear,linear --repeats 4`, plus 2 `mpc_follow_demo` runs | 9.46 / 8.88 / 9.46 / 8.11 % (+ 7.53 / 9.46 %) | **7.5-9.5 %**; the bench DECLINED to publish (order-group medians 9.17 and 8.78; 8.78 lies outside the other group's [8.88, 9.46]) |
+
+The cause of the spread between sessions is not established. Session 2 also
+measured faster simulation steps (median 5.8 vs 7.6 ms) and faster solves
+(median solve time, p50, 14.7 vs 16.7 ms) for the same field controller, in
+RT-1. The structure is not in doubt: a solve runs on every 4th step, its median
+is 15-17 ms, and the simulation step adds its own time — median 7.4-8 ms per
+run in session 1, about 5.8 ms in sessions 2 and 3 — so most solve steps exceed
+25 ms of control + simulation. Session 3's published per-arm figures (both order groups agree):
+NMPC control-time mean 4.82 ms [4.76 .. 4.85], solve p50 15.9 ms [15.6 .. 16.0],
+solve max 31.7 ms [30 .. 33.4]. **Measure your own machine with the bench**;
+the bench is a fail-closed disclosure heuristic (one fresh process per run,
+alternating arm order, a median printed only when the order groups agree), not
+a statistical test.
+
+**LMPC**: share of control steps over 25 ms, control time alone: 0 % median in
+every session. Control + simulation: in session 1 one run of five exceeded it
+at default threads (0.58 % of that run's steps) and one of five at 1 thread
+(0.77 %), medians 0.00 %; no run of sessions 2 and 3 did. Solve p50: 3.1 ms
+in session 1 as the median over runs (per-run p50 3.0-4.7 ms), 2.4-2.6 ms
+(session 2), 2.64 ms (session 3). On this
+machine only; the LMPC tracks the demo course with CTE 0.112 / 0.242 m (§6).
+
+**Speed options screened in session 1** (U5 harness, median tot>25 over 5
+runs, default threads), none of which reaches 1 %: shifted warm start
+19.11 % (changes the output); IPOPT `warm_start_init_point=yes` 13.71 % (the
+best NMPC result, changes the output); IPOPT `max_wall_time` 20 ms 20.85 %
+(and 69 capped + 5 capped-infeasible solves out of 675); casadi jit 23.94 %
+(output identical, 13 s construction; about 30 % faster solves in a standalone
+probe, no gain inside the Genesis process); casadi OpenBLAS at 1 thread
+20.27 % (identical); jit + 1 thread 20.27 %. The shift, OpenBLAS-thread and
+extra-IPOPT options exist on `control.mpc.NonlinearMPC` (`shift_warm_start`,
+`openblas_threads`, `nlpsol_opts`), all off by default; `PathFollower` does not
+expose them in 2.0.0.
+
+**Solve spikes.** Per-run solve maxima, by session (the SDK clears do_mpc's
+per-solve history after every solve in every SDK run below; the field
+controller never does):
+
+| session | harness | field controller | SDK arms |
+|---|---|---|---|
+| 1 | U5 (outside the repo) | solve max > 150 ms in 10 / 10 runs, up to 313.0 ms | > 150 ms in **40 / 70** runs (seven arms S0-S5 and S4+S5, both thread settings, 5 runs each), up to 311.6 ms |
+| 2 | RT-1 (outside the repo) | 167-277 ms in 10 / 10 runs | ≤ 34.4 ms in all 10 runs (none > 150 ms) |
+| 3 | `bench_path_follower` | not run | ≤ 33.4 ms |
+
+**The cause is not
+established.** Session 2 is consistent with do_mpc's unbounded history growth
+(an O(n) copy per solve) as the cause; session 1 contradicts it as the sole
+cause, since history clearing was on in all 70 SDK runs and 40 of them
+spiked.
+
+### 8. Solve classification and what is applied
+
+Every solve is classified and counted in `mpc_stats["status"]`; what is
+applied depends on `on_solve_failure`. Order: the solver raised (EXC), then a
+non-finite command (NAN), then the status.
+
+NMPC (IPOPT `return_status`):
+
+| class | statuses | `"pd"` (default) | `"hold"` (field parity) |
+|---|---|---|---|
+| CONV | `Solve_Succeeded`, `Solved_To_Acceptable_Level`, `Feasible_Point_Found` | apply | apply |
+| CAP | `Maximum_Iterations_Exceeded`, `Maximum_CpuTime_Exceeded`, `Maximum_WallTime_Exceeded`, `Search_Direction_Becomes_Too_Small` | apply if the returned iterate is feasible, else fall back | apply |
+| INFEAS | `Infeasible_Problem_Detected`, `Restoration_Failed`, `Error_In_Step_Computation`, `Invalid_Number_Detected`, `Diverging_Iterates`, `Not_Enough_Degrees_Of_Freedom` | fall back | apply |
+| OTHER | any other status | fall back | apply |
+| EXC | the solver raised | fall back | keep the previous command |
+| NAN | non-finite command, any status | fall back | keep the previous command |
+
+LMPC (OSQP `osqp.SolverStatus`):
+
+| class | statuses | `"pd"` | `"hold"` |
+|---|---|---|---|
+| CONV | `OSQP_SOLVED` | apply | apply |
+| CAP | `OSQP_SOLVED_INACCURATE`, `OSQP_MAX_ITER_REACHED`, `OSQP_TIME_LIMIT_REACHED` | apply if feasible (`l <= A x <= u` within 1e-4), else fall back | apply `SOLVED_INACCURATE` only |
+| INFEAS | the four (in)feasibility statuses, `OSQP_NON_CVX` | fall back | keep the previous command |
+| OTHER / EXC / NAN | — | fall back | keep the previous command |
+
+- "Feasible" = largest bound/constraint violation of the returned iterate
+  ≤ 1e-4 (IPOPT's default `constr_viol_tol`), in the solver's own (scaled)
+  space. **A capped solve applied under `"pd"` is feasible, not optimal**: one
+  OSQP iteration gave steer 0.14 where the converged answer was 0.28 (reviewer
+  measurement).
+- **`"hold"` means different things per solver.** With the NMPC it APPLIES
+  INFEASIBLE SOLUTIONS — every solve that did not raise, INFEAS, OTHER and
+  capped-infeasible included — as the field controller did. With the LMPC it
+  applies only `SOLVED` / `SOLVED_INACCURATE` (the field rule) and keeps the
+  previous command otherwise.
+- **Non-finite values.** A non-finite command is NAN: `"pd"` falls back,
+  `"hold"` keeps the previous command — where the SDK DIFFERS from the field,
+  which applied it. A NaN in the NMPC's state gives
+  `Invalid_Number_Detected` with a finite, stale command: INFEAS, so `"pd"`
+  falls back and `"hold"` applies it (as the field did). A non-finite entry in
+  the returned iterate counts as infinite violation, so such a capped solve is
+  never "feasible" (this was a defect found in review and fixed before
+  release: Python's `max(0.0, nan)` is 0.0).
+- Real-solver evidence: NMPC `ipopt.max_iter=1` returns
+  `Maximum_Iterations_Exceeded` with violation 4.54 (reviewer) / 5.54
+  (implementation test) → capped-infeasible; NMPC initial speed 60 m/s
+  (outside its bound) → capped-infeasible; LMPC one iteration →
+  capped-feasible; LMPC primal infeasible → applied by neither policy, and
+  the LMPC's own previous command is not overwritten by it.
+- `last_plan` (the predicted state trajectory of the last applied solve) is
+  NMPC-only: always `None` with `mpc_impl="linear"` and with `"off"`.
+- `mpc_v_floor` defaults to 0.5 m/s (`inspect.signature` shows 0.5; an
+  explicit `None` also means 0.5).
+- **A sweep table and a params file are never cross-checked against each
+  other** (a CSV carries no vehicle data): the tank sweep table with the car's
+  params was accepted silently in review. With a live plant
+  (`DifferentiablePlant`) the params' mass, wheelbase and per-axle tyre
+  coefficients are compared with the vehicle (relative 1e-6) and a mismatch
+  warns; a check that cannot run warns once, naming it.
+
+### 9. identify and the params record
+
+`python -m genesis_vehicle.control.identify` (`identify_mpc_params` in code;
+needs Genesis) measures a two-axle Ackermann vehicle on the scene
+`sweep_measure` builds — same flags: `--urdf --preset --config --output --dt
+--substeps --gpu` and the plant-override group. It refuses any other vehicle
+with a `ValueError` naming `mpc_model="off"` before measuring. It writes the
+field keys plus `schema`, `sdk_version`, `genesis_version`, the overrides, a
+per-axle tyre block (raises if wheels on one axle differ), static axle loads
+(after a 1.5 s braked settle, averaged over the last 0.25 s), `s`, `v*`, the
+drivetrain, the cornering-fit residual (a `UserWarning` above 3 % yaw-rate
+residual) and the sampled envelope. Reference car: C_αf / C_αr 33204 / 32555
+N/rad, acceleration τ 0.0152 s, steering-to-yaw τ 0.0805 s, settled axle loads
+6573.1 / 6474.6 N (moment balance 6572.7 / 6474.6; sum − m·g = +0.43 N),
+s 0.856, v* 2.98 m/s, yaw-rate fit residual 0.97 %. The tyre block is
+recorded but not used by the 2.0.0 bicycle model. **Every params file and
+sweep table is SDK-version-bound**, like the 1.8.0 tables: re-measure after a
+release that changes the plant.
+
+### 10. Optional dependencies, licences
+
+- `requirements-mpc.txt`: `casadi==3.8.2`, `do-mpc==5.1.2`, `osqp==1.1.3`
+  (the exact tested versions) and `threadpoolctl>=3` (a lower bound; tested
+  3.6.0). scipy is not listed (genesis-world already brings it; tested
+  1.17.1). The NMPC needs casadi + do_mpc; the LMPC needs osqp, scipy,
+  threadpoolctl.
+- These pull further packages (do-mpc → matplotlib, pandas; osqp → jinja2,
+  joblib, setuptools) and pip may change versions you already have. Check
+  first with `pip install --dry-run --report - -r requirements-mpc.txt`; if an
+  installed package would change, `pip install --no-deps -r
+  requirements-mpc.txt && pip check`.
+- `import genesis_vehicle`, `genesis_vehicle.control` and
+  `genesis_vehicle.control.mpc` load none of casadi, do_mpc, osqp,
+  threadpoolctl (subprocess-checked in `tests/test_mpc_deps.py`). A missing
+  package raises `ImportError` naming it and `requirements-mpc.txt` — after
+  U1, so a call without params gets the same error with or without the
+  packages. `mpc_model="off"` needs none of them.
+- Licences, as facts (not legal advice): the SDK is Apache-2.0; `NOTICE`
+  carries the AlpaSim attribution (Copyright (c) 2026 NVIDIA Corporation,
+  Apache-2.0), maps the derived SDK files (`control/mpc/params.py`,
+  `models.py`, `alpasim_nonlinear.py`, `alpasim_linear.py`, `law.py`) to their
+  sources, lists the modifications, and records the field team's permission
+  (2026-11-21) for the field-authored files. The optional packages are
+  installed by the user and not redistributed: casadi LGPL-3.0-or-later
+  (bundling Ipopt EPL-2.0, MUMPS CeCILL-C, METIS glue EPL-1.0, OpenBLAS
+  BSD-style), do-mpc LGPL-3.0, osqp Apache-2.0, threadpoolctl BSD-3-Clause.
+
+### 11. Other additions
+
+- `PathFollower.set_path(path, *, pos_xy=None, t=None)`: the path is
+  validated first, so a path error (length, waypoint shape) changes nothing;
+  a bad `pos_xy` or `t` raises AFTER the new path has been installed. Keeps
+  the plant, its warm start and the
+  MPC problem (no rebuild); the PD state restarts on the first block (a cusp
+  transition in progress is cancelled); `pos_xy` snaps to the nearest segment
+  of that block; a forward first block gets a new reference timed so that
+  point is due at `t`, and the MPC restarts (§1).
+- `.regime`, `.mpc_stats` (`n_solve`, per-class counts, `last_status`,
+  `last_solve_ms` from `perf_counter`, `plan_age_s`; `None` with `"off"`).
+- `sweep_measure`: `--v-list`, `--throttle-list`, `--steer-list`,
+  `--pitch-list`, `--roll-list`; `build_combo_arrays` / `run_sweep` signatures
+  and the default grid unchanged.
+- `samples/mpc_follow_demo.py` (NMPC / LMPC / PD, table or
+  `DifferentiablePlant`, demo or cusp course; ends with a `MPC_RESULT` JSON
+  line) and `samples/bench_path_follower.py` (the RT bench of §7). The five
+  existing path-following samples (`path_follow_demo`, `path_follow_reverse_demo`,
+  `path_follow_osc_demo`, `sweep_and_drive`, `fleet_follow_demo`) now pass
+  `mpc_model="off"` and keep their 1.x behaviour: they drive a tank, a fleet, or
+  a table with no params file.
+
+### 12. Documentation corrected in place
+
+- `docs/path-following.md`, `docs/api-reference.md`, `docs/index.md`,
+  `control/__init__.py`, `control/path_follower.py`: **"`DifferentiablePlant`
+  is the default (since v1.3.0)" is stale** — since 2.0.0 the default stage 1
+  is the MPC layer and the documented default stack is a sweep table + the
+  MPC layer; `DifferentiablePlant` remains the no-measurement inverse plant.
+- Every `PathFollower(path, plant)` example in `docs/path-following.md` and
+  `docs/api-reference.md` raises U1 on 2.0.0; each now passes
+  `mpc_model="off"` or `mpc_params=`.
+- `brake_torque_signed` entries in `docs/api-reference.md`,
+  `docs/physics-contracts.md`, `docs/testing.md` and
+  `docs/pipeline-and-hooks.md` now say it was removed in 2.0.0.
+- New contract `docs/physics-contracts.md` §7.18 (what the constructor and the
+  regime selection enforce, and what nothing enforces, including the
+  misaligned-start stall of §3.3).
+- `docs/testing.md`, `README.md`: test count.
+
+### 13. Still open
+
+- **GPU**: nothing in this release was run on the GPU backend.
+- The casadi OpenBLAS thread cap is Linux-only (opened by soname); on other
+  platforms it reports "not applied" — that branch is untested, and the
+  Windows/macOS library name was not checked.
+- Thread safety beyond one two-thread probe: not established (§1).
+- Whether the recorded tyre block is enough for the planned 2.1.0 Pacejka
+  prediction model is not verified.
+- The cause of the session-to-session RT spread, and of the solve spikes
+  (§7).
+- **The misaligned-start stall (§3.3)**, inherited from the field code:
+  mechanism not established; nothing in the code detects or escapes it.
+  Establishing the root cause and a fix are planned for 2.1.0.
+- Not run in review: `path_follow_osc_demo` and `sweep_and_drive` in a
+  Genesis comparison against 1.8.0; `mpc_follow_demo --plant diff`,
+  `--on-solve-failure hold`, linear + cusp, `--remeasure`; identify with
+  `--config` or plant overrides; `bench --arms pd` (the implementation ran
+  `path_follow_osc_demo`, `sweep_and_drive --vehicle tank` and the other demo
+  variants to PASS).
+- `FleetFollower` rejection with a real batched `DifferentiablePlant` (unit
+  test with a fake plant only).
+- osqp 1.1.3 warns that the field option `polish` is deprecated
+  (`polishing`); kept verbatim for parity.
+- Out-of-repo callers (Breaking 8) are not updated by this release.
+
+### Tests
+
+**1010 passed, 3 skipped** in 226.1 s (docs run on the release tree;
+impl-review 221.5 s; 1.8.0: 824 passed, 3 skipped), CPU/WSL2, genesis-world 1.4.5, with the optional packages installed,
+`python -m pytest genesis_vehicle/tests/ --ignore=genesis_vehicle/tests/test_fusion_probe.py`.
+The 3 skips are the env-gated live-server tests. Without casadi + do_mpc,
+`test_mpc_uprev.py`, `test_mpc_field_replay.py`, `test_mpc_plan_extract.py`,
+`test_mpc_models.py`, `test_mpc_solve.py`, `test_mpc_review_fixes.py`,
+`test_path_follower_set_path.py` (partly), `test_path_follower_mpc_regimes.py`
+and `test_path_follower_mpc_api.py` (partly) skip; `test_mpc_field_replay.py`
+also skips off its capture platform. New: `test_pd_golden.py` (+ fixture
+`tests/data/pd_golden_1x.json`, 1.09 MB, generator `make_pd_golden.py`),
+`test_mpc_params.py`, `test_mpc_deps.py`, `test_mpc_law.py`,
+`test_mpc_status_classes.py`, `test_mpc_uprev.py`, `test_mpc_plan_extract.py`,
+`test_mpc_models.py`, `test_mpc_solve.py`, `test_mpc_field_replay.py`
+(+ fixture and generator), `test_mpc_review_fixes.py`,
+`test_path_follower_mpc_api.py`, `test_path_follower_set_path.py`,
+`test_path_follower_mpc_regimes.py`, `test_extract_state_extras.py`,
+`test_identify_math.py`, `test_sweep_measure_grid_args.py`,
+`test_bench_path_follower.py`; 18 call sites in `test_path_follower.py` and 15
+in `test_differentiable_plant.py` gained `mpc_model="off"` with their
+assertions unchanged; `test_dynamics.py`'s `brake_torque_signed` tests became
+one removal test. Every new test was run once against a one-line mutant of
+the code it guards and failed (implementation and review logs).
+
+---
+
 ## [1.8.0] — 2026-11-21
 
 **Every axle torque now acts on the wheel spin BEFORE the tyre, and the brake

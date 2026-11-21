@@ -46,7 +46,7 @@ import torch
 from genesis_vehicle._pipeline import compute_wheel_step
 from genesis_vehicle.config import resolve
 from genesis_vehicle.core import PipelineContext, build_wheel_meta
-from genesis_vehicle.dynamics import brake_torque_signed, cap_resist_torque
+from genesis_vehicle.dynamics import cap_resist_torque
 from genesis_vehicle.presets import car_4w_rwd_ackermann, tank_skid_belt
 from genesis_vehicle.strategies.stability import (
     LowSpeedRegularizer, RollingResistance, StabilityHook,
@@ -244,18 +244,31 @@ def test_airborne_and_locked_wheels_get_no_rolling_resistance():
     assert bool((ctx.T_resist[0, 2:] > 0).all())   # the others do get it
 
 
+def _brake_torque_signed_1_8_0(t_brake, omega, dt=0.0, i_wheel=None, smoothing_scale=0.5):
+    """The body of ``dynamics.brake_torque_signed`` as it was in 1.8.0 (the
+    function was removed in 2.0.0), minus its DeprecationWarning — kept here as
+    this test's reference capped brake torque."""
+    smooth_signed = t_brake * torch.tanh(omega / smoothing_scale)
+    if dt > 0.0 and i_wheel is not None:
+        T_cap = torch.abs(omega) * i_wheel / dt
+        smooth_signed = torch.sign(smooth_signed) * torch.minimum(
+            torch.abs(smooth_signed), T_cap,
+        )
+    return smooth_signed
+
+
 def test_the_cap_never_weakens_braking():
     """``|cap(Tb + Trr)| >= |Tb|`` for a capped brake torque Tb and a resisting
     torque Trr of the same sign — the combined cap cannot make the brake alone
-    weaker than ``brake_torque_signed`` made it."""
+    weaker than the 1.8.0 ``brake_torque_signed`` made it (a private copy of
+    its body above, since the function was removed in 2.0.0)."""
     from genesis_vehicle.dynamics import cap_resist_torque
     g = torch.Generator().manual_seed(0)
     omega = (torch.rand(4096, generator=g) - 0.5) * 40.0
     i_w = torch.rand(4096, generator=g) * 5.0 + 0.1
     dt = 0.025
-    with pytest.warns(DeprecationWarning):          # deprecated since 1.8.0
-        tb = brake_torque_signed(torch.rand(4096, generator=g) * 3000.0, omega,
-                                 dt=dt, i_wheel=i_w)
+    tb = _brake_torque_signed_1_8_0(torch.rand(4096, generator=g) * 3000.0, omega,
+                                    dt=dt, i_wheel=i_w)
     trr = torch.rand(4096, generator=g) * 200.0 * torch.tanh(omega / 0.5)
     tot = cap_resist_torque(tb + trr, omega, dt, i_w)
     assert bool((tot.abs() >= tb.abs() - 1e-4).all())

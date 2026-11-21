@@ -566,7 +566,7 @@ class DifferentiablePlant:
     Example::
 
         plant = DifferentiablePlant(veh)          # no CSV anywhere
-        follower = PathFollower(path, plant)
+        follower = PathFollower(path, plant, mpc_model="off")
 
         fleet = DifferentiablePlant(all_tanks)    # one unroll for the lot
         thr, steer = fleet.solve(v_long, a_target, omega_target)   # arrays

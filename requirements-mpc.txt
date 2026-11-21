@@ -1,0 +1,21 @@
+# Optional dependencies of the PathFollower MPC layer (genesis_vehicle 2.0.0).
+#   mpc_impl="nonlinear" (default): casadi, do-mpc
+#   mpc_impl="linear":              osqp, scipy, threadpoolctl
+#
+# Pinned (==) = the exact versions the SDK was tested with: casadi 3.8.2,
+# do-mpc 5.1.2, osqp 1.1.3. threadpoolctl is a LOWER BOUND (tested with 3.6.0;
+# only `threadpool_limits(limits=..., user_api="blas")` is used). scipy is not
+# listed: it is already present in an SDK environment (genesis-world imports
+# it) and osqp / do-mpc declare it themselves; tested with scipy 1.17.1.
+#
+# These packages pull in further dependencies (do-mpc -> matplotlib, pandas;
+# osqp -> jinja2, joblib, setuptools) and pip may change versions of packages
+# you already have. Check first:
+#   pip install --dry-run --report - -r requirements-mpc.txt
+# If an installed package would change version, install without dependencies
+# and verify:
+#   pip install --no-deps -r requirements-mpc.txt && pip check
+casadi==3.8.2
+do-mpc==5.1.2
+osqp==1.1.3
+threadpoolctl>=3

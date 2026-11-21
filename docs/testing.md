@@ -19,6 +19,9 @@
 | substeps | solver iterations per step; internal interval is `dt / substeps` |
 | D / Y / Z | v1.8.0 held-wheel deadbeat / lateral deadbeat / their rigid-body scale `s` (`physics-contracts.md` §7.16) |
 | ULP | unit in the last place (one float32 step) |
+| MPC / NMPC / LMPC | Model Predictive Control / its nonlinear (do_mpc + IPOPT) and linear (OSQP) implementations in `PathFollower` (v2.0.0) |
+| PD | the 1.x `PathFollower` law (`mpc_model="off"`) |
+| U1 | the `ValueError` a default (MPC) `PathFollower` raises without `mpc_params` |
 
 ## Running the tests
 
@@ -28,8 +31,22 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-824 tests, mostly pure-Python, plus three env-gated live tests that skip by
-default. Measured on the v1.8.0 tree: `824 passed, 3 skipped in 278.5s`
+1010 tests, mostly pure-Python, plus three env-gated live tests that skip by
+default. Measured on the v2.0.0 tree with the optional MPC packages installed
+(casadi 3.8.2, do_mpc 5.1.2, osqp 1.1.3): `1010 passed, 3 skipped` in
+226.1 s (docs run; impl-review measured 221.5 s on the same code),
+CPU/WSL2, genesis-world 1.4.5,
+`python -m pytest genesis_vehicle/tests/ -q --ignore=genesis_vehicle/tests/test_fusion_probe.py`.
+v2.0.0 added 186 tests (824 → 1010), 18 new test files listed in the inventory
+below. **Without casadi + do_mpc** these skip: all of `test_mpc_uprev.py`,
+`test_mpc_field_replay.py`, `test_mpc_plan_extract.py`, `test_mpc_models.py`,
+`test_mpc_solve.py`, `test_mpc_review_fixes.py`,
+`test_path_follower_mpc_regimes.py`, and part of
+`test_path_follower_mpc_api.py` and `test_path_follower_set_path.py`; the rest
+of the new tests (params, deps, law, status classes, PD golden, identify math,
+grid flags, extract_state, bench) run without them. `test_mpc_field_replay.py`
+also skips on any machine other than its capture platform. Previous figure,
+v1.8.0: `824 passed, 3 skipped in 278.5s`
 (impl-review's run on a loaded machine; the implementation measured 253.5 s on
 the same tree). v1.8.0 added two files: `test_axle_torque_order.py` (50,
 Genesis-free) and `test_low_speed_deadbeats.py` (42, real CPU scenes, about
@@ -110,7 +127,7 @@ CI without GPU.
 | SameSideBelt averages each side | `test_strategies_unit.py` | |
 | RWD front-drive-zero invariant | `test_strategies_unit.py` | T_drive[FL] == 0, T_drive[RL] == T/2 |
 | PerSide gear cap | `test_strategies_unit.py` | throttle=1.0, gear_cap=0.3 → effective 0.3 |
-| `brake_torque_signed` reverses with omega | `test_dynamics.py` | `omega < 0` → `T_brake_eff < 0`; since v1.8.0 also that every call warns (`DeprecationWarning`; the pipeline no longer calls it) |
+| `brake_torque_signed` is removed | `test_dynamics.py` | v2.0.0: importing it from `genesis_vehicle.dynamics` or the package root fails. (Through 1.8.0 this row tested that it reversed with omega and warned on every call; the function was removed in 2.0.0, and `test_rolling_resistance.py` keeps a private copy of the 1.8.0 body for its braking-cap assertion) |
 | Axle torques before the tyre, Coulomb brake, friction ellipse at the transmitted force | `test_axle_torque_order.py` | 50 tests, Genesis-free (v1.8.0): the tyre sees ω after every axle torque; a rolling wheel passes the axle torque in one step; with no drive and no brake `omega_t` is the 1.7.0 ω′; brake + drive + RR never reverse ω (random grid); a zero brake never holds (forward and gradient) and the plant's throttle gain is continuous at 0; `last_kappa` is the pure-curve slip of the transmitted force; `F_lat` is on the ellipse of the transmitted force; the tyre never sees ω above `omega_max`; the Pacejka closed form vs a K = 512 grid (κ ≤ 1e-3 rel., `F_lat` ≤ 1e-3 μN) and the K = 16 grid within its stated bound; tyre call counts (Pacejka once, others three times, subclass and plain callable on the grid); the new ctx fields are populated, read-only and `hold_applied` exempts wheels from D and Y; `deadbeat_scale`, the non-physical-inertia refusal, keyword precedence, the one-time log; the reverse tank plant is monotone; the Newton divisor floor (finite at `pe_x` ≥ 1, the Newton direction kept where the divisor is negative, no preset reaches it); an entity without `links` names the requirement |
 | Low-speed deadbeats, `StaticFrictionLock` rest anchor, both pedals, slopes | `test_low_speed_deadbeats.py` | 42 tests, real CPU scenes (v1.8.0; per_vehicle unless stated, dt 0.025 × 4): the 15-row post-stop matrix (back-travel ≤ 2 mm, vmin ≥ -0.01 m/s; the accepted car throttle 1.0 + brake 1.0 row at its measured -0.0104 floor); both pedals stop and hold; downhill stops and the creep takeover; the tank hold does not ring (C) and holds where it came to rest (A), each failing on its one-line mutant; a plant on a held car starts from the lock state; throttle / brake / reverse do not alternate; no lateral 2-cycle on the reference car and on `tests/data/low_yaw_inertia_car.urdf` (which alternates with Z disabled); the static scale; Z inputs on both solvers and after a rebuild; a mass-read failure → `s = 1` and one warning; a plant with explicit masses never touches the driver (both solvers); the two solvers give the same rollout; closed-form drive / brake windows |
 | Suspension N clamped non-negative | `test_dynamics.py` | strong rebound → `N = 0`, not negative |
@@ -128,7 +145,17 @@ CI without GPU.
 | Fleet batching equivalence | `test_differentiable_plant.py` | a member's predict / jacobian / solve inside an M-member plant equals the same member inverted alone; diagnostics are per-member; `set_applied_member` touches one row; mixed kinds and the scalar sweep protocol are refused |
 | plan / finish split | `test_differentiable_plant.py` | `plan()` then `finish()` reproduces `step()` exactly, including `last_mode`; a decided plan (DONE / cusp brake) needs no inversion |
 | `FleetFollower` | `test_differentiable_plant.py` | drives every member off one solve, reports each command to its own plant row, matches independent followers, rejects a count mismatch or an unbatched plant |
-| Plant / PathFollower wiring | `test_differentiable_plant.py` | plant vs sweep-table dispatch, `.sweep` back-compat alias, steer range tightened to `steer_cap`, applied command reported on early-return exits, bad plant rejected |
+| Plant / PathFollower wiring | `test_differentiable_plant.py` | plant vs sweep-table dispatch, `.sweep` back-compat alias, steer range tightened to `steer_cap`, applied command reported on early-return exits, bad plant rejected. Since v2.0.0 every follower here is `mpc_model="off"` (15 sites; assertions unchanged), as in `test_path_follower.py` (18 sites) |
+| `mpc_model="off"` equals the 1.8.0 follower | `test_pd_golden.py` | v2.0.0. 19 synthetic scenarios (at rest, straight, square, tuned square, cusp, explicit-yaw cusp, 13 KICK-threshold sweeps) × {synthetic sweep table, fake coupled plant} = 38 runs, 8928 steps, `==` on every output against `tests/data/pd_golden_1x.json` captured on the 1.8.0 tree (generator `tests/data/make_pd_golden.py`). The only on-every-tree evidence of the off path's bit-identity; killed both PD mutants (KICK 0.4 → 0.41; heading blend reassociated) |
+| MPC constructor contract | `test_path_follower_mpc_api.py` | v2.0.0. U1 for every plant type; the check order (Ackermann before U1, U1 before dependencies); `"off"` with an MPC argument raises; `"pacejka"` raises, `mpc_feedforward=` / `mpc_correction=` are `TypeError`; `FleetFollower` rejects MPC members before mutating; `mpc_v_floor` shows 0.5; a live-plant cross-check that cannot run warns once; missing `yaw_rate` raises without moving the follower |
+| MPC regimes | `test_path_follower_mpc_regimes.py` | v2.0.0, needs casadi + do_mpc. A reverse block is PD and never solves; re-entry after a cusp restarts the reference; a failed solve falls back to PD and recovers; `"hold"` keeps the previous command; DONE is the stop command without a solve; MPC-HOLD at rest when the plan wants to slow |
+| `set_path` | `test_path_follower_set_path.py` | v2.0.0. With `"off"` equals a fresh constructor; `pos_xy` snaps beyond the advance cap; a PATH error (too short, bad waypoint length) leaves the follower unchanged — a bad `pos_xy` / `t` is not tested and raises after the path was replaced; with the MPC layer (needs casadi + do_mpc) no NLP rebuild, do_mpc `_u_prev` reset to the measured `(d0, a0)`, the reference re-timed |
+| Solve classification | `test_mpc_status_classes.py`, `test_mpc_review_fixes.py` | v2.0.0. Every row of the NMPC and LMPC tables with a fake solver; real solvers: NMPC `max_iter=1` → capped-infeasible, a converged solve feasible, a NaN iterate never feasible, `reset_history` on by default, the LMPC's previous command not overwritten by an unapplied solve; a missing `yaw_rate` moves nothing; an unrunnable cross-check is named; `mpc_v_floor` shows 0.5 |
+| MPC law, params, deps | `test_mpc_law.py`, `test_mpc_params.py`, `test_mpc_deps.py` | v2.0.0, numpy only. Reference and cadence, MPC-HOLD on `a_ff`; schema rule (field JSON rejected), τ floor, deceleration table; a fresh subprocess imports `genesis_vehicle` / `.control` / `.control.mpc` without loading casadi, do_mpc, osqp or threadpoolctl; a blocked package raises `ImportError` naming it |
+| Solver internals | `test_mpc_uprev.py`, `test_mpc_plan_extract.py`, `test_mpc_models.py`, `test_mpc_solve.py` | v2.0.0, need casadi + do_mpc. `MPC.u0` reaches `_u_prev`; plan extraction reads the last node; the casadi model vs an independent numpy transcription; NMPC straight and left-turn solves, the per-speed acceleration limit, a closed loop on a synthetic plant; NumPy mode restored (also when the block raises); casadi's OpenBLAS thread cap reaches the live copy (Linux only) |
+| Field parity replay | `test_mpc_field_replay.py` | v2.0.0. A 200-step, 50-solve replay of the field controller (synthetic table, synthetic numpy plant), law level and through `PathFollower`, compared exactly — **only on the capture platform** (linux-x86_64, casadi 3.8.2, do_mpc 5.1.2, Intel Core Ultra 9 285H); skips elsewhere. Never runs MPC-HOLD or a non-converged solve |
+| `extract_state` extras | `test_extract_state_extras.py` | v2.0.0. `yaw_rate` / `v_lat` definitions and sign; the five 1.x keys unchanged; a duck object without `get_ang()` keeps five keys |
+| identify math, grid flags, bench | `test_identify_math.py`, `test_sweep_measure_grid_args.py`, `test_bench_path_follower.py` | v2.0.0, Genesis-free. Cornering fit and its 3 % residual warning, `v*`; grid lists must contain 0 and the default grid is unchanged; the bench's fail-closed publication rule |
 | Ray-MISS sentinel | `test_ray_miss_and_grounded.py` | the engine's `no_hit_value` defaults to `max_range` and an explicit `0.0` is kept (not coerced); a real `VehicleScene` raycaster reports its OWN range; equality is exact for an unrepresentable sentinel (19.9, 0.1); `read_distances` leaves a non-default-range miss alone; the raw predicate is wrong when applied to corrected distances |
 | Miss-sentinel validation, all three entry points | `test_ray_miss_and_grounded.py` | a sentinel below `max_range` raises at the stamp, at the read, and at `VehiclePhysics.set_ray_miss_value`; non-finite and non-positive rejected; a stamped `nan` cannot survive the read path; `VehiclePhysics` refuses a hand-built bad sensor at construction |
 | `wheels_grounded` / `grounded_list` | `test_ray_miss_and_grounded.py` | all-False before the first step and on the unpopulated zero buffer; True after settling; False over a hole; the carried mask is used, not a recomputed one; batched `grounded_list()` matches per-vehicle |
@@ -176,7 +203,7 @@ and that the lazy names (`VehiclePhysics`, `WheelRayPattern`,
 | `config.py` | `WheelConfig`, `ChassisConfig`, `VehicleConfig`, `ResolvedConfig`, `resolve()`, `ConfigError`, `DEFAULT_*` |
 | `inputs.py` | `VehicleInputs`, `VehicleStepInputs`, typed inputs |
 | `urdf.py` | `parse_urdf()`, `URDFParsedConfig`, `estimate_spin_inertia_from_genesis` |
-| `dynamics.py` | `brake_projection`, `cap_resist_torque`, `deadbeat_scale` / `YawInertia` / `DEADBEAT_G` (v1.8.0), `suspension_normal_force`, deprecated `brake_torque_signed` — pure helpers |
+| `dynamics.py` | `brake_projection`, `cap_resist_torque`, `deadbeat_scale` / `YawInertia` / `DEADBEAT_G` (v1.8.0), `suspension_normal_force` — pure helpers (`brake_torque_signed`, deprecated in v1.8.0, was removed in 2.0.0) |
 | `raycast.py` | `WheelRayPattern`, `read_distances()`, the ray-MISS sentinel (`is_ray_hit` / `is_ray_hit_corrected` / `ray_miss_value` / `check_miss_supported`), high-cast offset helpers, the swept-envelope fan (`fan_longitudinal_offsets` / `fan_height_offsets` / `fan_ray_positions` / `set_sensor_fan` / `sensor_fan`, v1.6.0) |
 | `kinematics.py` | `get_link_transforms`, `LinkTransforms` — per-link transforms (world / base / parent frame) |
 | `visual.py` | `InstancedWheelRenderer` (solver-free wheel visuals), `WheelJointInternalSync` (legacy joint-sync fallback), `patch_viewer_atomic_update` |
@@ -188,6 +215,9 @@ and that the lazy names (`VehiclePhysics`, `WheelRayPattern`,
 | `presets.py` | 4 ready-to-use `VehicleConfig` builders + `stability_hooks_for_profile` |
 | `_hotset.py` | the HOT set and its build-time derivations: `derived()` (dependent cache, off-instance), `prime_derived()`, `HOT_DEPENDENTS`, `square_f64`, `row_tensor` (v1.6.4; contract in `docs/physics-contracts.md` §7.13) |
 | `_version.py` | `__version__`, `VERSION_INFO` (single source of truth) |
-| `control/plant.py` | `DifferentiablePlant` — autodiff inverse plant (the default for `PathFollower`), batched over (vehicle, env) members |
+| `control/plant.py` | `DifferentiablePlant` — autodiff inverse plant (the no-measurement option; this row said "the default for `PathFollower`", stale since 2.0.0), batched over (vehicle, env) members |
+| `control/path_follower.py` | `PathFollower` (stage 1: MPC layer or the 1.x PD law; regimes; `set_path`), `FleetFollower`, `FollowerPlan`, `extract_state*` |
+| `control/mpc/` | v2.0.0 MPC layer: `params.py` (params record, gains; numpy only), `law.py` (control law, solve classification), `alpasim_nonlinear.py` / `alpasim_linear.py` (do_mpc / OSQP solvers), `models.py` (bicycle model), `_deps.py` (optional-package gate) |
+| `control/identify.py` | v2.0.0 `identify_mpc_params` + the `python -m genesis_vehicle.control.identify` CLI |
 | `tests/` | Pure-Python unit tests (no Genesis runtime needed) |
 | `CHANGELOG.md` | Per-version release notes |

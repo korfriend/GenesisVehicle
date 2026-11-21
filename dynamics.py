@@ -11,8 +11,8 @@ The functions encode the physical contracts the SDK promises:
   - `deadbeat_scale` / `YawInertia` / `DEADBEAT_G` (v1.8.0): the rigid-body
     scale ``s`` of the low-speed deadbeat bounds (held wheel, lateral,
     ``StaticFrictionLock`` damper) and its inputs.
-  - `brake_torque_signed`: DEPRECATED since 1.8.0 (the pipeline no longer
-    calls it), removal 2.0.0.
+  - (`brake_torque_signed`, deprecated in 1.8.0, was removed in 2.0.0; the
+    brake is `brake_projection`.)
   - `suspension_normal_force`: per-wheel asymmetric damper + non-negative
     clamp + air-mask zero. Normal force can never pull the wheel down.
   - `aero_drag_force`: chassis aero drag opposing horizontal velocity.
@@ -21,7 +21,6 @@ The functions encode the physical contracts the SDK promises:
 from __future__ import annotations
 
 import math
-import warnings
 from typing import Any, NamedTuple, Optional, Union
 
 import torch
@@ -220,79 +219,6 @@ def aero_drag_force(
     v_h[..., 2] = 0.0
     speed = torch.linalg.norm(v_h, dim=-1, keepdim=True)
     return -(0.5 * float(air_density) * float(drag_area)) * speed * v_h
-
-
-def brake_torque_signed(
-    t_brake: torch.Tensor,
-    omega: torch.Tensor,
-    dt: float = 0.0,
-    i_wheel: Optional[torch.Tensor] = None,
-    smoothing_scale: float = 0.5,
-) -> torch.Tensor:
-    """Convert a positive-magnitude brake command into a signed torque
-    that opposes wheel rotation, **clamped** so a single discrete step
-    cannot reverse the wheel.
-
-    **DEPRECATED since 1.8.0, removal in 2.0.0.** The pipeline no longer calls
-    it: since 1.8.0 the brake is a Coulomb projection applied to the wheel spin
-    before the tyre (:func:`brake_projection`, ``docs/physics-contracts.md``
-    §7.1), with the full brake magnitude and no ``tanh``. Every call emits a
-    ``DeprecationWarning``; the return value is unchanged.
-
-    Without clamping (the v0.5.31 behavior), explicit Euler integration
-    of a sign-dependent friction torque can overshoot zero:
-
-        omega = +0.1 rad/s, t_brake = 100, I = 0.5, dt = 0.01
-        -> T_brake_eff = 100 * tanh(0.2) ~ 19.7 Nm
-        -> new_omega = 0.1 - 19.7/0.5 * 0.01 = -0.294        (sign flip!)
-        next step: brake_eff = -53 Nm -> new_omega = +0.76  (oscillation grows)
-
-    Visible as "brake sometimes acts like propulsion." Classic stiff-
-    friction-instability. The tanh smoothing only helps inside
-    ``|omega| < smoothing_scale``; beyond that, tanh saturates to ±1 and
-    brake re-introduces the overshoot.
-
-    Fix (when ``dt > 0`` and ``i_wheel`` are passed): cap the magnitude
-    of the brake-induced ω change to ``|omega|``. Equivalently, cap
-    ``|T_brake_eff|`` at ``|omega| * i_wheel / dt`` — the torque that
-    exactly zeroes ω this step. Brake can only decelerate to rest, never
-    past it. The remainder (true static hold) is the
-    ``StaticFrictionLock`` hook's job.
-
-    Args
-    ----
-    t_brake          : positive brake magnitude, shape ``(n_envs, n_wheels)``.
-    omega            : current wheel ang. velocity, same shape.
-    dt               : simulation step. ``0.0`` (default) disables the
-                       clamp and reproduces the legacy tanh-only behavior
-                       — kept for backward compat in existing tests.
-    i_wheel          : per-wheel spin inertia, shape ``(n_wheels,)`` or
-                       broadcastable. Required to compute the cap.
-    smoothing_scale  : tanh transition width (rad/s) for the sub-clamp
-                       regime where |omega| is small enough that tanh
-                       is the dominant attenuation.
-
-    Returns
-    -------
-    Signed torque tensor, same shape as ``t_brake``. Sign matches
-    ``omega``'s; consumer subtracts it from ``domega`` so the
-    acceleration always opposes spin.
-    """
-    warnings.warn(
-        "`brake_torque_signed` is deprecated since 1.8.0 and will be removed "
-        "in 2.0.0. The pipeline no longer calls it: the brake is a Coulomb "
-        "projection applied to the wheel spin before the tyre "
-        "(docs/physics-contracts.md §7.1). Its return value is unchanged.",
-        DeprecationWarning, stacklevel=2)
-    smooth_signed = t_brake * torch.tanh(omega / smoothing_scale)
-    if dt > 0.0 and i_wheel is not None:
-        # Cap |T_brake_eff| at the torque that exactly zeroes omega this
-        # step. Use raw |omega| so the cap doesn't depend on smoothing.
-        T_cap = torch.abs(omega) * i_wheel / dt
-        smooth_signed = torch.sign(smooth_signed) * torch.minimum(
-            torch.abs(smooth_signed), T_cap,
-        )
-    return smooth_signed
 
 
 def cap_resist_torque(

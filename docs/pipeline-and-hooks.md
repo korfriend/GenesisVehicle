@@ -91,6 +91,7 @@ VehiclePhysics.step(inputs)
         F_lat = clamp(F_lat, ±s*(N/g)*|v_lat|/DT)    # Y, not on held wheels (S7.16)
         omega[:, i] = clamp(omega, ±OMEGA_MAX); LSR pull; SFL omega override
         # Through v1.7.0 (D) was: T_brake_eff = brake_torque_signed(T_brake, omega)
+        # (that function was deprecated in v1.8.0 and removed in 2.0.0)
         # (a tanh brake), capped with T_resist, and the drive and brake torques went
         # through the overshoot clamp with the tyre at omega' (pre-step omega less RR). That
         # ordering made omega alternate step to step under throttle or brake.

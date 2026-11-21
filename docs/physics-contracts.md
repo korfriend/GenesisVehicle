@@ -38,6 +38,8 @@ enforced by `genesis_vehicle.dynamics` (pure-Python, unit-tested in
 | SFL | `StaticFrictionLock` (§7.17) |
 | MPPI | Model Predictive Path Integral (a sampling-based controller that copies hook state between rollouts) |
 | ζ / θ | damping ratio / slope angle |
+| MPC / NMPC / LMPC | Model Predictive Control / its nonlinear (do_mpc + IPOPT) and linear (OSQP) implementations in `PathFollower` (§7.18) |
+| U1 | the `ValueError` a default (MPC) `PathFollower` raises without `mpc_params` (§7.18) |
 | back / vmin | back-travel after the first \|v\| < 0.05 m/s / minimum speed along the travel direction after it |
 | HJW | the `GeneVehicle_HJW` demo car (outside this repo; ρ²/k² 3.9) |
 | k² | `I_cg / m`, the squared yaw radius of gyration |
@@ -85,9 +87,11 @@ could not hold a wheel: the reference car under full brake crept down a 10°
 slope at 0.907 m/s and ran away on 20° (CHANGELOG 1.8.0 §2.2). The section
 said so ("the smooth brake cannot pin the wheel"), but presented
 `StaticFrictionLock` as the remedy; the lock could not hold either, because its
-force was limited by the same inertia term. `brake_torque_signed` is no longer
-called by the pipeline; it is deprecated (a `DeprecationWarning` on every
-call), removal in 2.0.0.
+force was limited by the same inertia term. `brake_torque_signed` stopped
+being called by the pipeline in v1.8.0, was deprecated then (a
+`DeprecationWarning` on every call), and **was removed in 2.0.0** (module,
+package root and `__all__`). This paragraph said "removal in 2.0.0" through
+1.8.0; that removal is now done.
 
 Implementation: `genesis_vehicle.dynamics.brake_projection`, called from
 `_pipeline.compute_wheel_step`.
@@ -1268,3 +1272,100 @@ a light brake on a shallow slope still creeps (car 3°, brake 0.1: 0.0173 m/s);
 on a low-yaw-inertia vehicle the hold keeps a sub-mm/s yaw jitter (HJW demo car
 brake phase: 526 / 792 flips, final speed 0.0004 m/s; 1.7.0 612 / 792,
 0.0024 m/s).
+
+## 7.18 `PathFollower`'s MPC layer: what the constructor and the regime selection enforce (v2.0.0)
+
+Not a physics contract — a control-layer one, kept here because downstream
+code and tests build on it the same way. Guide: `path-following.md` §5.
+
+**Enforced (code path named):**
+
+- **Construction order**, each check raising before any side effect
+  (`PathFollower.__init__` → `_check_mpc_args`): path length ≥ 2; plant
+  present; `mpc_model` ∈ `PathFollower.MPC_MODELS` = `("bicycle", "off")`
+  (`"pacejka"` raises `ValueError`; `mpc_feedforward=` / `mpc_correction=` are
+  `TypeError`, not accepted-and-ignored); with `"off"`, any MPC-only argument
+  (`mpc_params`, `mpc_impl`, `on_solve_failure`, `mpc_gains`, `mpc_v_floor`,
+  `dt_ctrl`) raises `ValueError` — told apart from "not given" by the `_Unset`
+  sentinel, so an explicit default value also raises; a live vehicle or
+  `DifferentiablePlant` whose resolved steering is not `Ackermann` (or a
+  subclass) on exactly two axles raises `ValueError` naming
+  `mpc_model="off"` (axles counted from `WheelConfig.axle_index`; an unknown
+  axle makes the count unknown and fails); `mpc_params is None` raises U1 —
+  for every plant type; `mpc_impl` ∈ {`"nonlinear"`, `"linear"`},
+  `on_solve_failure` ∈ {`"pd"`, `"hold"`}; missing optional packages raise
+  `ImportError` (`require_mpc_deps`); the params file is loaded and validated
+  (`load_mpc_params`: `FileNotFoundError` for a missing file; `ValueError` for
+  schema ≠ `genesis_vehicle.mpc_params/1`, missing keys, or a JSON `steering`
+  that is not a two-axle Ackermann). Only after these does the 1.x plant
+  coercion (`_as_plant`, `TypeError`) and the waypoint parsing run — so under
+  the default `mpc_model` a call without params reports U1 even when the plant
+  OBJECT or a waypoint's SHAPE is also wrong; the path-length, plant-missing,
+  `mpc_model`-value and two-axle checks still come before U1. `tests/test_path_follower_mpc_api.py` pins the order.
+- **Regime selection** (`PathFollower.plan`): the path state machine runs every
+  step; DONE / cusp brake → a fixed command (`CMD`); `"off"` → the 1.x law
+  (`R-OFF`); a reverse block → the 1.x law (`R-REV`), with no solver call; a
+  forward block → the MPC, re-solved every 0.1 s; a solve that is not
+  applicable under `"pd"` → the 1.x law (`R-FAIL`, mode `PD-FALLBACK`) until the
+  next applicable solve. Which solves are applicable is the classification in
+  `control/mpc/law.py` (`classify_solve`, `_MPCLaw.step`), the tables of
+  `path-following.md` §5.5. `tests/test_path_follower_mpc_regimes.py`,
+  `test_mpc_status_classes.py`.
+- **Missing `yaw_rate` / `v_lat` on an MPC step** raise `TypeError` after the
+  follower's path state is restored and before the clock or the MPC moves.
+- **`FleetFollower` rejects MPC members** with `TypeError` before modifying any
+  follower.
+- **Feasibility** of a capped solve = largest violation ≤ 1e-4 in the solver's
+  own scaled space; a non-finite iterate counts as infinitely violated
+  (`NonlinearMPC.max_violation`; `LinearMPC` on `l <= A x <= u`).
+- **The optional packages are not imported** by `import genesis_vehicle`,
+  `genesis_vehicle.control` or `genesis_vehicle.control.mpc`
+  (`tests/test_mpc_deps.py`, a fresh subprocess).
+
+**Bit-identity of `mpc_model="off"` to 1.8.0 — enforcement scope.** Enforced on
+every tree only for the 38 synthetic runs of `tests/test_pd_golden.py` (19
+scenarios × {synthetic sweep table, fake coupled plant}, 8928 steps, captured
+on the 1.8.0 tree, compared with `==`). Measured ONCE for the 2.0.0 release,
+not re-run by the suite: a 300-path law-level fuzz (~148k steps), the
+`path_follow_demo` / `path_follow_reverse_demo` command sequences (sweep and
+jacobian) and `fleet_follow_demo --plant both --k 4` — all identical. Not
+identical by construction: `extract_state` returns two more keys.
+
+**Field parity — enforcement scope.** `tests/test_mpc_field_replay.py` replays a
+200-step synthetic fixture of the field controller and compares exactly, **only
+on its capture platform** (linux-x86_64, casadi 3.8.2, do_mpc 5.1.2, Intel Core
+Ultra 9 285H); elsewhere it skips. The 538-step Genesis closed-loop parity
+(max difference 0.0) was measured once for the release and needs the field
+folder. Neither exercises a non-converged solve.
+
+**Not enforced by anything:**
+
+- that a sweep table and a params file describe the same vehicle (a CSV
+  carries no vehicle data; a mismatched pair is accepted silently);
+- the steering type or axle count through a `SweepTable` (only the params
+  JSON's own `steering` field is checked);
+- that the params JSON describes the live vehicle beyond mass, wheelbase and
+  the per-axle tyre coefficients — and a mismatch there only WARNS;
+- that the prediction model matches the plant: it is a linear-tyre bicycle
+  model, not the ray-wheel pipeline (no load transfer, slope, terrain, wheel
+  spin or tyre saturation);
+- any real-time bound: the NMPC overran 25 ms on 5.0-24.1 % of control steps
+  on the measured machine depending on the session and harness
+  (`path-following.md` §5.6);
+- **progress from a misaligned start**: with the reference car spawned at
+  (30, 0) facing +X at the start of the path (30, 0) → (10, -8) → (-10, -8) →
+  (-30, 0) at 2 m/s, the MPC follower never moved in 1600 steps (40 s):
+  `last_mode` alternated `MPC` (476 steps) / `MPC-HOLD` (1124 steps), all 400
+  solves converged, no warning, no fallback (a converged solve never triggers
+  `on_solve_failure`). `mpc_model="off"` drove the course, and the MPC reached
+  `DONE` when spawned facing along the path. The unmodified field follower
+  behaved identically from the same start (same end pose and mode counts), so
+  the limitation is inherited. Mechanism not established (the forward-only
+  model and its ±π/2 horizon yaw bound are suspected). Conditions:
+  impl-review's runs (harness outside the repo), CPU/WSL2, genesis-world 1.4.5,
+  2026-11-21. 2.0.0 ships with it documented; root cause and fix are planned
+  for 2.1.0. Start aligned with the first forward block, or use
+  `mpc_model="off"`; detect it by the vehicle not moving while far from the
+  goal (`last_mode` alone is not enough);
+- thread safety (casadi's NumPy mode, the OpenBLAS thread count and warning
+  filters are process-global).

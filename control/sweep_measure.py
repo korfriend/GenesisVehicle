@@ -369,37 +369,14 @@ def run_sweep(urdf_path, preset_fn, config_mod, n_envs,
     return {k: np.concatenate(v)[:n_total] for k, v in results.items()}
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(
-        description="Measure a sweep table (see genesis_vehicle/docs/path-following.md)")
-    ap.add_argument("--urdf", required=True, help="vehicle URDF path")
-    ap.add_argument("--preset", required=True,
-                    help="genesis_vehicle preset name (e.g. tank_skid_belt, "
-                         "car_4w_rwd_ackermann)")
-    ap.add_argument("--config", default=None,
-                    help="optional Python override file defining "
-                         "apply_config(cfg) / apply_runtime_config(physics)")
-    ap.add_argument("--output", required=True, help="output CSV path")
-    ap.add_argument("--n-envs", "--n_envs", dest="n_envs", type=int, default=500,
-                    help="parallel envs per chunk (default 500; lower it on "
-                         "GPU out-of-memory)")
-    ap.add_argument("--gpu", action="store_true",
-                    help="use the GPU backend. Recommended when CUDA is "
-                         "available: at ~500 envs this workload is past the "
-                         "measured CPU/GPU crossover (~300 envs, docs/backends.md); "
-                         "measured full grid GPU ~3.6 min vs CPU ~20 min")
-    ap.add_argument("--quick", action="store_true",
-                    help="tiny smoke grid (81 combos) to check the CLI wiring; "
-                         "the resulting table is too coarse for real control")
-    ap.add_argument("--dt", type=float, default=DEFAULT_DT,
-                    help="sim dt for the measurement (default 0.025 — the "
-                         "presets' recommended_dt). MEASURE AT THE dt YOU "
-                         "WILL DRIVE AT: dt/substeps are part of the table's "
-                         "validity contract")
-    ap.add_argument("--substeps", type=int, default=DEFAULT_SUBSTEPS,
-                    help="solver substeps (default 4 -> internal 6.25 ms at "
-                         "dt=0.025)")
+PLANT_OVERRIDE_KEYS = ("top_speed", "omega_max_drive", "i_wheel", "mu_long",
+                       "mu_lat", "k_susp", "rest_stroke", "brake_max", "k_bump")
 
+
+def add_plant_override_args(ap):
+    """Add the "plant overrides" flag group (shared by this CLI and
+    ``control.identify``, so a table and an MPC params file can be measured on
+    the same plant with the same flags)."""
     plant = ap.add_argument_group(
         "plant overrides",
         "Parameterise the sweep plant from the CLI instead of a --config file "
@@ -431,6 +408,102 @@ def main(argv=None):
                             "0 disables")
     plant.add_argument("--brake-max", type=float, default=None,
                        help="max brake torque (N*m)")
+    return plant
+
+
+def plant_overrides_fn(args, urdf_path):
+    """``overrides_fn(cfg)`` applying the parsed plant-override flags, or
+    ``None`` when none was given."""
+    vals = {k: getattr(args, k) for k in PLANT_OVERRIDE_KEYS}
+    if not any(v is not None for v in vals.values()):
+        return None
+
+    def overrides_fn(cfg, _u=urdf_path, _p=vals):
+        apply_plant_overrides(cfg, _u, **_p)
+    overrides_fn.overrides = {k: v for k, v in vals.items() if v is not None}
+    return overrides_fn
+
+
+def _parse_float_list(text, name, need_zero=False):
+    try:
+        vals = [float(x) for x in text.split(",") if x.strip() != ""]
+    except ValueError:
+        raise ValueError(f"--{name}: expected comma-separated numbers, got {text!r}")
+    if not vals:
+        raise ValueError(f"--{name}: empty list")
+    if need_zero and 0.0 not in vals:
+        raise ValueError(
+            f"--{name} must contain 0: SweepTable builds its steer inverse from "
+            "the throttle == 0 rows and its throttle inverse from the steer == 0 rows")
+    return sorted(set(vals))
+
+
+def grid_from_args(args):
+    """The measurement grid ``(v, throttle, steer, pitch, roll)`` lists from
+    the parsed CLI: ``--quick`` / the defaults, with any ``--*-list`` flag
+    replacing its axis. Raises ``ValueError`` before anything is measured if
+    a throttle or steer list lacks 0."""
+    if args.quick:
+        grids = [QUICK_V, QUICK_TS, QUICK_TS, QUICK_PITCH, QUICK_ROLL]
+    else:
+        grids = [V_INIT_LIST, THROTTLE_LIST, STEER_LIST, PITCH_DEG_LIST, ROLL_DEG_LIST]
+    for i, (flag, need_zero) in enumerate((("v_list", False), ("throttle_list", True),
+                                            ("steer_list", True), ("pitch_list", False),
+                                            ("roll_list", False))):
+        text = getattr(args, flag, None)
+        if text is not None:
+            grids[i] = _parse_float_list(text, flag.replace("_", "-"), need_zero)
+    return tuple(grids)
+
+
+def build_arg_parser():
+    ap = argparse.ArgumentParser(
+        description="Measure a sweep table (see genesis_vehicle/docs/path-following.md)")
+    ap.add_argument("--urdf", required=True, help="vehicle URDF path")
+    ap.add_argument("--preset", required=True,
+                    help="genesis_vehicle preset name (e.g. tank_skid_belt, "
+                         "car_4w_rwd_ackermann)")
+    ap.add_argument("--config", default=None,
+                    help="optional Python override file defining "
+                         "apply_config(cfg) / apply_runtime_config(physics)")
+    ap.add_argument("--output", required=True, help="output CSV path")
+    ap.add_argument("--n-envs", "--n_envs", dest="n_envs", type=int, default=500,
+                    help="parallel envs per chunk (default 500; lower it on "
+                         "GPU out-of-memory)")
+    ap.add_argument("--gpu", action="store_true",
+                    help="use the GPU backend. Recommended when CUDA is "
+                         "available: at ~500 envs this workload is past the "
+                         "measured CPU/GPU crossover (~300 envs, docs/backends.md); "
+                         "measured full grid GPU ~3.6 min vs CPU ~20 min")
+    ap.add_argument("--quick", action="store_true",
+                    help="tiny smoke grid (81 combos) to check the CLI wiring; "
+                         "the resulting table is too coarse for real control")
+    ap.add_argument("--dt", type=float, default=DEFAULT_DT,
+                    help="sim dt for the measurement (default 0.025 — the "
+                         "presets' recommended_dt). MEASURE AT THE dt YOU "
+                         "WILL DRIVE AT: dt/substeps are part of the table's "
+                         "validity contract")
+    ap.add_argument("--substeps", type=int, default=DEFAULT_SUBSTEPS,
+                    help="solver substeps (default 4 -> internal 6.25 ms at "
+                         "dt=0.025)")
+
+    add_plant_override_args(ap)
+    grid = ap.add_argument_group(
+        "grid",
+        "Replace one axis of the measurement grid (comma-separated values, v2.0.0). "
+        "The default grid covers |v| <= 4 m/s; an MPC demo at 8-10 m/s needs e.g. "
+        "--v-list=-2,0,2,4,6,8,10,12,14,16 (write a list that starts with a minus "
+        "sign with '='). Throttle and steer lists must contain 0.")
+    grid.add_argument("--v-list", default=None, help="initial speeds (m/s)")
+    grid.add_argument("--throttle-list", default=None, help="throttle levels (must contain 0)")
+    grid.add_argument("--steer-list", default=None, help="steer levels (must contain 0)")
+    grid.add_argument("--pitch-list", default=None, help="pitch angles (deg)")
+    grid.add_argument("--roll-list", default=None, help="roll angles (deg)")
+    return ap
+
+
+def main(argv=None):
+    ap = build_arg_parser()
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.urdf):
@@ -438,24 +511,15 @@ def main(argv=None):
     preset_fn = _load_preset(args.preset)
     config_mod = _load_config_module(args.config)
 
-    _plant_keys = ("top_speed", "omega_max_drive", "i_wheel", "mu_long",
-                   "mu_lat", "k_susp", "rest_stroke", "brake_max", "k_bump")
-    _plant = {k: getattr(args, k) for k in _plant_keys}
-    overrides_fn = None
-    if any(v is not None for v in _plant.values()):
-        def overrides_fn(cfg, _u=args.urdf, _p=_plant):
-            apply_plant_overrides(cfg, _u, **_p)
+    overrides_fn = plant_overrides_fn(args, args.urdf)
+    _plant = overrides_fn.overrides if overrides_fn is not None else {}
+    grids = grid_from_args(args)          # raises before any measurement
 
     import genesis as gs
     from genesis_vehicle import VehicleScene
     VehicleScene.init_backend("gpu" if args.gpu else "cpu")
     device = gs.device
 
-    if args.quick:
-        grids = (QUICK_V, QUICK_TS, QUICK_TS, QUICK_PITCH, QUICK_ROLL)
-    else:
-        grids = (V_INIT_LIST, THROTTLE_LIST, STEER_LIST,
-                 PITCH_DEG_LIST, ROLL_DEG_LIST)
     v_arr, t_arr, s_arr, p_arr, r_arr = build_combo_arrays(*grids)
     n_total = len(v_arr)
     n_envs = min(args.n_envs, n_total)   # don't build more envs than combos
@@ -465,7 +529,7 @@ def main(argv=None):
     print(f"  Config: {args.config or '(none)'}")
     if overrides_fn is not None:
         print("  CLI plant overrides: "
-              + ", ".join(f"{k}={v}" for k, v in _plant.items() if v is not None))
+              + ", ".join(f"{k}={v}" for k, v in _plant.items()))
     print(f"  Output: {args.output}")
     print(f"  Backend: {'gpu' if args.gpu else 'cpu'}")
     print(f"  Combos: {n_total} "

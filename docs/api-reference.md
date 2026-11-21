@@ -1101,19 +1101,13 @@ sensor_up_offset(sensor) -> float
     # read_distances subtracts exactly what WheelRayPattern added.
 
 # --- Pure-Python dynamics primitives (testable without Genesis) ---
-brake_torque_signed(
-    t_brake: torch.Tensor, omega: torch.Tensor, dt: float = 0.0,
-    i_wheel: torch.Tensor | None = None, smoothing_scale: float = 0.5,
-) -> torch.Tensor
-    # DEPRECATED since v1.8.0, removal in 2.0.0: a DeprecationWarning on EVERY
-    # call; return value unchanged. The pipeline no longer calls it (the brake is
-    # dynamics.brake_projection, physics-contracts §7.1). brake_projection is NOT
-    # a drop-in replacement (it takes the post-drive omega and returns
-    # (omega_t, b_rem), not a signed torque).
-    # dt > 0 with i_wheel caps |T| at |omega| * i_wheel / dt (no reversal in one
-    # step); dt = 0 is the tanh-only legacy form. (This entry listed only
-    # (t_brake, omega, smoothing_scale) before v1.7.0; the dt / i_wheel
-    # parameters already existed.)
+# brake_torque_signed(t_brake, omega, dt=0.0, i_wheel=None, smoothing_scale=0.5)
+#   REMOVED in 2.0.0 (deprecated in v1.8.0 with a DeprecationWarning on every
+#   call; the pipeline stopped calling it in v1.8.0). Gone from
+#   genesis_vehicle.dynamics, the package root and __all__. brake_projection
+#   (below) is NOT a drop-in replacement: it takes the post-drive omega and
+#   returns (omega_t, b_rem), not a signed torque. Code that needs the old tanh
+#   brake must copy the 1.8.0 function body (CHANGELOG 2.0.0 §4).
 # --- genesis_vehicle.dynamics, v1.8.0 (NOT re-exported from the package root) ---
 brake_projection(omega_d, t_brake, dt, i_wheel) -> (omega_t, b_rem)
     # The Coulomb brake: full magnitude, a projection toward 0 that cannot cross
@@ -1477,17 +1471,36 @@ stateless.
 These are last-resort fallbacks. URDF + `WheelConfig` overrides take
 precedence per [`concepts.md`](concepts.md#4-urdf-is-the-default-source-explicit-api-overrides-are-the-final-truth).
 
-## 11. `control` — path following (v1.1.11)
+## 11. `control` — path following (v1.1.11; MPC layer v2.0.0)
 
-Full guide: [`path-following.md`](path-following.md). Numpy-only (no
-Genesis/torch needed at control time).
+Full guide: [`path-following.md`](path-following.md). The PD follower with a
+`SweepTable` is numpy-only (no Genesis/torch needed at control time). The MPC
+layer (the 2.0.0 default stage 1) needs the optional packages of
+`requirements-mpc.txt` (`path-following.md` §5.1); `DifferentiablePlant` and
+`identify` need Genesis.
+
+| abbr | meaning |
+|---|---|
+| MPC / NMPC / LMPC | Model Predictive Control / its nonlinear (do_mpc + IPOPT) and linear (OSQP) implementations |
+| PD | the 1.x stage-1 law (`mpc_model="off"`) |
+| U1 | the `ValueError` a default (MPC) follower raises without `mpc_params` |
+| ω_z | chassis yaw rate (rad/s) |
 
 | Symbol | Import | What it is |
 |---|---|---|
-| `PathFollower(path, plant, **tuning)` | `from genesis_vehicle import PathFollower` | path `(x, y, z, speed[, yaw])` → per-step `(throttle, steer, brake)`; the optional per-waypoint `yaw` (rad, world +X = 0, CCW+) pins the desired chassis heading verbatim, else tangential default; `plant` is a `DifferentiablePlant`, a live vehicle (`Vehicle` / `VehiclePhysics`, wrapped for you), a `SweepTable`, or a sweep-CSV path — also accepted as the keyword `sweep=`; cusps (speed-sign flips) handled as stop-and-reverse. `last_mode` ∈ `INIT/DRV±1/STOP/BRAKE_TRANS/DONE` |
-| `FleetFollower(followers, plant)` | `from genesis_vehicle import FleetFollower` | drives N `PathFollower`s off ONE batched plant: `plan` per follower → one batched `solve` → `finish` per follower. `step(states)` → list of `(throttle, steer, brake)`. Needs `plant.n_members == len(followers)` |
-| `DifferentiablePlant(vehicle, horizon=4, **tuning)` | `from genesis_vehicle import DifferentiablePlant` | the DEFAULT inverse plant (v1.3.0): unrolls the SDK's own ray-wheel force model and differentiates it with `torch.autograd` for `J = d(a, ω_z)/d(throttle, steer)`, then Newton-solves. No sweep measurement, no CSV. `solve(v, a_target, ω_target, pitch, roll)` → `(throttle, steer)`; `predict` / `jacobian` / `set_applied` / `reset`; diagnostics in `last_jacobian` / `last_response` / `last_target` / `last_singular` / `last_restarted`. `saturation_restart=True` (v1.7.0): a warm start at a range limit is also solved from 0 in the same batch and the lower residual wins (`path-following.md`). Pass a SEQUENCE of vehicles (and/or of `env_idx`) for a fleet: M members inverted in one batch, every entry point taking and returning length-M arrays, `set_applied_member(i, ...)` for a single row |
+| `PathFollower(path, plant, *, mpc_params=, mpc_model="bicycle", mpc_impl="nonlinear", on_solve_failure="pd", mpc_gains=None, mpc_v_floor=0.5, dt_ctrl=None, **pd_tuning)` | `from genesis_vehicle import PathFollower` | path `(x, y, z, speed[, yaw])` → per-step `(throttle, steer, brake)`; the optional per-waypoint `yaw` (rad, world +X = 0, CCW+) pins the desired chassis heading verbatim, else tangential default; `plant` is a `DifferentiablePlant`, a live vehicle (`Vehicle` / `VehiclePhysics`, wrapped for you), a `SweepTable`, or a sweep-CSV path — also accepted as the keyword `sweep=`; cusps (speed-sign flips) handled as stop-and-reverse. **2.0.0: the MPC layer is on by default and `mpc_params` is required — `PathFollower(path, plant)` raises U1 for every plant type; `mpc_model="off"` is the 1.x PD follower** (any MPC-only argument with it raises `ValueError`). The MPC layer: two-axle Ackermann vehicles, forward blocks; PD on reverse blocks and after a failed solve. `step(pos_xy, yaw, v_long, pitch_deg, roll_deg, *, yaw_rate=None, v_lat=None, t=None)` — `yaw_rate` / `v_lat` required on MPC steps (`TypeError`). `last_mode` ∈ `INIT/DRV±1/STOP/BRAKE_TRANS/DONE`, plus `MPC/MPC-HOLD/MPC-HOLDCMD/PD-FALLBACK` with the layer on; `.regime` ∈ `R-OFF/R-MPC/R-REV/R-FAIL/CMD`; `.mpc_stats` (`None` when off); `.last_plan` (NMPC only). This row showed `PathFollower(path, plant, **tuning)` through 1.8.0; that call raises on 2.0.0. Constructor check order and the solve classification: `path-following.md` §5.4-§5.5, `physics-contracts.md` §7.18 |
+| `PathFollower.set_path(path, *, pos_xy=None, t=None)` | method (v2.0.0) | replace the path; the PATH is validated first, so a path error (length, waypoint shape) changes nothing, but a bad `pos_xy` or `t` raises AFTER the new path has been installed; keeps the plant, its warm start and the MPC problem; restarts the PD state on the first block (cancels a cusp transition in progress); `pos_xy` snaps to that block's nearest segment; with the MPC layer on and a forward first block, re-times the reference so that point is due at `t` and restarts the MPC |
+| `PathFollower.plan(...)` / `.finish(plan, throttle, steer)` | methods | the two halves of `step` (stage 1 / supervisors); `plan` takes the same keyword arguments as `step` |
+| `FollowerPlan` | `from genesis_vehicle.control import FollowerPlan` | `plan()`'s result: `mode, a_target, omega_target, v_long, v_target, pitch_deg, roll_deg, command`, and (v2.0.0, appended with defaults) `regime="R-OFF"`, `a_ff=None`, `w_ff=None` — on an `R-MPC` plan `a_ff` / `w_ff` are the MPC's commanded `a` / `ω_z`, otherwise `None`; not the feedforward planned for 2.2.0 |
+| `FleetFollower(followers, plant)` | `from genesis_vehicle import FleetFollower` | drives N `PathFollower`s off ONE batched plant: `plan` per follower → one batched `solve` → `finish` per follower. `step(states)` → list of `(throttle, steer, brake)`. Needs `plant.n_members == len(followers)`. **v2.0.0: PD followers only** — any follower with the MPC layer on raises `TypeError` before a follower is modified |
+| `DifferentiablePlant(vehicle, horizon=4, **tuning)` | `from genesis_vehicle import DifferentiablePlant` | the no-measurement inverse plant (v1.3.0; this row called it "the DEFAULT inverse plant" through 1.8.0 — stale since 2.0.0, whose documented default stack is a sweep table + the MPC layer): unrolls the SDK's own ray-wheel force model and differentiates it with `torch.autograd` for `J = d(a, ω_z)/d(throttle, steer)`, then Newton-solves. No sweep measurement, no CSV. `solve(v, a_target, ω_target, pitch, roll)` → `(throttle, steer)`; `predict` / `jacobian` / `set_applied` / `reset`; diagnostics in `last_jacobian` / `last_response` / `last_target` / `last_singular` / `last_restarted`. `saturation_restart=True` (v1.7.0): a warm start at a range limit is also solved from 0 in the same batch and the lower residual wins (`path-following.md`). Pass a SEQUENCE of vehicles (and/or of `env_idx`) for a fleet: M members inverted in one batch, every entry point taking and returning length-M arrays, `set_applied_member(i, ...)` for a single row |
 | `SweepTable` | `from genesis_vehicle import SweepTable` | the measured inverse plant: (v, throttle, steer, pitch, roll) → (a, ω_z) grid; `.load(csv)` / `.save(csv)`; inverse lookups `throttle_for(v, a, pitch, roll)` / `steer_for(v, ω, pitch, roll)`. numpy-only, so it is the option for a controller running without a simulator |
-| `extract_state(vehicle, env_idx=0)` | `from genesis_vehicle.control import extract_state` | Genesis entity / `Vehicle` wrapper → state dict for `PathFollower.step` |
-| `extract_state_from_arrays(pos, quat_wxyz, vel)` | `from genesis_vehicle.control import extract_state_from_arrays` | same, from raw arrays (simulator-agnostic) |
-| `sweep_measure` CLI | `python -m genesis_vehicle.control.sweep_measure` | measure the sweep CSV for a (URDF, preset, config) triple; `--gpu` recommended (~500-env L3 batch) |
+| `extract_state(vehicle, env_idx=0)` | `from genesis_vehicle.control import extract_state` | Genesis entity / `Vehicle` wrapper → state dict for `PathFollower.step`: `pos_xy, yaw, v_long, pitch, roll` (degrees), and since 2.0.0 `yaw_rate` (world ω_z; equals the chassis yaw rate only on level ground) and `v_lat` when the object has `get_ang()` |
+| `extract_state_from_arrays(pos, quat_wxyz, vel, ang_xyz=None)` | `from genesis_vehicle.control import extract_state_from_arrays` | same, from raw arrays (simulator-agnostic); `yaw_rate` / `v_lat` only when `ang_xyz` is given |
+| `MPCVehicleParams` | `from genesis_vehicle.control import MPCVehicleParams` | v2.0.0. The measured MPC record of one vehicle; `from_json` accepts exactly schema `genesis_vehicle.mpc_params/1` (every 2.x reader keeps accepting `/1`; other or missing → `ValueError`, which rejects field `PathFollower_MPC` JSONs); `to_json`; `solver_params(model, steer_cap=, dt_ctrl=)` |
+| `load_mpc_params(path_or_params)` | `from genesis_vehicle.control import load_mpc_params` | v2.0.0. `MPCVehicleParams` from a path (or pass-through) |
+| `MPCGains` | `from genesis_vehicle.control import MPCGains` | v2.0.0. The MPC cost weights (AlpaSim defaults) |
+| `identify_mpc_params(urdf_path, preset_fn, config_mod=None, *, dt=0.025, substeps=4, overrides_fn=None, device=None, log=print)` | `from genesis_vehicle.control import identify_mpc_params` (resolved lazily) | v2.0.0. Measure a two-axle Ackermann vehicle's `MPCVehicleParams` (needs Genesis); `ValueError` naming `mpc_model="off"` for any other vehicle |
+| `identify` CLI | `python -m genesis_vehicle.control.identify --urdf ... --preset ... --output ...` | v2.0.0. Same scene and flags as `sweep_measure` (`--config`, `--dt`, `--substeps`, `--gpu`, plant overrides) |
+| `genesis_vehicle.control.mpc` | module | v2.0.0. `require_mpc_deps`, `SCHEMA`, `accel_limits`, and lazily `NonlinearMPC` (`shift_warm_start`, `openblas_threads`, `nlpsol_opts`, `reset_history=True`; options not exposed by `PathFollower`) / `LinearMPC` / `SolveResult`; the classification tables in `control.mpc.law`. Importing it loads no optional package |
+| `sweep_measure` CLI | `python -m genesis_vehicle.control.sweep_measure` | measure the sweep CSV for a (URDF, preset, config) triple; `--gpu` recommended (~500-env L3 batch). v2.0.0 grid flags `--v-list`, `--throttle-list`, `--steer-list`, `--pitch-list`, `--roll-list` (a list starting with a minus sign needs the `=` form: `--v-list=-2,0,2`; throttle and steer lists must contain 0); the default grid (|v| ≤ 4 m/s, 17325 combinations) is unchanged |

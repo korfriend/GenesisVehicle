@@ -16,7 +16,7 @@ from genesis_vehicle import (
     Independent, SameSideBelt,
     RollingResistance, LowSpeedRegularizer, StaticFrictionLock,
     TireModel, PacejkaAnisotropic, CoulombIsotropic,
-    brake_torque_signed, suspension_normal_force,
+    suspension_normal_force,
     car_4w_rwd_ackermann, car_4w_awd_ackermann,
     truck_6w_partial_ackermann, tank_skid_belt,
     stability_hooks_for_profile,

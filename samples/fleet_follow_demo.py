@@ -188,12 +188,12 @@ def run(mode, args, n_lanes, recorder=None):
     if mode == "jacobian":
         plant = DifferentiablePlant(tanks, horizon=args.horizon,
                                     newton_iters=args.newton_iters)
-        followers = [PathFollower(p, plant, **tune) for p in paths]
+        followers = [PathFollower(p, plant, **tune, mpc_model="off") for p in paths]
         driver = FleetFollower(followers, plant)
         print(f"  inverse plant: {plant}")
     else:
         table = SweepTable.load(CSV)        # stateless -> one table for the fleet
-        followers = [PathFollower(p, table, **tune) for p in paths]
+        followers = [PathFollower(p, table, **tune, mpc_model="off") for p in paths]
         driver = None
         print(f"  inverse plant: sweep table {os.path.basename(CSV)} "
               f"(shared by all {n_lanes} vehicles)")
