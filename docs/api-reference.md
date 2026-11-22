@@ -109,10 +109,16 @@ class VehicleScene:
     dynamics: list[DynamicBody]          # property
 
 class Vehicle:                           # handle returned by add_vehicle
-    def set_inputs(throttle=0.0, brake=0.0, steer=0.0) -> Vehicle
+    def set_inputs(throttle=0.0, brake=0.0, steer=0.0, *, gear=None) -> Vehicle
         # v1.7.0: VehicleScene.step hands the driver a fresh SHALLOW copy per
         # step, so a physics.step wrapper's attribute rewrite no longer persists;
         # an in-place tensor write (inputs.throttle.mul_(...)) still does.
+        # v2.0.2 gear (keyword-only): None = signed throttle (unchanged); +1/-1
+        # (or a per-env tensor, by sign) = gear mode — physics-contracts §7.20.
+        # Checked HERE before anything is stored: a skid-steer vehicle, a scalar
+        # gear other than +-1 and a negative scalar throttle with a gear raise.
+    gear                                 # property (v2.0.2): engaged gear (n_envs,) int8 copy;
+                                         #   None on a skid-steer vehicle and before build()
     def get_pos() / get_quat() / get_vel() / get_ang()   # (n_envs, ...) main-scene truth
     distances                            # property: last (n_envs, n_wheels) wheel-ground d
                                          #   (n_wheels, not n_wheels x M — read_distances
@@ -396,7 +402,22 @@ class VehiclePhysics:
     vehicle_name         # attribute: str, identifies THIS driver's config  # v1.6.4
     wheels_grounded      # property: (n_envs, n_wheels) bool             # v1.5.2
     all_wheels_grounded  # property: (n_envs,) bool                      # v1.5.2
+    gear                 # property: (n_envs,) int8 engaged gear, or None (skid-steer)  # v2.0.2
 ```
+
+**Gear mode (v2.0.2).** `step()` reads an optional `gear` off the input object
+it is given (`VehicleInputs.gear` or a typed input's `gear`), BEFORE converting
+it, and on a step that carries one: refuses a skid-steer vehicle and a bad
+scalar (`ValueError`, before any state is written); feeds the drivetrain
+`gear * clamp(throttle, 0, 1)` on a new inputs object (`TypeError` if the
+steering's input type is not a dataclass with a `throttle` field); shifts the
+engaged gear only at clamped throttle 0 and planar speed below
+`GEAR_SHIFT_MAX_SPEED` (0.5 m/s), not on the first-step protection step; and
+clamps every wheel's `T_drive` to the post-shift gear's sign before the
+pipeline (`last_T_drive` is the clamped tensor). With no gear the step is the
+2.0.1 step. `gear` is +1 for a vehicle never driven with a gear; `reset()` sets
+the reset rows to +1; a rebuild carries it (`RUNTIME_STATE_ROW_ATTRS`). Full
+contract: [`physics-contracts.md`](physics-contracts.md) §7.20.
 
 `name` / `vehicle_name` (v1.6.4) exist so a warning about a driver's config can
 say which vehicle it is about — currently only the bump-stop/`dt` stability
@@ -458,6 +479,7 @@ class MultiVehiclePhysics:
     def step(inputs_list: list[VehicleStepInputs]) -> None
     def distances_list() -> list[torch.Tensor]   # per vehicle (n_envs, n_wheels) float
     def grounded_list()  -> list[torch.Tensor]   # per vehicle (n_envs, n_wheels) bool, v1.5.2
+    def gear_list()      -> list[torch.Tensor | None]  # per vehicle (n_envs,) int8, None = skid-steer, v2.0.2
     def reset(vehicle_ids=None) -> None          # per-VEHICLE reset (v1.6.2)
     build_id: int                                # bumped on every construction (staleness key)
 ```
@@ -482,7 +504,18 @@ class MultiVehicleKindPhysics:
     def __init__(scene, entities, sensors, config: VehicleConfig, n_envs: int = 1,
                  names: list[str] | None = None)                     # names: v1.6.4
     def reset(rows=None) -> None    # FLAT env*K+slot rows, NOT vehicle indices (v1.6.2)
+    def gear_rows() -> torch.Tensor | None   # (n_envs, K) int8 engaged gear; None = skid-steer (v2.0.2)
 ```
+
+**Gear inputs on the batched driver (v2.0.2).** `MultiVehiclePhysics.step`
+checks every input that carries a gear BEFORE any kind steps
+(`_precheck_gear_inputs`): a skid-steer kind or a bad scalar (`ValueError`), a
+gear tensor that is neither a scalar nor `(n_envs,)` (`ValueError`), and a
+steering input type that cannot carry the effective throttle (`TypeError`;
+probed with a stand-in object, so a custom `from_unified` that type-checks its
+argument raises its own error instead). `MultiVehicleKindPhysics.step` repeats
+the check at its head for a direct caller. In a kind where only some vehicles
+carry a gear, the others' rows are passed through unchanged.
 
 `names` (v1.6.4) is optional and display-only: per-vehicle names in the
 CALLER's flat order, re-ordered to kind/slot order internally so each kind gets
@@ -503,7 +536,7 @@ the replacement rather than quietly running wrong-meaning code; use
 Prefer `MultiVehiclePhysics` — it does the grouping and the flat-order
 bookkeeping for you.
 
-`distances_list()` / `grounded_list()` both return one entry per vehicle in
+`distances_list()` / `grounded_list()` / `gear_list()` all return one entry per vehicle in
 **caller flat order** (the order `vehicles` was passed in, not kind order), so
 `grounded_list()[i]` is the L2 mirror of `VehiclePhysics.wheels_grounded` for
 vehicle `i`.
@@ -572,19 +605,20 @@ it also runs the supported-floor check (`_gs_compat.check_genesis_floor`: one
 ```python
 @dataclass
 class VehicleInputs:
-    throttle: float | torch.Tensor    # [-1, +1] signed
+    throttle: float | torch.Tensor    # [-1, +1] signed; with a gear: a magnitude, clamped to [0, 1]
     brake:    float | torch.Tensor    # [0, 1] positive magnitude
     steer:    float | torch.Tensor    # [-1, +1], + = right turn
+    gear: float | torch.Tensor | None = None   # v2.0.2, KEYWORD-ONLY: None = signed, +1/-1 = gear mode
 
 @dataclass
 class AckermannInputs:           # for Ackermann / PartialAckermann
-    throttle, brake, steer
+    throttle, brake, steer, *, gear=None     # gear: v2.0.2, keyword-only
 @dataclass
 class SkidSteerInputs:           # for SkidSteer + PerSide
-    throttle, brake, steer_diff  # + = right turn
+    throttle, brake, steer_diff  # + = right turn; NO gear field (skid-steer refuses gear mode)
 @dataclass
 class NoSteerInputs:             # for NoSteer + any drivetrain
-    throttle, brake
+    throttle, brake, *, gear=None            # gear: v2.0.2, keyword-only
 
 # Convenience alias for VehiclePhysics.step() type hints.
 VehicleStepInputs = Union[
@@ -594,7 +628,15 @@ VehicleStepInputs = Union[
 ```
 
 Each typed input has a `from_unified(VehicleInputs) -> Self` classmethod for
-pipelines that prefer the unified schema.
+pipelines that prefer the unified schema. Since v2.0.2 it passes `gear`
+through; `SkidSteerInputs.from_unified` raises `ValueError` on a
+`VehicleInputs` whose `gear` is not `None` instead of dropping it. `gear` is
+keyword-only: `VehicleInputs(0.1, 0.2, 0.3, 1)` raises `TypeError`. Semantics
+(gear mode, the shift rule, the scalar / tensor rules, the skid-steer refusal):
+[`physics-contracts.md`](physics-contracts.md) §7.20. The gear module
+`genesis_vehicle.gear` (Genesis-free) holds the pure functions and the
+constants `GEAR_FORWARD` = 1, `GEAR_REVERSE` = -1, `GEAR_SHIFT_MAX_SPEED` = 0.5
+(m/s), all three also exported from the package root.
 
 ## 3. Config
 
@@ -924,6 +966,10 @@ class PipelineContext:
                                      # REPLACED with a position hold (OR yours in). Exempt from D and Y
     deadbeat_scale                   # s, (B, 1) tensor (python 1.0 only with no yaw-inertia inputs);
                                      # set before PRE_TIRE. READ-ONLY
+    gear                             # v2.0.2: (B,) float +-1, the ENGAGED gear after this step's shift
+                                     # decision, or None when no input of the step carried a gear; set
+                                     # before PRE_LOOP. On gear rows `throttle` above is the EFFECTIVE
+                                     # signed throttle gear * clamp(throttle, 0, 1). READ-ONLY
 ```
 
 `omega` means the pre-step ω in `apply_pre_tire` and `omega_t` in
@@ -1471,7 +1517,7 @@ stateless.
 These are last-resort fallbacks. URDF + `WheelConfig` overrides take
 precedence per [`concepts.md`](concepts.md#4-urdf-is-the-default-source-explicit-api-overrides-are-the-final-truth).
 
-## 11. `control` — path following (v1.1.11; MPC layer v2.0.0; heading gate, watchdog, stops v2.0.1)
+## 11. `control` — path following (v1.1.11; MPC layer v2.0.0; heading gate, watchdog, stops v2.0.1; gear mode v2.0.2)
 
 Full guide: [`path-following.md`](path-following.md). The PD follower with a
 `SweepTable` is numpy-only (no Genesis/torch needed at control time). The MPC
@@ -1487,24 +1533,30 @@ layer (the 2.0.0 default stage 1) needs the optional packages of
 | ω_z | chassis yaw rate (rad/s) |
 | e_psi | heading error: wrap(per-waypoint path yaw at the projection − chassis yaw), rad |
 | R_min | `wheelbase / tan(steer_cap · max_steer_rad)` (7.397 m for the reference car) |
+| k_b | (v2.0.2) brake gain: modelled deceleration per unit brake (m/s² per unit brake) |
+| a_coast | (v2.0.2) modelled acceleration at throttle 0, brake 0 (m/s²) |
+| v_h | (v2.0.2) a sweep table's grid speed nearest 0, excluding 0, on the side used |
 
 | Symbol | Import | What it is |
 |---|---|---|
-| `PathFollower(path, plant, *, mpc_params=, mpc_model="bicycle", mpc_impl="nonlinear", on_solve_failure="pd", mpc_gains=None, mpc_v_floor=0.5, dt_ctrl=None, mpc_align_gate=(π/2, π/4), mpc_stall_timeout=2.0, **pd_tuning)` | `from genesis_vehicle import PathFollower` | path `(x, y, z, speed[, yaw])` → per-step `(throttle, steer, brake)`; the optional per-waypoint `yaw` (rad, world +X = 0, CCW+) pins the desired chassis heading verbatim, else tangential default; `plant` is a `DifferentiablePlant`, a live vehicle (`Vehicle` / `VehiclePhysics`, wrapped for you), a `SweepTable`, or a sweep-CSV path — also accepted as the keyword `sweep=`; cusps (speed-sign flips) handled as stop-and-reverse. **2.0.0: the MPC layer is on by default and `mpc_params` is required — `PathFollower(path, plant)` raises U1 for every plant type; `mpc_model="off"` is the 1.x PD follower** (any MPC-only argument with it raises `ValueError`). The MPC layer: two-axle Ackermann vehicles, forward blocks; PD on reverse blocks and after a failed solve. `step(pos_xy, yaw, v_long, pitch_deg, roll_deg, *, yaw_rate=None, v_lat=None, t=None)` — `yaw_rate` / `v_lat` required on MPC steps (`TypeError`). `last_mode` ∈ `INIT/DRV±1/STOP/BRAKE_TRANS/DONE`, since v2.0.1 the terminal `GOAL-MISSED` in every mode, plus `MPC/MPC-HOLD/MPC-HOLDCMD/PD-FALLBACK` and (v2.0.1) `PD-ALIGN/PD-STALL` and the terminal `MPC-ABORT` with the layer on; `.regime` ∈ `R-OFF/R-MPC/R-REV/R-FAIL/CMD`, plus (v2.0.1) `R-ALIGN/R-STALL`; `.mpc_stats` (`None` when off; v2.0.1 key `handover: {align, stall}` = entries since construction, kept by `set_path`, not per block); `.last_plan` (NMPC only). **v2.0.1**: `mpc_align_gate` = `(theta_on, theta_off)` rad with `0 < theta_off < theta_on <= π`, the heading gate (\|e_psi\| above `theta_on` → PD until below `theta_off`); `mpc_stall_timeout` = s of follower time within 0.25 m before the watchdog hands over to PD for 1.0 m; for these two **`None` disables** (unlike `mpc_v_floor` / `mpc_gains` / `dt_ctrl`), and with `"off"` either raises even as `None`. Per-forward-block budgets → `MPC-ABORT` (`stop_reason`); no kwarg combination restores 2.0.0 exactly (`path-following.md` §5.8). An MPC follower raises `ValueError` at construction unless `wheelbase > 0` and `steer_cap · max_steer_rad` ∈ (0, π/2). This row showed `PathFollower(path, plant, **tuning)` through 1.8.0; that call raises on 2.0.0. Constructor check order and the solve classification: `path-following.md` §5.4-§5.5, `physics-contracts.md` §7.18 |
-| `PathFollower.set_path(path, *, pos_xy=None, t=None)` | method (v2.0.0) | replace the path; the PATH is validated first, so a path error (length, waypoint shape) changes nothing, but a bad `pos_xy` or `t` raises AFTER the new path has been installed; keeps the plant, its warm start and the MPC problem; restarts the PD state on the first block (cancels a cusp transition in progress); `pos_xy` snaps to that block's nearest segment; with the MPC layer on and a forward first block, re-times the reference so that point is due at `t` and restarts the MPC. **v2.0.1**: also clears `GOAL-MISSED` / `MPC-ABORT`, `stop_reason` and the goal-passed history (every mode), and with the MPC layer R-ALIGN / R-STALL, the watchdog anchor and entry point and EVERY per-block budget — a caller that re-plans repeatedly is not bounded by them; `handover` counts are kept; the gate is re-evaluated on the next `plan()` |
-| `PathFollower.TERMINAL_MODES` | class attribute (v2.0.1) | `("DONE", "GOAL-MISSED", "MPC-ABORT")`. Loop on `last_mode in PathFollower.TERMINAL_MODES`, not on `"DONE"` alone. `DONE` is recomputed every step (1.x); the other two command `(0, 0, 1)` and stay set until `set_path` or a `DONE` step (a `DONE` can clear only a final-block abort and resets no budget) |
-| `PathFollower.stop_reason` | read-only property (v2.0.1) | `None` before the first step, while driving and on `DONE`; `"goal_passed"` (`GOAL-MISSED`; every mode, cannot be disabled — final block, past the goal plane on the last segment, ≥ `arrival_goal + 0.1` m away, distance grew > 1e-3 m on each of the last two `plan()` calls; not a distance or time bound); `"align_budget"` (MPC on, `mpc_align_gate` not `None`); `"stall_budget"` (MPC on, `mpc_stall_timeout` not `None`); `"fail_budget"` (MPC on, `on_solve_failure="pd"`, whatever the two kwargs). Reset by `set_path` |
-| `PathFollower.plan(...)` / `.finish(plan, throttle, steer)` | methods | the two halves of `step` (stage 1 / supervisors); `plan` takes the same keyword arguments as `step`. The v2.0.1 gate, watchdog, budgets and stops are decided in `plan()` from its inputs, so a caller running its own finish gets them; the goal-passed stop counts `plan()` calls |
-| `FollowerPlan` | `from genesis_vehicle.control import FollowerPlan` | `plan()`'s result: `mode, a_target, omega_target, v_long, v_target, pitch_deg, roll_deg, command`, and (v2.0.0, appended with defaults) `regime="R-OFF"`, `a_ff=None`, `w_ff=None` — on an `R-MPC` plan `a_ff` / `w_ff` are the MPC's commanded `a` / `ω_z`, otherwise `None`; not the planned (2.2.0) feedforward. No field added in v2.0.1; `regime` can also be `R-ALIGN` / `R-STALL`, a terminal step is `CMD` (`R-OFF` with the layer off) with `command=(0, 0, 1)`; under `R-MPC` `v_target` is the PD's value, which since v2.0.1 can differ in sign from 1.x at a block end (the MPC command does not use it) |
-| `FleetFollower(followers, plant)` | `from genesis_vehicle import FleetFollower` | drives N `PathFollower`s off ONE batched plant: `plan` per follower → one batched `solve` → `finish` per follower. `step(states)` → list of `(throttle, steer, brake)`. Needs `plant.n_members == len(followers)`. **v2.0.0: PD followers only** — any follower with the MPC layer on raises `TypeError` before a follower is modified. v2.0.1: members get the goal-passed stop and the block-end speed sign; the fleet does not aggregate — a member that stops brakes while the rest drive on, so check `fleet.last_modes` against `PathFollower.TERMINAL_MODES` |
-| `DifferentiablePlant(vehicle, horizon=4, **tuning)` | `from genesis_vehicle import DifferentiablePlant` | the no-measurement inverse plant (v1.3.0; this row called it "the DEFAULT inverse plant" through 1.8.0 — stale since 2.0.0, whose documented default stack is a sweep table + the MPC layer): unrolls the SDK's own ray-wheel force model and differentiates it with `torch.autograd` for `J = d(a, ω_z)/d(throttle, steer)`, then Newton-solves. No sweep measurement, no CSV. `solve(v, a_target, ω_target, pitch, roll)` → `(throttle, steer)`; `predict` / `jacobian` / `set_applied` / `reset`; diagnostics in `last_jacobian` / `last_response` / `last_target` / `last_singular` / `last_restarted`. `saturation_restart=True` (v1.7.0): a warm start at a range limit is also solved from 0 in the same batch and the lower residual wins (`path-following.md`). Pass a SEQUENCE of vehicles (and/or of `env_idx`) for a fleet: M members inverted in one batch, every entry point taking and returning length-M arrays, `set_applied_member(i, ...)` for a single row |
-| `SweepTable` | `from genesis_vehicle import SweepTable` | the measured inverse plant: (v, throttle, steer, pitch, roll) → (a, ω_z) grid; `.load(csv)` / `.save(csv)`; inverse lookups `throttle_for(v, a, pitch, roll)` / `steer_for(v, ω, pitch, roll)`. numpy-only, so it is the option for a controller running without a simulator |
+| `PathFollower(path, plant, *, mpc_params=, mpc_model="bicycle", mpc_impl="nonlinear", on_solve_failure="pd", mpc_gains=None, mpc_v_floor=0.5, dt_ctrl=None, mpc_align_gate=(π/2, π/4), mpc_stall_timeout=2.0, command_mode=None, brake_gain=None, **pd_tuning)` | `from genesis_vehicle import PathFollower` | path `(x, y, z, speed[, yaw])` → per-step `(throttle, steer, brake)` with `command_mode="signed"`, or a `GearCommand` with `command_mode="gear"` — **v2.0.2: `command_mode=None` means `"gear"` with the MPC layer on and `"signed"` with `mpc_model="off"`; the default MPC follower's return type changed (breaking in a patch release, by user decision; `path-following.md` §5.9). `brake_gain` = k_b for gear mode (`None` → `plant.brake_gain()` → the params' `brake_gain` key → derived from `decel_brake_by_speed`, else `ValueError`; with `"signed"` it raises `ValueError`); in gear mode a skid-steer plant source raises `ValueError` and a plant without a callable `accel_at` raises `TypeError`**; the optional per-waypoint `yaw` (rad, world +X = 0, CCW+) pins the desired chassis heading verbatim, else tangential default; `plant` is a `DifferentiablePlant`, a live vehicle (`Vehicle` / `VehiclePhysics`, wrapped for you), a `SweepTable`, or a sweep-CSV path — also accepted as the keyword `sweep=`; cusps (speed-sign flips) handled as stop-and-reverse. **2.0.0: the MPC layer is on by default and `mpc_params` is required — `PathFollower(path, plant)` raises U1 for every plant type; `mpc_model="off"` is the 1.x PD follower** (any MPC-only argument with it raises `ValueError`). The MPC layer: two-axle Ackermann vehicles, forward blocks; PD on reverse blocks and after a failed solve. `step(pos_xy, yaw, v_long, pitch_deg, roll_deg, *, yaw_rate=None, v_lat=None, t=None, gear=None)` — `yaw_rate` / `v_lat` required on MPC steps (`TypeError`); `gear` (v2.0.2) = the vehicle's engaged gear as feedback in gear mode (±1 or `None`, else `ValueError`; ignored when signed). `last_mode` ∈ `INIT/DRV±1/STOP/BRAKE_TRANS/DONE`, since v2.0.1 the terminal `GOAL-MISSED` in every mode, plus `MPC/MPC-HOLD/MPC-HOLDCMD/PD-FALLBACK` and (v2.0.1) `PD-ALIGN/PD-STALL` and the terminal `MPC-ABORT` with the layer on, and (v2.0.2, gear mode) `SHIFT/GUARD` and the terminal `GEAR-ABORT`; `.command_mode` (v2.0.2) is the resolved mode; `.regime` ∈ `R-OFF/R-MPC/R-REV/R-FAIL/CMD`, plus (v2.0.1) `R-ALIGN/R-STALL`; `.mpc_stats` (`None` when off; v2.0.1 key `handover: {align, stall}` = entries since construction, kept by `set_path`, not per block); `.last_plan` (NMPC only). **v2.0.1**: `mpc_align_gate` = `(theta_on, theta_off)` rad with `0 < theta_off < theta_on <= π`, the heading gate (\|e_psi\| above `theta_on` → PD until below `theta_off`); `mpc_stall_timeout` = s of follower time within 0.25 m before the watchdog hands over to PD for 1.0 m; for these two **`None` disables** (unlike `mpc_v_floor` / `mpc_gains` / `dt_ctrl`), and with `"off"` either raises even as `None`. Per-forward-block budgets → `MPC-ABORT` (`stop_reason`); no kwarg combination restores 2.0.0 exactly (`path-following.md` §5.8). An MPC follower raises `ValueError` at construction unless `wheelbase > 0` and `steer_cap · max_steer_rad` ∈ (0, π/2). This row showed `PathFollower(path, plant, **tuning)` through 1.8.0; that call raises on 2.0.0. Constructor check order and the solve classification: `path-following.md` §5.4-§5.5, `physics-contracts.md` §7.18 |
+| `PathFollower.set_path(path, *, pos_xy=None, t=None)` | method (v2.0.0) | replace the path; the PATH is validated first, so a path error (length, waypoint shape) changes nothing, but a bad `pos_xy` or `t` raises AFTER the new path has been installed; keeps the plant, its warm start and the MPC problem; restarts the PD state on the first block (cancels a cusp transition in progress); `pos_xy` snaps to that block's nearest segment; with the MPC layer on and a forward first block, re-times the reference so that point is due at `t` and restarts the MPC. **v2.0.1**: also clears `GOAL-MISSED` / `MPC-ABORT`, `stop_reason` and the goal-passed history (every mode), and with the MPC layer R-ALIGN / R-STALL, the watchdog anchor and entry point and EVERY per-block budget — a caller that re-plans repeatedly is not bounded by them; `handover` counts are kept; the gate is re-evaluated on the next `plan()`. **v2.0.2** (gear mode): also restarts the `SHIFT` / `GUARD` counters and releases the `GUARD` latch (and clears a `GEAR-ABORT` with the terminal state); KEEPS the gear the follower assumes engaged |
+| `PathFollower.resync_gear()` | method (v2.0.2) | gear mode: forget the gear the follower assumes engaged and clear the `SHIFT` / `GUARD` counters and latch (a terminal mode stays); without feedback the next driving call is always a `SHIFT` (with `gear=` feedback, a call whose feedback already equals the wanted gear drives). Call it after anything changed the vehicle's gear behind the follower (`VehicleScene.reset()`, `reset(env_ids)`) when no `gear=` feedback is passed. No effect with `command_mode="signed"` |
+| `GearCommand(throttle, steer, brake, gear)` | `from genesis_vehicle import GearCommand` (also `genesis_vehicle.control`) | v2.0.2. Frozen dataclass a gear-mode follower returns: `throttle` in [0, 1] (a magnitude), `steer`, `brake` in [0, 1], `gear` ±1. Iterates as exactly four values (`thr, st, br, g = cmd`; a three-value unpack raises `ValueError`); NOT indexable (`cmd[0]` → `TypeError`); `cmd == (0, 0, 1)` is always `False`, `np.asarray(cmd)` is a 0-d object array. `.signed()` → `(gear * throttle, steer, brake)`. Apply with `veh.set_inputs(throttle=c.throttle, brake=c.brake, steer=c.steer, gear=c.gear)` |
+| `PathFollower.TERMINAL_MODES` | class attribute (v2.0.1) | `("DONE", "GOAL-MISSED", "MPC-ABORT", "GEAR-ABORT")` — v2.0.2 appended `"GEAR-ABORT"` (gear mode: more than 120 consecutive `SHIFT` / `GUARD` calls, sticky; it was the three-mode tuple in 2.0.1). Loop on `last_mode in PathFollower.TERMINAL_MODES`, not on `"DONE"` alone. `DONE` is recomputed every step (1.x); the other three (`GOAL-MISSED`, `MPC-ABORT`, `GEAR-ABORT`) command `(0, 0, 1)` and stay set until `set_path` or a `DONE` step (this row said "the other two" through 2.0.1) (a `DONE` can clear only a final-block abort and resets no budget) |
+| `PathFollower.stop_reason` | read-only property (v2.0.1) | `None` before the first step, while driving and on `DONE`; `"goal_passed"` (`GOAL-MISSED`; every mode, cannot be disabled — final block, past the goal plane on the last segment, ≥ `arrival_goal + 0.1` m away, distance grew > 1e-3 m on each of the last two `plan()` calls; not a distance or time bound); `"align_budget"` (MPC on, `mpc_align_gate` not `None`); `"stall_budget"` (MPC on, `mpc_stall_timeout` not `None`); `"fail_budget"` (MPC on, `on_solve_failure="pd"`, whatever the two kwargs); (v2.0.2) `"shift_timeout"` (`GEAR-ABORT`, gear mode). Reset by `set_path` |
+| `PathFollower.plan(...)` / `.finish(plan, throttle, steer)` | methods | the two halves of `step` (stage 1 / supervisors); `plan` takes the same keyword arguments as `step`. The v2.0.1 gate, watchdog, budgets and stops are decided in `plan()` from its inputs, so a caller running its own finish gets them; the goal-passed stop counts `plan()` calls. v2.0.2: `plan` also takes `gear=` and decides `SHIFT` / `GUARD` / `GEAR-ABORT`; in gear mode `finish` returns a `GearCommand` (the signed `finish` is the 2.0.1 code) |
+| `FollowerPlan` | `from genesis_vehicle.control import FollowerPlan` | `plan()`'s result: `mode, a_target, omega_target, v_long, v_target, pitch_deg, roll_deg, command`, and (v2.0.0, appended with defaults) `regime="R-OFF"`, `a_ff=None`, `w_ff=None` — on an `R-MPC` plan `a_ff` / `w_ff` are the MPC's commanded `a` / `ω_z`, otherwise `None`; not the planned (2.2.0) feedforward. No field added in v2.0.1; `regime` can also be `R-ALIGN` / `R-STALL`, a terminal step is `CMD` (`R-OFF` with the layer off) with `command=(0, 0, 1)`; under `R-MPC` `v_target` is the PD's value, which since v2.0.1 can differ in sign from 1.x at a block end (the MPC command does not use it). v2.0.2 appended `gear=None` (gear mode only: the gear the step's command requests — the block's sign, the assumed gear on a terminal step; `None` in signed mode) and `a_coast=None` (the coast a `FleetFollower` fills from one batched prediction; `None` lets `finish` ask the plant) |
+| `FleetFollower(followers, plant)` | `from genesis_vehicle import FleetFollower` | drives N `PathFollower`s off ONE batched plant: `plan` per follower → one batched `solve` → `finish` per follower. `step(states)` → list of `(throttle, steer, brake)`. Needs `plant.n_members == len(followers)`. **v2.0.0: PD followers only** — any follower with the MPC layer on raises `TypeError` before a follower is modified. v2.0.1: members get the goal-passed stop and the block-end speed sign; the fleet does not aggregate — a member that stops brakes while the rest drive on, so check `fleet.last_modes` against `PathFollower.TERMINAL_MODES`. v2.0.2: every follower must have the same `command_mode` (`ValueError`); in gear mode `step` returns `GearCommand`s, reads a dict state's optional `"gear"` key as feedback, and fills braking members' `a_coast` from ONE batched `predict` at throttle 0 (the plant's constant brake held at 0) |
+| `DifferentiablePlant(vehicle, horizon=4, **tuning)` | `from genesis_vehicle import DifferentiablePlant` | the no-measurement inverse plant (v1.3.0; this row called it "the DEFAULT inverse plant" through 1.8.0 — stale since 2.0.0, whose documented default stack is a sweep table + the MPC layer): unrolls the SDK's own ray-wheel force model and differentiates it with `torch.autograd` for `J = d(a, ω_z)/d(throttle, steer)`, then Newton-solves. No sweep measurement, no CSV. `solve(v, a_target, ω_target, pitch, roll)` → `(throttle, steer)`; `predict` / `jacobian` / `set_applied` / `reset`; diagnostics in `last_jacobian` / `last_response` / `last_target` / `last_singular` / `last_restarted`. `saturation_restart=True` (v1.7.0): a warm start at a range limit is also solved from 0 in the same batch and the lower residual wins (`path-following.md`). Pass a SEQUENCE of vehicles (and/or of `env_idx`) for a fleet: M members inverted in one batch, every entry point taking and returning length-M arrays, `set_applied_member(i, ...)` for a single row. **v2.0.2**: `accel_at(v, throttle, pitch_deg=0, roll_deg=0)` — forward prediction from the LIVE state at the last applied steer and at brake 0 (`v` / pitch / roll ignored, like `throttle_for`; single-member only, `ValueError` otherwise); `brake_gain()` — the closed-form k_b of the source vehicle (`control.brake.brake_gain_closed_form`, valid below the friction limit; 5.0152 on the reference car) |
+| `SweepTable` | `from genesis_vehicle import SweepTable` | the measured inverse plant: (v, throttle, steer, pitch, roll) → (a, ω_z) grid; `.load(csv)` / `.save(csv)`; inverse lookups `throttle_for(v, a, pitch, roll)` / `steer_for(v, ω, pitch, roll)`. numpy-only, so it is the option for a controller running without a simulator. **v2.0.2**: `accel_at(v, throttle, pitch_deg=0, roll_deg=0)` — the forward map (multilinear, clamped to the grid; unchanged by the gear-mode coast model); `coast_hold_speeds` — read-only `(v_neg, v_pos)`, the grid speeds nearest 0 on each side (`None` for a side without one) |
+| `genesis_vehicle.control.brake` | module (v2.0.2; functions not re-exported) | the gear-mode follower's stage-2 brake model — NOT in the MPC prediction. `brake_for(a_target, a_coast, v, gear, k_b)` → brake in [0, 1] = `clip(s·(a_coast − a_target)/k_b, 0, 1)`, `s = sign(v)` (\|v\| > 1e-3) else `gear`; `brake_gain_closed_form(resolved, wheel_meta, mass)`; `brake_gain_from_params(params, accel_at)` (the `brake_gain` key, else the mean of `accel_at(v, 0, 0, 0) − decel_brake_by_speed[v]`, else `None`); `coast_for_brake(plant, v, pitch_deg, roll_deg, gear)` (a `SweepTable`'s flat coast below `v_h` faded by `tanh(\|v\|/0.5)`, slope term never faded; any other plant's `accel_at` passed through); `COAST_FADE_SPEED` (0.5, read from `RollingResistance`'s default `tanh_scale`). Conditions and validity: `path-following.md` §5.9 |
 | `extract_state(vehicle, env_idx=0)` | `from genesis_vehicle.control import extract_state` | Genesis entity / `Vehicle` wrapper → state dict for `PathFollower.step`: `pos_xy, yaw, v_long, pitch, roll` (degrees), and since 2.0.0 `yaw_rate` (world ω_z; equals the chassis yaw rate only on level ground) and `v_lat` when the object has `get_ang()` |
 | `extract_state_from_arrays(pos, quat_wxyz, vel, ang_xyz=None)` | `from genesis_vehicle.control import extract_state_from_arrays` | same, from raw arrays (simulator-agnostic); `yaw_rate` / `v_lat` only when `ang_xyz` is given |
-| `MPCVehicleParams` | `from genesis_vehicle.control import MPCVehicleParams` | v2.0.0. The measured MPC record of one vehicle; `from_json` accepts exactly schema `genesis_vehicle.mpc_params/1` (every 2.x reader keeps accepting `/1`; other or missing → `ValueError`, which rejects field `PathFollower_MPC` JSONs); `to_json`; `solver_params(model, steer_cap=, dt_ctrl=)` |
+| `MPCVehicleParams` | `from genesis_vehicle.control import MPCVehicleParams` | v2.0.0. The measured MPC record of one vehicle; `from_json` accepts exactly schema `genesis_vehicle.mpc_params/1` (every 2.x reader keeps accepting `/1`; other or missing → `ValueError`, which rejects field `PathFollower_MPC` JSONs); `to_json`; `solver_params(model, steer_cap=, dt_ctrl=)`. v2.0.2: optional key `brake_gain` (k_b; `null` / absent in a record from before 2.0.2, treated as absent) |
 | `load_mpc_params(path_or_params)` | `from genesis_vehicle.control import load_mpc_params` | v2.0.0. `MPCVehicleParams` from a path (or pass-through) |
 | `MPCGains` | `from genesis_vehicle.control import MPCGains` | v2.0.0. The MPC cost weights (AlpaSim defaults) |
-| `identify_mpc_params(urdf_path, preset_fn, config_mod=None, *, dt=0.025, substeps=4, overrides_fn=None, device=None, log=print)` | `from genesis_vehicle.control import identify_mpc_params` (resolved lazily) | v2.0.0. Measure a two-axle Ackermann vehicle's `MPCVehicleParams` (needs Genesis); `ValueError` naming `mpc_model="off"` for any other vehicle |
+| `identify_mpc_params(urdf_path, preset_fn, config_mod=None, *, dt=0.025, substeps=4, overrides_fn=None, device=None, log=print)` | `from genesis_vehicle.control import identify_mpc_params` (resolved lazily) | v2.0.0. Measure a two-axle Ackermann vehicle's `MPCVehicleParams` (needs Genesis); `ValueError` naming `mpc_model="off"` for any other vehicle. v2.0.2: also records `brake_gain` (the closed form) |
 | `identify` CLI | `python -m genesis_vehicle.control.identify --urdf ... --preset ... --output ...` | v2.0.0. Same scene and flags as `sweep_measure` (`--config`, `--dt`, `--substeps`, `--gpu`, plant overrides) |
 | `genesis_vehicle.control.mpc` | module | v2.0.0. `require_mpc_deps`, `SCHEMA`, `accel_limits`, and lazily `NonlinearMPC` (`shift_warm_start`, `openblas_threads`, `nlpsol_opts`, `reset_history=True`; options not exposed by `PathFollower`) / `LinearMPC` / `SolveResult`; the classification tables in `control.mpc.law`. Importing it loads no optional package |
 | `sweep_measure` CLI | `python -m genesis_vehicle.control.sweep_measure` | measure the sweep CSV for a (URDF, preset, config) triple; `--gpu` recommended (~500-env L3 batch). v2.0.0 grid flags `--v-list`, `--throttle-list`, `--steer-list`, `--pitch-list`, `--roll-list` (a list starting with a minus sign needs the `=` form: `--v-list=-2,0,2`; throttle and steer lists must contain 0); the default grid (|v| ≤ 4 m/s, 17325 combinations) is unchanged |

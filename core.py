@@ -23,6 +23,8 @@ from .dynamics import YawInertia, yaw_inertia_from_mass_props
 from ._hotset import prime_derived
 from ._pipeline import compute_wheel_step, pw, pw3
 from .inputs import VehicleInputs, VehicleStepInputs
+from .gear import (check_vehicle_request, clamp_drive_to_gear, effective_throttle,
+                   encode_requests, refuses_gear, update_gear, with_throttle)
 from .raycast import (
     check_miss_supported, is_ray_hit_corrected, ray_miss_value, read_distances,
 )
@@ -336,6 +338,15 @@ class PipelineContext:
     # computes. Hooks that bound a force by a one-step deadbeat multiply their
     # mass share ``N / g`` by it (``StaticFrictionLock``'s damper bound does).
     deadbeat_scale: Optional[Any] = None
+    # (v2.0.2) The ENGAGED gear of each batch row after this step's shift
+    # evaluation, a (B,) float tensor of +-1, or None when no input of the
+    # step carried a gear (the signed-throttle path; then nothing below is
+    # set). In a batch where only some rows are in gear mode, the rows without
+    # a gear carry their stored (unused) state. Set before the PRE_LOOP hooks;
+    # ``throttle`` above is then the EFFECTIVE signed throttle
+    # (gear * clamp(throttle, 0, 1) on gear rows). Read-only for hooks.
+    # Appended last so positional construction keeps its meaning.
+    gear: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -372,7 +383,9 @@ RUNTIME_STATE_ATTRS = (
 )
 
 #: ``(batch,)``-shaped runtime state (one entry per flat batch row).
-RUNTIME_STATE_ROW_ATTRS = ("_stepped_once",)
+#: ``_gear`` (v2.0.2): the engaged gear (+-1.0) of gear mode; a snapshot from
+#: before 2.0.2 has no such key, so a load skips it and the row keeps +1.
+RUNTIME_STATE_ROW_ATTRS = ("_stepped_once", "_gear")
 
 #: Batch-wide scalars carried with the tensors.
 RUNTIME_STATE_SCALARS = ("_prev_init",)
@@ -555,6 +568,12 @@ class VehiclePhysics:
         # reset(env_ids=...) zeroes only those envs' last_distances, so a single
         # scalar flag would report their stale zeros as a valid reading.
         self._stepped_once = torch.zeros(n_envs, device=self.dev, dtype=torch.bool)
+        # (v2.0.2) Engaged gear of gear mode, +1.0 forward / -1.0 reverse, per
+        # batch row (a batched kind's proto gets (NK,)). Starts forward; read
+        # and changed only by a step whose input carries a gear (gear.py);
+        # +1 again on reset(); carried across a rebuild
+        # (RUNTIME_STATE_ROW_ATTRS). Public read: the ``gear`` property.
+        self._gear = torch.ones(n_envs, device=self.dev, dtype=self.fdt)
         radii = [float(w.radius) for w in self.resolved.wheels if w.radius is not None]
         self._mesh_radius = float(sum(radii) / len(radii)) if radii else 0.35
         strokes = [float(w.rest_stroke) for w in self.resolved.wheels
@@ -728,6 +747,17 @@ class VehiclePhysics:
         The question "is this vehicle actually on the terrain?"."""
         return self.wheels_grounded.all(dim=1)
 
+    @property
+    def gear(self) -> Optional[torch.Tensor]:
+        """(v2.0.2) The engaged gear of gear mode, ``(n_envs,)`` ``int8``
+        (+1 forward, -1 reverse), a COPY. Meaningful only for a vehicle driven
+        with gear inputs: a vehicle driven only with ``gear=None`` reads +1
+        forever, whatever its throttle sign. ``None`` for a skid-steer vehicle,
+        which refuses gear mode (``gear.refuses_gear``)."""
+        if refuses_gear(self.resolved):
+            return None
+        return self._gear.detach().to(dtype=torch.int8).clone()
+
     def _ensure_yaw_inertia(self) -> None:
         """Compute ``wheel_meta.yaw_inertia`` once (v1.8.0).
 
@@ -811,6 +841,7 @@ class VehiclePhysics:
             self.last_kappa.zero_(); self.last_alpha.zero_()
             self.last_steer_per_wheel.zero_(); self.wheel_spin_angle.zero_()
             self._stepped_once.zero_()
+            self._gear.fill_(1.0)       # (v2.0.2) engaged gear back to forward
             if self.visual is not None:
                 self.visual.reset_visual_state()
             return
@@ -829,6 +860,7 @@ class VehiclePhysics:
         # stepped as far as any reader is concerned (v1.5.2 — a scalar flag left
         # a stale True here and wheels_grounded reported the zeros as ground).
         self._stepped_once[idx] = False
+        self._gear[idx] = 1.0           # (v2.0.2) engaged gear back to forward
         if self.visual is not None:
             self.visual.reset_visual_state(idx)
 
@@ -1160,6 +1192,15 @@ class VehiclePhysics:
             ``docs/dual-scene-raycast.md``). When ``None`` (default) the sensor
             is read exactly as before — fully backward compatible.
         """
+        # (v2.0.2) Gear mode: read the request off the ORIGINAL object, before
+        # any conversion (a custom InputType's from_unified may drop it), and
+        # refuse a bad request before ANY state is written.
+        gear_req = getattr(inputs, "gear", None)
+        if gear_req is not None:
+            check_vehicle_request(self.resolved, gear_req,
+                                  getattr(inputs, "throttle", 0.0),
+                                  where="VehiclePhysics.step", name=self.vehicle_name)
+
         # Deadbeat-scale inputs, once per driver, on the first call (the
         # entity is built by then); one attribute test afterwards.
         self._ensure_yaw_inertia()
@@ -1184,13 +1225,27 @@ class VehiclePhysics:
         steer_per_wheel = self.resolved.steering.per_wheel_steer(
             inputs, n_envs, wm, dev, fdt,
         )                                                # (n_envs, n)
-        T_drive_pw, T_brake_pw = self.resolved.drivetrain.distribute_torque(
-            inputs, self.omega, wm, dev, fdt,
-        )                                                # both (n_envs, n)
-        self.last_T_drive = T_drive_pw
-        self.last_T_brake = T_brake_pw
+        req = (None if gear_req is None
+               else encode_requests([gear_req], n_envs, dev, fdt))
+        if req is None:
+            T_drive_pw, T_brake_pw = self.resolved.drivetrain.distribute_torque(
+                inputs, self.omega, wm, dev, fdt,
+            )                                                # both (n_envs, n)
+            self.last_T_drive = T_drive_pw
+            self.last_T_brake = T_brake_pw
 
-        throttle = self._scalar_to_envs(getattr(inputs, "throttle", 0.0))
+            throttle = self._scalar_to_envs(getattr(inputs, "throttle", 0.0))
+        else:
+            # (v2.0.2) Gear mode: the drivetrain gets gear * clamp(throttle,
+            # 0, 1) on a NEW inputs object; T_drive stays local until it has
+            # been clamped to the gear engaged AFTER this step's shift
+            # (below), and only then becomes last_T_drive.
+            throttle_req = self._scalar_to_envs(getattr(inputs, "throttle", 0.0))
+            throttle = effective_throttle(throttle_req, req, self._gear)
+            T_drive_pw, T_brake_pw = self.resolved.drivetrain.distribute_torque(
+                with_throttle(inputs, throttle), self.omega, wm, dev, fdt,
+            )
+            self.last_T_brake = T_brake_pw
         brake = self._scalar_to_envs(getattr(inputs, "brake", 0.0))
 
         ctx = PipelineContext(throttle=throttle, brake=brake, wheel_meta=wm)
@@ -1221,6 +1276,10 @@ class VehiclePhysics:
         self.last_hit = hit.detach().clone()
         if not self._prev_init and torch.all(distances < 1e-6):
             self._prev_init = True
+            if req is not None:
+                # No chassis state on this step, so no shift: clamp to the
+                # gear engaged now.
+                self.last_T_drive = clamp_drive_to_gear(T_drive_pw, req, self._gear)
             return
 
         # [CHASSIS STATE]
@@ -1234,6 +1293,15 @@ class VehiclePhysics:
 
         ctx.vel = vel
         ctx.ang = ang
+        if req is not None:
+            # (v2.0.2) Rule 4 on the planar speed, then the drive torque
+            # clamped to the POST-shift gear (B1: a shift step must not apply
+            # torque of the old gear's sign).
+            v_xy = torch.hypot(vel[:, 0], vel[:, 1])
+            self._gear, _ = update_gear(req, self._gear, throttle_req, v_xy)
+            T_drive_pw = clamp_drive_to_gear(T_drive_pw, req, self._gear)
+            self.last_T_drive = T_drive_pw
+            ctx.gear = self._gear.clone()
         for hook in self.pre_loop_hooks:
             hook.apply_pre_loop(ctx)
 

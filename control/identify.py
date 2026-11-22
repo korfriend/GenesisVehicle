@@ -350,6 +350,11 @@ def identify_mpc_params(urdf_path, preset_fn, config_mod=None, *, dt=DEFAULT_DT,
 
     dtr = phys.resolved.drivetrain
     driven = getattr(dtr, "driven_axles", None)
+    # (v2.0.2) closed-form brake gain for the gear-mode follower's stage 2.
+    from .brake import brake_gain_closed_form
+    k_b = brake_gain_closed_form(phys.resolved, wm, mass)
+    log(f"[brake] closed-form brake gain {k_b:.4f} m/s^2 per unit brake (measured "
+        f"brake-1 acceleration {dbrk})")
     out = dict(
         schema=SCHEMA, sdk_version=genesis_vehicle.__version__, genesis_version=gs.__version__,
         urdf=os.path.abspath(urdf_path), preset=getattr(preset_fn, "__name__", str(preset_fn)),
@@ -370,6 +375,7 @@ def identify_mpc_params(urdf_path, preset_fn, config_mod=None, *, dt=DEFAULT_DT,
                     "driven_axles": None if driven is None else [int(a) for a in driven]},
         fit_residual=resid,
         envelope={"a_y_range": resid["a_y_range"], "speed_range": resid["speed_range"]},
+        brake_gain=k_b,
     )
     return MPCVehicleParams.from_dict(out)
 

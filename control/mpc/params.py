@@ -110,7 +110,11 @@ REQUIRED_KEYS = (
 #: Keys that may be absent or ``null`` (filled by the identify tool from the
 #: vehicle config; the bicycle model does not read them).
 OPTIONAL_KEYS = ("tyre", "axle_loads", "deadbeat_scale", "v_star", "drivetrain",
-                 "fit_residual", "envelope")
+                 "fit_residual", "envelope", "brake_gain")
+# ``brake_gain`` (v2.0.2): the closed-form brake gain k_b (m/s^2 per unit
+# brake, ``control.brake.brake_gain_closed_form``) the gear-mode follower's
+# stage 2 uses; a record from before 2.0.2 lacks it (from_dict fills None), and
+# the follower then derives k_b from ``decel_brake_by_speed``.
 
 #: Steering strategies the MPC model describes (2-axle front-steer vehicles).
 ACKERMANN_STEERING = ("Ackermann", "PartialAckermann")

@@ -36,7 +36,8 @@ FWD2 = _densify([(6.0, -4.0, 0.0, 1.5), (14.0, -4.0, 0.0, 1.5)])
 
 def _mpc(path, results=None, policy="pd"):
     p = MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK))
-    f = PathFollower(path, make_table(), mpc_params=p, on_solve_failure=policy)
+    f = PathFollower(path, make_table(), mpc_params=p, on_solve_failure=policy,
+                     command_mode="signed")
     fake = FakeSolver(results, default=ok(0.0, 0.5))
     f._law.solver = fake
     return f, fake

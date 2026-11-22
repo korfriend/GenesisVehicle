@@ -208,7 +208,8 @@ def _mpc_follower(path, fake_kind):
     from genesis_vehicle.tests._mpc_fakes import FakeSolver, exc, ok
     from genesis_vehicle.tests.data import make_mpc_field_replay as rp
     f = PathFollower(path, G.make_table(),
-                     mpc_params=MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK)))
+                     mpc_params=MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK)),
+                     command_mode="signed")
     f._law.solver = FakeSolver(default=ok(0.0, 0.0) if fake_kind == "converged" else exc())
     return f
 

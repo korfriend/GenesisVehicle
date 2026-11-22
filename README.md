@@ -337,7 +337,7 @@ Detailed docs live under [`docs/`](docs/):
 | [`docs/quickstart.md`](docs/quickstart.md) | Minimal example, runnable end-to-end |
 | [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855, hook intuition, batched-by-default |
 | [`docs/batching.md`](docs/batching.md) | The L1 / L2 / L3 vectorization axes — when to use which, measured speedups, the L2 × L3 combined pattern |
-| [`docs/path-following.md`](docs/path-following.md) | `PathFollower`: the MPC layer (v2.0.0 default) and the 1.x PD law, the two inverse plants, sweep measurement, identify, migrating from 1.x |
+| [`docs/path-following.md`](docs/path-following.md) | `PathFollower`: the MPC layer (v2.0.0 default) and the 1.x PD law, the two inverse plants, sweep measurement, identify, the v2.0.2 gear command mode and its stage-2 brake model (§5.9), migrating from 1.x and between 2.0.x releases |
 | [`docs/tire-and-contact.md`](docs/tire-and-contact.md) | Tire model (Pacejka vs Coulomb) & ground-contact mechanism (raycast wheel etc.) — the two axes, standard names, recommendation |
 | [`docs/server.md`](docs/server.md) | OSC physics server for external clients (Unreal / Unity) — purpose, modes, full wire-schema reference |
 | [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default) |
@@ -359,7 +359,8 @@ genesis_vehicle/
 ├── _version.py                     __version__ / VERSION_INFO source of truth
 ├── core.py                         VehiclePhysics — 5-step pipeline orchestrator
 ├── config.py                       WheelConfig / VehicleConfig / resolve()
-├── inputs.py                       VehicleInputs + typed inputs
+├── inputs.py                       VehicleInputs + typed inputs (v2.0.2: keyword-only gear)
+├── gear.py                         v2.0.2 opt-in gear mode: shift rule, drive-torque clamp, skid-steer refusal
 ├── urdf.py                         parse_urdf() + URDFParsedConfig
 ├── raycast.py                      WheelRayPattern
 ├── dynamics.py                     brake_projection / deadbeat_scale / suspension_normal_force
@@ -367,7 +368,7 @@ genesis_vehicle/
 ├── tire_models/                    TireModel ABC + Pacejka + Coulomb
 ├── strategies/                     steering / drivetrain / coupling / stability
 ├── presets.py                      4 ready-to-use VehicleConfig builders
-├── control/                        PathFollower (MPC layer + PD), inverse plants, sweep_measure, identify
+├── control/                        PathFollower (MPC layer + PD; gear mode v2.0.2), inverse plants, brake model, sweep_measure, identify
 ├── docs/                           the wiki
 └── tests/                          pure-Python unit tests (no Genesis needed)
 ```
@@ -380,7 +381,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-1127 tests covering URDF parsing, config resolve, suspension sizing, strategy
+1225 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity witness
@@ -419,15 +420,21 @@ the follower's heading gate, watchdog, per-block budgets and goal-passed stop
 (v2.0.1 — every budget and the run-of-entries rule on a fake solver, the 2.0.0
 stall reproduced on the real NMPC, the PD golden up to its four `GOAL-MISSED`
 steps, a pre-registered run-away property test on a kinematic plant),
+the opt-in gear mode and the gear-mode follower (v2.0.2 — the shift and
+drive-torque rules on both solvers, every skid-steer refusal site, a
+platform-gated byte-identity check of signed inputs against the 2.0.1 tree,
+the stage-2 brake model and its low-speed coast, `SHIFT` / `GUARD` /
+`GEAR-ABORT` against an independent oracle),
 and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v2.0.1 tree with the optional MPC packages installed, `1127 passed, 3 skipped`
-in 347.1 s (CPU/WSL2, genesis-world 1.4.5,
-`python -m pytest genesis_vehicle/tests/ --ignore=genesis_vehicle/tests/test_fusion_probe.py`;
+v2.0.2 tree with the optional MPC packages installed, `1225 passed, 3 skipped`
+in three groups of files, 433.5 s summed (CPU/WSL2, genesis-world 1.4.5,
+`test_fusion_probe.py` excluded;
 the 3 skips are the env-gated live server tests,
 run them with `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`; without casadi + do_mpc the
-solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1010 passed,
+solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1127 passed,
+3 skipped` in 347.1 s at v2.0.1, `1010 passed,
 3 skipped` in 226.1 s at v2.0.0, `824 passed,
 3 skipped in 278.5s` at v1.8.0, `712 passed, 3 skipped in
 89.31s` at v1.7.0,
@@ -448,9 +455,29 @@ in its "Why a minor version" section). 2.0.0 is a major bump: the default
 `PathFollower(path, plant)` call stops working. 2.0.1 is a patch that departs
 from the minor-bump rule (two new kwargs, new modes, changed default behaviour
 including `mpc_model="off"`), by user decision; its CHANGELOG section says why.
+2.0.2 is a patch that carries a breaking change — the default MPC
+`PathFollower` returns a 4-field `GearCommand` — plus new public surface (the
+opt-in gear mode), again by user decision; CHANGELOG 2.0.2 §1 lists every
+departure.
 (This line said "pre-1.0, so minor bumps
 may break" — stale since 1.0.) Current version: `genesis_vehicle.__version__`. Per-release notes
 in [`CHANGELOG.md`](CHANGELOG.md).
+
+**Upgrading to 2.0.2:** an MPC `PathFollower` constructed without
+`command_mode=` now runs gear mode and returns `GearCommand(throttle, steer,
+brake, gear)`: `thr, st, br = cmd` raises, `cmd[0]` raises, and `cmd == (0, 0,
+1)` / `np.asarray(cmd)` silently do something else. Apply it with
+`veh.set_inputs(throttle=cmd.throttle, brake=cmd.brake, steer=cmd.steer,
+gear=cmd.gear)` (pass `gear=int(veh.gear[0])` to `step` as feedback), or
+construct with `command_mode="signed"` for the 2.0.1 3-tuple. Dropping the gear
+from the command drives reverse blocks forward until the follower's `GUARD`
+brakes. Loop on `PathFollower.TERMINAL_MODES` (it gained `GEAR-ABORT`). A custom
+stage-2 plant needs `accel_at` and a brake-gain source. The brake model is in
+the command conversion only (the MPC prediction is unchanged), validated on the
+reference car, flat ground, μ 1.0, 2-12 m/s. Vehicle inputs without a gear,
+`mpc_model="off"`, `FleetFollower` and the OSC server are unchanged. On a slope
+a brake ≤ 0.3 does not bring a vehicle to rest (pre-existing, identical on
+2.0.1). Read CHANGELOG 2.0.2 first.
 
 **Upgrading to 2.0.1:** a follower can now end on `GOAL-MISSED` (every mode)
 or `MPC-ABORT` (MPC layer) as well as `DONE` — loop on

@@ -40,9 +40,18 @@
 | p50 | median (50th percentile) of a per-step time within one run |
 | U5 / RT-1 | the implementation's session-1 screening harness (`u5_bench.py`) / its session-2 paired field-vs-SDK timing harness (`run_rt1.py`); both outside the repo, not shipped |
 | WSL2 | Windows Subsystem for Linux 2 (the measurement machine's environment) |
+| g | (v2.0.2) gear: +1 forward, -1 reverse |
+| `GearCommand` | (v2.0.2) what a gear-mode follower returns: `(throttle ≥ 0, steer, brake, gear)` (§5.9) |
+| k_b | (v2.0.2) brake gain: modelled deceleration per unit brake (m/s² per unit brake) |
+| a_coast | (v2.0.2) modelled acceleration at throttle 0, brake 0 (m/s²) |
+| u_g | (v2.0.2) `g * u`: the plant's signed throttle seen in the gear's direction |
+| v_h | (v2.0.2) a sweep table's grid speed nearest 0, excluding 0, on the side used (±2 m/s on the reference table) |
+| SHIFT / GUARD / GEAR-ABORT | (v2.0.2) gear-mode `last_mode` values: brake for a gear change / brake while moving against the wanted gear / terminal, more than 120 consecutive `SHIFT` / `GUARD` calls (§5.9) |
 
 Give a path — a list of `(x, y, z, target_speed)` waypoints — and get
-per-step `(throttle, steer, brake)` for any URDF + preset vehicle. A step has
+per-step `(throttle, steer, brake)` for any URDF + preset vehicle — or, since
+v2.0.2 by default with the MPC layer, a `GearCommand` `(throttle, steer, brake,
+gear)` for a vehicle driven in gear mode (§5.9). A step has
 two stages. **Stage 1** decides what physical response the vehicle should
 produce, `(a, ω_z)`. **Stage 2**, the **inverse plant**, finds the commands
 that produce it. Everything vehicle-specific in stage 2 lives in that one
@@ -60,6 +69,7 @@ needs the vehicle's measured MPC parameters, and **a follower constructed the
 |---|---|---|
 | stage 1 | the 1.x PD law everywhere, plus the v2.0.1 goal-passed stop and block-end speed sign (§5.8); for the same inputs identical to 1.8.0 before the first `GOAL-MISSED` step and away from block-end sign steps (§6). Through 2.0.0 this cell said "bit-identical to 1.8.0 on every scenario measured" — true then | MPC on forward blocks, PD on reverse blocks, after a failed solve, and (v2.0.1) while misaligned or stalled |
 | vehicles | any (tank, truck, car) | two-axle Ackermann only |
+| command (v2.0.2) | `command_mode="signed"` by default: the 2.0.1 `(throttle, steer, brake)`, decelerating with a negative throttle; `command_mode="gear"` opt-in (not on a tank) | `command_mode="gear"` by default: a `GearCommand`, decelerating with the brake, reverse only on reverse blocks; `command_mode="signed"` gives the 2.0.1 3-tuple (§5.9) |
 | needs | nothing new | `requirements-mpc.txt`; a sweep table on a grid reaching the driving speeds + an identified params JSON (§5.2) |
 | `FleetFollower` | yes | no (`TypeError`) |
 | real time on the measured machine | PD + sweep table: 0 % of steps over 25 ms, 0.27 ms control mean (§5.6); with a `DifferentiablePlant` the plant decides (§1 "Tuning knobs") | NMPC: NOT guaranteed — 5-24 % of steps over 25 ms depending on the session; LMPC: 0 % median (§5.6) |
@@ -102,7 +112,7 @@ flowchart LR
         PRM --> PF
         JP --> PF
         CSV --> PF
-        PF -->|"throttle, steer, brake"| VEH["vehicle.set_inputs"]
+        PF -->|"throttle, steer, brake<br/>(+ gear in gear mode, v2.0.2)"| VEH["vehicle.set_inputs"]
     end
 ```
 
@@ -147,15 +157,24 @@ follower = PathFollower(path, vehicle, mpc_model="off")
 # PD law first (§5.8).
 #   follower = PathFollower(path, "my_car_sweep.csv",
 #                           mpc_params="my_car_mpc_params.json")
+# Since v2.0.2 that follower runs command_mode="gear" by default and returns a
+# GearCommand (the vehicle is driven in gear mode, decelerations come out as
+# brake); add command_mode="signed" for the 2.0.1 3-tuple (§5.9).
 
 for step in range(n_steps):
-    st = extract_state(vehicle)          # Genesis entity or Vehicle wrapper
-    thr, steer, brake = follower.step(
+    st = extract_state(vehicle)          # Vehicle wrapper (a raw entity has no .gear)
+    g = vehicle.gear                     # v2.0.2: engaged gear, (n_envs,) int8; None on a tank
+    cmd = follower.step(
         st["pos_xy"], st["yaw"], st["v_long"], st["pitch"], st["roll"],
-        yaw_rate=st.get("yaw_rate"), v_lat=st.get("v_lat"))  # required by the MPC layer
-    vehicle.set_inputs(throttle=thr, brake=brake, steer=steer)   # apply first: a terminal
-    vs.step()                                                      # step returns the (0, 0, 1) brake
-    if follower.last_mode in PathFollower.TERMINAL_MODES:  # v2.0.1: DONE / GOAL-MISSED / MPC-ABORT
+        yaw_rate=st.get("yaw_rate"), v_lat=st.get("v_lat"),   # required by the MPC layer
+        gear=None if g is None else int(g[0]))               # gear-mode feedback; ignored when signed
+    if follower.command_mode == "gear":  # apply first: a terminal step returns the (0, 0, 1) brake
+        vehicle.set_inputs(throttle=cmd.throttle, brake=cmd.brake, steer=cmd.steer, gear=cmd.gear)
+    else:                                # "signed": mpc_model="off" default, or command_mode="signed"
+        thr, steer, brake = cmd
+        vehicle.set_inputs(throttle=thr, brake=brake, steer=steer)
+    vs.step()
+    if follower.last_mode in PathFollower.TERMINAL_MODES:  # DONE / GOAL-MISSED / MPC-ABORT / GEAR-ABORT
         print(follower.last_mode, follower.stop_reason)      # stop_reason: None on DONE
         break
 ```
@@ -166,19 +185,27 @@ command — on `GOAL-MISSED` that is path speed away from the goal. (The 2.0.0
 version of this loop broke before `set_inputs` on `DONE`, which only left the
 arrival-speed command in place.)
 
-The bundled samples do not all follow this pattern (v2.0.1): on the terminal step `path_follow_demo`, `path_follow_reverse_demo`,
-`path_follow_osc_demo` and `mpc_follow_demo` leave their loop BEFORE applying
-the returned `(0, 0, 1)` command (the run ends there, so the sample result is
-unaffected); `sweep_and_drive` applies it first; `fleet_follow_demo` keeps
-applying it to members that have ended while the others drive, and breaks
-before applying it on the step the last member ends. A loop copied from one of
-those samples into a longer-running program must apply the command before
-leaving, as this quick start does.
+The bundled samples: through v2.0.1 `path_follow_demo`,
+`path_follow_reverse_demo`, `path_follow_osc_demo` and `mpc_follow_demo` left
+their loop BEFORE applying the returned `(0, 0, 1)` command; since v2.0.2 they
+apply it and keep stepping until the vehicle is still (|v| < 0.01 m/s) or 2 s
+have passed. `sweep_and_drive` applies it first; `fleet_follow_demo` keeps
+applying it to members that have ended while the others drive, and still
+breaks before applying it on the step the last member ends — a loop copied from
+it into a longer-running program must apply the command before leaving, as this
+quick start does.
+
+Through v2.0.1 this loop unpacked `thr, steer, brake = follower.step(...)`
+for every follower; on 2.0.2 that raises `ValueError` for an MPC follower in
+its default gear mode (four values). The loop above has not been run as
+printed; its API calls were checked Genesis-free against a stub vehicle.
 
 Through 2.0.0 this loop broke on `last_mode == "DONE"` only. Since 2.0.1 a
-follower can also end on `GOAL-MISSED` or `MPC-ABORT` (§5.8); a loop that waits
-only for `DONE` keeps stepping a braked vehicle until its own cap, and an
-uncapped `while last_mode != "DONE"` never ends.
+follower can also end on `GOAL-MISSED` or `MPC-ABORT` (§5.8), and since 2.0.2
+in gear mode on `GEAR-ABORT` (§5.9); a loop that waits only for `DONE` keeps
+stepping a braked vehicle until its own cap, an uncapped `while last_mode !=
+"DONE"` never ends, and a loop that tests a hard-coded 2.0.1 tuple of terminal
+modes never ends on `GEAR-ABORT`.
 
 Quick start — the 2.0.0 version of this snippet, run as written; the
 rewritten 2.0.1 loop (apply, step, then break) has not been run, and the `DONE`
@@ -189,7 +216,9 @@ friction 1.0, CPU/WSL2, genesis-world 1.4.5): `mpc_model="off"` with the live
 vehicle DONE at 30.55 s (1222 steps), end (58.965, -6.922); the CSV variant
 DONE at 30.55 s, end (58.964, -6.928); the MPC variant (default NMPC, `"pd"`,
 the `mpc_follow_demo` cache's table and params) DONE at 30.075 s (1203 steps),
-end (58.528, -7.999), 301/301 solves converged, no `MPC-HOLD`.
+end (58.528, -7.999), 301/301 solves converged, no `MPC-HOLD`. Those MPC
+figures are signed-mode figures (2.0.0 had no gear mode); the 2.0.2 default
+gear-mode MPC variant of this snippet has not been run.
 
 Outside Genesis (UE / Unity / replay), build the state dict with
 `extract_state_from_arrays(pos_xyz, quat_wxyz, vel_xyz[, ang_xyz])` (pass the
@@ -215,7 +244,11 @@ SLOW MOTION, where wall-clock FD under-reads speed, the KICK
 over-throttles, and the vehicle overshoots the course in sim terms
 (measured: a 157 m miss that sim-time FD turns back into a normal PASS).
 Sample #14 (`path_follow_osc_demo.py`) is the reference implementation,
-including the UE-frame decode (`docs/server.md` §4).
+including the UE-frame decode (`docs/server.md` §4). **The OSC wire carries no
+gear (v2.0.2)**: every server vehicle is driven with the signed throttle, so a
+client-side follower uses `command_mode="signed"` (the `mpc_model="off"`
+default, as in sample #14) or sends `GearCommand.signed()` — and then the
+vehicle does not enforce the shift rule.
 
 Runnable end-to-end demos (bundled 10-wheel tank, `mpc_model="off"` since
 2.0.0; both default to the Jacobian plant, and `--plant sweep` switches them to
@@ -237,7 +270,14 @@ python -m genesis_vehicle.samples.mpc_follow_demo                    # NMPC + ta
 python -m genesis_vehicle.samples.mpc_follow_demo --mpc-impl linear  # LMPC
 python -m genesis_vehicle.samples.mpc_follow_demo --mpc-model off    # PD, same course
 python -m genesis_vehicle.samples.mpc_follow_demo --course cusp      # forward MPC, reverse PD
+python -m genesis_vehicle.samples.mpc_follow_demo --command-mode signed  # v2.0.2: the 2.0.1 signed loop
+python -m genesis_vehicle.samples.mpc_follow_demo --gear-feedback off    # v2.0.2: gear mode without feedback
 ```
+
+Since v2.0.2 `mpc_follow_demo` runs gear mode by default (also with
+`--mpc-model off`, where it derives the brake gain from its params file) and
+passes the engaged gear back to the follower; on a terminal mode it applies the
+terminal command until the car is still or 2 s have passed.
 
 ## 1. The Jacobian plant (`DifferentiablePlant`)
 
@@ -878,13 +918,22 @@ The path is split into **direction blocks** (runs of same-sign
    `|v_target|`, saturate throttle toward the target direction;
 8. near-zero throttle at near-zero speed ⇒ `brake = 1`.
 
+Steps 6-8 above are the **signed** finish (`command_mode="signed"`, the
+default with `mpc_model="off"`): a deceleration comes out as a negative
+throttle, i.e. drive torque against the motion. In **gear mode** (v2.0.2,
+§5.9) the inverse plant's `u` is read in the gear's direction: `u_g = g·u ≥ 0`
+is a throttle magnitude, `u_g < 0` becomes a brake from the stage-2 brake model
+at throttle 0, and the KICK is suppressed while the vehicle moves against the
+gear by more than 0.05 m/s.
+
 At a block boundary the cusp state machine takes over: brake until
 `|v_long| < v_stop`, then continue into the next block with the flipped
 direction. `last_mode` exposes the state: `INIT` / `DRV+1` / `DRV-1` /
 `STOP` / `BRAKE_TRANS` / `DONE`, since v2.0.1 the terminal `GOAL-MISSED` in
 every mode, and with the MPC layer on also `MPC` / `MPC-HOLD` / `MPC-HOLDCMD` /
 `PD-FALLBACK` (§5.3) and, since v2.0.1, `PD-ALIGN` / `PD-STALL` / the terminal
-`MPC-ABORT` (§5.8). The cusp state machine runs on every step under both
+`MPC-ABORT` (§5.8), and in gear mode (v2.0.2, every stage-1 choice) `SHIFT` /
+`GUARD` / the terminal `GEAR-ABORT` (§5.9). The cusp state machine runs on every step under both
 stage-1 choices.
 
 **Goal-passed stop (v2.0.1, every mode, cannot be switched off).** The heading
@@ -965,9 +1014,12 @@ low-speed brake.
   with the MPC layer R-ALIGN / R-STALL, the watchdog anchor and entry point,
   and EVERY per-block budget (§5.8) — so a caller that re-plans repeatedly is
   not bounded by the budgets. The `mpc_stats["handover"]` counts are kept; the
-  heading gate is evaluated again on the next `plan()`.
+  heading gate is evaluated again on the next `plan()`. In gear mode (v2.0.2)
+  it also restarts the `SHIFT` / `GUARD` counters, releases the `GUARD` latch
+  and clears a `GEAR-ABORT`, and it keeps the gear the follower assumes engaged
+  (§5.9).
 
-## 5. The MPC layer (v2.0.0; heading gate, watchdog and stops v2.0.1)
+## 5. The MPC layer (v2.0.0; heading gate, watchdog and stops v2.0.1; gear mode v2.0.2)
 
 The MPC layer is the field team's `PathFollower_MPC` controller ported into
 the SDK, itself derived from NVlabs AlpaSim (Apache-2.0; attribution, file
@@ -984,8 +1036,9 @@ rest, straight 20 m, a 90° left turn of 30 m radius, straight 15 m, speed
 ramped at 1 m/s² to 8 m/s, `steer_cap` 0.5, plane and tyre friction 1.0, a
 sweep table on the grid of §5.2 in stage 2. Nothing else was measured for
 2.0.0: treat it as the whole validated envelope. The exceptions are the stall
-paragraph of §5.3 and §5.8 (v2.0.1, measured 2026-11-21 .. 2026-11-22), which
-name their own courses and conditions.
+paragraph of §5.3 and §5.8 (v2.0.1, measured 2026-11-21 .. 2026-11-22) and
+§5.9 (v2.0.2, measured 2026-11-22), which name their own courses and
+conditions. The 2.0.0 figures of §5.6-§5.7 are signed-mode figures.
 
 ### 5.1 Install
 
@@ -1073,9 +1126,15 @@ from genesis_vehicle.control import extract_state
 
 follower = PathFollower(path, "my_car_sweep.csv", mpc_params="my_car_mpc_params.json")
 st = extract_state(vehicle)
-thr, steer, brake = follower.step(st["pos_xy"], st["yaw"], st["v_long"], st["pitch"],
-                                  st["roll"], yaw_rate=st["yaw_rate"], v_lat=st["v_lat"])
+cmd = follower.step(st["pos_xy"], st["yaw"], st["v_long"], st["pitch"], st["roll"],
+                    yaw_rate=st["yaw_rate"], v_lat=st["v_lat"],
+                    gear=int(vehicle.gear[0]))     # v2.0.2: gear mode by default (§5.9)
+vehicle.set_inputs(throttle=cmd.throttle, brake=cmd.brake, steer=cmd.steer, gear=cmd.gear)
 ```
+
+Through v2.0.1 this example unpacked `thr, steer, brake = follower.step(...)`;
+on 2.0.2 the default MPC follower returns a `GearCommand` and that line raises
+`ValueError`. `command_mode="signed"` restores the 3-tuple.
 
 ### 5.3 Regimes: what runs where
 
@@ -1085,7 +1144,7 @@ every regime; the regime decides who fills stage 1 and which finish applies.
 ```mermaid
 flowchart TD
     S["step(pos_xy, yaw, v_long, pitch, roll,<br/>yaw_rate=, v_lat=, t=)"] --> SM["path state machine — every step, every regime<br/>projection, direction blocks, cusp, DONE,<br/>goal-passed stop (v2.0.1)"]
-    SM -->|"DONE / cusp brake /<br/>GOAL-MISSED / MPC-ABORT"| CMD["fixed command<br/>regime CMD (R-OFF with the layer off)"]
+    SM -->|"DONE / cusp brake /<br/>GOAL-MISSED / MPC-ABORT /<br/>v2.0.2 SHIFT / GUARD / GEAR-ABORT"| CMD["fixed command<br/>regime CMD (R-OFF with the layer off)"]
     SM --> M{"mpc_model"}
     M -->|"off"| OFF["1.x PD law — regime R-OFF"]
     M -->|"bicycle (default)"| B{"active block"}
@@ -1115,7 +1174,7 @@ flowchart TD
 | `R-FAIL` | layer on, forward block, solve not applicable under `"pd"` | 1.x PD until the next applicable solve (v2.0.1: up to a per-block travel budget, §5.8) | 1.x | `PD-FALLBACK` |
 | `R-ALIGN` (v2.0.1) | layer on, forward block, \|e_psi\| above `theta_on` until below `theta_off` | 1.x PD, no solve | 1.x | `PD-ALIGN` |
 | `R-STALL` (v2.0.1) | layer on, forward block, after the watchdog fired, until 1.0 m from the entry point | 1.x PD, no solve | 1.x | `PD-STALL` |
-| `CMD` | layer on, DONE, cusp brake, and since v2.0.1 a terminal stop | fixed command (terminal: `(0, 0, 1)`) | — | `DONE` / `BRAKE_TRANS` / `GOAL-MISSED` / `MPC-ABORT` |
+| `CMD` | layer on, DONE, cusp brake, since v2.0.1 a terminal stop, and (v2.0.2, gear mode) a gear change or a guard stop | fixed command (terminal: `(0, 0, 1)`) | — | `DONE` / `BRAKE_TRANS` / `GOAL-MISSED` / `MPC-ABORT`; v2.0.2 `SHIFT` / `GUARD` / `GEAR-ABORT` (§5.9) |
 
 - **The MPC**: the AlpaSim bicycle model, 8 states (rig position, yaw,
   centre-of-gravity (CG) velocities, yaw rate, steering angle, acceleration), commands `(δ_cmd,
@@ -1199,12 +1258,16 @@ steering-to-yaw τ on top of the response the table already contains) — a know
 limitation of the field model, kept for parity. Neither a Pacejka prediction
 model nor a PD correction on the MPC's predicted trajectory exists in 2.0.1
 (`mpc_model="pacejka"` raises `ValueError`, `mpc_feedforward=` /
-`mpc_correction=` are `TypeError`). Planned, not present: 2.0.2 braking and
-stopping by the brake channel with a forward/reverse gear state, 2.0.3
-reverse-assisted alignment (K-turn), 2.1.0 the Pacejka prediction model, 2.2.0
-the PD correction; whether 2.0.2 and 2.0.3 merge is undecided. (Through 2.0.0
-this paragraph named 2.1.0 / 2.2.0 as the next releases; that roadmap is
-replaced.)
+`mpc_correction=` are `TypeError`). **The prediction model's deceleration
+bound is still the throttle-based one** (`decel_throttle_by_speed`, about −2.15
+m/s² on the reference car) in 2.0.2: gear mode's brake model is in stage 2 only
+(§5.9). Planned, not present: 2.0.3 controller-initiated reverse (K-turn),
+2.1.0 the Pacejka prediction model with a deceleration bound widened to the
+brake's limit, 2.2.0 feedforward from the MPC plan and the PD correction, 2.3.0
+a hold-release rule, a KICK redesign and a wider default sweep grid. (Through
+2.0.0 this paragraph named 2.1.0 / 2.2.0 as the next releases; 2.0.1 listed
+"2.0.2 braking and stopping by the brake channel with a forward/reverse gear
+state" — that shipped in 2.0.2, and 2.0.2 and 2.0.3 did not merge.)
 
 ### 5.4 Constructor arguments and checks
 
@@ -1219,6 +1282,8 @@ replaced.)
 | `dt_ctrl` | the params file's `dt` | control period (s) |
 | `mpc_align_gate` (v2.0.1) | `(π/2, π/4)` | `(theta_on, theta_off)` rad of the heading gate, `0 < theta_off < theta_on <= π`; **`None` disables** it and its R-ALIGN budget (§5.8) |
 | `mpc_stall_timeout` (v2.0.1) | 2.0 s | seconds of follower time `t` without 0.25 m of movement before the watchdog hands over; **`None` disables** it, its R-STALL run limit and its `t`-jump rule (§5.8) |
+| `command_mode` (v2.0.2) | `None` = `"gear"` with the layer on, `"signed"` with `"off"` | `"gear"` → `GearCommand`; `"signed"` → the 2.0.1 3-tuple (§5.9). Not an MPC-only argument: valid with `"off"` too |
+| `brake_gain` (v2.0.2) | `None` | k_b for gear mode; `None` → `plant.brake_gain()` → the params' `brake_gain` key → derived from `decel_brake_by_speed`; with `"signed"` it raises `ValueError` (§5.9) |
 
 For `mpc_align_gate` / `mpc_stall_timeout`, `None` DISABLES the feature —
 unlike `mpc_v_floor` / `mpc_gains` / `dt_ctrl`, where `None` means the
@@ -1247,8 +1312,12 @@ params' `wheelbase > 0` and the steering limit `steer_cap · max_steer_rad`
 lies in (0, π/2) — R_min sets the budgets, and an infinite one would disable
 them silently (`steer_cap=0` stays accepted with `"off"`). A sweep table and a
 params file are never cross-checked: the tank's table with the car's params was accepted
-silently in review. Construction: 0.64 s (NMPC, the problem is set up here; the
-first `step` builds nothing), about 20 ms (LMPC).
+silently in review. Then (v2.0.2) the command-mode checks (§5.9): the mode
+value; in gear mode a skid-steer plant source (`ValueError`), a plant without a
+callable `accel_at` (`TypeError`), the k_b source (`ValueError` when there is
+none; `TypeError` for a non-callable `brake_gain` attribute). Construction: 0.64
+s (NMPC, the problem is set up here; the first `step` builds nothing), about
+20 ms (LMPC).
 
 `mpc_stats` → `{n_solve, status: {converged, capped, capped_infeasible,
 "failed:<status>", exception, nan}, last_status, last_solve_ms, plan_age_s,
@@ -1319,6 +1388,13 @@ LMPC (OSQP `osqp.SolverStatus`):
 python -m genesis_vehicle.samples.bench_path_follower                 # nonlinear,linear x 5
 python -m genesis_vehicle.samples.bench_path_follower --arms nonlinear,linear,pd --repeats 5
 ```
+
+**Every figure in this section is a signed-mode figure.** Since v2.0.2
+`bench_path_follower` pins every arm to `command_mode="signed"` (the default of
+`mpc_follow_demo`, which it runs, became gear mode). Gear-mode cost was
+measured once and reported only (CHANGELOG 2.0.2 §8.5): a braking step adds at
+most four table lookups with a `SweepTable`, and one more `predict` (about 4.8
+ms) with a `DifferentiablePlant`.
 
 The bench measures tot>25 on the demo course in one fresh process per run,
 alternating the arm order between rounds, and prints a per-arm median only when
@@ -1547,8 +1623,9 @@ the last at 22.15 s. With both new
 kwargs `None` (the 2.0.0 code path), C-v150 L5 and the 6 m straight do not
 reach `DONE` in 60 s.
 
-**Terminal modes.** `PathFollower.TERMINAL_MODES = ("DONE", "GOAL-MISSED",
-"MPC-ABORT")`. `GOAL-MISSED` (every mode, `"off"` included, cannot be switched
+**Terminal modes.** `PathFollower.TERMINAL_MODES` was `("DONE",
+"GOAL-MISSED", "MPC-ABORT")` in 2.0.1; since v2.0.2 it also holds
+`"GEAR-ABORT"` (gear mode, `stop_reason == "shift_timeout"`, §5.9). `GOAL-MISSED` (every mode, `"off"` included, cannot be switched
 off): on the final block, with the projection on its last segment, beyond the
 goal's segment-normal plane, at least `arrival_goal + 0.1` m from the goal,
 and the distance to the goal grew by more than 1e-3 m on **each of the last two
@@ -1558,8 +1635,9 @@ calling `plan()` more than once per control step shortens the window, and
 movement before the goal plane is not limited. It is neither a distance nor a
 time bound. `stop_reason`: `"goal_passed"` (every mode), `"align_budget"`
 (MPC on, gate not `None`), `"stall_budget"` (MPC on, watchdog not `None`),
-`"fail_budget"` (MPC on, `"pd"`, whatever the two kwargs); `None` before the
-first step, while driving and on `DONE`. Both terminal modes command
+`"fail_budget"` (MPC on, `"pd"`, whatever the two kwargs), and since v2.0.2
+`"shift_timeout"` (`GEAR-ABORT`, gear mode, §5.9); `None` before the first
+step, while driving and on `DONE`. Both terminal modes command
 `(0, 0, 1)` and stay set until `set_path` or a `DONE` step; a `DONE` clears
 `stop_reason`, resets no budget, and can clear only an abort on the final block
 (an earlier block's abort is sticky until `set_path`); after a `DONE` the
@@ -1606,6 +1684,263 @@ cusp paths 15 / 102 / 3 clean, 14 / 104 / 2 noisy; 0 false stops (CHANGELOG
 
 Not measured: GPU; other platforms; the LMPC on ray-wheel short-leg courses;
 curve-inside run starts on ray-wheel.
+
+### 5.9 Gear command mode (v2.0.2)
+
+| abbr | meaning |
+|---|---|
+| v_xy | planar chassis speed `hypot(vel_x, vel_y)`, world frame (m/s) — the vehicle's shift-rule speed |
+| G | slope term of the brake conversion's coast: the table's pitched/rolled minus flat acceleration |
+| AC | acceptance criterion of the 2.0.2 release, threshold fixed before measuring |
+| B0 | the same harness run on the 2.0.1 tree |
+
+**Numbers in this section** are from the 2.0.2 implementation and impl-review
+runs, with the conditions of CHANGELOG 2.0.2 (CPU/WSL2, genesis-world 1.4.5,
+the reference car `"control"`, plane μ 1.0, dt 0.025 × 4, `per_vehicle`,
+`dual_scene`, NMPC, the table and params file the 2.0.0 release was measured
+with; harnesses outside the repo).
+
+**What it is.** The vehicle side (contract: `physics-contracts.md` §7.20):
+`veh.set_inputs(throttle=, brake=, steer=, gear=±1)` puts a vehicle in gear
+mode — the throttle is a magnitude, clamped to [0, 1], applied in the
+direction of the gear ENGAGED in the vehicle's state (`veh.gear`); every
+wheel's drive torque is clamped to that gear's sign after the shift decision;
+the engaged gear follows the request only on a step with (clamped) throttle 0
+and planar speed below 0.5 m/s, otherwise the request is deferred. A negative
+Python scalar throttle with a gear raises; a negative tensor element is clamped
+to 0 (and so permits a shift). Tanks (`PerSide` drivetrain or `SkidSteer`
+steering) refuse a gear. `gear=None` is the 2.0.1 signed input, bit-identical
+to 2.0.1 on the measured scenes.
+
+The follower side: `PathFollower(command_mode="gear")` — the default with the
+MPC layer on — returns a `GearCommand(throttle, steer, brake, gear)` for such
+a vehicle. It decelerates with the brake (never with a throttle against the
+commanded gear) and asks for reverse only on reverse blocks already in the path
+(the wanted gear is the active block's sign; controller-initiated reverse is
+2.0.3). `command_mode="signed"` returns the 2.0.1 3-tuple, the same commands as
+2.0.1 for the same inputs.
+
+```python
+follower = PathFollower(path, "my_car_sweep.csv", mpc_params="my_car_mpc_params.json")
+# command_mode="gear" by default here; mpc_model="off" needs it explicitly, and a
+# SweepTable PD follower also needs brake_gain= (it has no mpc_params)
+st = extract_state(veh)
+cmd = follower.step(st["pos_xy"], st["yaw"], st["v_long"], st["pitch"], st["roll"],
+                    yaw_rate=st["yaw_rate"], v_lat=st["v_lat"],
+                    gear=int(veh.gear[0]))           # feedback: optional, recommended
+veh.set_inputs(throttle=cmd.throttle, brake=cmd.brake, steer=cmd.steer, gear=cmd.gear)
+```
+
+`GearCommand` unpacks to exactly four values (`thr, st, br, g = cmd`; the
+2.0.1 three-value unpack raises `ValueError`), is not indexable (`cmd[0]`
+raises `TypeError` — an index would hand a signed vehicle the unsigned
+magnitude and drive a reverse block forwards), compares unequal to every tuple,
+and `np.asarray(cmd)` is a 0-d object array. `cmd.signed()` gives
+`(gear·throttle, steer, brake)` for a consumer with no gear (an OSC client) —
+the vehicle then does not enforce the shift rule. `veh.set_inputs(*cmd)` raises
+`TypeError`: `gear` is keyword-only, and `GearCommand`'s order is
+`throttle, steer, brake` while `set_inputs` takes `throttle, brake, steer`.
+
+#### The finish
+
+| plant command | PD step | MPC step (R-MPC) |
+|---|---|---|
+| `u_g = g·u ≥ 0` | throttle `min(u_g, 1)`, brake 0 | throttle `min(u_g, 1)`, the field finish's brake |
+| `u_g < 0` | throttle 0, brake `brake_for(a_target, a_coast, v, g, k_b)` | throttle 0, the larger of that and the field finish's brake |
+| low speed | KICK (throttle 1) only while not moving against the gear by more than 0.05 m/s; throttle < 0.02 and \|v\| < 0.1 → brake 1 (2.0.1 rule) | `MPC-HOLD` → throttle 0, brake 1 |
+| reported to the plant | `g·throttle` (0 on a braking step) | the same |
+
+Fixed commands (`DONE`, cusp brake, terminal, `SHIFT`, `GUARD`) are
+`GearCommand(0, 0, 1, gear)`; a terminal step keeps the gear the follower
+believes engaged. (`MPC-HOLD` keeps the MPC's steer: throttle 0, brake 1.)
+
+#### Gear changes: `SHIFT`, `GUARD`, `GEAR-ABORT`
+
+```mermaid
+stateDiagram-v2
+    [*] --> SYNC
+    SYNC --> SHIFT: assumed gear != wanted gear
+    SYNC --> DRIVE: assumed gear == wanted gear
+    SHIFT --> SHIFT: feedback != wanted, or fewer than 2 slow calls
+    SHIFT --> DRIVE: feedback == wanted, or after 2 slow calls
+    DRIVE --> GUARD: no confirming feedback and g*v_long < -0.3
+    GUARD --> DRIVE: after 2 consecutive slow GUARD calls
+    DRIVE --> SHIFT: a block change flips the wanted gear
+    SHIFT --> GEAR_ABORT: more than 120 consecutive SHIFT/GUARD calls
+    GUARD --> GEAR_ABORT: more than 120 consecutive SHIFT/GUARD calls
+```
+
+Decided in `plan()`, in this order: `DONE` → sticky terminal → cusp state
+machine → `SHIFT` → projection advance → `GOAL-MISSED` → `GUARD` → lookahead.
+`SHIFT` and `GUARD` are non-terminal throttle 0 / brake 1 steps (regime `CMD`
+with the MPC layer: no solve, no budget charged) and are not counted toward
+`GOAL-MISSED`.
+
+- **`SHIFT`.** With `gear=` feedback: every call whose engaged gear differs
+  from the wanted one. Without feedback: while the gear the follower assumes
+  differs from the wanted one; the follower assumes the shift took on the call
+  AFTER two consecutive `SHIFT` calls below 0.45 m/s (`0.9 ×
+  GEAR_SHIFT_MAX_SPEED`) — two, because the first can fall on the vehicle's
+  first-step protection step, where the vehicle does not shift. That is an
+  assumption, not a check: the follower measures `hypot(v_long, v_lat)` (the
+  vehicle's v_xy for a base link without a morph offset, checked on the
+  reference car only); **given neither `v_lat` nor feedback it judges "slow" on
+  |v_long| alone**, so a vehicle sliding sideways can be assumed engaged while
+  it has not shifted. At construction a vehicle already moving at 0.5 m/s or
+  more in the wanted direction is assumed in gear (first call only).
+- **`GUARD`.** Without feedback confirming the wanted gear, a vehicle moving
+  faster than 0.3 m/s against it gets throttle 0 / brake 1, latched until the
+  call after two consecutive slow `GUARD` calls (the vehicle engages the
+  deferred request during them); the wanted gear is then assumed engaged. A
+  mismatch while the vehicle moves IN the block direction is not detected.
+- **`GEAR-ABORT`.** More than 120 consecutive `SHIFT` / `GUARD` calls (a call
+  count — 3 s at 40 Hz — not a time) → terminal, `stop_reason ==
+  "shift_timeout"`, sticky like `MPC-ABORT`. It ends a feedback that never
+  matches (a vehicle driven in signed mode, a stale value) and a vehicle that
+  never slows below 0.45 m/s. One driving call resets the count.
+- **Feedback** (`step(..., gear=)` / `plan(..., gear=)`, e.g.
+  `int(veh.gear[0])`) is optional and recommended: with it there is no
+  assumption and no `GUARD`. `extract_state` does not supply it. ±1 or
+  `None`; anything else raises `ValueError`. `FleetFollower.step` reads it from
+  a dict state's `"gear"` key.
+- **`set_path`** restarts the counters, releases the latch, clears a
+  `GEAR-ABORT`, and **keeps** the assumed gear — a `set_path` while driving the
+  same direction issues no `SHIFT` (measured: a `set_path` at 8 m/s on the demo
+  course, `SHIFT` only on the first two steps of the run).
+- **`resync_gear()`** forgets the assumed gear (and clears the counters and the
+  latch; a terminal mode stays). Without feedback the next driving call is
+  always a `SHIFT`; with `gear=` feedback a call whose feedback already equals
+  the wanted gear drives.
+  Call it after anything changed the vehicle's gear behind the follower's back
+  — `VehicleScene.reset()` or a partial reset sets the engaged gear to +1 and
+  leaves the velocity alone — when you pass no feedback.
+
+#### The brake model — stage 2 only
+
+**The brake → deceleration relation is modelled in the stage-2 command
+conversion only.** The MPC prediction model keeps its throttle-based
+deceleration bound (about −2.15 m/s² on the reference car), so it plans no
+harder deceleration than 2.0.1; `DifferentiablePlant`'s unroll predicts with its
+constant constructor `brake`. Widening the MPC bound is planned for 2.1.0.
+
+- **Model:** `a(b) = a_coast(v, pitch, roll) − sign(v)·k_b·b`, inverted by
+  `control.brake.brake_for(a_t, a_coast, v, g, k_b) = clip(s·(a_coast −
+  a_t)/k_b, 0, 1)`, `s = sign(v)` (|v| > 1e-3) else `g`.
+- **k_b**, in this order: `brake_gain=`; a callable `plant.brake_gain()`
+  (`DifferentiablePlant`: the closed form `Σ(T_b,max,i/R_i) / (m + Σ
+  I_i/R_i²)`, 5.0152 on the reference car; an exploratory open-loop probe
+  measured 5.0204); the params record's `brake_gain` key (written by the 2.0.2
+  `identify`); derived from its `decel_brake_by_speed` (a record from before
+  2.0.2); otherwise `ValueError`. A `SweepTable` PD follower (`mpc_model="off"`)
+  has no params, so pass `brake_gain=` (`mpc_follow_demo` derives it with
+  `control.brake.brake_gain_from_params`).
+- **a_coast:** `DifferentiablePlant.accel_at` predicts it from the live state
+  at brake 0. On a `SweepTable`, `control.brake.coast_for_brake` uses the
+  table's forward map `accel_at(v, 0, pitch, roll)` at and above `v_h`; **below
+  `v_h` it fades the table's FLAT coast with `tanh(|v|/0.5)`**, because the
+  table is linear between its v = 0 row (a vehicle at rest) and `v_h`, while the
+  real coast stays near its full value down to about 0.5 m/s. The slope term G
+  is read at `v_h` or above and never faded; on a table side with no grid speed
+  the flat part is mirrored (a direction-symmetric coast is assumed — measured
+  for the reference car only). `SweepTable.accel_at` itself is unchanged. A
+  duck-typed plant gets its `accel_at` unchanged (no low-speed correction).
+
+**Conditions of the coast model** — read these before trusting it:
+
+- The fade shape matches a table measured on a vehicle with the `"control"`
+  stability profile (`RollingResistance`, `tanh_scale` 0.5). With `"raw"` /
+  `"research"` (no `RollingResistance`) or another `tanh_scale` it is an
+  assumption: below about 1 m/s the flat-coast error is then at most
+  `|accel_at(v_h, 0, 0, 0)|` of that table (0.142 m/s² for the reference car;
+  the tank's coast is about 0.48 m/s²).
+- **Dead band:** `throttle_for` still inverts the table's LINEAR low-speed
+  coast, so below `v_h` a target between the faded coast and the linear one
+  (about −0.13 and −0.071 m/s² at 1 m/s on the reference car) gets a slightly
+  negative throttle, the conversion clips the brake to 0, and the vehicle
+  coasts harder than asked, by at most the gap (0.07 m/s² there).
+- **Continuous through v = 0 only on flat ground.** On a slope G switches
+  between the two sides' table rows at |v| = 1e-3 (0.15 m/s² on the reference
+  table at 10°).
+- **Uphill table rows are biased**: the vehicle rolls back inside the sweep's
+  measurement window, so on the reference table at 10° the slope term is about
+  0.15 m/s² too small in magnitude (−1.472 vs about −1.627 m/s²) — the modelled
+  coast is less decelerating than the truth and the conversion commands MORE
+  brake than needed. A property of the table; not fixed in 2.0.2.
+- The conversion on a slope is not measured in closed loop. Not modelled: the
+  friction-limited regime (wheel lock, low μ), where the real deceleration is
+  smaller than the model's.
+
+**Validity, as fixed before measuring (AC-5a):** reference car, plane μ 1.0,
+dt 0.025 × 4, `SweepTable` plant — stopping distance within 5 % of the model
+for initial speeds 2-12 m/s and brake 0.1-1.0; measured 12/12, worst −3.16 %
+(2 m/s, brake 1.0). **The first implementation failed this**: with the table's
+linear low-speed coast the (2 m/s, 0.1) stop was 3.0948 m measured vs 3.3359 m
+modelled, −7.2 %; the coast model above replaced it (that point is now −0.70 %).
+Below 2 m/s or below brake 0.1 only report-only points exist (CHANGELOG 2.0.2
+§5.4: within −0.25 .. −2.88 % at 0.5-4 m/s and brake 0.05-0.1). The brake-1
+residual (−3.16 % at dt 0.025 × 4, −2.32 % at dt 0.0125 × 4, ratio 0.734 above
+the pre-fixed 0.6): cause not established. Inversion check (AC-5b, 6 m/s):
+targets −0.5 / −1 / −2 / −4 m/s² → −0.504 / −1.004 / −2.004 / −4.003.
+
+#### Measured in closed loop
+
+Gear mode with feedback against B0 (signed); thresholds fixed before measuring.
+
+| run | B0 | 2.0.2 gear | limit |
+|---|---|---|---|
+| demo, NMPC | CTE mean / max 0.0670 / 0.6822 m | 0.0678 / 0.6835 | mean ≤ 0.0837, max < 1.0 |
+| cusp, NMPC | max 0.0498, `DONE` 11.125 s | 0.0497, `DONE` 11.15 s; reverse block engaged −1 on every step | ≤ 0.1073 |
+| misaligned start | `DONE` 41.775 s | `DONE` 41.775 s | ≤ 45.95 s |
+| C-v150 L20 / C-v120 L20 | max 10.9253 / 6.6273 | 11.0388 / 6.796 | ≤ 11.175 / 6.877 |
+| PD (`"off"`) demo / cusp | max 0.2972 / 0.0498 | 0.2972 / 0.0497 | ≤ 0.3918 / 0.1073 |
+
+Without feedback the same five runs reached `DONE` with no `GUARD` step and no
+step that drove with a mismatched gear. **Measured regression, accepted by the
+user:** on the straight 15 m / 22 m "behind" courses gear mode reaches `DONE`
+2.625 s / 4.100 s later than 2.0.1 (20.400 vs 17.775 s, 23.425 vs 19.325 s): the
+2.0.1 low-speed `MPC` ↔ `MPC-HOLD` cycle there escaped by itself helped by small
+negative throttles (reverse drive torque, now forbidden); in gear mode it
+persists until the stall watchdog hands over to `PD-STALL`, as designed.
+
+#### Not guaranteed
+
+- **Without feedback, after an external reset of a moving vehicle**, the
+  follower keeps commanding throttle in the gear it assumes, which the vehicle
+  applies in its reset (opposite) gear, until the vehicle has stopped, moved
+  back faster than 0.3 m/s and tripped `GUARD`. Measured on flat ground: 54
+  steps, 1.35 m travelled along the block direction while driven against it
+  (report only — a different quantity from the gated travel AGAINST the block
+  direction, 0.0373 m, limit 0.5 m). About 68 steps was estimated beforehand
+  for flat or uphill ground — an estimate, not a bound; **on a downhill grade
+  (in the block direction) that equals or exceeds the rolling resistance there
+  is no time bound.** Pass `gear=` feedback, or call `resync_gear()` after the
+  reset (measured: no step with a mismatched gear and throttle).
+- **A `GUARD` ↔ drive cycle has no time bound** (a feedback-less hill start, a
+  caller that drops the gear): a driving call resets the `GEAR-ABORT` count
+  and `GUARD` clears the stall watchdog. Not measured.
+- Travel between an R-ALIGN step and a following `GUARD` step is not charged to
+  `align_budget`.
+- **On a slope, a brake ≤ 0.3 does not bring the vehicle to rest** even with
+  enough brake torque: the wheels stop (ω = 0, never reversed) but the chassis
+  slides on tyre slip, because `StaticFrictionLock` engages only when brake >
+  `brake_thr` (0.3 in `"control"`) — reference car, 5°, brake 0.3: 0.0250 m/s
+  for 30 s; brake 0.31 stops in 2.2 s. Pre-existing (identical on 2.0.1),
+  `physics-contracts.md` §7.17; the follower's terminal, `SHIFT` and `GUARD`
+  stops use brake 1; a `brake_for` value ≤ 0.3 at very low speed on a slope
+  would creep (not measured in closed loop). The fix is planned for a later
+  release.
+- Not measured in gear mode: the LMPC, GPU, closed-loop `n_envs > 1`, a
+  multi-member `FleetFollower`, the 6-wheel truck in the repo, vehicles other
+  than the reference car.
+
+**Tanks, fleets, the OSC server.** A tank refuses gear mode: a
+`DifferentiablePlant` (or live) tank follower raises at construction with
+`command_mode="gear"`; a `SweepTable` follower cannot tell and the vehicle
+raises at its first gear step; `GearCommand.signed()` into a tank is not
+refused. The tank samples and `FleetFollower` defaults stay signed. A
+`FleetFollower` needs one `command_mode` for every member (`ValueError`); in
+gear mode it fills each braking member's `a_coast` from one batched prediction.
+The OSC wire has no gear field (§ "Driving over the OSC server" above).
 
 ## 6. Migrating from 1.x
 
@@ -1674,6 +2009,29 @@ curve-inside run starts on ray-wheel.
 - `None` disables these two kwargs, unlike the other MPC kwargs;
 - `set_path` resets every budget and the terminal state.
 
+**From 2.0.1 to 2.0.2** (CHANGELOG 2.0.2 lists every change; the follower part
+is breaking in a patch release, by user decision):
+
+- an MPC follower constructed without `command_mode=` returns a `GearCommand`:
+  apply it with `veh.set_inputs(throttle=cmd.throttle, brake=cmd.brake,
+  steer=cmd.steer, gear=cmd.gear)` and pass `gear=int(veh.gear[0])` to `step`,
+  or construct with `command_mode="signed"` for the 2.0.1 3-tuple;
+- `thr, st, br = cmd` raises `ValueError`, `cmd[0]` raises `TypeError`,
+  `veh.set_inputs(*cmd)` raises `TypeError`; `cmd == (0, 0, 1)` is always
+  `False` and `np.asarray(cmd)` is a 0-d object array — neither raises;
+- unpacking four values and dropping the gear (`thr, st, br, _ = cmd`, then a
+  signed `set_inputs`) raises nothing: reverse blocks are driven forward until
+  `GUARD`, and that cycle has no time bound;
+- a custom stage-2 plant needs `accel_at(v, throttle, pitch_deg, roll_deg)` and
+  a k_b source (`brake_gain()`, `brake_gain=`, or params);
+- loop on `TERMINAL_MODES` (it gained `GEAR-ABORT`), not on a hard-coded tuple;
+- `last_mode` can be `SHIFT` / `GUARD`; decelerations are brake, not negative
+  throttle;
+- `samples/mpc_follow_demo.py` runs gear mode by default;
+  `samples/bench_path_follower.py` is pinned to signed;
+- `mpc_model="off"`, `FleetFollower` and vehicle inputs without a gear are
+  unchanged.
+
 ## See also
 
 - [`samples/path_follow_demo.py`](../samples/path_follow_demo.py) — bundled
@@ -1691,5 +2049,6 @@ curve-inside run starts on ray-wheel.
   fail-closed 25 ms overrun bench of §5.6.
 - [`physics-contracts.md`](physics-contracts.md) §7.18 — what the MPC layer's
   constructor and regime selection enforce, and what nothing enforces; §7.19 —
-  the v2.0.1 gate, watchdog, budgets and stops.
+  the v2.0.1 gate, watchdog, budgets and stops; §7.20 — v2.0.2 gear mode, the
+  vehicle rules and the follower's `SHIFT` / `GUARD` / `GEAR-ABORT`.
 - [`api-reference.md`](api-reference.md) §11 — `control` API surface.

@@ -198,6 +198,15 @@ def main():
         if follower.last_mode in PathFollower.TERMINAL_MODES:   # v2.0.1: any terminal mode
             print(f"\n[{follower.last_mode}] t={step * DT:.2f}s"
                   + (f" stop_reason={follower.stop_reason}" if follower.stop_reason else ""))
+            # v2.0.2: APPLY the terminal command (0, 0, 1) and wait for the
+            # tank to stop (|v| < 0.01 m/s, at most 2 s) before leaving.
+            tank.set_inputs(throttle=thr, brake=brk, steer=steer)
+            for _ in range(int(2.0 / DT)):
+                if abs(extract_state(tank)["v_long"]) < 0.01:
+                    break
+                vs.step()
+            print(f"terminal command applied: |v| = "
+                  f"{abs(extract_state(tank)['v_long']):.4f} m/s")
             break
         tank.set_inputs(throttle=thr, brake=brk, steer=steer)
         vs.step()

@@ -1319,6 +1319,35 @@ class DifferentiablePlant:
         self._pending_a = None
         return self.solve(v, a_t, omega_target, pitch_deg, roll_deg)[1]
 
+    def accel_at(self, v: float, throttle: float,
+                 pitch_deg: float = 0.0, roll_deg: float = 0.0) -> float:
+        """(v2.0.2) Forward prediction of the acceleration for a held
+        ``throttle`` from the LIVE vehicle state (``v`` / ``pitch_deg`` /
+        ``roll_deg`` are ignored — the same convention as :meth:`throttle_for`,
+        which also inverts at the live state), at the last applied steer and at
+        brake 0: the constructor's constant ``brake`` is NOT applied here, so
+        the gear-mode follower's brake model does not count a brake twice.
+        Single-member plants only (``ValueError`` otherwise, like
+        :meth:`throttle_for`)."""
+        self._require_single("accel_at")
+        saved = self.brake
+        self.brake = 0.0
+        try:
+            a, _ = self.predict(float(throttle), float(self._u[0, 1]))
+        finally:
+            self.brake = saved
+        return float(a)
+
+    def brake_gain(self) -> float:
+        """(v2.0.2) The closed-form brake gain ``k_b`` (m/s^2 per unit brake)
+        of the source vehicle: ``control.brake.brake_gain_closed_form`` with
+        this plant's ``mass_props.mass`` and the source's drivetrain and wheel
+        meta. Valid below the friction limit (see :mod:`genesis_vehicle.control.brake`)."""
+        from .brake import brake_gain_closed_form
+        self._refresh_source()
+        return brake_gain_closed_form(self.src.resolved, self.src.wheel_meta,
+                                      self.mass_props.mass)
+
     def _held_omega(self) -> float:
         return float(self._response[0, 1]) if self._has_solved else 0.0
 

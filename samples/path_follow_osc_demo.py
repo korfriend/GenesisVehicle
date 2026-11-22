@@ -272,6 +272,30 @@ def main():
             if follower.last_mode in PathFollower.TERMINAL_MODES:   # v2.0.1: any terminal mode
                 print(f"\n[{follower.last_mode}] wall t={time.time() - t0:.1f}s"
                       + (f" stop_reason={follower.stop_reason}" if follower.stop_reason else ""))
+                # v2.0.2: SEND the terminal command (0, 0, 1) and keep sending
+                # it, one per received state, until the windowed speed is
+                # below 0.01 m/s or 2 s of server time have passed.
+                t_stop, v_now = tb, st["v_long"]
+                while proc.poll() is None:
+                    frame += 1
+                    cli.send_message("/Genesis/Vehicle/Control",
+                                     [frame, TARGET_ID, steer, thr, brk, 0.0, 0.0])
+                    seq, pos, quat, t_pkt, sim_t = receiver.latest()
+                    if seq == last_seq or pos is None:
+                        time.sleep(0.002)
+                        continue
+                    last_seq = seq
+                    tb = sim_t if sim_t is not None else t_pkt
+                    hist.append((tb, pos))
+                    while hist and tb - hist[0][0] > 0.3:
+                        hist.popleft()
+                    t_old, p_old = hist[0]
+                    if tb - t_old > 0.1:
+                        vel = tuple((p - q) / (tb - t_old) for p, q in zip(pos, p_old))
+                    v_now = extract_state_from_arrays(pos, quat, vel)["v_long"]
+                    if abs(v_now) < 0.01 or tb - t_stop > 2.0:
+                        break
+                print(f"terminal command applied: last speed |v| = {abs(v_now):.4f} m/s")
                 break
             frame += 1
             cli.send_message("/Genesis/Vehicle/Control",

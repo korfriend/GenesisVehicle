@@ -276,6 +276,14 @@ mphys.step(inputs)
 scene.step()
 ```
 
+Gear mode (v2.0.2) batches the same way: `VehicleInputs(..., gear=)` takes a
+scalar (broadcast) or an `(N,)` tensor (by sign, 0 → +1), the engaged gear is
+one value per flat row, and `mphys.gear_list()` returns it per vehicle as
+`(N,)` `int8`. `mphys.step` checks every gear input before ANY kind steps
+(skid-steer kind, bad scalar, tensor shape, input type), so a refused input
+leaves no kind half-stepped. A kind with only some vehicles in gear mode passes
+the others' rows through unchanged ([`physics-contracts.md` §7.20](physics-contracts.md)).
+
 ### Measured stacking
 
 L2 × L3 stack close to MULTIPLICATIVELY. From [`samples/perf_l2_l3_combined.py`](../samples/perf_l2_l3_combined.py)

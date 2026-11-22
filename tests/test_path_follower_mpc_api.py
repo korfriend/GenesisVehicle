@@ -182,7 +182,7 @@ def test_live_plant_warns_and_cross_checks(deps):
     plant = _FakeLivePlant(Ackermann(max_steer_rad=0.7), [0, 0, 1, 1], mass=1500.0)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        PathFollower(PATH, plant, mpc_params=_params())
+        PathFollower(PATH, plant, mpc_params=_params(), command_mode="signed")
     msgs = [str(x.message) for x in w]
     assert any("live-vehicle plant" in m for m in msgs)
     assert any("mass: params 1330.0 vs vehicle 1500.0" in m for m in msgs)
@@ -195,7 +195,7 @@ def test_off_follower_adds_no_warning():
 
 
 def test_forward_block_needs_yaw_rate_and_v_lat(deps):
-    f = PathFollower(PATH, make_table(), mpc_params=_params())
+    f = PathFollower(PATH, make_table(), mpc_params=_params(), command_mode="signed")
     with pytest.raises(TypeError, match="extract_state"):
         f.step((0.0, 0.0), 0.0, 0.0, 0.0, 0.0)
     out = f.step((0.0, 0.0), 0.0, 0.0, 0.0, 0.0, yaw_rate=0.0, v_lat=0.0)
@@ -243,6 +243,6 @@ def test_followerplan_new_fields_are_appended():
     names = [f.name for f in fields(FollowerPlan)]
     assert names[:8] == ["mode", "a_target", "omega_target", "v_long", "v_target",
                          "pitch_deg", "roll_deg", "command"]
-    assert names[8:] == ["regime", "a_ff", "w_ff"]
+    assert names[8:] == ["regime", "a_ff", "w_ff", "gear", "a_coast"]
     p = FollowerPlan("DRV+1", 1.0, 0.5, 2.0, 3.0, 0.0, 0.0, None)    # 1.x positional
     assert p.regime == "R-OFF"

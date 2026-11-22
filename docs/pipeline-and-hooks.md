@@ -36,12 +36,20 @@ The 5-step pipeline with every strategy and stability-hook seam marked.
 VehiclePhysics.step(inputs)
 
 [0] Input adaptation
+    gear_req = getattr(inputs, "gear", None)   # v2.0.2: read off the ORIGINAL object; refuse a
+                                               # skid-steer vehicle / bad scalar here (physics-contracts S7.20)
     typed = inputs if isinstance(inputs, steering.InputType)
             else steering.InputType.from_unified(inputs)
 
 [1] PRE-LOOP
     steer_per_wheel = SteeringStrategy.per_wheel_steer(typed)
     T_drive_pw, T_brake_pw = DrivetrainStrategy.distribute_torque(typed, omega, meta)
+        # v2.0.2 gear rows: typed' = replace(typed, throttle = gear * clamp(throttle, 0, 1));
+        # ctx.throttle = that effective throttle. After the chassis state read [3]:
+        # update_gear (clamped throttle == 0 AND v_xy < 0.5; not on the first-step
+        # protection step), then T_drive clamped to the POST-shift gear's sign,
+        # last_T_drive = the clamped tensor, ctx.gear = the engaged gear (before the
+        # PRE_LOOP hooks). No gear on any input: none of this runs (the 2.0.1 path).
     for hook in stability_hooks if PRE_LOOP in hook.slots:
         hook.apply_pre_loop(ctx)                     # e.g. LowSpeedRegularizer
 

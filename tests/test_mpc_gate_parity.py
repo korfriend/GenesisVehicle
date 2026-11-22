@@ -66,7 +66,8 @@ def arc(R=30.0, v=4.0):
 def run(path, gate_on, t_max=60.0):
     kw = {} if gate_on else dict(mpc_align_gate=None, mpc_stall_timeout=None)
     f = PathFollower(path, rp.make_table(),
-                     mpc_params=MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK)), **kw)
+                     mpc_params=MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK)),
+                     command_mode="signed", **kw)
     x = y = yaw = v = 0.0
     out, mode = [], None
     for k in range(int(t_max / DT)):

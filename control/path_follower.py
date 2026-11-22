@@ -78,6 +78,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .sweep import SweepTable
+from ..gear import GEAR_SHIFT_MAX_SPEED, refuses_gear
 
 
 # --- State extraction --------------------------------------------------------
@@ -169,6 +170,62 @@ class FollowerPlan:
     regime: str = "R-OFF"
     a_ff: Optional[float] = None
     w_ff: Optional[float] = None
+    #: (v2.0.2, appended) gear mode only (``command_mode="gear"``; ``None``
+    #: otherwise): the gear the command of this step requests — the active
+    #: block's sign, except on a terminal step (``DONE`` / ``GOAL-MISSED`` /
+    #: ``MPC-ABORT`` / ``GEAR-ABORT``), which keeps the gear the follower
+    #: believes engaged. ``a_coast``: the plant's coast acceleration (throttle
+    #: 0, brake 0) for the brake model, filled by :class:`FleetFollower` from
+    #: one batched prediction; ``None`` lets :meth:`PathFollower.finish` ask
+    #: the plant's ``accel_at`` when it needs it.
+    gear: Optional[int] = None
+    a_coast: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class GearCommand:
+    """(v2.0.2) What a gear-mode :class:`PathFollower` (``command_mode=
+    "gear"``, the default with the MPC layer on) returns from :meth:`step` /
+    :meth:`finish`: ``throttle`` in [0, 1] (a magnitude, applied in ``gear``'s
+    direction by a vehicle in gear mode), ``steer`` in [-steer_cap, steer_cap],
+    ``brake`` in [0, 1], ``gear`` +1 / -1. Apply it with
+    ``veh.set_inputs(throttle=c.throttle, brake=c.brake, steer=c.steer,
+    gear=c.gear)``.
+
+    Iterates as ``throttle, steer, brake, gear = cmd`` (so the 2.0.1
+    ``thr, st, br = cmd`` raises ``ValueError``). NOT indexable (``cmd[0]``
+    raises ``TypeError``): an index would silently hand a legacy signed
+    vehicle the unsigned magnitude and drive a reverse block forwards.
+    ``cmd == (0, 0, 1)`` is always False (a dataclass is not a tuple) and
+    ``np.asarray(cmd)`` is a 0-d object array — compare fields or
+    :meth:`signed`. :meth:`signed` gives the 2.0.1 3-tuple for a consumer that
+    has no gear (an OSC client, a legacy vehicle); a vehicle driven that way
+    does not enforce the shift rule."""
+    throttle: float
+    steer: float
+    brake: float
+    gear: int
+
+    def __iter__(self):
+        return iter((self.throttle, self.steer, self.brake, self.gear))
+
+    def signed(self) -> tuple:
+        """``(gear * throttle, steer, brake)`` — the signed 2.0.1 command."""
+        return (self.gear * self.throttle, self.steer, self.brake)
+
+
+def _predict_brake0(plant, throttle, steer):
+    """``plant.predict(throttle, steer)`` with the plant's constant
+    prediction ``brake`` (a ``DifferentiablePlant`` constructor argument) held
+    at 0 for the call, so the brake model does not count a brake twice."""
+    saved = getattr(plant, "brake", None)
+    if saved is not None:
+        plant.brake = 0.0
+    try:
+        return plant.predict(throttle, steer)
+    finally:
+        if saved is not None:
+            plant.brake = saved
 
 
 class FleetFollower:
@@ -193,8 +250,8 @@ class FleetFollower:
                                for p in paths], plant)
         cmds = fleet.step([extract_state(t) for t in tanks])
 
-    Each member stops on its own terminal mode (v2.0.1: ``DONE``,
-    ``GOAL-MISSED``); the fleet does not aggregate — check
+    Each member stops on its own terminal mode (``DONE``, ``GOAL-MISSED``,
+    and in gear mode ``GEAR-ABORT``, v2.0.2); the fleet does not aggregate — check
     ``fleet.last_modes`` against ``PathFollower.TERMINAL_MODES``.
     """
 
@@ -210,6 +267,10 @@ class FleetFollower:
                 "MPC layer on — construct them with mpc_model=\"off\" (the fleet "
                 "step passes no yaw_rate / v_lat, and N MPC solves per step do not "
                 "fit a control period)")
+        modes = sorted({getattr(f, "command_mode", "signed") for f in followers})
+        if len(modes) > 1:
+            raise ValueError(
+                f"FleetFollower needs one command_mode for every follower; got {modes}")
         n = int(getattr(plant, "n_members", 1))
         if n != len(followers):
             raise ValueError(
@@ -236,7 +297,11 @@ class FleetFollower:
 
         ``states`` is a sequence of the dicts :func:`extract_state` returns,
         or of ``(pos_xy, yaw, v_long, pitch_deg, roll_deg)`` tuples — one per
-        follower. Returns a list of ``(throttle, steer, brake)``.
+        follower. Returns a list of ``(throttle, steer, brake)`` — or, when the
+        followers run ``command_mode="gear"`` (v2.0.2), of
+        :class:`GearCommand`. In gear mode a dict state's optional ``"gear"``
+        key is that vehicle's engaged gear (feedback, see
+        :meth:`PathFollower.step`); :func:`extract_state` does not set it.
         """
         states = list(states)
         if len(states) != len(self.followers):
@@ -245,10 +310,15 @@ class FleetFollower:
 
         plans = []
         for f, st in zip(self.followers, states):
+            fb = None
             if isinstance(st, dict):
+                fb = st.get("gear")
                 st = (st["pos_xy"], st["yaw"], st["v_long"],
                       st["pitch"], st["roll"])
-            plans.append(f.plan(*st))
+            if fb is None:
+                plans.append(f.plan(*st))
+            else:
+                plans.append(f.plan(*st, gear=fb))
 
         # One inversion for everyone. Followers whose step is already decided
         # still occupy a slot — asking for their current response makes their
@@ -257,6 +327,19 @@ class FleetFollower:
         a_t = [p.a_target for p in plans]
         w_t = [p.omega_target for p in plans]
         thr, steer = self.plant.solve(v_long, a_t, w_t)
+        if self.followers and getattr(self.followers[0], "command_mode", "signed") == "gear":
+            # (v2.0.2) the brake model's coast acceleration, ONE batched
+            # prediction at throttle 0 for every member, only when some
+            # member will brake this step.
+            need = [i for i, p in enumerate(plans)
+                    if p.command is None and p.gear * float(thr[i]) < 0.0]
+            if need:
+                import numpy as np
+                a0, _ = _predict_brake0(self.plant, np.zeros(len(plans)),
+                                        np.asarray(steer, dtype=float))
+                a0 = np.atleast_1d(a0)
+                for i in need:
+                    plans[i].a_coast = float(a0[i])
 
         out = [f.finish(p, thr[i], steer[i])
                for i, (f, p) in enumerate(zip(self.followers, plans))]
@@ -323,6 +406,22 @@ GP_INC_M = 1e-3
 GP_MARGIN_M = 0.1
 # _handover_step results.
 _HO_LAW, _HO_PD, _HO_ABORT = 0, 1, 2
+#: v2.0.2 gear mode, chosen values: GUARD latches while the vehicle moves
+#: faster than V_AGAINST (m/s) against the desired gear; more than
+#: SHIFT_MAX_CALLS consecutive SHIFT / GUARD calls end on GEAR-ABORT
+#: ("shift_timeout"; 120 calls = 3 s at 40 Hz — a call count, not a time).
+V_AGAINST = 0.3
+SHIFT_MAX_CALLS = 120
+#: Planar speed below which a SHIFT / GUARD call counts as "slow": 90 % of the
+#: vehicle's shift limit (GEAR_SHIFT_MAX_SPEED). The margin covers the
+#: differences between the follower's ``hypot(v_long, v_lat)`` and the
+#: vehicle's own ``hypot(vel_x, vel_y)``: one control step of lag and float32
+#: vs float64. They are the same quantity only when the state comes from the
+#: same base-link velocity — ``extract_state`` and the drivers read the same
+#: one for a base link without a morph offset (checked on the reference car
+#: only); without ``v_lat`` the follower uses ``|v_long|``.
+SHIFT_SLOW_SPEED = 0.9 * GEAR_SHIFT_MAX_SPEED
+COMMAND_MODES = ("gear", "signed")
 
 
 def _is_real(x) -> bool:
@@ -500,6 +599,32 @@ class PathFollower:
             |v_target| <= k_approach * remaining_distance + 0.3.
         v_stop: |v| below this counts as stopped for the cusp transition (m/s).
         steer_cap: |steer| command cap (keeps skid-steer from saturating).
+        command_mode: (v2.0.2) ``"gear"`` or ``"signed"``; ``None`` (default)
+            = ``"gear"`` with the MPC layer on, ``"signed"`` with
+            ``mpc_model="off"``. ``"signed"`` returns the 2.0.1
+            ``(throttle, steer, brake)`` 3-tuple: the same commands as 2.0.1
+            for the same inputs. ``"gear"`` returns a :class:`GearCommand`
+            (throttle in [0, 1], brake, gear = the active block's sign) for a
+            vehicle driven with ``set_inputs(..., gear=)``. The COMMAND never
+            asks for reverse outside a reverse block already in the path and
+            never decelerates with a throttle against the commanded gear; the
+            VEHICLE behaves the same with ``gear=`` feedback, or absent an
+            external change of its engaged gear — without feedback, after an
+            external reset (or a follower constructed on a vehicle rolling the
+            wanted way in the other engaged gear) the vehicle can be driven in
+            its engaged gear until ``GUARD`` (see :meth:`resync_gear`). The
+            brake level comes from a brake -> deceleration model in STAGE 2 only
+            (:mod:`genesis_vehicle.control.brake`; the MPC prediction keeps its
+            throttle-based deceleration bound). Gear mode refuses a skid-steer
+            ``DifferentiablePlant`` source (``ValueError``; a ``SweepTable``
+            cannot tell — the vehicle refuses the gear on its first step) and
+            needs a plant with ``accel_at`` (``TypeError`` otherwise). See
+            :meth:`plan` for ``SHIFT`` / ``GUARD`` / ``GEAR-ABORT``.
+        brake_gain: (v2.0.2, gear mode only) k_b, m/s^2 of deceleration per
+            unit brake. ``None``: ``plant.brake_gain()`` (DifferentiablePlant,
+            closed form), else the params record's ``brake_gain`` key, else
+            derived from its ``decel_brake_by_speed``; none of these ->
+            ``ValueError``.
 
     MPC layer (v2.0.0; every argument below is MPC-only and raises
     ``ValueError`` when given together with ``mpc_model="off"``):
@@ -678,6 +803,8 @@ class PathFollower:
     instead of a negative throttle) / ``MPC-HOLDCMD`` (``"hold"``: previous
     command kept after a failed solve) / ``PD-FALLBACK`` (``"pd"``: PD after
     a failed solve) / ``PD-ALIGN`` (heading gate) / ``PD-STALL`` (watchdog),
+    and in gear mode (v2.0.2) the non-terminal ``SHIFT`` / ``GUARD`` and the
+    terminal ``GEAR-ABORT`` (see :meth:`plan`),
     and since v2.0.1 the terminal ``GOAL-MISSED`` (every mode: on the final
     block, past the goal's normal plane on the last segment, at least
     ``arrival_goal + 0.1`` m from the goal, and the distance grew by more than
@@ -715,7 +842,10 @@ class PathFollower:
     #: on the final block, sets ``stop_reason`` to None and resets no MPC
     #: budget). Loop on
     #: ``last_mode in PathFollower.TERMINAL_MODES`` and read :attr:`stop_reason`.
-    TERMINAL_MODES = ("DONE", "GOAL-MISSED", "MPC-ABORT")
+    #: (v2.0.2) plus ``GEAR-ABORT`` (gear mode: more than ``SHIFT_MAX_CALLS``
+    #: consecutive ``SHIFT`` / ``GUARD`` calls, ``stop_reason ==
+    #: "shift_timeout"``; sticky like ``MPC-ABORT``).
+    TERMINAL_MODES = ("DONE", "GOAL-MISSED", "MPC-ABORT", "GEAR-ABORT")
 
     def __init__(self, path, plant=None, *, sweep=None,
                  mpc_params=_Unset(None), mpc_model: str = "bicycle",
@@ -727,7 +857,8 @@ class PathFollower:
                  lookahead: float = 3.5, arrival_goal: float = 1.5,
                  cusp_goal: float = 1.0, k_v: float = 2.0, k_w: float = 1.5,
                  k_approach: float = 1.0, v_stop: float = 0.05,
-                 steer_cap: float = 0.5, plant_kwargs=None):
+                 steer_cap: float = 0.5, plant_kwargs=None,
+                 command_mode: Optional[str] = None, brake_gain: Optional[float] = None):
         # (1) path length, (2) plant present — the 1.x checks, unchanged.
         if len(path) < 2:
             raise ValueError("path needs at least 2 waypoints")
@@ -761,9 +892,18 @@ class PathFollower:
             mpc_setup = None
         else:
             mpc_setup = self._check_mpc_args(plant, mpc_model, **mpc_kw)
+        # (v2.0.2) command mode and the brake model's gain — every check before
+        # this object is touched (the plant is coerced into a local first).
+        plant_obj = _as_plant(plant, plant_kwargs or {})
+        command_mode, k_b = self._check_command_mode(
+            plant_obj, mpc_on, command_mode, brake_gain,
+            None if mpc_setup is None else mpc_setup["params"])
 
         self.mpc_model = mpc_model
-        self.plant = _as_plant(plant, plant_kwargs or {})
+        self.command_mode = command_mode
+        self._gear_mode = command_mode == "gear"
+        self._k_b = k_b
+        self.plant = plant_obj
         #: Back-compat alias — ``.sweep`` was the pre-v1.3.0 attribute name.
         self.sweep = self.plant
         self._coupled_plant = bool(getattr(self.plant, "has_coupled_solve", False))
@@ -802,8 +942,81 @@ class PathFollower:
         # v2.0.1 terminal state and GP-AWAY2 history (every mode, "off" too).
         self._terminal = None           # None | (mode, stop_reason); DONE is not stored
         self._gp_hist = []              # distance to the final waypoint, last 3 calls
+        # v2.0.2 gear mode (plan_r202 section 3.3): the gear the follower
+        # believes engaged, whether the construction-only motion rule has run,
+        # consecutive slow SHIFT calls without feedback, consecutive
+        # SHIFT/GUARD calls (GEAR-ABORT), the GUARD latch and its slow calls,
+        # and this call's feedback / lateral speed.
+        self._gear_assumed = None
+        self._gear_init_done = False
+        self._shift_ok = 0
+        self._shift_n = 0
+        self._guard = False
+        self._guard_slow = 0
+        self._fb_gear = None
+        self._fb_vlat = None
         if mpc_on:
             self._init_mpc(mpc_setup, steer_cap)
+
+    # -- gear mode: construction (v2.0.2) -------------------------------------------
+
+    @staticmethod
+    def _check_command_mode(plant, mpc_on, command_mode, brake_gain, params):
+        """``(command_mode, k_b)``; raises before any side effect. Default
+        mode: ``"gear"`` with the MPC layer on, ``"signed"`` with
+        ``mpc_model="off"``. In gear mode: a skid-steer ``DifferentiablePlant``
+        source refuses (``ValueError``); the plant needs a callable
+        ``accel_at`` (``TypeError``); ``k_b`` comes from ``brake_gain=``, else
+        a callable ``plant.brake_gain()`` (a non-callable attribute of that name
+        is a ``TypeError``), else the params record
+        (``control.brake.brake_gain_from_params``), else ``ValueError``."""
+        if command_mode is None:
+            command_mode = "gear" if mpc_on else "signed"
+        if command_mode not in COMMAND_MODES:
+            raise ValueError(f"command_mode must be one of {list(COMMAND_MODES)} or None; "
+                             f"got {command_mode!r}")
+        if brake_gain is not None:
+            if command_mode != "gear":
+                raise ValueError("brake_gain= is a gear-mode argument (command_mode=\"gear\")")
+            if not _is_real(brake_gain) or not (math.isfinite(float(brake_gain))
+                                                and float(brake_gain) > 0.0):
+                raise ValueError(f"brake_gain must be a finite number > 0 (m/s^2 per unit "
+                                 f"brake); got {brake_gain!r}")
+        if command_mode == "signed":
+            return command_mode, None
+        src = getattr(plant, "src", None)
+        resolved = getattr(src, "resolved", None) if src is not None else None
+        if resolved is not None and refuses_gear(resolved):
+            raise ValueError(
+                "command_mode=\"gear\": this plant's vehicle is skid-steer (PerSide "
+                "drivetrain or SkidSteer steering), which refuses gear mode — pass "
+                "command_mode=\"signed\"")
+        if not callable(getattr(plant, "accel_at", None)):
+            raise TypeError(
+                "command_mode=\"gear\" needs a plant with a forward accel_at(v, throttle, "
+                f"pitch_deg, roll_deg) for the brake model; {type(plant).__name__} has "
+                "none (SweepTable and DifferentiablePlant have it) — or pass "
+                "command_mode=\"signed\"")
+        if brake_gain is not None:
+            return command_mode, float(brake_gain)
+        bg = getattr(plant, "brake_gain", None)
+        if bg is not None and not callable(bg):
+            raise TypeError(
+                f"plant.brake_gain must be a method returning the brake gain; got a "
+                f"{type(bg).__name__} attribute — pass brake_gain= to PathFollower instead")
+        if bg is not None:
+            k_b = float(bg())
+            if not (math.isfinite(k_b) and k_b > 0.0):
+                raise ValueError(f"plant.brake_gain() must be a finite number > 0; got {k_b!r}")
+            return command_mode, k_b
+        from .brake import brake_gain_from_params
+        k_b = brake_gain_from_params(params, plant.accel_at)
+        if k_b is None:
+            raise ValueError(
+                "command_mode=\"gear\" needs the brake gain k_b (m/s^2 per unit brake): "
+                "pass brake_gain=, a plant with brake_gain() (DifferentiablePlant), or "
+                "mpc_params (its brake_gain key, or decel_brake_by_speed)")
+        return command_mode, k_b
 
     # -- MPC layer: construction ------------------------------------------------
 
@@ -1126,9 +1339,23 @@ class PathFollower:
     # -- Control ----------------------------------------------------------------
 
     def step(self, pos_xy, yaw, v_long, pitch_deg, roll_deg, *,
-             yaw_rate=None, v_lat=None, t=None):
+             yaw_rate=None, v_lat=None, t=None, gear=None):
         """One control step. Returns ``(throttle, steer, brake)``, each in
-        the SDK input range (throttle/steer in [-1, 1], brake in [0, 1]).
+        the SDK input range (throttle/steer in [-1, 1], brake in [0, 1]) with
+        ``command_mode="signed"``; with ``command_mode="gear"`` (v2.0.2, the
+        default with the MPC layer on) a :class:`GearCommand` ``(throttle in
+        [0, 1], steer, brake, gear)`` — decelerations come out as brake, never
+        as a throttle against the commanded gear. The vehicle follows that with
+        ``gear=`` feedback, or absent an external change of its engaged gear
+        (see :meth:`resync_gear` for the case without feedback).
+
+        ``gear`` (v2.0.2, gear mode): the vehicle's ENGAGED gear (+1 / -1),
+        e.g. ``int(veh.gear[0])`` — optional feedback. With it, a call whose
+        engaged gear differs from the one the follower wants is a ``SHIFT``
+        (throttle 0, brake 1); without it the follower assumes the shift took
+        after two slow ``SHIFT`` calls and guards against motion opposite the
+        wanted gear (``GUARD``) — see :meth:`plan`. Ignored with
+        ``command_mode="signed"``.
 
         ``yaw_rate`` (rad/s) and ``v_lat`` (m/s) are required while the MPC
         layer drives a forward block (``TypeError`` otherwise;
@@ -1137,7 +1364,7 @@ class PathFollower:
         per call (from 0 at construction / the ``set_path`` time), a given
         ``t`` also resets that clock. Ignored with ``mpc_model="off"``."""
         plan = self.plan(pos_xy, yaw, v_long, pitch_deg, roll_deg,
-                         yaw_rate=yaw_rate, v_lat=v_lat, t=t)
+                         yaw_rate=yaw_rate, v_lat=v_lat, t=t, gear=gear)
         if plan.command is not None:
             return self.finish(plan, 0.0, 0.0)
         if self._coupled_plant:
@@ -1181,7 +1408,13 @@ class PathFollower:
         report back to the plant. Split out of :meth:`step` so a fleet can run
         one batched inversion between everyone's :meth:`plan` and everyone's
         :meth:`finish` — see :class:`FleetFollower`.
+
+        With ``command_mode="gear"`` (v2.0.2) it returns a :class:`GearCommand`
+        from :meth:`_finish_gear` instead; the signed path below is the 2.0.1
+        code, unchanged.
         """
+        if self._gear_mode:
+            return self._finish_gear(plan, throttle, steer)
         if plan.command is not None:
             self.last_mode = plan.mode
             self._report_applied(plan.command[0], plan.command[1])
@@ -1216,8 +1449,77 @@ class PathFollower:
         self.last_mode = plan.mode
         return throttle, steer, brake
 
+    def _finish_gear(self, plan, throttle, steer):
+        """(v2.0.2) The gear-mode finish: ``GearCommand(throttle >= 0, steer,
+        brake, gear)``. ``u_g = gear * u`` is the plant's command in the
+        gear's direction: ``u_g >= 0`` drives with throttle ``min(u_g, 1)``,
+        ``u_g < 0`` brakes with ``control.brake.brake_for(a_target, a_coast,
+        v, gear, k_b)`` at throttle 0 (``a_coast`` = ``plan.a_coast`` or
+        ``control.brake.coast_for_brake(plant, v, pitch, roll, gear)``: the
+        plant's ``accel_at`` at throttle 0, with a SweepTable's coast below its
+        first non-zero grid speed replaced — Amendment 1). PD steps keep the low-speed
+        KICK only while the vehicle is not moving against the gear by more
+        than 0.05 m/s; the brake at rest (throttle < 0.02 and |v| < 0.1 m/s)
+        is the 2.0.1 rule. MPC steps keep ``MPC-HOLD`` and the field finish's
+        brake at rest. The plant is told ``gear * throttle`` (0 on a braking
+        step)."""
+        g = 1 if plan.gear is None or plan.gear >= 0 else -1
+        if plan.command is not None:
+            self.last_mode = plan.mode
+            self._report_applied(plan.command[0], plan.command[1])
+            c = plan.command
+            return GearCommand(float(c[0]), float(c[1]), float(c[2]), g)
+        v_long = plan.v_long
+
+        def _brake():
+            a_coast = plan.a_coast
+            if a_coast is None:
+                # Amendment 1: the table's coast below its first non-zero
+                # speed is replaced (control.brake.coast_for_brake).
+                from .brake import coast_for_brake
+                a_coast = coast_for_brake(self.plant, v_long, plan.pitch_deg,
+                                          plan.roll_deg, g)
+            from .brake import brake_for
+            return brake_for(plan.a_target, a_coast, v_long, g, self._k_b)
+
+        if plan.regime == "R-MPC":
+            from .mpc.law import finish_command
+            thr, st, brk, mode = finish_command(
+                plan.v_long, plan.a_ff, throttle, steer, self.steer_cap)
+            if mode == "MPC-HOLD":
+                thr_out, brake = 0.0, 1.0
+            else:
+                u_g = g * thr
+                if u_g >= 0.0:
+                    thr_out, brake = min(u_g, 1.0), brk
+                else:
+                    thr_out, brake = 0.0, max(_brake(), brk)
+            self._report_applied(g * thr_out, st)
+            self.last_mode = mode if mode == "MPC-HOLD" else plan.mode
+            return GearCommand(float(thr_out), float(st), float(brake), g)
+
+        v_target = plan.v_target
+        u_g = g * float(throttle)
+        kick = False
+        if abs(v_target) > 0.1 and math.copysign(1.0, v_target) == g:
+            v_along = v_long * g
+            # 2.0.1 KICK condition, and (B2) not while moving against the gear.
+            kick = v_along < 0.4 * abs(v_target) and v_along >= -0.05
+        if kick:
+            thr_out, brake = 1.0, 0.0
+        elif u_g >= 0.0:
+            thr_out, brake = min(u_g, 1.0), 0.0
+        else:
+            thr_out, brake = 0.0, _brake()
+        st = max(-self.steer_cap, min(self.steer_cap, float(steer)))
+        if thr_out < 0.02 and abs(v_long) < 0.1:
+            brake = 1.0
+        self._report_applied(g * thr_out, st)
+        self.last_mode = plan.mode
+        return GearCommand(float(thr_out), float(st), float(brake), g)
+
     def plan(self, pos_xy, yaw, v_long, pitch_deg, roll_deg, *,
-             yaw_rate=None, v_lat=None, t=None):
+             yaw_rate=None, v_lat=None, t=None, gear=None):
         """The vehicle-agnostic half of a control step (stage 1).
 
         Runs the path state machine (projection, blocks, cusp, DONE) every
@@ -1233,17 +1535,179 @@ class PathFollower:
         here from this method's inputs, so a caller that runs its own finish
         gets them too. A terminal step (``DONE``, ``GOAL-MISSED``,
         ``MPC-ABORT``) carries ``command=(0, 0, 1)``.
+
+        Gear mode (v2.0.2, ``command_mode="gear"``), decided here too — in
+        this order after the DONE / terminal / cusp checks: ``SHIFT`` (before
+        the projection advances), then after ``GOAL-MISSED`` ``GUARD``. Both
+        are non-terminal ``command=(0, 0, 1)`` plans with ``gear`` = the
+        active block's sign (regime ``"CMD"`` with the MPC layer: no solve, no
+        budget charged), and neither counts toward ``GOAL-MISSED`` (that call's
+        goal distance is taken back out of the history).
+
+        * ``SHIFT`` — the engaged gear (feedback ``gear=``) differs from the
+          wanted one; without feedback, while the gear the follower assumes
+          differs: it is assumed engaged on the call AFTER two consecutive
+          ``SHIFT`` calls at planar speed ``hypot(v_long, v_lat)`` below
+          ``SHIFT_SLOW_SPEED`` (0.45 m/s). Given neither ``v_lat`` nor ``gear``
+          feedback, the follower judges "slow" on ``|v_long|`` alone while the
+          vehicle's shift rule uses its planar speed, so a vehicle sliding
+          sideways can be assumed engaged while it has not shifted — two, because the first can fall on the vehicle's
+          first-step protection step, where it does not shift. The assumed
+          gear starts unknown, except that on the FIRST call that reaches this
+          check a vehicle already moving at 0.5 m/s or more in the wanted
+          direction is assumed in gear; :meth:`set_path` keeps it,
+          :meth:`resync_gear` forgets it (then always ``SHIFT``).
+        * ``GUARD`` — no feedback confirming the wanted gear, and the vehicle
+          moves faster than ``V_AGAINST`` (0.3 m/s) against it: latched; it
+          releases on the call after two consecutive slow ``GUARD`` calls
+          (the vehicle, at throttle 0 and below 0.5 m/s, engages the wanted
+          gear during them), and the wanted gear is then assumed engaged.
+          A mismatch while the vehicle moves IN the block direction (e.g. an
+          external reset of the vehicle's gear) is not detected; with
+          feedback there is none.
+        * ``GEAR-ABORT`` (terminal, ``stop_reason="shift_timeout"``) — more
+          than ``SHIFT_MAX_CALLS`` (120) consecutive ``SHIFT`` / ``GUARD``
+          calls; one driving call resets the count, so ``GUARD`` <-> drive
+          cycles have no bound.
         """
+        if self._gear_mode:
+            self._fb_gear = self._check_feedback(gear)
+            self._fb_vlat = v_lat
         if self._law is None:
             pd = self._plan_pd(pos_xy, yaw, v_long, pitch_deg, roll_deg)
             self.regime = pd.regime
+            if self._gear_mode:
+                self._stamp_gear(pd)
             return pd
         out = self._plan_mpc(pos_xy, yaw, v_long, pitch_deg, roll_deg, yaw_rate, v_lat, t)
         # (v2.0.1) what drove the step that ends here: the next call charges
         # the travel in between to the R-ALIGN / R-FAIL budget of this block.
         self._prev_regime = self.regime
         self._prev_xy = (float(pos_xy[0]), float(pos_xy[1]))
+        if self._gear_mode:
+            self._stamp_gear(out)
         return out
+
+    # -- gear mode: the follower side (v2.0.2) -------------------------------------
+
+    @staticmethod
+    def _check_feedback(gear):
+        """``None``, or the feedback gear as int +1 / -1 (anything ``float()``
+        reads as exactly +-1: an int, a numpy scalar, a one-element tensor);
+        ``ValueError`` otherwise (a ``bool`` included)."""
+        if gear is None:
+            return None
+        try:
+            g = None if isinstance(gear, bool) else float(gear)
+        except (TypeError, ValueError):
+            g = None
+        if g not in (1.0, -1.0):
+            raise ValueError(f"gear feedback must be +1, -1 or None; got {gear!r}")
+        return int(g)
+
+    def _desired_gear(self) -> int:
+        """The gear the follower wants: the active block's direction sign
+        (+1 forward block, -1 reverse block). The single source of the wanted
+        gear — the 2.0.3 seam."""
+        return 1 if self.blocks[self.block_i][2] >= 0 else -1
+
+    def _stamp_gear(self, plan) -> None:
+        if plan.mode in self.TERMINAL_MODES:
+            plan.gear = (self._gear_assumed if self._gear_assumed is not None
+                         else self._desired_gear())
+        else:
+            plan.gear = self._desired_gear()
+
+    def _slow(self, v_long) -> bool:
+        vl = self._fb_vlat
+        return math.hypot(float(v_long), 0.0 if vl is None else float(vl)) < SHIFT_SLOW_SPEED
+
+    def _shift_call(self, desired, v_long) -> bool:
+        """True when this call is a ``SHIFT`` (counters advanced)."""
+        fb = self._fb_gear
+        if not self._gear_init_done:
+            # Construction-only motion rule (plan-review C1): resync_gear()
+            # never re-enters here.
+            self._gear_init_done = True
+            if fb is not None:
+                self._gear_assumed = fb
+            elif desired * float(v_long) >= GEAR_SHIFT_MAX_SPEED:
+                self._gear_assumed = desired
+        if fb is not None:
+            self._gear_assumed = fb
+            self._shift_ok = 0
+            return fb != desired
+        if self._gear_assumed == desired:
+            self._shift_ok = 0
+            return False
+        if self._shift_ok >= 2:
+            self._gear_assumed = desired
+            self._shift_ok = 0
+            return False
+        self._shift_ok = self._shift_ok + 1 if self._slow(v_long) else 0
+        return True
+
+    def _guard_call(self, desired, v_long) -> bool:
+        """True when this call is a ``GUARD`` (latch advanced)."""
+        fb = self._fb_gear
+        if fb is not None and fb == desired:
+            self._guard = False
+            self._guard_slow = 0
+            return False
+        if self._guard and self._guard_slow >= 2:
+            self._guard = False
+            self._guard_slow = 0
+            self._gear_assumed = desired
+        if not self._guard:
+            if desired * float(v_long) < -V_AGAINST:
+                self._guard = True
+                self._guard_slow = 0
+            else:
+                return False
+        self._guard_slow = self._guard_slow + 1 if self._slow(v_long) else 0
+        return True
+
+    def _gear_cmd_plan(self, mode, v_long, pitch_deg, roll_deg, gp_saved):
+        """A SHIFT / GUARD plan, or GEAR-ABORT past the call limit. Takes
+        this call's goal distance back out of the GOAL-MISSED history."""
+        self._gp_hist = gp_saved
+        self._shift_n += 1
+        if self._shift_n > SHIFT_MAX_CALLS:
+            self._terminal = ("GEAR-ABORT", "shift_timeout")
+            mode = "GEAR-ABORT"
+        return FollowerPlan(mode=mode, command=(0.0, 0.0, 1.0), v_long=v_long,
+                            pitch_deg=pitch_deg, roll_deg=roll_deg)
+
+    def resync_gear(self) -> None:
+        """(v2.0.2, gear mode) Forget the gear the follower assumes engaged —
+        call it after anything changed the vehicle's gear behind the
+        follower's back (``VehicleScene.reset()``, ``reset(env_ids)``)
+        when no ``gear=`` feedback is passed. Without feedback the next driving
+        call is then a ``SHIFT`` (two slow calls, as at a cusp; a call that
+        does pass ``gear=`` equal to the wanted gear drives instead) — the construction-time
+        "already moving in the wanted direction" rule does not apply again.
+        Also clears the ``SHIFT`` / ``GUARD`` counters and the ``GUARD``
+        latch, like :meth:`set_path`; keeps a terminal mode. No effect with
+        ``command_mode="signed"``.
+
+        Without feedback and without this call, after an external reset of a
+        vehicle that keeps moving in the block direction the follower goes on
+        commanding throttle in the gear it assumes while the vehicle drives in
+        its reset (opposite) gear, until the vehicle has stopped, moved back
+        and tripped ``GUARD``. That stretch is NOT bounded: on flat or uphill
+        ground it was estimated at about 68 control steps for the reference
+        case (plan_r202 section 4.1 — an estimate, not a bound), and on a
+        downhill grade (in the block direction) that equals or exceeds the
+        rolling resistance it has no time bound. Passing ``gear=`` feedback
+        removes it."""
+        if not self._gear_mode:
+            return
+        self._gear_assumed = None
+        self._gear_init_done = True
+        self._shift_ok = 0
+        self._shift_n = 0
+        self._guard = False
+        self._guard_slow = 0
 
     def _plan_mpc(self, pos_xy, yaw, v_long, pitch_deg, roll_deg, yaw_rate, v_lat, t):
         """:meth:`plan` with the MPC layer on."""
@@ -1252,10 +1716,14 @@ class PathFollower:
             snap = (self.block_i, self.current_idx, self.projection_t,
                     self.projection_xy, self.transitioning, list(self._gp_hist),
                     self._terminal)
+            gsnap = (self._gear_assumed, self._gear_init_done, self._shift_ok,
+                     self._shift_n, self._guard, self._guard_slow)
         pd = self._plan_pd(pos_xy, yaw, v_long, pitch_deg, roll_deg)
         if missing and pd.command is None and self.blocks[self.block_i][2] > 0:
             (self.block_i, self.current_idx, self.projection_t,
              self.projection_xy, self.transitioning, self._gp_hist, self._terminal) = snap
+            (self._gear_assumed, self._gear_init_done, self._shift_ok,
+             self._shift_n, self._guard, self._guard_slow) = gsnap
             raise TypeError(
                 "the MPC layer needs yaw_rate= and v_lat= on every step of a forward "
                 "block — extract_state() returns both")
@@ -1333,7 +1801,9 @@ class PathFollower:
         * ``"stall_budget"`` (``MPC-ABORT``): MPC layer on and
           ``mpc_stall_timeout`` not None;
         * ``"fail_budget"`` (``MPC-ABORT``): MPC layer on and
-          ``on_solve_failure="pd"``, whatever the two kwargs.
+          ``on_solve_failure="pd"``, whatever the two kwargs;
+        * ``"shift_timeout"`` (``GEAR-ABORT``, v2.0.2): gear mode, more than
+          ``SHIFT_MAX_CALLS`` consecutive ``SHIFT`` / ``GUARD`` calls.
 
         ``None`` before the first step, while driving, and on ``DONE`` (a
         ``DONE`` step clears it); reset by :meth:`set_path`. Read-only."""
@@ -1541,6 +2011,13 @@ class PathFollower:
         do_mpc's ``u_prev`` reset to the measured ``(d0, a0)`` before the
         next solve.
 
+        (v2.0.2) In gear mode it also restarts the ``SHIFT`` / ``GUARD``
+        counters and releases the ``GUARD`` latch (and, as the terminal state
+        is cleared, a ``GEAR-ABORT``); it KEEPS the gear the follower assumes
+        engaged, so a ``set_path`` while driving in the same direction issues
+        no ``SHIFT``. A vehicle still moving against the wanted gear latches
+        ``GUARD`` again on the next call.
+
         (v2.0.1) It also clears ``GOAL-MISSED`` / ``MPC-ABORT`` and
         :attr:`stop_reason`, the GP-AWAY2 history, and every MPC budget
         (R-ALIGN / R-FAIL travel, R-STALL count and progress mark): the
@@ -1569,6 +2046,13 @@ class PathFollower:
         self.transitioning = False
         self._terminal = None           # (v2.0.1) terminal state and GP-AWAY2 history
         self._gp_hist = []
+        # (v2.0.2) gear mode: SHIFT / GUARD counters and the GUARD latch
+        # restart; the gear assumed engaged is KEPT (the vehicle's gear does
+        # not depend on the path; resync_gear() forgets it).
+        self._shift_ok = 0
+        self._shift_n = 0
+        self._guard = False
+        self._guard_slow = 0
         if pos_xy is not None:
             self._snap(pos_xy)
         if self._law is None:
@@ -1638,6 +2122,7 @@ class PathFollower:
             return FollowerPlan(mode=self._terminal[0], command=(0.0, 0.0, 1.0),
                                 v_long=v_long, pitch_deg=pitch_deg,
                                 roll_deg=roll_deg)
+        gp_saved = list(self._gp_hist) if self._gear_mode else None
         self._gp_hist = (self._gp_hist + [d_goal])[-3:]
 
         # Cusp state machine: brake to a stop at the block boundary, then
@@ -1670,6 +2155,12 @@ class PathFollower:
                                     v_long=v_long, pitch_deg=pitch_deg,
                                     roll_deg=roll_deg)
 
+        if self._gear_mode:
+            # (v2.0.2) SHIFT: after the cusp machine, before the projection.
+            desired = self._desired_gear()
+            if self._shift_call(desired, v_long):
+                return self._gear_cmd_plan("SHIFT", v_long, pitch_deg, roll_deg, gp_saved)
+
         self._advance(pos_xy)
 
         # (v2.0.1) GP-AWAY2: past the goal on the final segment, moving away.
@@ -1678,6 +2169,13 @@ class PathFollower:
             return FollowerPlan(mode="GOAL-MISSED", command=(0.0, 0.0, 1.0),
                                 v_long=v_long, pitch_deg=pitch_deg,
                                 roll_deg=roll_deg)
+
+        if self._gear_mode:
+            # (v2.0.2) GUARD: after GOAL-MISSED (a terminal wins), before the
+            # lookahead. A driving call resets the SHIFT/GUARD call count.
+            if self._guard_call(desired, v_long):
+                return self._gear_cmd_plan("GUARD", v_long, pitch_deg, roll_deg, gp_saved)
+            self._shift_n = 0
 
         la_idx, capped = self._lookahead()
         la = self.path[la_idx]

@@ -172,7 +172,8 @@ def test_counts_plan_calls_not_time():
     idx = []
     for h in (0.025, 0.05):
         f = PathFollower(STRAIGHT, G.make_table(),
-                         mpc_params=MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK)))
+                         mpc_params=MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK)),
+                         command_mode="signed")
         f._law.solver = FakeSolver(default=ok(0.0, 0.5))
         for k, p in enumerate(_past_goal()):
             f.plan(p, 0.0, 1.0, 0.0, 0.0, yaw_rate=0.0, v_lat=0.0, t=k * h)

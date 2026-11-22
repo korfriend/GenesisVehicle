@@ -211,5 +211,26 @@ class SweepTable:
         ``omega_target`` (saturates when the target is unachievable)."""
         return self._steer_lu.inverse(v, omega_target, pitch_deg, roll_deg)
 
+    def accel_at(self, v: float, throttle: float,
+                 pitch_deg: float = 0.0, roll_deg: float = 0.0) -> float:
+        """(v2.0.2) The FORWARD map: the table's acceleration at speed ``v``,
+        ``throttle``, steer 0, ``pitch_deg`` / ``roll_deg`` (multilinear, clamped
+        to the grid like the inverse). The gear-mode follower reads its coast
+        acceleration ``accel_at(v, 0, pitch, roll)`` here for the brake model
+        (``control.brake``)."""
+        return float(self._throttle_lu.forward(v, throttle, pitch_deg, roll_deg))
+
+    @property
+    def coast_hold_speeds(self):
+        """(v2.0.2) ``(v_neg, v_pos)``: the largest grid speed below 0 and the
+        smallest above 0 of the throttle lookup's speed axis (``None`` for a
+        side without one). Read-only; used by ``control.brake.coast_for_brake``
+        (the gear-mode brake conversion) to replace the table's linear coast
+        between rest and its first non-zero speed. ``accel_at`` is unchanged."""
+        ax = self._throttle_lu._interp.axes[0]
+        neg = [float(a) for a in ax if a < 0.0]
+        pos = [float(a) for a in ax if a > 0.0]
+        return (max(neg) if neg else None, min(pos) if pos else None)
+
     def __len__(self) -> int:
         return len(self.columns[SWEEP_COLUMNS[0]])

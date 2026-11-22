@@ -45,7 +45,8 @@ START = (30.0, 0.0)
 
 def _follower(**kw):
     return PathFollower(STALL_PATH, make_table(),
-                        mpc_params=MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK)), **kw)
+                        mpc_params=MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK)),
+                        command_mode="signed", **kw)
 
 
 def test_both_none_reproduces_the_standstill_solution():

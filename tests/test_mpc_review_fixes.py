@@ -80,7 +80,7 @@ def test_reset_history_is_on_by_default():
 def _mpc_follower():
     p = MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK))
     return PathFollower([(float(x), 0.0, 0.0, 3.0) for x in np.arange(0.0, 30.0, 0.5)],
-                        rp.make_table(), mpc_params=p)
+                        rp.make_table(), mpc_params=p, command_mode="signed")
 
 
 def test_missing_yaw_rate_raises_before_anything_moves():

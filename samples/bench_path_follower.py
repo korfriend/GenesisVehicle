@@ -44,9 +44,13 @@ import subprocess
 
 import numpy as np
 
-ARMS = {"nonlinear": dict(mpc_model="bicycle", mpc_impl="nonlinear"),
-        "linear": dict(mpc_model="bicycle", mpc_impl="linear"),
-        "pd": dict(mpc_model="off")}
+#: Every arm runs ``command_mode="signed"`` (v2.0.2): the published real-time
+#: figures were measured with the signed follower, and ``mpc_follow_demo.run``'s
+#: default became gear mode in 2.0.2. The gear-mode cost is not what this bench
+#: reports.
+ARMS = {"nonlinear": dict(mpc_model="bicycle", mpc_impl="nonlinear", command_mode="signed"),
+        "linear": dict(mpc_model="bicycle", mpc_impl="linear", command_mode="signed"),
+        "pd": dict(mpc_model="off", command_mode="signed")}
 METRICS = ("tot_over25_pct", "ctrl_over25_pct", "ctrl_mean_ms", "solve_p50_ms", "solve_p95_ms",
            "solve_max_ms")
 

@@ -76,9 +76,10 @@ seams. The full diagram lives in
 
 | Input | Range | Meaning |
 |---|---|---|
-| `throttle` | `[-1, +1]` | signed; `+` accelerates forward, `-` reverses |
+| `throttle` | `[-1, +1]` | signed; `+` accelerates forward, `-` reverses. In gear mode (v2.0.2): a magnitude, clamped to `[0, 1]`, applied in the engaged gear's direction |
 | `brake` | `[0, 1]` | positive magnitude — internally converted to a signed torque opposing wheel rotation |
 | `steer` | `[-1, +1]` | **`+steer` = right turn** |
+| `gear` (v2.0.2, keyword-only) | `None`, `+1`, `-1` | `None` (default) = the signed throttle above; `±1` = opt-in gear mode: the engaged gear changes only at throttle 0 and planar speed < 0.5 m/s, drive torque never opposes it; skid-steer vehicles refuse it ([`physics-contracts.md` §7.20](physics-contracts.md)) |
 
 Internal sign flips (Genesis RHS, URDF `<axis 0 0 -1>`, a legacy variant's
 `+steer = LEFT`) are absorbed inside the strategy / visual layer. The

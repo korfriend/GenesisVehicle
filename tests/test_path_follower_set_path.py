@@ -72,7 +72,7 @@ def mpc_follower():
     pytest.importorskip("casadi")
     pytest.importorskip("do_mpc")
     p = MPCVehicleParams.from_dict(copy.deepcopy(rp.PARAMS_SDK))
-    return PathFollower(A, rp.make_table(), mpc_params=p)
+    return PathFollower(A, rp.make_table(), mpc_params=p, command_mode="signed")
 
 
 def test_mpc_set_path_keeps_the_nlp_and_resets_u_prev(mpc_follower):

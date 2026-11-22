@@ -82,7 +82,7 @@ from genesis_vehicle.tests.data import make_mpc_field_replay as rp
 fx = json.load(open(FIXTURE))
 fol = PathFollower(rp.course(), rp.make_table(), mpc_params=MPCVehicleParams.from_dict(fx["params"]),
                    mpc_model="bicycle", on_solve_failure="hold", mpc_v_floor=0.5,
-                   steer_cap=fx["steer_cap"])
+                   steer_cap=fx["steer_cap"], command_mode="signed")
 out = []
 for s in fx["steps"]:
     t, x, y, yaw, v, pitch, roll, r, vy = s[:9]

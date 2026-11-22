@@ -76,7 +76,8 @@ def _params():
 
 
 def _f(path, results=None, policy="pd", **kw):
-    f = PathFollower(path, make_table(), mpc_params=_params(), on_solve_failure=policy, **kw)
+    f = PathFollower(path, make_table(), mpc_params=_params(), on_solve_failure=policy,
+                     command_mode="signed", **kw)
     fake = FakeSolver(results, default=ok(0.0, 0.5))
     f._law.solver = fake
     return f, fake
@@ -436,7 +437,7 @@ def test_zero_steer_cap_raises_with_mpc_but_not_off():
 
 
 def test_terminal_modes_constant_and_stop_reason_default():
-    assert PathFollower.TERMINAL_MODES == ("DONE", "GOAL-MISSED", "MPC-ABORT")
+    assert PathFollower.TERMINAL_MODES == ("DONE", "GOAL-MISSED", "MPC-ABORT", "GEAR-ABORT")
     f, _ = _f(LONG)
     assert f.stop_reason is None
 

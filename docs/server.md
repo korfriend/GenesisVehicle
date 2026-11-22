@@ -1380,11 +1380,30 @@ After build, the server also emits topology once:
 > `brake` field now applies its full torque down to standstill as a Coulomb
 > projection that holds a stopped wheel (`physics-contracts.md` §7.1): stops
 > are shorter (reference car, brake 1.0 from about 8.7 m/s: 9.450 → 7.295 m),
-> a braked vehicle holds on a slope (car 10° / 20°), and `throttle` + `brake`
+> a braked vehicle holds on a slope (car 10° / 20°, at brake 1.0), and `throttle` + `brake`
 > stops the vehicle when the brake torque exceeds the drive torque per wheel
 > (1.7.0 crept at 0.728 m/s under throttle 1.0 + brake 1.0). A client tuned
 > against 1.7.0's fading brake will feel a stronger brake. The wire schema is
 > unchanged. CHANGELOG 1.8.0 §2.
+>
+> **Correction (v2.0.2): "holds on a slope" needs `brake > 0.3`.** The note
+> above said a braked vehicle holds on a slope without that condition; that was
+> incomplete. The vehicle comes to rest only when `StaticFrictionLock` engages,
+> at brake above its `brake_thr` (0.3 in the `"control"` stability profile).
+> At brake ≤ 0.3 on a slope the wheels stay stopped while the
+> chassis slides on tyre slip (reference car, 5° downhill, brake 0.3: 0.025 m/s,
+> no rest in 30 s; brake 0.31 stops in 2.2 s), identical on 2.0.1 —
+> `physics-contracts.md` §7.17, CHANGELOG 2.0.2 §7. A fix is planned for a later
+> release.
+>
+> **Gear mode (SDK v2.0.2) is NOT on the wire.** The SDK's opt-in vehicle gear
+> mode (`Vehicle.set_inputs(..., gear=)`, `physics-contracts.md` §7.20) has no
+> OSC field: the server calls `set_inputs` without a gear, so every server
+> vehicle is driven with the signed throttle exactly as in 2.0.1 (negative
+> throttle = reverse drive torque), and no gear state is reported. A client-side
+> `PathFollower` therefore uses `command_mode="signed"` (the `mpc_model="off"`
+> default) or sends `GearCommand.signed()`. Server code and wire schema are
+> unchanged in 2.0.2.
 
 ### 4.5 Runtime — server → client
 

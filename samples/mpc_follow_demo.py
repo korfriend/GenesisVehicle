@@ -28,7 +28,20 @@ yaw. ``--align-gate off`` / ``--stall-timeout off`` pass
 exact 2.0.0 restore: ``GOAL-MISSED``, the block-end speed sign (W2) and, under
 ``on_solve_failure="pd"``, the ``fail_budget`` abort stay on; a run equals 2.0.0
 only if none of them acts. ``--log PATH`` writes one JSON line per control step (time,
-state, regime, mode, command, solve status).
+state, regime, mode, command, solve status; v2.0.2 also the commanded and the engaged
+gear).
+
+Gear mode (v2.0.2): ``--command-mode gear`` (default, also with ``--mpc-model off``)
+drives the car with ``set_inputs(..., gear=)`` from the follower's ``GearCommand``
+(decelerations by brake, reverse only on the cusp course's reverse block);
+``--gear-feedback on`` (default) passes the engaged gear ``int(veh.gear[0])`` back to
+``PathFollower.step(gear=)``, ``off`` lets the follower run without it.
+``--command-mode signed`` is the 2.0.1 signed-throttle loop.
+
+On a terminal mode the demo applies the terminal command (throttle 0, brake 1) and
+keeps stepping until the car is still (|v| < 0.01 m/s) or 2 s have passed, then
+exits (v2.0.2; through 2.0.1 it left the loop without applying it). The reported
+metrics (time, CTE, modes) stop at the terminal step.
 
 Onboarding is two measurements, done on the first run and CACHED in
 ``samples/data/mpc_cache/`` (git-ignored; ``--remeasure`` refreshes):
@@ -53,7 +66,7 @@ that machine (CPU/WSL2, genesis-world 1.4.5, this course) — measure yours.
 
 PASS: DONE within ``--t-max`` and maximum cross-track error < 1.0 m (the
 other courses: DONE within ``--t-max``). The run ends on any terminal mode
-(v2.0.1: ``DONE``, ``GOAL-MISSED``, ``MPC-ABORT``; ``PathFollower.TERMINAL_MODES``)
+(``DONE``, ``GOAL-MISSED``, ``MPC-ABORT``, v2.0.2 ``GEAR-ABORT``; ``PathFollower.TERMINAL_MODES``)
 and reports it with ``stop_reason``; only ``DONE`` is a PASS. The last line is a ``MPC_RESULT {json}``
 record (consumed by ``bench_path_follower.py``).
 
@@ -178,8 +191,13 @@ def ensure_cache(urdf, preset, remeasure=False, gpu=False, log=print):
 def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="bicycle",
         mpc_impl="nonlinear", plant="table", course="demo", v=None, ramp=1.0, t_max=40.0,
         on_solve_failure="pd", gpu=False, viewer=False, log=print, radius=30.0,
-        vertex_deg=90.0, start_yaw=None, align_gate=True, stall_timeout=True, log_path=None):
+        vertex_deg=90.0, start_yaw=None, align_gate=True, stall_timeout=True, log_path=None,
+        command_mode="gear", gear_feedback=True):
     """Drive one run; returns the result dict (also the ``MPC_RESULT`` record).
+
+    ``command_mode`` ``"gear"`` (default) / ``"signed"`` is passed to
+    ``PathFollower``; ``gear_feedback`` passes the engaged gear to
+    ``PathFollower.step(gear=)`` in gear mode.
 
     ``v`` None = the course's speed (demo 8, cusp 4, misaligned 2, vertex 4 m/s).
     ``align_gate`` / ``stall_timeout`` False pass ``mpc_align_gate=None`` /
@@ -221,18 +239,34 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
         kw["mpc_align_gate"] = None
     if mpc_model != "off" and not stall_timeout:
         kw["mpc_stall_timeout"] = None
+    if mpc_model == "off" and command_mode == "gear" and plant == "table":
+        # The PD follower gets no mpc_params, so its brake gain comes from the
+        # same params file explicitly (a DifferentiablePlant has brake_gain()).
+        from genesis_vehicle.control import SweepTable, load_mpc_params
+        from genesis_vehicle.control.brake import brake_gain_from_params
+        stage2 = SweepTable.load(table)
+        kw["brake_gain"] = brake_gain_from_params(load_mpc_params(params), stage2.accel_at)
     t0 = time.perf_counter()
-    fol = PathFollower(path, stage2, mpc_model=mpc_model, steer_cap=STEER_CAP, **kw)
+    fol = PathFollower(path, stage2, mpc_model=mpc_model, steer_cap=STEER_CAP,
+                       command_mode=command_mode, **kw)
+    gear_mode = fol.command_mode == "gear"
     ctor_ms = (time.perf_counter() - t0) * 1e3
     tc, ts, xy, modes, rev_entry, solve_ms = [], [], [], {}, None, []
     rows, seq = [], []
+    terminal_cmd = None
     for k in range(int(t_max / DT)):
         st = extract_state(veh)
+        eng = int(veh.gear[0]) if gear_mode else None
+        gkw = {"gear": eng} if (gear_mode and gear_feedback) else {}
         t1 = time.perf_counter()
-        thr, steer, brake = fol.step(st["pos_xy"], st["yaw"], st["v_long"], st["pitch"],
-                                     st["roll"], yaw_rate=st["yaw_rate"], v_lat=st["v_lat"],
-                                     t=k * DT)
+        cmd = fol.step(st["pos_xy"], st["yaw"], st["v_long"], st["pitch"],
+                       st["roll"], yaw_rate=st["yaw_rate"], v_lat=st["v_lat"],
+                       t=k * DT, **gkw)
         tc.append((time.perf_counter() - t1) * 1e3)
+        if gear_mode:
+            thr, steer, brake, gear = cmd
+        else:
+            (thr, steer, brake), gear = cmd, None
         solved = fol._law is not None and fol._law.n_solve > len(solve_ms)
         if solved:
             solve_ms.append(fol._law.last_solve_ms)
@@ -245,18 +279,33 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
             rows.append(dict(k=k, t=k * DT, x=float(st["pos_xy"][0]), y=float(st["pos_xy"][1]),
                              yaw=float(st["yaw"]), v=float(st["v_long"]),
                              regime=fol.regime, mode=fol.last_mode, thr=float(thr),
-                             steer=float(steer), brake=float(brake),
+                             steer=float(steer), brake=float(brake), gear=gear, eng=eng,
                              status=fol._law.last_status if solved else None))
         if rev_entry is None and fol.last_mode == "DRV-1":
             rev_entry = k
         xy.append(st["pos_xy"])
-        if fol.last_mode in PathFollower.TERMINAL_MODES:   # v2.0.1: DONE / GOAL-MISSED / MPC-ABORT
+        if fol.last_mode in PathFollower.TERMINAL_MODES:   # DONE / GOAL-MISSED / MPC-ABORT / GEAR-ABORT
             ts.append(0.0)
+            terminal_cmd = (thr, steer, brake, gear)
             break
         t2 = time.perf_counter()
-        veh.set_inputs(throttle=float(thr), brake=float(brake), steer=float(steer))
+        veh.set_inputs(throttle=float(thr), brake=float(brake), steer=float(steer),
+                       **({"gear": gear} if gear is not None else {}))
         vs.step()
         ts.append((time.perf_counter() - t2) * 1e3)
+    # v2.0.2: APPLY the terminal command (throttle 0, brake 1) until the car is
+    # still or 2 s have passed (not part of the metrics below).
+    post_v, post_s = None, 0.0
+    if terminal_cmd is not None:
+        thr_t, steer_t, brake_t, gear_t = terminal_cmd
+        veh.set_inputs(throttle=float(thr_t), brake=float(brake_t), steer=float(steer_t),
+                       **({"gear": gear_t} if gear_t is not None else {}))
+        for _ in range(int(2.0 / DT)):
+            if abs(extract_state(veh)["v_long"]) < 0.01:
+                break
+            vs.step()
+            post_s += DT
+        post_v = abs(extract_state(veh)["v_long"])
     xy = np.array(xy)
     cte = np.hypot(P[None, :, 0] - xy[:, None, 0], P[None, :, 1] - xy[:, None, 1]).min(1)
     tcs, tss = np.array(tc[20:]), np.array(ts[20:])
@@ -278,6 +327,8 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
         solve_max_ms=float(np.max(solve_ms[1:])) if len(solve_ms) > 1 else None,
         mpc_stats=fol.mpc_stats, sdk=gv.__version__, genesis=gs.__version__,
         end_mode=fol.last_mode, stop_reason=fol.stop_reason,
+        command_mode=fol.command_mode, gear_feedback=bool(gear_feedback) if gear_mode else None,
+        post_stop_v=post_v, post_stop_s=round(post_s, 3),
         mode_seq=seq[:60], mode_seq_len=len(seq), start_xy=[float(c) for c in xy[0]],
         end_xy=[float(c) for c in xy[-1]], start_yaw=yaw0,
         align_gate=bool(align_gate) if mpc_model != "off" else None,
@@ -296,11 +347,13 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
                 fh.write(json.dumps(r_) + "\n")
     log(f"\n{'PASS' if ok else 'FAIL'}: done={done} end mode {fol.last_mode}"
         + (f" ({fol.stop_reason})" if fol.stop_reason else "")
-        + f" t={res['t_end']:.2f}s  CTE mean/max "
+        + f" t={res['t_end']:.2f}s  [{fol.command_mode}] CTE mean/max "
         f"{res['cte_mean']:.3f}/{res['cte_max']:.3f} m  ctrl mean {res['ctrl_mean_ms']:.2f} ms, "
         f"control+sim > 25 ms on {res['tot_over25_pct']:.1f} % of steps  modes {modes}")
     if fol.mpc_stats is not None:
         log(f"MPC solves: {fol.mpc_stats['n_solve']} {fol.mpc_stats['status']}")
+    if post_v is not None:
+        log(f"terminal command applied: |v| = {post_v:.4f} m/s after {post_s:.2f} s")
     return res
 
 
@@ -319,6 +372,10 @@ def main():
     ap.add_argument("--align-gate", choices=("on", "off"), default="on")
     ap.add_argument("--stall-timeout", choices=("on", "off"), default="on")
     ap.add_argument("--log", default=None, help="per-step JSON-lines log path")
+    ap.add_argument("--command-mode", choices=("gear", "signed"), default="gear",
+                    help="PathFollower command_mode (v2.0.2; default gear)")
+    ap.add_argument("--gear-feedback", choices=("on", "off"), default="on",
+                    help="pass the engaged gear to PathFollower.step(gear=) (gear mode)")
     ap.add_argument("--table", default=None, help="existing sweep CSV (skips the cache)")
     ap.add_argument("--params", default=None, help="existing MPC params JSON (skips the cache)")
     ap.add_argument("--remeasure", action="store_true")
@@ -338,7 +395,8 @@ def main():
               t_max=a.t_max, on_solve_failure=a.on_solve_failure, gpu=a.gpu, viewer=a.viewer,
               radius=a.radius, vertex_deg=a.vertex_deg, start_yaw=a.start_yaw,
               align_gate=a.align_gate == "on", stall_timeout=a.stall_timeout == "on",
-              log_path=a.log)
+              log_path=a.log, command_mode=a.command_mode,
+              gear_feedback=a.gear_feedback == "on")
     print("MPC_RESULT " + json.dumps(res, default=str), flush=True)
     return 0 if res["pass"] else 1
 

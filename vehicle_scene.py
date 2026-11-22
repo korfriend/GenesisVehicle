@@ -77,6 +77,7 @@ from ._gs_compat import (COARSE_SDF_MATERIAL_KW, check_genesis_floor,
                          scene_sim_options, warn_coarse_sdf_on_nonconvex)
 from .core import VehiclePhysics
 from .inputs import VehicleInputs
+from .gear import check_vehicle_request
 from .raycast import (
     WheelRayPattern, fan_height_offsets, fan_ray_positions, ray_miss_value,
     read_distances, set_sensor_fan, set_sensor_miss_value, set_sensor_up_offset,
@@ -505,7 +506,7 @@ class Vehicle:
         self._group_cfg = cfg      # shared cfg of its batched kind
 
     # ---- per-step input ----
-    def set_inputs(self, throttle=0.0, brake=0.0, steer=0.0) -> "Vehicle":
+    def set_inputs(self, throttle=0.0, brake=0.0, steer=0.0, *, gear=None) -> "Vehicle":
         """Set this vehicle's controls for the next ``step``(s). Each of
         ``throttle`` [-1,1] (+ = accel) / ``brake`` [0,1] / ``steer`` [-1,1]
         (+ = right) is a scalar (broadcast to all envs) **or a per-env tensor of
@@ -531,15 +532,33 @@ class Vehicle:
         machine-dependent, not a bound). The guarantee covers the
         ``VehicleScene.step`` path only: a caller driving
         ``VehiclePhysics.step`` / ``MultiVehiclePhysics.step`` directly passes
-        its own object and owns what happens to it."""
-        self._inputs = VehicleInputs(throttle=throttle, brake=brake, steer=steer)
+        its own object and owns what happens to it.
+
+        ``gear`` (v2.0.2, keyword-only): ``None`` (default) is the signed
+        throttle above, unchanged. ``+1`` / ``-1`` (or a per-env tensor,
+        mapped by sign) selects gear mode: ``throttle`` is then a magnitude in
+        [0, 1] applied in the direction of the ENGAGED gear (:attr:`gear`),
+        which follows the request only on a step with throttle 0 and planar
+        speed below ``gear.GEAR_SHIFT_MAX_SPEED`` (a request made too early is
+        deferred, not refused). Checked HERE, before anything is stored: a
+        skid-steer vehicle (``PerSide`` drivetrain or ``SkidSteer`` steering;
+        before ``build()`` read off ``cfg``) raises ``ValueError``, and so do a
+        scalar gear other than +-1 and a negative scalar throttle with a gear.
+        A tensor throttle is clamped to [0, 1], not checked."""
+        if gear is not None:
+            check_vehicle_request(self.resolved if self.resolved is not None else self.cfg,
+                                  gear, throttle, where="Vehicle.set_inputs",
+                                  name=self.name)
+        self._inputs = VehicleInputs(throttle=throttle, brake=brake, steer=steer,
+                                     gear=gear)
         return self
 
     def _step_inputs(self) -> VehicleInputs:
         """The per-step copy :meth:`VehicleScene.step` passes to the physics
         driver (v1.7.0) — see :meth:`set_inputs`."""
         i = self._inputs
-        return VehicleInputs(throttle=i.throttle, brake=i.brake, steer=i.steer)
+        return VehicleInputs(throttle=i.throttle, brake=i.brake, steer=i.steer,
+                             gear=i.gear)
 
     # ---- runtime parameter setters (v1.2.5) ----
     # Explicit, supported way to change plant parameters mid-drive. They mutate
@@ -625,6 +644,20 @@ class Vehicle:
         the terrain?"."""
         g = self.wheels_grounded
         return None if g is None else g.all(dim=1)
+
+    @property
+    def gear(self):
+        """(v2.0.2) Engaged gear of gear mode, ``(n_envs,)`` ``int8`` (+1
+        forward, -1 reverse), a copy — pass ``int(veh.gear[0])`` to
+        ``PathFollower.step(gear=)`` as feedback. Meaningful only for a
+        vehicle driven with gear inputs (one driven only with ``gear=None``
+        reads +1). ``None`` for a skid-steer vehicle (refuses gear mode) and
+        before ``build()``."""
+        if self.physics is not None:
+            return self.physics.gear
+        if self._scene is not None and self._scene._mvp is not None:
+            return self._scene._mvp.gear_list()[self._slot]
+        return None
 
     @property
     def resolved(self):

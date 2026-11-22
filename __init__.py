@@ -146,8 +146,9 @@ from .presets import (
     tank_skid_belt,
     stability_hooks_for_profile,
 )
+from .gear import GEAR_FORWARD, GEAR_REVERSE, GEAR_SHIFT_MAX_SPEED
 from .control import (PathFollower, FleetFollower, SweepTable,
-                      DifferentiablePlant)
+                      DifferentiablePlant, GearCommand)
 
 # --- Lazy (require Genesis at import time) -----------------------------------
 
@@ -257,4 +258,6 @@ __all__ = [
     "stability_hooks_for_profile",
     # Control utilities (path following; state extractors live in .control)
     "PathFollower", "FleetFollower", "SweepTable", "DifferentiablePlant",
+    # Gear mode (v2.0.2)
+    "GearCommand", "GEAR_FORWARD", "GEAR_REVERSE", "GEAR_SHIFT_MAX_SPEED",
 ]

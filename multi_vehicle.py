@@ -60,6 +60,9 @@ from .core import (
 from ._gs_compat import apply_links_wrench
 from ._pipeline import compute_wheel_step
 from .inputs import VehicleInputs, VehicleStepInputs
+from .gear import (check_input_type, check_request_shape, check_vehicle_request,
+                   clamp_drive_to_gear, effective_throttle, encode_requests, refuses_gear,
+                   update_gear, with_throttle)
 from .raycast import is_ray_hit_corrected, read_distances, sensor_fan
 from .visual import WheelJointInternalSync
 
@@ -499,6 +502,10 @@ class MultiVehicleKindPhysics:
         assert len(inputs_list) == self.K, (
             f"expected K={self.K} inputs, got {len(inputs_list)}")
         p = self._proto
+        # (v2.0.2) Gear checks for every slot BEFORE any state is written (a
+        # caller of this kind directly; MultiVehiclePhysics.step has already
+        # run the same checks for every kind before stepping any).
+        self._check_gear_inputs(inputs_list)
         # Deadbeat-scale inputs (v1.8.0), once, on the proto: this step never
         # goes through p.step(), so the proto's own first-step call does not
         # happen here. The proto's entity is entities[0] — see the class
@@ -542,11 +549,26 @@ class MultiVehicleKindPhysics:
         steer_per_wheel = steering.per_wheel_steer(
             batched_in, NK, wm, dev, fdt,
         )                                                # (NK, n)
-        T_drive_pw, T_brake_pw = p.resolved.drivetrain.distribute_torque(
-            batched_in, p.omega, wm, dev, fdt,
-        )
-        p.last_T_drive = T_drive_pw
-        p.last_T_brake = T_brake_pw
+        # (v2.0.2) gear requests, read off the ORIGINAL inputs like the other
+        # fields; None when no slot carries one (the 2.0.1 lines below).
+        req = encode_requests([getattr(i, "gear", None) for i in inputs_list],
+                              N, dev, fdt)
+        if req is None:
+            T_drive_pw, T_brake_pw = p.resolved.drivetrain.distribute_torque(
+                batched_in, p.omega, wm, dev, fdt,
+            )
+            p.last_T_drive = T_drive_pw
+            p.last_T_brake = T_brake_pw
+        else:
+            # Gear rows get gear * clamp(throttle, 0, 1), legacy rows their
+            # own throttle (torch.where); T_drive stays local until clamped to
+            # the post-shift gear below.
+            throttle_req = throttle_t
+            throttle_t = effective_throttle(throttle_req, req, p._gear)
+            T_drive_pw, T_brake_pw = p.resolved.drivetrain.distribute_torque(
+                with_throttle(batched_in, throttle_t), p.omega, wm, dev, fdt,
+            )
+            p.last_T_brake = T_brake_pw
 
         ctx = PipelineContext(
             throttle=throttle_t, brake=brake_t, wheel_meta=wm,
@@ -565,6 +587,9 @@ class MultiVehicleKindPhysics:
         p.last_hit = hit.detach().clone()
         if not p._prev_init and torch.all(distances < 1e-6):
             p._prev_init = True
+            if req is not None:
+                # No chassis state on this step, so no shift (gear.py).
+                p.last_T_drive = clamp_drive_to_gear(T_drive_pw, req, p._gear)
             return None
 
         # [CHASSIS STATE]  — single batched solver read for K vehicles, or the
@@ -573,6 +598,14 @@ class MultiVehicleKindPhysics:
                                else self._read_state_batched())
         ctx.vel = vel
         ctx.ang = ang
+        if req is not None:
+            # (v2.0.2) Rule 4 on the planar speed, then the clamp to the
+            # POST-shift gear — the same order as VehiclePhysics.step.
+            v_xy = torch.hypot(vel[:, 0], vel[:, 1])
+            p._gear, _ = update_gear(req, p._gear, throttle_req, v_xy)
+            T_drive_pw = clamp_drive_to_gear(T_drive_pw, req, p._gear)
+            p.last_T_drive = T_drive_pw
+            ctx.gear = p._gear.clone()
         for hook in p.pre_loop_hooks:
             hook.apply_pre_loop(ctx)
 
@@ -643,6 +676,33 @@ class MultiVehicleKindPhysics:
             return (total_F.reshape(self.n_envs, K, 3),
                     total_T.reshape(self.n_envs, K, 3))
         return None
+
+    def _check_gear_inputs(self, inputs_list) -> None:
+        """(v2.0.2) ``gear.check_vehicle_request`` for every slot of this kind
+        whose input carries a gear: a skid-steer kind or a bad scalar request
+        (``ValueError``), a gear tensor of the wrong shape (``ValueError``) or a
+        steering input type that cannot carry the effective throttle
+        (``TypeError``) raises before anything is written."""
+        any_gear = False
+        for i in inputs_list:
+            g = getattr(i, "gear", None)
+            if g is not None:
+                any_gear = True
+                check_vehicle_request(self._proto.resolved, g, getattr(i, "throttle", 0.0),
+                                      where="MultiVehicleKindPhysics.step",
+                                      name=self._proto.vehicle_name)
+                check_request_shape(g, self.n_envs, where="MultiVehicleKindPhysics.step")
+        if any_gear:
+            check_input_type(self._proto.resolved.steering,
+                             where="MultiVehicleKindPhysics.step")
+
+    def gear_rows(self) -> Optional[torch.Tensor]:
+        """(v2.0.2) Engaged gear of every vehicle of this kind, ``(n_envs, K)``
+        ``int8`` copy; ``None`` for a skid-steer kind (refuses gear mode)."""
+        if refuses_gear(self._proto.resolved):
+            return None
+        return self._proto._gear.detach().to(dtype=torch.int8).reshape(
+            self.n_envs, self.K).clone()
 
     def wheel_visual_transforms(self, frame: str = "world"):
         """Closed-form wheel visual poses for this kind's K vehicles (× n_envs),
@@ -1019,6 +1079,10 @@ class MultiVehiclePhysics:
         assert len(inputs_list) == self.n_vehicles, (
             f"MultiVehiclePhysics expected {self.n_vehicles} inputs, "
             f"got {len(inputs_list)}")
+        # (v2.0.2) Gear checks for EVERY vehicle of every kind before any kind
+        # steps: a raise from inside the kind loop below would leave the kinds
+        # before it advanced with no wrench applied.
+        self._precheck_gear_inputs(inputs_list)
         # Re-bucket inputs into per-kind slot order (pure helper — unit-tested).
         per_kind = rebucket_inputs(
             inputs_list, self._flat_to_kind, [k.K for k in self.kinds])
@@ -1063,6 +1127,40 @@ class MultiVehiclePhysics:
             off += Kk
         apply_links_wrench(solver, torch.cat(F_parts, dim=1),
                            torch.cat(T_parts, dim=1), idx)
+
+    def _precheck_gear_inputs(self, inputs_list) -> None:
+        """(v2.0.2) Every gear check a kind's step would make, for every flat
+        input that carries a gear, before ANY kind steps:
+        ``gear.check_vehicle_request`` (skid-steer kind, bad scalar values),
+        ``gear.check_request_shape`` (tensor shape) — ``ValueError`` — and, once
+        per kind with a gear input, ``gear.check_input_type`` (``TypeError``).
+        No state of any kind is written before these pass."""
+        kinds_with_gear = set()
+        for flat_i, kind_idx, _slot in self._flat_to_kind:
+            ins = inputs_list[flat_i]
+            g = getattr(ins, "gear", None)
+            if g is not None:
+                name = self.names[flat_i] if self.names is not None else f"slot {flat_i}"
+                check_vehicle_request(self.kinds[kind_idx].resolved, g,
+                                      getattr(ins, "throttle", 0.0),
+                                      where="MultiVehiclePhysics.step", name=name)
+                check_request_shape(g, self.n_envs, where="MultiVehiclePhysics.step")
+                kinds_with_gear.add(kind_idx)
+        for kind_idx in sorted(kinds_with_gear):
+            check_input_type(self.kinds[kind_idx].resolved.steering,
+                             where="MultiVehiclePhysics.step")
+
+    def gear_list(self) -> list:
+        """(v2.0.2) Per-vehicle engaged gear ``(n_envs,)`` ``int8`` (copies),
+        caller flat order; ``None`` for a skid-steer vehicle (refuses gear
+        mode). Meaningful only for a vehicle driven with gear inputs: one
+        driven only with ``gear=None`` reads +1."""
+        out = [None] * self.n_vehicles
+        for flat_i, kind_idx, slot_idx in self._flat_to_kind:
+            g = self.kinds[kind_idx].gear_rows()
+            if g is not None:
+                out[flat_i] = g[:, slot_idx].clone()
+        return out
 
     def _assemble_kind_distances(self, distances):
         """Re-bucket a flat per-vehicle distances list (length ``n_vehicles``, each
