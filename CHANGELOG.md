@@ -10,12 +10,671 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [2.0.1] — 2026-11-22
+
+**An MPC `PathFollower` started facing away from its path no longer stands
+still: a heading gate hands the start to the PD law until the vehicle faces the
+path, and a watchdog hands a stopped MPC to the PD law; both are on by
+default.** The 2.0.0 stall is caused — measured in a Genesis-free probe of the
+controller — by the MPC's forward-only speed bound (`v_cg_x >= 0`, `control/mpc/alpasim_nonlinear.py:156`), which makes
+standing still the converged optimum; the ±π/2 yaw bound that 2.0.0 named as a
+suspect is measured inactive (§1). Fixing it made a pre-existing 1.x PD
+run-away reachable from the default MPC follower — on the last segment, past
+the goal, the PD drove straight away at path speed — so 2.0.1 also adds a
+goal-passed stop (`GOAL-MISSED`) in every mode, `mpc_model="off"` included,
+per-forward-block budgets on the PD hand-overs (`MPC-ABORT`), and a block-end
+speed-sign fix. Code that loops until `last_mode == "DONE"` must now also stop
+on `GOAL-MISSED` / `MPC-ABORT`: use `last_mode in PathFollower.TERMINAL_MODES`.
+
+**What this release does NOT give you, stated plainly:** the follower is **not
+guaranteed not to run away** — the 1.x PD law can still drive away in
+`mpc_model="off"`, on reverse blocks, and in other measured classes (§8, with
+the counts); `GOAL-MISSED` is neither a distance nor a time bound (§3); the
+distance the MPC itself drives (R-MPC) has no budget (§5); no kwarg combination
+restores 2.0.0 exactly (§6); a final block too short for the turn is not
+refused — the PD drives up to the budget: on the measured course 43.92 m of
+travel (23.29 m PD), CTE 23.95 m (§7);
+forward-only alignment needs about two turning radii of lateral room (§2); the
+LMPC was measured on two ray-wheel courses only (§7.4). The 2.0.0 roadmap
+sentences are replaced (§10).
+
+| abbr | meaning |
+|---|---|
+| MPC / NMPC / LMPC | Model Predictive Control / nonlinear MPC (do_mpc + IPOPT, `mpc_impl="nonlinear"`, default) / linear MPC (OSQP, `mpc_impl="linear"`) |
+| PD | the 1.x `PathFollower` law; `mpc_model="off"` runs it alone, the MPC layer hands steps to it |
+| e_psi | heading error: wrap(per-waypoint path yaw at the projection − chassis yaw), rad |
+| R-OFF / R-MPC / R-REV / R-FAIL / R-ALIGN / R-STALL / CMD | `PathFollower.regime`: layer off / MPC on a forward block / PD on a reverse block / PD after a failed solve / PD while the heading gate holds (new) / PD after the watchdog fired (new) / a fixed command (DONE, cusp brake, and since 2.0.1 `GOAL-MISSED` / `MPC-ABORT`) |
+| R_min | minimum turn radius `wheelbase / tan(steer_cap · max_steer_rad)`; 7.397 m for the reference car (π·R_min = 23.24 m) |
+| s_hw | the furthest path-projection arc length (along the active block) over the earlier R-STALL entries of the block |
+| CTE | cross-track error: distance to the course polyline (m) |
+| C-vNNN Lk | straight 20 m, a vertex with heading change NNN°, then a second leg of k m; 0.5 m waypoint spacing, 4 m/s, start from rest |
+| straight N m behind | a straight path of N m from the car's spawn point along -X at 2 m/s, the car facing +X (e_psi π) |
+| stall course | the 2.0.0 stall case: path (30, 0) → (10, -8) → (-10, -8) → (-30, 0) at 2 m/s, car spawned at (30, 0) facing +X (e_psi 2.76 rad) |
+| ray-wheel | the SDK's Genesis vehicle (as opposed to a kinematic bicycle used in Genesis-free probes) |
+| WSL2 | Windows Subsystem for Linux 2 (the measurement machine's environment) |
+| SemVer | Semantic Versioning |
+
+**Conditions of every ray-wheel number in this entry unless a row says
+otherwise:** CPU/WSL2 (Intel Core Ultra 9 285H), genesis-world 1.4.5,
+`dual_scene`, dt 0.025 × 4 substeps, plane μ 1.0, the reference car
+(`samples/urdf/car_4w.urdf`, `car_4w_rwd_ackermann`, `"control"`), `n_envs` 1,
+`steer_cap` 0.5, `mpc_model="bicycle"`, `OPENBLAS/OMP_NUM_THREADS=1`, one run
+per process and one process at a time, 0.5 s braked settle after the drop,
+60 s limit; the stall course uses the table and params the 2.0.0 stall was
+documented with, every other course the table and params the 2.0.0 release
+was measured with. Harnesses
+(outside the repo): `samples/mpc_follow_demo.py` driven by the implementation's
+scripts, and impl-review's driver built on the same scene and loop, which
+stops at `DONE` or at a terminal mode once |v| < 0.01. Measured 2026-11-21 ..
+2026-11-22.
+
+**Why a patch version.** The rule this project wrote in 1.7.0 and 1.8.0 — a new
+kwarg or an observable public behaviour change bumps the minor version — would
+make this 2.1.0. The user chose 2.0.1 (the fix ships alone and before the
+Pacejka work). The departures from that rule, all of them:
+
+1. **Two new constructor kwargs, on by default**: `mpc_align_gate` and
+   `mpc_stall_timeout`.
+2. **New public surface**: `PathFollower.stop_reason`,
+   `PathFollower.TERMINAL_MODES`; `last_mode` values `PD-ALIGN`, `PD-STALL`,
+   `GOAL-MISSED`, `MPC-ABORT`; `regime` values `R-ALIGN`, `R-STALL`; the
+   `mpc_stats["handover"]` key.
+3. **Default behaviour changes**, including in `mpc_model="off"` (1.x
+   semantics changed in a patch release): new terminal modes other than `DONE`,
+   which a loop that waits only for `DONE` does not end on (in strict SemVer a
+   compatibility break, although each is a stop); the goal-passed stop and the
+   block-end speed sign in every mode; the heading gate, the watchdog and the
+   budgets for every MPC follower, `on_solve_failure="hold"` included; and
+   `on_solve_failure="pd"` now means "the PD drives up to a per-block budget".
+4. **A new construction-time `ValueError`** for an MPC follower whose params
+   give `wheelbase <= 0` or a steering limit `steer_cap · max_steer_rad`
+   outside (0, π/2) (behaviour item 8).
+5. **New sample surface** (`samples/mpc_follow_demo.py`): CLI `--course
+   misaligned|vertex`, `--start-yaw`, `--vertex-deg`, `--radius`,
+   `--align-gate on|off`, `--stall-timeout on|off`, `--log PATH`; `run()`
+   kwargs `radius`, `vertex_deg`, `start_yaw`, `align_gate`, `stall_timeout`,
+   `log_path` (and `v=None` = the course's speed); `MPC_RESULT` keys
+   `end_mode`, `stop_reason`, `align_gate`, `stall_timeout` (plus `mode_seq`,
+   `mode_seq_len`, `start_xy`, `end_xy`, `start_yaw`). The `--course
+   misaligned` run reaches `DONE` at 41.775 s, past the sample's default
+   `--t-max` 40.0, so it needs `--t-max 60` to print PASS.
+
+Earlier patches that changed behaviour (1.5.2, 1.6.2, 1.6.8) all predate the
+rule; they are not a precedent for it.
+
+**Behaviour changes a 2.0.0 user can act on:**
+
+1. **Terminal modes.** `last_mode` can end on `GOAL-MISSED` (every mode) or
+   `MPC-ABORT` (MPC layer); both command `(0, 0, 1)`. An uncapped
+   `while follower.last_mode != "DONE"` loop never ends there (the vehicle
+   stays braked). Do: `last_mode in PathFollower.TERMINAL_MODES`, then read
+   `stop_reason` (§3).
+2. **`mpc_model="off"` changes** (§4): a vehicle on the final block that has
+   passed the goal and is moving away stops with `GOAL-MISSED`; at a block end
+   the target speed keeps the current block's direction sign. For the same
+   sequence of inputs it equals 1.8.0 on every step before the first
+   `GOAL-MISSED` step, except at block-end steps where 1.x planned a speed of
+   the next block's sign (none in the PD golden); in closed loop such a step
+   changes the run from that step on. 4 of the 38 golden runs now stop
+   (§4.3). `FleetFollower` members (always `"off"`) get both.
+3. **A misaligned MPC start is driven by the PD** (`PD-ALIGN`) while
+   |e_psi| > π/2, and the MPC resumes below π/4. This also takes over starts
+   2.0.0 drove away from (|e_psi| above π/2 where the 2.0.0 MPC still started:
+   in a Genesis-free sweep its first `a_cmd` was still positive, 0.47 m/s², at
+   2.2 rad; on ray-wheel 1.67 rad drove to `DONE` and 2.36 rad (3π/4) stood) and mid-path
+   corners sharp enough to put |e_psi| above π/2 (measured on ray-wheel:
+   C-v120 and C-v150 fire, C-v90 does not); such runs differ from 2.0.0 and
+   from the field controller (§2, §7.2).
+4. **A stopped MPC hands over to the PD** (`PD-STALL`) after 2.0 s within
+   0.25 m of an anchor while farther than `arrival_goal` from the goal —
+   **including a vehicle you hold still yourself** (own brake / e-stop) while
+   the follower keeps being stepped; on release the PD (its low-speed KICK
+   saturates the throttle) drives 1.0 m. Avoid with
+   `mpc_stall_timeout=None`, or do not step the follower while holding (§2).
+5. **`MPC-ABORT`** when a forward block's PD hand-overs exceed their budget:
+   `align_budget`, `stall_budget`, `fail_budget` (§5). The R-STALL count
+   starts a new run after 3.0 m of new path progress, measured along the path
+   projection, not on the ground. A final block too short for the turn is not
+   refused: the PD drives up to the R-ALIGN budget (C-v150 L5: 43.92 m of
+   travel — 23.29 m PD, 19.09 m MPC, 1.53 m braking — CTE 23.95 m, then
+   `align_budget`).
+6. **`on_solve_failure="hold"` gets the gate and watchdog by default too**, so
+   "hold" is field parity only with `mpc_align_gate=None,
+   mpc_stall_timeout=None` and only on runs with no `GOAL-MISSED` and no
+   block-end sign step (§6).
+7. **`None` disables** the two new kwargs — unlike `mpc_v_floor` /
+   `mpc_gains` / `dt_ctrl`, where `None` means the default. With
+   `mpc_model="off"` passing either, even as `None`, raises `ValueError` like
+   every MPC argument.
+8. **Error precedence** (CHANGELOG 2.0.0 Breaking 2 gains two steps):
+   `mpc_align_gate` / `mpc_stall_timeout` values are checked right after
+   `mpc_impl` / `on_solve_failure`, before the optional-package check; and
+   after the params file, the plant coercion, the waypoint parsing, the
+   `dt_ctrl` and no-forward-block warnings and the live-plant warning and
+   cross-check, an MPC follower raises `ValueError` unless `wheelbase > 0` and the steering limit
+   `steer_cap · max_steer_rad` lies in (0, π/2) — `steer_cap=0` is still
+   accepted with `"off"`.
+9. **While the PD drives under R-ALIGN / R-STALL the law is not called**:
+   `mpc_stats["plan_age_s"]` keeps growing and `last_plan` is the last
+   pre-hand-over plan. Under R-MPC, `FollowerPlan.v_target` is the PD's value
+   and can differ in sign from 1.x at a block end; the MPC command does not use
+   it.
+10. **The six path-following samples end on any terminal mode** and report it
+    with `stop_reason`; `GOAL-MISSED` / `MPC-ABORT` are never a PASS
+    (`samples/README.md`). Four of them leave the loop before applying the
+    terminal `(0, 0, 1)` command — harmless there, wrong in a copied loop
+    (§11).
+
+### 1. The 2.0.0 stall: root cause, measured
+
+Probes are Genesis-free: `PathFollower` with the real NMPC fed the stall
+course's constant state (the car standing at (30, 0), yaw 0), which reproduces
+the controller-side mechanism; it is not a replay of the Genesis run (that run
+dropped the car from z = 0.5 and its logged end pose is rounded to 3 decimals).
+
+- **Standstill is the converged answer.** 1600 steps, 400 solves, every one
+  `Solve_Succeeded`; `a_cmd` in [-1.22e-7, 6.44e-8]; the planned speed is 0
+  over the horizon, its last nodes sitting on the `v_cg_x >= 0` bound; at
+  `a_cmd` ≈ 0 the finish brakes on every step. Converged solves never trigger
+  `on_solve_failure`.
+- **The forward-only bound is active.** With only that bound lowered from 0 to
+  -5 m/s (a diagnostic copy), the same state gives a reversing plan (planned
+  speed 0 → -1.036 m/s); the aligned case is unchanged (first `a_cmd` 1.8123).
+- **The ±π/2 yaw bound is NOT the cause.** A sweep of 21 start conditions
+  gives identical output with the yaw bound at π/2 and at 3.1 rad (21/21,
+  re-run by plan-review). 2.0.0 said this bound was suspected; that was wrong.
+- **The 2.0.0 MPC starts less the more it is misaligned.** First `a_cmd` from
+  rest at e_psi 0 / 0.5 / 1.0 / 1.4 / 1.8 / 2.2 / 2.76 rad: 1.81 / 1.81 / 1.61 /
+  1.12 / 0.75 / 0.47 / 0.00 m/s².
+- **The `MPC` / `MPC-HOLD` alternation** of the 2.0.0 report is reproduced by
+  state noise (σ 1e-3 on v, yaw rate and lateral speed flips the sign of the
+  numerically-zero `a_cmd`: MPC 172 / MPC-HOLD 228, brake 1 on 400/400 steps);
+  the real Genesis noise level is not measured.
+- **It is not only a start problem.** plan-review's kinematic probe, aligned
+  start, 2.0.0 MPC: on a 150° vertex the MPC stood mid-path in `MPC-HOLD` for 1052 steps
+  and reached `DONE` only at 38.95 s; on ray-wheel C-v150 L20 with the gate and
+  watchdog off it does not reach `DONE` in 60 s (`MPC-HOLD` 1368 steps).
+- **Not established:** whether the standstill is the global minimum of the
+  nonlinear program; the cost terms behind it (a per-term breakdown was not
+  measured). The LMPC (`alpasim_linear.py` has no explicit speed bound) also
+  stands still on the stall course with the gate and watchdog off; its
+  mechanism was not investigated.
+
+The fix does not change the MPC problem (allowing reverse is a different
+controller): it keeps the MPC out of the situations it cannot solve.
+
+### 2. Heading gate and watchdog (MPC layer)
+
+- **`mpc_align_gate=(theta_on, theta_off)`**, default `(π/2, π/4)`, `None`
+  disables; needs `0 < theta_off < theta_on <= π` (`ValueError`). Evaluated
+  on every forward, non-command step outside R-STALL (in R-STALL only at its
+  1.0 m exit), after the path state machine and before any solve: above
+  `theta_on` the PD drives (`PD-ALIGN`, regime `R-ALIGN`, no solve); below
+  `theta_off` the MPC reference is re-timed from the current projection,
+  `u_prev` is reset as in `set_path`, and the MPC drives from that step. At a
+  forward-block entry under the gate the reference is built at the release,
+  not at the entry.
+- **`mpc_stall_timeout`**, default 2.0 s, `None` disables. While the MPC
+  drives a forward block (R-MPC / R-FAIL), if the position passed to `plan()`
+  stays within 0.25 m of an anchor for `mpc_stall_timeout` of follower time
+  `t` while farther than `arrival_goal` from the last waypoint, the PD drives
+  from that step (`PD-STALL`, regime `R-STALL`) until the position is 1.0 m
+  from the entry point (displacement, not travel); then the reference is
+  re-timed and the MPC (or the gate) takes over. A stop that creeps 0.25 m or
+  more per `mpc_stall_timeout` is NOT caught. Time is the `t` passed to
+  `step` / `plan` (or the internal clock), in the caller's units; a forward
+  jump of `t` by more than half the timeout re-anchors (it does not fire on
+  that call; a later stop still fires). Both
+  are decided in `plan()` from its inputs, so a caller running its own finish
+  gets them.
+- The thresholds (π/2, π/4, 2.0 s, 0.25 m, 1.0 m) are chosen values, not
+  derived; they were fixed before the acceptance runs and not changed after.
+- **Forward-only alignment needs lateral room.** The PD turns forward at the
+  steer cap, so a U-turn sweeps about 2·R_min ≈ 15 m sideways: stall course
+  (e_psi 2.76 rad) CTE max 15.09 m; misaligned starts at e_psi π: CTE max
+  15.03 m (stall-course path) / 14.99 m (demo course); C-v150 L20 CTE max
+  10.93 m against 3.46 m with the gate off (which does not reach `DONE` in
+  60 s). Do not
+  read R-ALIGN as tracking: on the stall course it is 10.9 s of U-turn.
+- `mpc_stats["handover"] = {"align": n, "stall": n}` counts entries since
+  construction (`set_path` keeps it); not a per-block count, and
+  `handover["stall"]` is not bounded by 3 per block.
+
+### 3. Terminal modes: `GOAL-MISSED`, `MPC-ABORT`, `stop_reason`, `TERMINAL_MODES`
+
+- `PathFollower.TERMINAL_MODES = ("DONE", "GOAL-MISSED", "MPC-ABORT")`.
+  `DONE` is recomputed every step, as in 1.x.
+- **`GOAL-MISSED`** (every mode, cannot be switched off): on the final block,
+  with the projection on its last segment, beyond the goal's segment-normal
+  plane, at least `arrival_goal + 0.1` m from the goal, and the distance to
+  the goal grew by more than 1e-3 m on **each of the last two `plan()`
+  calls**. It counts calls, not seconds or metres: a vehicle moving away
+  slower than 1e-3 m per call — 1e-3/h m/s at call interval h (0.04 m/s at
+  40 Hz, 0.02 m/s at 20 Hz, 0.1 m/s at 100 Hz) — is not stopped, and calling
+  `plan()` more than once per control step shortens the window. Movement
+  before the vehicle crosses the goal plane is not limited at all.
+- **`MPC-ABORT`**: a budget of §5 was exceeded.
+- **`stop_reason`** (read-only): `"goal_passed"` (`GOAL-MISSED`; every mode,
+  cannot be disabled), `"align_budget"` (MPC on, `mpc_align_gate` not None),
+  `"stall_budget"` (MPC on, `mpc_stall_timeout` not None), `"fail_budget"`
+  (MPC on, `on_solve_failure="pd"`, whatever the two kwargs). `None` before
+  the first step, while driving and on `DONE`.
+- **Stickiness**: `GOAL-MISSED` / `MPC-ABORT` stay set until `set_path` or a
+  `DONE` step. A `DONE` (vehicle inside `arrival_goal`) clears `stop_reason`
+  and the follower drives again if the vehicle leaves the circle; it resets no
+  budget, and it can clear only an abort on the final block — an abort on an
+  earlier block is sticky until `set_path`.
+- With the layer on a terminal step has regime `CMD`, with `"off"` `R-OFF`;
+  `finish()` is unchanged (the existing command path). `FleetFollower` does
+  not aggregate: a member that stops brakes while the rest drive on, so check
+  `fleet.last_modes` against `TERMINAL_MODES`.
+
+### 4. PD changes in every mode (`mpc_model="off"` included)
+
+#### 4.1 The goal-passed stop
+
+The 1.x heading law `0.7·yaw_err + 0.3·pos_err` has a fixed point once the
+vehicle has missed the arrival circle on the last segment: the lookahead is
+pinned to the goal, yaw_err settles at ∓0.3π/0.7 ≈ ∓1.35 rad, the target yaw
+rate goes to 0, and the final block has no speed taper, so the vehicle drives
+straight away at path speed (kinematic probe, reproduced by plan-review). This
+is a 1.x defect; 2.0.1's gate made it reachable from the default MPC follower:
+on an intermediate 2.0.1 build (gate and watchdog, no stops) the ray-wheel car
+reached CTE 218 m on C-v150 L5 and was still moving at 60 s, because 1.35 rad
+lies inside the gate band (π/4, π/2) and the watchdog does not run in R-ALIGN.
+`mpc_model="off"` ran away the same way on that course (214.8 m). Since 2.0.1
+`"off"` on C-v150 L5 stops with `GOAL-MISSED` at 16.425 s, 43.16 m from the
+goal (implementation run, measured on the pre-final 2.0.1 build; the final
+amendment touched only the R-STALL run rule, the deleted draft refusal and
+docstrings, not this path).
+
+#### 4.2 The block-end speed sign
+
+When the lookahead sits exactly on a block-end waypoint without being capped,
+1.x took `v_target` from that waypoint — which carries the NEXT block's sign —
+so a vehicle approaching a cusp could plan, and keep planning, the wrong
+direction (forward → reverse and reverse → forward blocks; the planner's
+kinematic probe, `"off"`, one generator seed: 67 of 150 random cusp paths held
+the wrong sign for over 100 steps). Since
+2.0.1 the target speed keeps the current block's direction sign there. It
+changed 0 of the golden steps and 0 steps of every sample run compared (§7.3).
+Not fixed (a 1.x behaviour pinned by the golden): on a capped approach to a
+cusp the MAGNITUDE of `v_target` still comes from the cusp waypoint (one
+trace: 2.0 m/s planned on a 1.0 m/s block).
+
+#### 4.3 The PD golden
+
+`tests/test_pd_golden.py` (38 runs captured on 1.8.0, not re-captured): 34 are
+`==` on every step; the other 4 — `square` and `square_tuned` × {table,
+coupled} — are runs in which the 1.x follower missed the arrival circle and
+drove away past the goal. They are compared `==` up to the first
+`GOAL-MISSED` step (665 / 644 / 684 / 657, measured independently before the
+implementation) and must be `GOAL-MISSED` with `(0, 0, 1)` and
+`stop_reason == "goal_passed"` from there on. `tests/data/make_pd_golden.py`
+now says not to regenerate the file on 2.0.1 or later.
+
+### 5. Per-forward-block budgets — what is bounded and what is not
+
+R_min is computed at construction from the solver's own steering limit. Each
+budget is per forward block and reset by `set_path` (and on a block change).
+
+| budget | what is charged | limit | on excess | turned off by |
+|---|---|---|---|---|
+| R-ALIGN travel | distance between successive positions passed to `plan()` after R-ALIGN steps | π·R_min plus the travel of one `plan()` interval | `MPC-ABORT`, `align_budget` | `mpc_align_gate=None` |
+| R-FAIL travel (`"pd"`) | the same, after R-FAIL steps | the same | `MPC-ABORT`, `fail_budget` | nothing (avoid with `"hold"`) |
+| R-STALL entries | entries in a run | an entry that is the 4th in a run aborts | `MPC-ABORT`, `stall_budget` | `mpc_stall_timeout=None` |
+
+**R-STALL runs.** A run starts at the block's first entry, or at an entry
+whose projection lies at least 3.0 m (arc length along the block) beyond the
+furthest projection of every earlier entry in the block (s_hw). Progress is
+measured along the PATH PROJECTION, not on the ground. Because s_hw only grows
+and cannot exceed the block length, a block has at most
+3·(floor(L_block / 3.0 m) + 1) entries before an abort (303 on a 300 m block).
+
+**What this bounds, exactly**: with the MPC layer on, on a forward block,
+between two `set_path` calls, the PD travel is at most
+2·(π·R_min + one `plan()` interval's travel) + N_entries × (R-STALL episode travel) +
+braking, N_entries capped as above. An R-STALL episode's travel is not
+enforced, only its 1.0 m displacement.
+
+**What it does not bound:**
+
+- **the distance the MPC itself drives (R-MPC)** — no budget;
+- **anything across `set_path`**: it resets every budget. Measured by
+  impl-review (fake solver, states fed directly): a car in R-ALIGN at 0.1 m
+  per call with `set_path(same path)` every 100 calls travelled 40 m without
+  an abort (budget 23.24 m) (measured on the pre-final 2.0.1 build; the final amendment touched only the R-STALL run rule, the deleted draft refusal and docstrings, not this path);
+- **a `DONE` step resets no budget**; it clears only a final-block abort;
+- **time**: a blocked vehicle with a noise-free pose stays in R-ALIGN without
+  a time limit (the watchdog does not run in R-ALIGN); the budgets integrate
+  successive positions, so pose noise alone fills them (impl-review, pose
+  noise 5 mm / 0.002 rad at 40 Hz: `align_budget` after 65.95 s, pre-final
+  build; the final amendment does not touch this path). A vehicle
+  blocked in R-FAIL enters R-STALL after `mpc_stall_timeout` with the watchdog
+  on (default) and stays there without a time limit (plan-review's probe on
+  its amendment probe tree, fake always-raising solver: R-STALL at 2.0 s,
+  still there at 100 s — it did not make the 1.0 m exit in the measured
+  100 s, and noise of a few mm does not reach 1.0 m); "stays in R-FAIL" and "noise fills the R-FAIL
+  budget" hold only with `mpc_stall_timeout=None`;
+- `"off"` and reverse blocks (R-REV): no MPC budget at all (§8).
+
+**Stop-and-go and held stops.** Stop-and-go where every stop lies at least
+3.0 m of path beyond every earlier stop in the block does not end on
+`stall_budget` (it can still end on another budget or `GOAL-MISSED`).
+User-held stops long enough to fire the watchdog, the 2nd to 4th of a run
+each less than 3.0 m of new path progress, end the run with `stall_budget`.
+Ray-wheel, 150 m straight at 4 m/s, brake held 3 s while the follower keeps
+stepping (implementation harness, re-run by impl-review with identical
+numbers): holds at 8 / 18 / 28 / 38 s → entries at x = 33.53 / 59.97 / 86.40 /
+112.84 m, each a new run, `DONE` at 50.875 s; holds at 6 / 10 / 14 / 18 s →
+entries 1.28 m apart (counts 1, 2, 3), the 4th at x = 29.44 m, t = 20.25 s:
+`MPC-ABORT` / `stall_budget`. Kinematic, real NMPC, 300 m at 4 m/s, four 3 s
+holds at 8 / 18 / 28 / 38 s: `DONE` at 87.8 s, `handover["stall"] == 4`.
+
+**Progress can be satisfied without getting anywhere.** On the inside of a
+path curve of radius R, at offset d toward the centre, 1 m of ground motion is
+about R/(R − d) m of path progress. Constructed by plan-review on a probe tree
+with the fake solver and positions fed directly (no plant): a hairpin of radius
+7.4 m with the vehicle 1.9 m from the centre (offset 5.5 m; probe script
+`review5/f5_construct.py`), entries 1.03 m apart on the
+ground: 6 entries, 6 run starts, no abort (pinned in
+`tests/test_mpc_handover.py`); a path coiled around the vehicle (polyline
+circle of radius 3 m, 6 laps, block 112.8 m) with the vehicle within 0.6 m of
+one point: 20 entries, 18 run starts (17 of them by progress), the 21st entry
+aborting on `stall_budget` only at the block end (inside the cap of 114); inside a sharp polyline vertex: one run
+start from a 4.5 m projection jump, not repeatable at the same vertex; a
+position outlier 3.2 m ahead: one run start. None of these was run on
+ray-wheel.
+
+**A repeating stop still ends.** The stall course with the gate off and the
+watchdog on: fires at 2.0 / 5.5 / 9.0 s with 0.000 m of path progress each
+(the projection is clamped at the block start while the car creeps behind it),
+the 4th at 12.5 s: `MPC-ABORT` / `stall_budget`.
+
+### 6. What each kwarg turns off; no exact 2.0.0 restore
+
+| mechanism | turned off by |
+|---|---|
+| heading gate + R-ALIGN budget (`align_budget`) | `mpc_align_gate=None` |
+| watchdog + R-STALL run limit (with the progress rule) + the `t`-jump re-anchor (`stall_budget`) | `mpc_stall_timeout=None` |
+| R-FAIL budget (`fail_budget`) | nothing; part of `on_solve_failure="pd"` (`"hold"` has none) |
+| `GOAL-MISSED` | nothing, every mode |
+| block-end speed sign | nothing, every mode |
+
+So `mpc_align_gate=None, mpc_stall_timeout=None` gives the 2.0.0 commands only
+on runs with no `GOAL-MISSED`, no block-end sign step and, under `"pd"`, no
+`fail_budget` abort; **no kwarg combination restores 2.0.0's `"pd"` exactly**,
+and `mpc_stats` gains the `handover` key either way. Measured: with both
+`None` the ray-wheel C-v150 L5 and the 6 m straight course were `==` to 2.0.0
+on all 2400 steps (no terminal mode; measured on the pre-final 2.0.1 build —
+the final amendment touched only the R-STALL run rule, which both `None`
+switches off, the deleted draft refusal and docstrings). `on_solve_failure="hold"` is gated by
+default too, so it is field parity only with both `None` and only on runs with
+no `GOAL-MISSED` and no block-end sign step. The 2.0.0 recipe works for MPC
+followers only: with `mpc_model="off"`, `mpc_align_gate=None` raises.
+
+### 7. Measured results
+
+#### 7.1 Short final blocks and the 2.0.0-draft run-away courses (ray-wheel, NMPC, default kwargs)
+
+Time: "stopped" = when the run ended (terminal mode and |v| < 0.01; the
+implementation's and impl-review's drivers both stop there and agree); "first
+terminal step" = impl-review's log. Travel and CTE agree between the two runs;
+the review-only rows and the `DONE` rows' travel and CTE are impl-review's
+logs. 60 s limit unless stated.
+
+| course | end / `stop_reason` | t stopped / first terminal step (s; one value = `DONE` time) | travel (m) | CTE max (m) |
+|---|---|---|---|---|
+| C-v150 L5 | `MPC-ABORT` / `align_budget` | 11.65 / 10.825 | 43.92 (23.29 PD-ALIGN, 19.09 MPC, 1.53 braking) | 23.95 |
+| C-v150 L8 | `GOAL-MISSED` | 14.05 / 13.65 | 35.49 | 11.44 |
+| C-v150 L12 | `GOAL-MISSED` | 13.925 / 13.10 | 53.97 | 10.90 |
+| C-v135 L6 | `GOAL-MISSED` | 10.35 / 9.525 | 38.74 | 18.04 |
+| straight 6 m path behind the car | `GOAL-MISSED` | 22.15 / 21.275 | 42.77 | 15.02 |
+| C-v150 L14 / L16 / L18 | `DONE` | 12.0 / 11.75 / 11.95 | 49.65 / 49.08 / 49.98 | 10.93 each |
+| straight 15 m / 22 m behind (40 s limit) | `DONE` | 17.775 / 19.325 | 43.33 / 49.49 | 15.03 each |
+| C-v150 L2 (review only; the gate did not fire) | `DONE` | 4.7 | 17.95 | 0.76 |
+| straight 3 m behind (review only) | `GOAL-MISSED` | 26.55 / 25.725 | 41.70 | 15.02 |
+| C-v120 L4 (review only) | `GOAL-MISSED` | 8.325 / 7.5 | 30.80 | 10.10 |
+
+C-v150 L5 split: 23.29 m in `PD-ALIGN`, 19.09 m under the MPC, 1.53 m braking after the abort (release tree, per-step log, travel attributed to the mode of the step it started in) — the same 23.29 m the planner measured earlier on its probe tree. With both new kwargs `None`
+(the 2.0.0 code path, pre-final 2.0.1 build) C-v150 L5 and the 6 m straight
+do not reach `DONE` in 60 s. So a final block too short for the turn is not refused: the
+PD drives it up to the R-ALIGN budget, and the other short-leg courses end
+`GOAL-MISSED` after 30-54 m of travel. Kinematic, impl-review, 29 short cases
+(straight 2-12 m behind the car at e_psi 1.67 / 2.2 / 2.8 / π; 120 / 150 /
+170° vertices with 2 / 4 / 8 m legs; 120 s; impl-review's log): NMPC 29/29
+ended (20 `GOAL-MISSED`, 6 `DONE`, 3 `align_budget`), maximum travel 65.5 m
+(150° vertex, 8 m leg); LMPC 29/29 ended (23 `GOAL-MISSED`, 4 `DONE`,
+1 `fail_budget`, 1 `align_budget`), maximum travel 44.2 m; maximum distance
+from the start 38.5 m for both. (impl-review's report gave the NMPC split as
+21 / 6 / 2; its log says 20 / 6 / 3.)
+
+#### 7.2 Courses that changed against 2.0.0
+
+Left column: both new kwargs `None` on the 2.0.1 tree — the 2.0.0 code path
+on these runs (no terminal mode, no block-end sign step fired).
+
+| course | both kwargs `None` | 2.0.1 defaults |
+|---|---|---|
+| stall course | stands still (60 s; max displacement 0.36 mm) | `DONE` 41.775 s (×3, identical); R-ALIGN released at 10.925 s; 309 solves, all converged; CTE max 15.09 m |
+| C-v150 L20 | not `DONE` in 60 s (`MPC-HOLD` 1368 steps) | `DONE` 12.1 s, CTE max 10.93 m (one R-ALIGN) |
+| C-v120 L20 | `DONE` 10.95 s, CTE max 6.658 m | gate fires (67 PD steps); `DONE` 10.575 s, CTE max 6.627 m |
+| misaligned start e_psi π/2 + 0.1 (stall-course path / demo course) | `DONE` 30.85 / 13.425 s | `DONE` 33.25 / 14.80 s (gate fires) |
+| misaligned start 3π/4 / π (stall-course path) | stands | `DONE` 36.5 / 40.35 s, CTE max 11.99 / 15.03 m |
+
+All rows ran with a 60 s limit. To reproduce the stall-course row with the
+sample, pass `--t-max 60`: `python -m genesis_vehicle.samples.mpc_follow_demo
+--course misaligned --t-max 60` (its default `--t-max` is 40.0 and the run
+reaches `DONE` at 41.775 s, so the default would print FAIL — a prediction, not a run). The 41.775 s was
+measured with the table and params the 2.0.0 stall was documented with,
+passed as `--table` / `--params`.
+
+A run that completed on 2.0.0 and does not on 2.0.1: in impl-review's
+kinematic search (seed 33, 40 random paths, NMPC, synthetic params), run 31
+was taken by the gate at the start (logged `handover["align"] == 1`; its start
+error, 1.63 rad — just over π/2 — is reported by impl-review without a log
+field) and ends `GOAL-MISSED` 1.8 m from the goal at 12.0 s, where 2.0.0
+reached `DONE` at 5.3 s. That is the
+default gate taking over a start 2.0.0 drove, not a defect of the stops.
+
+#### 7.3 Runs unchanged by the budgets and stops
+
+Step-wise `==` (throttle, steer, brake on every row) to the tree before the
+budgets and stops, with no terminal mode, on (the gate fires in some of these —
+C-v150 / C-v120 L20 gate-on, the misaligned starts above π/2 — but no budget
+or stop does): the stall course ×3, the stall
+course with the gate and watchdog off (stands, as in 2.0.0), the demo course,
+the 10 m/s radius-17 m turn, the cusp course and C-v90 (gate on and off), the
+misaligned-heading sweep (24 runs), C-v150 L20 and C-v120 L20 on / off; the
+samples `quickstart`, `path_follow_demo` sweep / jacobian,
+`path_follow_reverse_demo` ×2, `fleet_follow_demo`, `mpc_follow_demo` demo /
+cusp and `sweep_and_drive --vehicle tank` (no block-end sign step changed any
+of them); `path_follow_osc_demo` reached `DONE` with no terminal mode (its
+baseline is nondeterministic, so no `==`). Field parity with the 2.0.1
+defaults: the 2.0.0 Genesis replay of the unmodified field controller, 538
+steps, max difference 0.0, `handover` {0, 0}; `tests/test_mpc_field_replay.py`
+unchanged and passing.
+
+#### 7.4 LMPC (`mpc_impl="linear"`)
+
+The gate, watchdog and budgets apply to the LMPC too. The ray-wheel acceptance
+runs were NMPC except two LMPC rows: stall course → `MPC-ABORT` /
+`fail_budget`, travel 47.32 m, CTE max 15.45 m (2.0.0: stands); C-v150 L20 →
+`GOAL-MISSED`, CTE max 11.63 m (2.0.0: CTE 11.65, not `DONE`). Neither
+completes. Kinematic search (seed 33, 40 runs, 120 s): 40/40 end, 12 `DONE`,
+18 `goal_passed`, 6 `stall_budget`, 3 `fail_budget`, 1 `align_budget`; run 13
+is lost to the R-FAIL budget (on the draft tree without budgets it reached
+`DONE` at 14.7 s after 25.6 m of R-FAIL travel) — accepted by the user. LMPC on
+2.0.0 was not run in that search. **Not measured: the LMPC on the ray-wheel
+short-leg courses.** Do not read the gate as helping the LMPC.
+
+#### 7.5 NMPC kinematic search
+
+impl-review, generator seed 33, 40 random paths (single-block and cusp), real
+NMPC, synthetic params, default kwargs, 120 s: 40/40 end — 17 `DONE`, 18
+`goal_passed`, 4 `stall_budget`, 1 `align_budget`; maximum travel 101.9 m
+(run 27, a two-forward-block cusp path, `GOAL-MISSED`). 2.0.0 on the same set
+(runs 0-8 at 120 s, 9-39 at 60 s): 13 `DONE`.
+
+**An observation on these runs, not a property of the follower:** with the
+default kwargs and a real solver, every run in impl-review's kinematic
+searches (seed 33 × 40, NMPC and LMPC; the 29 short cases, NMPC and LMPC) and
+every ray-wheel acceptance run ended in a terminal mode or `DONE` within its
+limit. Counter-cases in this same release: the `"off"` property test still has
+2 / 2 / 3 / 2 runs driving at 120 s (§8); with a fake always-converged solver
+runs coast on under R-MPC (§8); and with both kwargs `None` the ray-wheel
+C-v150 L20 is still in `MPC` / `MPC-HOLD`, not terminal, at 60 s.
+
+### 8. Remaining PD run-aways — not guaranteed
+
+The follower is **not guaranteed not to run away**. The stops above end the
+measured classes they target; the 1.x PD can still drive away with its
+projection pinned mid-path and receding (seed-21 run 13) or near the path start
+(other seeds, planner's emulation), on the near side of the last segment and
+receding, on a non-final forward block (a reverse one on other seeds), and it
+can stay beyond the goal plane on the final block either approaching slowly
+(-1.8 m over 10 s) or moving at about 2 m/s at a nearly constant distance (run 34: 63.4 m, +0.4 m net over the last 10 s), so the distance does not grow on two consecutive calls — either way `GOAL-MISSED` does not fire — in `"off"`, on reverse blocks (R-REV) and in the PD phases
+before a budget is spent.
+
+Pre-registered property test (`tests/test_pd_runaway_property.py`; kinematic
+bicycle, not ray-wheel: wheelbase 2.7 m, |δ| ≤ 0.35, `plan()` targets applied
+directly; `mpc_model="off"`, seed 21, 120 random paths per configuration,
+120 s; noise = pose 5 mm / 0.002 rad and speed 0.02 m/s). The expected list was
+produced by an emulation probe before the implementation and the implemented
+code reproduces it exactly; "escape" = at 120 s neither `DONE` nor stopped:
+
+| configuration | `DONE` | `GOAL-MISSED` | escapes (run: class) | false stops |
+|---|---|---|---|---|
+| single-block, clean | 50 | 68 | 2 (13: pinned mid-path, 221.6 m from the goal; 108: last segment, near side, 431.7 m) | 0 |
+| single-block, noisy | 50 | 68 | 2 (13, 108) | 0 |
+| cusp paths, clean | 15 | 102 | 3 (8: non-final block; 32: beyond the goal plane, slowly returning, -1.8 m / 10 s at 39 m; 34: beyond the goal plane, about 2 m/s at a nearly constant distance, +0.4 m net / 10 s at 63.4 m) | 0 |
+| cusp paths, noisy | 14 | 104 | 2 (8, 34) | 0 |
+
+The test is strict: an escape not in the list fails, and a listed run that
+finishes or stops fails. For scale only (the planner's emulation of the same
+rules on other seeds, kinematic, 120 s, not the shipped code): escapes 0 to
+3 per 120 runs (seeds 11-14, 37, 41, 47), the farthest 897.9 m from the goal
+at 120 s and still moving at 8 m/s. The R-MPC
+distance is outside every budget. The implementation's survey script (outside
+the repo; it reuses the test's path generator, helpers and bound, but the test
+itself prints no counts), release tree, default kwargs, 100 single-block paths
+per fake solver, 120 s, same drag-free plant:
+
+| fake solver | never end | `GOAL-MISSED` | `DONE` | `MPC-ABORT` | max PD travel / asserted bound |
+|---|---|---|---|---|---|
+| always converged, `u = 0` | 39 (all coasting under R-MPC after a PD hand-over gave them speed) | 55 | 5 | 1 (`align_budget`) | 0.501 |
+| always raising | 0 | 17 | 13 | 70 (65 `fail_budget`, 5 `align_budget`) | **0.99** |
+
+The 39 was 34 on a 2.0.1 build before the final amendment, where an unreleased
+draft rule ended 18 of the runs; in the release those runs continue under
+the other rules, so the counts moved (55 / 5 / 1 / 39 instead of the earlier
+split). The asserted bound (2·(π·R_min + one interval's travel) +
+n_stall·(1.0 m + one interval's travel) + braking) holds with a thin margin
+on the always-raising solver: the worst run used 0.99 of it. The test asserts
+that bound, and that every run that does not end is in R-MPC — not that every
+run ends.
+
+### 9. Documentation corrected in place
+
+- **"Mechanism not established; the forward-only model and its ±π/2 horizon
+  yaw bound are suspected"** (CHANGELOG 2.0.0 §3.3, `docs/path-following.md`
+  §5.3, `docs/physics-contracts.md` §7.18): wrong about the yaw bound —
+  measured inactive; the forward-only speed bound is measured active (§1).
+- **"Root cause and fix planned for 2.1.0"** (CHANGELOG 2.0.0 lead, §3.3, §13;
+  `docs/index.md`; `README.md`; `docs/path-following.md` Quick start, §5.3,
+  §6; `docs/physics-contracts.md` §7.18): superseded — both are in 2.0.1.
+- **"Nothing in the code detects it" / "no warning, no fallback"**: no longer
+  true for an MPC follower with the defaults (gate, watchdog); still true with
+  both kwargs `None`.
+- **"`mpc_model="off"` is bit-identical to 1.8.0"** without qualification
+  (CHANGELOG 2.0.0 lead and §2, `docs/path-following.md` "Which follower" and §6, `README.md`,
+  `docs/physics-contracts.md` §7.18, `docs/testing.md` golden row): true for
+  2.0.0; since 2.0.1 it holds, for the same inputs, only before a
+  `GOAL-MISSED` step and away from block-end steps where the speed sign
+  changed.
+- **`"hold"` labelled "field parity"** (`docs/path-following.md` §5.5 tables):
+  qualified (§6).
+- **The `last_mode` / `regime` / `mpc_stats` lists** in
+  `docs/path-following.md`, `docs/api-reference.md`: extended.
+- **The 2.0.0 roadmap** (Pacejka 2.1.0, PD correction 2.2.0, as the next
+  releases): replaced (§10).
+- The quick-start loop in `docs/path-following.md` waited only for `DONE` and
+  broke BEFORE applying the step's command, so the stop command was never
+  applied (harmless at arrival speed on `DONE`, but on `GOAL-MISSED` the
+  vehicle would keep its last command); it now applies the command, then
+  breaks on `TERMINAL_MODES`.
+- `docs/physics-contracts.md` §7.18: the list of MPC-only arguments that raise
+  with `"off"` now includes `mpc_align_gate` / `mpc_stall_timeout` (they raise
+  even as `None`).
+- `samples/README.md`: the `mpc_follow_demo` row said "both off = the 2.0.0 MPC
+  behaviour" (written for this release, never published) — qualified; the six
+  sample rows state the new end condition.
+
+### 10. Roadmap (planned, not present)
+
+2.0.2: braking and stopping by the brake channel only, with a forward/reverse
+gear state; 2.0.3: reverse-assisted alignment (K-turn); 2.1.0: the Pacejka
+prediction model; 2.2.0: a PD correction on the MPC's predicted trajectory.
+Whether 2.0.2 and 2.0.3 merge is undecided. None of this is in 2.0.1.
+
+### 11. Still open / not measured
+
+- **Sample loops and the terminal command**: on the terminal step `path_follow_demo`, `path_follow_reverse_demo`,
+`path_follow_osc_demo` and `mpc_follow_demo` leave their loop BEFORE applying
+the returned `(0, 0, 1)` command (the run ends there, so the sample result is
+unaffected); `sweep_and_drive` applies it first; `fleet_follow_demo` keeps
+applying it to members that have ended while the others drive, and breaks
+before applying it on the step the last member ends. A loop copied from one of
+those samples into a longer-running program must apply the command before
+leaving, as the `docs/path-following.md` quick start does.
+- GPU; any platform other than CPU/WSL2 linux-x86_64.
+- The LMPC on the ray-wheel short-leg courses (§7.4).
+- Curve-inside, coil, vertex and outlier run starts on ray-wheel (§5:
+  constructed with a fake solver only).
+- The watchdog's R-STALL run limit on ray-wheel beyond the stall course and
+  the two held-stop runs.
+- `>=` vs `>` at exactly 3.0 m of new path progress (no test distinguishes
+  them).
+- A general PD run-away stop (§8) — a later release; its open problems are a
+  false stop on cusp approaches, the wrap at `pos_err = ±π`, the dependence on
+  `k_w`, and the absence of a clock in `"off"`.
+
+### Tests
+
+**1127 passed, 3 skipped** in 347.1 s (implementation, release tree, after the
+last edit; an earlier run of the same count took 338.5 s; impl-review 1126
+passed, 3 skipped, 338.2 s, before the last minor test was added; 2.0.0: 1010 passed, 3 skipped), CPU/WSL2, genesis-world 1.4.5, with
+`requirements-mpc.txt` installed,
+`python -m pytest genesis_vehicle/tests/ --ignore=genesis_vehicle/tests/test_fusion_probe.py`.
+Without casadi + do_mpc the solver-dependent MPC tests skip, as in 2.0.0. New:
+`test_mpc_handover.py` (81 tests: gate, watchdog, every budget, run-of-entries
+rule, `set_path` / `DONE` effects, stickiness), `test_mpc_gate_parity.py`
+(real NMPC, kinematic: 90° vertex and gentle arc `==` with the gate on and
+off, 150° hand-over, C-v150 L5 ends on `align_budget`),
+`test_mpc_stall_repro.py` (real NMPC on the stall course's constant state:
+the default hands over, both `None` stands as 2.0.0),
+`test_pd_goal_passed.py` (13), `test_pd_boundary_speed.py` (3),
+`test_pd_runaway_property.py` (14; §8). Changed assertions:
+`test_pd_golden.py` (§4.3) and `test_mpc_field_replay.py` (the `PathFollower`
+replay also asserts `handover` {0, 0}). Each new test was run against its
+mutants on a scratch copy; every mutant in the implementation's list has at
+least one measured kill (implementation and review logs). Not killed: `>`
+instead of `>=` at exactly 3.0 m of progress (survives, not claimed); "three
+growth steps" for the goal-passed stop was run only against the golden and
+survived there (the one-growth-step mutant is killed by
+`test_pd_goal_passed.py`). The version bump changes no test (no test
+pins the SDK version string).
+
+---
+
 ## [2.0.0] — 2026-11-21
 
 **`PathFollower` gains an MPC layer, and it is ON by default: a follower
 constructed the 1.x way, `PathFollower(path, plant)`, now raises `ValueError`
 for every plant type.** Add `mpc_model="off"` to keep the 1.x follower — on
-every scenario measured for this release it is bit-identical to 1.8.0 (§2) —
+every scenario measured for this release it is bit-identical to 1.8.0 (§2)
+[since 2.0.1 only before a `GOAL-MISSED` step and away from block-end
+speed-sign steps, CHANGELOG 2.0.1 §4] —
 or measure the vehicle once (a sweep table on a grid that reaches the driving
 speeds, plus `python -m genesis_vehicle.control.identify`) and pass
 `mpc_params=` (§3.2). The MPC layer is the field team's `PathFollower_MPC`
@@ -30,14 +689,16 @@ measured machine 5.0 % to 24.1 % of control steps overran it, depending on the
 session and the harness, and the cause of that spread is not established (§7);
 **an MPC follower that starts facing away from its path can stall — never
 move — with every solve "converged" and no warning or fallback; inherited from
-the field code, root cause and fix planned for 2.1.0** (§3.3); the closed-loop
+the field code, root cause and fix planned for 2.1.0** (§3.3; superseded —
+both shipped in 2.0.1, see CHANGELOG 2.0.1 §1-§2); the closed-loop
 acceptance criterion "NMPC mean CTE ≤ 0.6 × PD mean CTE" is **not met**
 (0.0670 vs limit 0.0641 m) and the NMPC's MAXIMUM deviation is larger than the
 PD's (0.682 vs 0.297 m), accepted by the user with the criterion unchanged
 (§6); the only prediction model is the linear-tyre bicycle model; only
 two-axle Ackermann vehicles on forward blocks are supported. The Pacejka
 prediction model (planned 2.1.0) and a PD correction on the MPC's predicted
-trajectory (planned 2.2.0) are **not in this release**.
+trajectory (planned 2.2.0) are **not in this release** (roadmap replaced in
+CHANGELOG 2.0.1 §10).
 
 | abbr | meaning |
 |---|---|
@@ -230,6 +891,10 @@ no rebuild (implementation measurement).
 
 ### 2. `mpc_model="off"` — what stays bit-identical to 1.8.0, and where that is proven
 
+(True for 2.0.0. Since 2.0.1 it holds, for the same inputs, only before a
+`GOAL-MISSED` step and away from block-end steps where the speed sign changed
+— CHANGELOG 2.0.1 §4.)
+
 `mpc_model="off"` runs the 1.x PD code, moved unchanged (the 1.x plan body
 became `_plan_pd`, path parsing a pure `_parse_path`). Identity was checked on:
 
@@ -330,10 +995,14 @@ along the path. **The stall is inherited from the field code**: the unmodified
 field follower, from the same start pose on the same path, behaved identically
 (same end pose, same 476 / 1124 mode counts, 400 solves all `solved`). The
 mechanism is not established; the forward-only model and its ±π/2 horizon yaw
-bound are suspected, not proven. Conditions: impl-review's runs (harness
-outside the repo), CPU/WSL2, genesis-world 1.4.5, 2026-11-21. **Decision:**
-2.0.0 ships with this limitation documented; establishing the root cause and a
-fix are planned for 2.1.0 (a plan, not a promised behaviour). **Do:** start
+bound are suspected, not proven. **[Corrected in 2.0.1: the ±π/2 yaw bound was
+measured inactive — the suspicion was wrong; the forward-only speed bound
+`v_cg_x >= 0` is the measured cause. CHANGELOG 2.0.1 §1.]** Conditions:
+impl-review's runs (harness outside the repo), CPU/WSL2, genesis-world 1.4.5,
+2026-11-21. **Decision:** 2.0.0 ships with this limitation documented;
+establishing the root cause and a fix are planned for 2.1.0 (a plan, not a
+promised behaviour). **[Superseded: both shipped in 2.0.1 — heading gate and
+watchdog, on by default.]** **Do:** start
 the vehicle aligned with the first forward block, or use `mpc_model="off"`.
 Detect it by the vehicle not moving while far from the goal; `last_mode` alone
 is not enough (about 30 % of the stalled steps report `MPC`).
@@ -649,7 +1318,8 @@ release that changes the plant.
   (§7).
 - **The misaligned-start stall (§3.3)**, inherited from the field code:
   mechanism not established; nothing in the code detects or escapes it.
-  Establishing the root cause and a fix are planned for 2.1.0.
+  Establishing the root cause and a fix are planned for 2.1.0. **[Superseded:
+  root cause measured and fix shipped in 2.0.1, §1-§2 of its entry.]**
 - Not run in review: `path_follow_osc_demo` and `sweep_and_drive` in a
   Genesis comparison against 1.8.0; `mpc_follow_demo --plant diff`,
   `--on-solve-failure hold`, linear + cusp, `--remeasure`; identify with

@@ -269,8 +269,9 @@ def main():
             st = extract_state_from_arrays(pos, quat, vel)
             thr, steer, brk = follower.step(
                 st["pos_xy"], st["yaw"], st["v_long"], st["pitch"], st["roll"])
-            if follower.last_mode == "DONE":
-                print(f"\n[DONE] wall t={time.time() - t0:.1f}s")
+            if follower.last_mode in PathFollower.TERMINAL_MODES:   # v2.0.1: any terminal mode
+                print(f"\n[{follower.last_mode}] wall t={time.time() - t0:.1f}s"
+                      + (f" stop_reason={follower.stop_reason}" if follower.stop_reason else ""))
                 break
             frame += 1
             cli.send_message("/Genesis/Vehicle/Control",
@@ -291,7 +292,7 @@ def main():
             print("no state ever received — FAIL")
         else:
             err = math.hypot(pos[0] - goal_xy[0], pos[1] - goal_xy[1])
-            ok = err < 3.0
+            ok = err < 3.0 and follower.last_mode not in ("GOAL-MISSED", "MPC-ABORT")
             print(f"\nFINAL pos=({pos[0]:+.2f}, {pos[1]:+.2f}) "
                   f"goal=({goal_xy[0]:+.2f}, {goal_xy[1]:+.2f})  err={err:.2f}m  "
                   f"{'PASS' if ok else 'FAIL'} (criterion: err < 3m)")

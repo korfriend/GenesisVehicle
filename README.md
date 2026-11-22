@@ -380,7 +380,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-1010 tests covering URDF parsing, config resolve, suspension sizing, strategy
+1127 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity witness
@@ -415,15 +415,20 @@ touches the driver), the path follower's MPC layer (v2.0.0 — the 1.x PD
 follower against a golden captured on 1.8.0, the constructor contract and its
 check order, the solve classification on fake and real solvers, a field-parity
 replay that runs only on its capture platform, the optional-package gate),
+the follower's heading gate, watchdog, per-block budgets and goal-passed stop
+(v2.0.1 — every budget and the run-of-entries rule on a fake solver, the 2.0.0
+stall reproduced on the real NMPC, the PD golden up to its four `GOAL-MISSED`
+steps, a pre-registered run-away property test on a kinematic plant),
 and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v2.0.0 tree with the optional MPC packages installed, `1010 passed, 3 skipped`
-in 226.1 s (CPU/WSL2, genesis-world 1.4.5,
-`python -m pytest genesis_vehicle/tests/ -q --ignore=genesis_vehicle/tests/test_fusion_probe.py`;
-impl-review measured 221.5 s; the 3 skips are the env-gated live server tests,
+v2.0.1 tree with the optional MPC packages installed, `1127 passed, 3 skipped`
+in 347.1 s (CPU/WSL2, genesis-world 1.4.5,
+`python -m pytest genesis_vehicle/tests/ --ignore=genesis_vehicle/tests/test_fusion_probe.py`;
+the 3 skips are the env-gated live server tests,
 run them with `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`; without casadi + do_mpc the
-solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `824 passed,
+solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1010 passed,
+3 skipped` in 226.1 s at v2.0.0, `824 passed,
 3 skipped in 278.5s` at v1.8.0, `712 passed, 3 skipped in
 89.31s` at v1.7.0,
 `634 passed, 3 skipped in 88.17s` at v1.6.10, 633 in 58.69 s at v1.6.9,
@@ -440,20 +445,35 @@ between releases, so treat it as an order of magnitude, not a metric.
 MINOR bump may change observable public behaviour, and the CHANGELOG names
 every such change (1.8.0 lists eight items strict SemVer would call breaking
 in its "Why a minor version" section). 2.0.0 is a major bump: the default
-`PathFollower(path, plant)` call stops working. (This line said "pre-1.0, so minor bumps
+`PathFollower(path, plant)` call stops working. 2.0.1 is a patch that departs
+from the minor-bump rule (two new kwargs, new modes, changed default behaviour
+including `mpc_model="off"`), by user decision; its CHANGELOG section says why.
+(This line said "pre-1.0, so minor bumps
 may break" — stale since 1.0.) Current version: `genesis_vehicle.__version__`. Per-release notes
 in [`CHANGELOG.md`](CHANGELOG.md).
 
+**Upgrading to 2.0.1:** a follower can now end on `GOAL-MISSED` (every mode)
+or `MPC-ABORT` (MPC layer) as well as `DONE` — loop on
+`last_mode in PathFollower.TERMINAL_MODES`, or an uncapped loop waiting for
+`DONE` never ends. The 2.0.0 misaligned-start stall is fixed by a heading gate
+and a no-progress watchdog, on by default (also under `on_solve_failure="hold"`;
+a vehicle you hold still while stepping the follower hands over to the PD law
+after 2.0 s); `mpc_align_gate=None, mpc_stall_timeout=None` comes closest to
+2.0.0 but no kwarg combination restores it exactly. `mpc_model="off"` changed
+in two places (the goal-passed stop and the block-end speed sign). The
+follower is not guaranteed not to run away. Read CHANGELOG 2.0.1 first.
+
 **Upgrading to 2.0.0:** `PathFollower(path, plant)` raises `ValueError` for
 every plant type — add `mpc_model="off"` for the 1.x follower (bit-identical to
-1.8.0 on every scenario measured), or install `requirements-mpc.txt`, measure
+1.8.0 on every scenario measured for 2.0.0; since 2.0.1 only before a
+`GOAL-MISSED` step and away from block-end sign steps), or install `requirements-mpc.txt`, measure
 the vehicle (`sweep_measure` with the grid flags + `control.identify`) and pass
 `mpc_params=`. `FleetFollower` members must be `"off"`; `extract_state` gains
 `yaw_rate` / `v_lat`; `dynamics.brake_torque_signed` is removed. The nonlinear
 MPC is not guaranteed to fit a 25 ms control step, and an MPC follower started
 facing away from its path can stall (never move) with no warning — a limitation
-inherited from the field code, root cause and fix planned for 2.1.0; start
-aligned with the path. Read the 2.0.0 "Breaking"
+inherited from the field code (this said "root cause and fix planned for
+2.1.0"; superseded — both shipped in 2.0.1, above). Read the 2.0.0 "Breaking"
 list and `docs/path-following.md` §6 first.
 
 **Upgrading to 1.8.0:** the brake is now a Coulomb projection that holds a

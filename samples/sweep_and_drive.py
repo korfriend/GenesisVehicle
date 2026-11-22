@@ -149,7 +149,7 @@ def main():
             st.get("pitch_deg", 0.0), st.get("roll_deg", 0.0))
         veh.set_inputs(throttle=thr, brake=brake, steer=steer)
         vs.step()
-        if follower.last_mode == "DONE":
+        if follower.last_mode in PathFollower.TERMINAL_MODES:   # v2.0.1: any terminal mode
             break
         if step % 40 == 0:
             print(f"  t={step * DT:5.1f}s pos=({st['pos_xy'][0]:+6.1f},"
@@ -157,7 +157,11 @@ def main():
 
     st = extract_state(veh)
     err = math.hypot(st["pos_xy"][0] - goal_xy[0], st["pos_xy"][1] - goal_xy[1])
-    ok = err < goal_r
+    # v2.0.1: GOAL-MISSED / MPC-ABORT end the run and are never a PASS.
+    stopped = follower.last_mode in PathFollower.TERMINAL_MODES and follower.last_mode != "DONE"
+    ok = err < goal_r and not stopped
+    print(f"\nend mode {follower.last_mode}"
+          + (f" (stop_reason {follower.stop_reason})" if follower.stop_reason else ""))
     print(f"\nFINAL pos=({st['pos_xy'][0]:+.2f},{st['pos_xy'][1]:+.2f}) "
           f"goal=({goal_xy[0]:+.2f},{goal_xy[1]:+.2f})  err={err:.2f} m  "
           f"{'PASS' if ok else 'FAIL'} (criterion: err < {goal_r} m)")

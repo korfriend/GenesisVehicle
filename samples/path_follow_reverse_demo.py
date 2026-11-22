@@ -195,8 +195,9 @@ def main():
         st = extract_state(tank)
         thr, steer, brk = follower.step(
             st["pos_xy"], st["yaw"], st["v_long"], st["pitch"], st["roll"])
-        if follower.last_mode == "DONE":
-            print(f"\n[DONE] t={step * DT:.2f}s")
+        if follower.last_mode in PathFollower.TERMINAL_MODES:   # v2.0.1: any terminal mode
+            print(f"\n[{follower.last_mode}] t={step * DT:.2f}s"
+                  + (f" stop_reason={follower.stop_reason}" if follower.stop_reason else ""))
             break
         tank.set_inputs(throttle=thr, brake=brk, steer=steer)
         vs.step()
@@ -217,7 +218,8 @@ def main():
     st = extract_state(tank)
     pos_err = math.hypot(st["pos_xy"][0] - BAY_XY[0], st["pos_xy"][1] - BAY_XY[1])
     yaw_err = abs((st["yaw"] - BAY_YAW + math.pi) % (2 * math.pi) - math.pi)
-    ok = pos_err < 2.0 and yaw_err < 0.4
+    ok = (pos_err < 2.0 and yaw_err < 0.4
+          and follower.last_mode not in ("GOAL-MISSED", "MPC-ABORT"))   # v2.0.1
     print(f"\nFINAL pos=({st['pos_xy'][0]:+.2f}, {st['pos_xy'][1]:+.2f}) "
           f"yaw={st['yaw']:+.2f}  bay={BAY_XY} yaw*={BAY_YAW:+.2f}")
     print(f"pos_err={pos_err:.2f}m (<2)  yaw_err={yaw_err:.2f}rad (<0.4)  "

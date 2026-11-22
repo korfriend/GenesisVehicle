@@ -235,9 +235,11 @@ def main():
                                    pxy[:, 1] - st["pos_xy"][1]).min()))
         thr, steer, brk = follower.step(
             st["pos_xy"], st["yaw"], st["v_long"], st["pitch"], st["roll"])
-        if follower.last_mode == "DONE":
-            done_t = step * DT
-            print(f"\n[DONE] t={done_t:.2f}s")
+        if follower.last_mode in PathFollower.TERMINAL_MODES:   # v2.0.1: any terminal mode
+            if follower.last_mode == "DONE":
+                done_t = step * DT
+            print(f"\n[{follower.last_mode}] t={step * DT:.2f}s"
+                  + (f" stop_reason={follower.stop_reason}" if follower.stop_reason else ""))
             break
         tank.set_inputs(throttle=thr, brake=brk, steer=steer)
         vs.step()
@@ -257,6 +259,7 @@ def main():
         recorder.close()
     final_pos = tank.get_pos()[0].cpu().numpy()
     err = math.hypot(final_pos[0] - goal_xy[0], final_pos[1] - goal_xy[1])
+    ok = err < 3.0 and follower.last_mode not in ("GOAL-MISSED", "MPC-ABORT")
     if devs:
         d = np.array(devs)
         print(f"\npath deviation [{args.plant}]: mean {d.mean():.3f} m  "
@@ -264,8 +267,8 @@ def main():
               + (f"  (finished in {done_t:.2f}s)" if done_t else "  (timed out)"))
     print(f"\nFINAL pos=({final_pos[0]:+.2f}, {final_pos[1]:+.2f}) "
           f"goal=({goal_xy[0]:+.2f}, {goal_xy[1]:+.2f})  err={err:.2f}m  "
-          f"{'PASS' if err < 3.0 else 'FAIL'} (criterion: err < 3m)")
-    return 0 if err < 3.0 else 1
+          f"{'PASS' if ok else 'FAIL'} (criterion: err < 3m, not GOAL-MISSED / MPC-ABORT)")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

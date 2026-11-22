@@ -10,7 +10,9 @@ step with ``==``.
 It was captured ONCE on the unmodified 1.8.0 tree (``3810c79``), before any
 2.0.0 edit to ``control/path_follower.py``. Re-running it on a later tree
 re-captures THAT tree, which defeats the purpose; it is kept so the capture
-is reproducible from the 1.8.0 tree::
+is reproducible from the 1.8.0 tree. Do NOT regenerate it on 2.0.1 or later:
+since 2.0.1 four entries stop with ``GOAL-MISSED`` where 1.8.0 drove on, and
+``tests/test_pd_golden.py`` compares those up to their pinned step::
 
     python genesis_vehicle/tests/data/make_pd_golden.py --output pd_golden_1x.json
 

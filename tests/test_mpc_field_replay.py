@@ -93,6 +93,7 @@ for s in fx["steps"]:
     if fol.last_mode == "DONE":
         break
 print("REPLAY " + json.dumps(out))
+print("HANDOVER " + json.dumps(fol.mpc_stats["handover"]))
 '''
 
 
@@ -132,6 +133,7 @@ def replay_or_skip(fixture: dict, script=None):
             assert abs(a - b) <= TOL, f"step {k}: {name} {a!r} != field {b!r}"
         assert mode == w[12], f"step {k}: mode {mode} != field {w[12]}"
         assert solved == w[13], f"step {k}: solve cadence differs"
+    return p.stdout
 
 
 def test_sdk_law_replays_the_field_run():
@@ -140,8 +142,12 @@ def test_sdk_law_replays_the_field_run():
 
 def test_path_follower_replays_the_field_run():
     """The same replay through the public 2.0.0 PathFollower (stage 2 = the
-    synthetic SweepTable, field finish, ``on_solve_failure="hold"``)."""
-    replay_or_skip(_load(), _REPLAY_PF)
+    synthetic SweepTable, field finish, ``on_solve_failure="hold"``) — with
+    the 2.0.1 defaults (heading gate and watchdog on): neither fires on this
+    run, so the replay is unchanged and the handover counts stay 0."""
+    out = replay_or_skip(_load(), _REPLAY_PF)
+    ho = json.loads(next(ln for ln in out.splitlines() if ln.startswith("HANDOVER "))[9:])
+    assert ho == {"align": 0, "stall": 0}
 
 
 def test_forged_platform_key_skips():

@@ -22,6 +22,9 @@
 | MPC / NMPC / LMPC | Model Predictive Control / its nonlinear (do_mpc + IPOPT) and linear (OSQP) implementations in `PathFollower` (v2.0.0) |
 | PD | the 1.x `PathFollower` law (`mpc_model="off"`) |
 | U1 | the `ValueError` a default (MPC) `PathFollower` raises without `mpc_params` |
+| R-ALIGN / R-STALL / R-FAIL | v2.0.1 `PathFollower` regimes: PD while the heading gate holds / PD after the watchdog fired / PD after a failed solve |
+| s_hw | the furthest path-projection arc length over the earlier R-STALL entries of a block |
+| C-vNNN Lk | straight 20 m, a vertex with heading change NNN°, a k m second leg (0.5 m spacing, 4 m/s) |
 
 ## Running the tests
 
@@ -31,12 +34,24 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-1010 tests, mostly pure-Python, plus three env-gated live tests that skip by
-default. Measured on the v2.0.0 tree with the optional MPC packages installed
-(casadi 3.8.2, do_mpc 5.1.2, osqp 1.1.3): `1010 passed, 3 skipped` in
-226.1 s (docs run; impl-review measured 221.5 s on the same code),
+1127 tests, mostly pure-Python, plus three env-gated live tests that skip by
+default. Measured on the v2.0.1 tree with the optional MPC packages installed
+(casadi 3.8.2, do_mpc 5.1.2, osqp 1.1.3): `1127 passed, 3 skipped` in
+347.1 s (implementation run on the release tree after the last edit; an
+earlier run of the same count: 338.5 s; impl-review measured 1126 passed,
+3 skipped, 338.2 s, one test earlier),
 CPU/WSL2, genesis-world 1.4.5,
-`python -m pytest genesis_vehicle/tests/ -q --ignore=genesis_vehicle/tests/test_fusion_probe.py`.
+`python -m pytest genesis_vehicle/tests/ --ignore=genesis_vehicle/tests/test_fusion_probe.py`.
+v2.0.1 added 117 tests (1010 → 1127) in six new files —
+`test_mpc_handover.py` (81), `test_mpc_gate_parity.py`,
+`test_mpc_stall_repro.py`, `test_pd_goal_passed.py` (13),
+`test_pd_boundary_speed.py` (3), `test_pd_runaway_property.py` (14) — of which
+`test_mpc_handover.py`, `test_mpc_gate_parity.py`, `test_mpc_stall_repro.py`,
+the MPC part of `test_pd_runaway_property.py` and one test of
+`test_pd_goal_passed.py` skip without casadi + do_mpc; the run-away property
+test (`test_pd_runaway_property.py`) added about 59 s when it was introduced
+(measured on a pre-final 2.0.1 build; not re-timed on the release tree). Previous figure, v2.0.0:
+`1010 passed, 3 skipped` in 226.1 s (impl-review 221.5 s).
 v2.0.0 added 186 tests (824 → 1010), 18 new test files listed in the inventory
 below. **Without casadi + do_mpc** these skip: all of `test_mpc_uprev.py`,
 `test_mpc_field_replay.py`, `test_mpc_plan_extract.py`, `test_mpc_models.py`,
@@ -146,14 +161,20 @@ CI without GPU.
 | plan / finish split | `test_differentiable_plant.py` | `plan()` then `finish()` reproduces `step()` exactly, including `last_mode`; a decided plan (DONE / cusp brake) needs no inversion |
 | `FleetFollower` | `test_differentiable_plant.py` | drives every member off one solve, reports each command to its own plant row, matches independent followers, rejects a count mismatch or an unbatched plant |
 | Plant / PathFollower wiring | `test_differentiable_plant.py` | plant vs sweep-table dispatch, `.sweep` back-compat alias, steer range tightened to `steer_cap`, applied command reported on early-return exits, bad plant rejected. Since v2.0.0 every follower here is `mpc_model="off"` (15 sites; assertions unchanged), as in `test_path_follower.py` (18 sites) |
-| `mpc_model="off"` equals the 1.8.0 follower | `test_pd_golden.py` | v2.0.0. 19 synthetic scenarios (at rest, straight, square, tuned square, cusp, explicit-yaw cusp, 13 KICK-threshold sweeps) × {synthetic sweep table, fake coupled plant} = 38 runs, 8928 steps, `==` on every output against `tests/data/pd_golden_1x.json` captured on the 1.8.0 tree (generator `tests/data/make_pd_golden.py`). The only on-every-tree evidence of the off path's bit-identity; killed both PD mutants (KICK 0.4 → 0.41; heading blend reassociated) |
+| `mpc_model="off"` equals the 1.8.0 follower | `test_pd_golden.py` | v2.0.0. 19 synthetic scenarios (at rest, straight, square, tuned square, cusp, explicit-yaw cusp, 13 KICK-threshold sweeps) × {synthetic sweep table, fake coupled plant} = 38 runs, 8928 steps, against `tests/data/pd_golden_1x.json` captured on the 1.8.0 tree (generator `tests/data/make_pd_golden.py`, which since v2.0.1 says not to regenerate the file on 2.0.1 or later). **Since v2.0.1**: 34 runs `==` on every output; the other 4 (`square` / `square_tuned` × table / coupled — runs in which 1.x missed the arrival circle and drove away past the goal) `==` up to `K_STAR` 665 / 644 / 684 / 657 and `GOAL-MISSED` with `(0, 0, 1)` and `stop_reason == "goal_passed"` from there on. Through 2.0.0 this row said "`==` on every output" and called the file "the only on-every-tree evidence of the off path's bit-identity"; since 2.0.1 it is the evidence of identity before the first `GOAL-MISSED` step. Killed both PD mutants (KICK 0.4 → 0.41; heading blend reassociated) and the goal-passed stop one call late / early and not sticky |
+| Heading gate, watchdog, budgets, stickiness | `test_mpc_handover.py` | v2.0.1, 81 tests, needs casadi + do_mpc; fake solver, states fed directly. Gate entry / release and re-seed (no `_t_next` change), watchdog anchor and 1.0 m exit, the `t`-jump rule, `set_path` effects (every budget, terminal state, goal-passed history cleared; `handover` kept), the R-ALIGN and R-FAIL budgets cumulative per block (also with both kwargs `None` for R-FAIL), the R-STALL run-of-entries rule (3.0 m of new path progress on the high-water mark, not ground distance, not the previous entry; reset by block change and `set_path`; NOT by a `DONE` step), a short final block handed over (not refused), the hairpin case where projection progress starts a run every entry, a jittering blocked car filling the R-ALIGN budget, `DONE` precedence and the terminal command. Every listed mutant has a measured kill |
+| Gate vs the 2.0.0 path | `test_mpc_gate_parity.py` | v2.0.1, real NMPC on a KINEMATIC bicycle plant (not ray-wheel), synthetic params. 90° vertex and a gentle arc: default and both kwargs `None` `==` with no hand-over; 150° vertex: the default hands over and reaches `DONE`, both `None` stands in `MPC-HOLD` ≥ 400 steps (1024 measured on linux-x86_64; an IPOPT path may differ elsewhere); C-v150 L5 ends `MPC-ABORT` / `align_budget` |
+| The 2.0.0 stall, controller side | `test_mpc_stall_repro.py` | v2.0.1, real NMPC, the stall course's constant state, synthetic params: both kwargs `None` → every solve converges to standstill and every step brakes; the default → the first step is `PD-ALIGN` with no solve and no MPC reference during that R-ALIGN |
+| Goal-passed stop | `test_pd_goal_passed.py` | v2.0.1, 13 tests. The fixed-point run-away stops; `DONE` wins inside the circle and clears `stop_reason`; no stop at `arrival_goal + 0.05`, after one growth step, at a loop path's start; a reverse final block stops; `set_path` clears it; call intervals 0.025 / 0.05 give the same result (it counts calls); three literal runs 1.x completes still complete; the margin is checked on this call's distance |
+| Block-end speed sign | `test_pd_boundary_speed.py` | v2.0.1, 3 tests: forward → reverse and reverse → forward literals never plan against their block; golden cusp entries unchanged |
+| PD run-away property | `test_pd_runaway_property.py` | v2.0.1, 14 tests, kinematic bicycle (not ray-wheel). `"off"`, seed 21, 120 single-block + 120 cusp paths, clean and noisy, 120 s: outcome counts and the escape list equal the expectation produced before the implementation (escapes = 1.x run-away classes 2.0.1 does not stop; strict). MPC part, fake solvers: the forward-block PD-travel bound and the R-STALL entry cap; every run with the always-raising solver ends; a run that does not end with the always-converged solver is in R-MPC (whose distance is not budgeted) |
 | MPC constructor contract | `test_path_follower_mpc_api.py` | v2.0.0. U1 for every plant type; the check order (Ackermann before U1, U1 before dependencies); `"off"` with an MPC argument raises; `"pacejka"` raises, `mpc_feedforward=` / `mpc_correction=` are `TypeError`; `FleetFollower` rejects MPC members before mutating; `mpc_v_floor` shows 0.5; a live-plant cross-check that cannot run warns once; missing `yaw_rate` raises without moving the follower |
 | MPC regimes | `test_path_follower_mpc_regimes.py` | v2.0.0, needs casadi + do_mpc. A reverse block is PD and never solves; re-entry after a cusp restarts the reference; a failed solve falls back to PD and recovers; `"hold"` keeps the previous command; DONE is the stop command without a solve; MPC-HOLD at rest when the plan wants to slow |
 | `set_path` | `test_path_follower_set_path.py` | v2.0.0. With `"off"` equals a fresh constructor; `pos_xy` snaps beyond the advance cap; a PATH error (too short, bad waypoint length) leaves the follower unchanged — a bad `pos_xy` / `t` is not tested and raises after the path was replaced; with the MPC layer (needs casadi + do_mpc) no NLP rebuild, do_mpc `_u_prev` reset to the measured `(d0, a0)`, the reference re-timed |
 | Solve classification | `test_mpc_status_classes.py`, `test_mpc_review_fixes.py` | v2.0.0. Every row of the NMPC and LMPC tables with a fake solver; real solvers: NMPC `max_iter=1` → capped-infeasible, a converged solve feasible, a NaN iterate never feasible, `reset_history` on by default, the LMPC's previous command not overwritten by an unapplied solve; a missing `yaw_rate` moves nothing; an unrunnable cross-check is named; `mpc_v_floor` shows 0.5 |
 | MPC law, params, deps | `test_mpc_law.py`, `test_mpc_params.py`, `test_mpc_deps.py` | v2.0.0, numpy only. Reference and cadence, MPC-HOLD on `a_ff`; schema rule (field JSON rejected), τ floor, deceleration table; a fresh subprocess imports `genesis_vehicle` / `.control` / `.control.mpc` without loading casadi, do_mpc, osqp or threadpoolctl; a blocked package raises `ImportError` naming it |
 | Solver internals | `test_mpc_uprev.py`, `test_mpc_plan_extract.py`, `test_mpc_models.py`, `test_mpc_solve.py` | v2.0.0, need casadi + do_mpc. `MPC.u0` reaches `_u_prev`; plan extraction reads the last node; the casadi model vs an independent numpy transcription; NMPC straight and left-turn solves, the per-speed acceleration limit, a closed loop on a synthetic plant; NumPy mode restored (also when the block raises); casadi's OpenBLAS thread cap reaches the live copy (Linux only) |
-| Field parity replay | `test_mpc_field_replay.py` | v2.0.0. A 200-step, 50-solve replay of the field controller (synthetic table, synthetic numpy plant), law level and through `PathFollower`, compared exactly — **only on the capture platform** (linux-x86_64, casadi 3.8.2, do_mpc 5.1.2, Intel Core Ultra 9 285H); skips elsewhere. Never runs MPC-HOLD or a non-converged solve |
+| Field parity replay | `test_mpc_field_replay.py` | v2.0.0. A 200-step, 50-solve replay of the field controller (synthetic table, synthetic numpy plant), law level and through `PathFollower` (since v2.0.1 with the default gate and watchdog, asserting `handover` {0, 0}), compared exactly — **only on the capture platform** (linux-x86_64, casadi 3.8.2, do_mpc 5.1.2, Intel Core Ultra 9 285H); skips elsewhere. Never runs MPC-HOLD or a non-converged solve |
 | `extract_state` extras | `test_extract_state_extras.py` | v2.0.0. `yaw_rate` / `v_lat` definitions and sign; the five 1.x keys unchanged; a duck object without `get_ang()` keeps five keys |
 | identify math, grid flags, bench | `test_identify_math.py`, `test_sweep_measure_grid_args.py`, `test_bench_path_follower.py` | v2.0.0, Genesis-free. Cornering fit and its 3 % residual warning, `v*`; grid lists must contain 0 and the default grid is unchanged; the bench's fail-closed publication rule |
 | Ray-MISS sentinel | `test_ray_miss_and_grounded.py` | the engine's `no_hit_value` defaults to `max_range` and an explicit `0.0` is kept (not coerced); a real `VehicleScene` raycaster reports its OWN range; equality is exact for an unrepresentable sentinel (19.9, 0.1); `read_distances` leaves a non-default-range miss alone; the raw predicate is wrong when applied to corrected distances |

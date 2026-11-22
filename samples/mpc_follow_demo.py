@@ -10,6 +10,25 @@ the forward block and the inverse plant in stage 2.
     python -m genesis_vehicle.samples.mpc_follow_demo --mpc-model off    # the 1.x PD follower
     python -m genesis_vehicle.samples.mpc_follow_demo --plant diff       # DifferentiablePlant in stage 2
     python -m genesis_vehicle.samples.mpc_follow_demo --course cusp      # forward, cusp, reverse (PD)
+    python -m genesis_vehicle.samples.mpc_follow_demo --course misaligned --t-max 60  # the 2.0.0 stall start
+    python -m genesis_vehicle.samples.mpc_follow_demo --course vertex --vertex-deg 150
+    python -m genesis_vehicle.samples.mpc_follow_demo --radius 17 --v 10  # tighter demo turn
+
+Courses (v2.0.1 adds the last two and ``--radius``): ``demo`` (the field
+course; ``--radius`` sets the turn radius, default 30 m); ``cusp``;
+``misaligned`` — the path (30,0) -> (10,-8) -> (-10,-8) -> (-30,0) at 2 m/s,
+the car spawned on its first waypoint with yaw ``--start-yaw`` (default 0,
+i.e. 2.76 rad off the path heading: the start on which the 2.0.0 MPC stood
+still; it needs ``--t-max 60``: on the reference setup it reaches DONE at
+41.775 s, after the default 40 s); ``vertex`` — straight 20 m, a vertex with heading change
+``--vertex-deg``, straight 20 m (0.5 m waypoint spacing, 4 m/s at every
+waypoint, start from rest). ``--start-yaw`` (rad) spawns any course at that
+yaw. ``--align-gate off`` / ``--stall-timeout off`` pass
+``mpc_align_gate=None`` / ``mpc_stall_timeout=None``. Both off is NOT an
+exact 2.0.0 restore: ``GOAL-MISSED``, the block-end speed sign (W2) and, under
+``on_solve_failure="pd"``, the ``fail_budget`` abort stay on; a run equals 2.0.0
+only if none of them acts. ``--log PATH`` writes one JSON line per control step (time,
+state, regime, mode, command, solve status).
 
 Onboarding is two measurements, done on the first run and CACHED in
 ``samples/data/mpc_cache/`` (git-ignored; ``--remeasure`` refreshes):
@@ -33,7 +52,9 @@ on the measured machine that share varied between sessions (see
 that machine (CPU/WSL2, genesis-world 1.4.5, this course) — measure yours.
 
 PASS: DONE within ``--t-max`` and maximum cross-track error < 1.0 m (the
-cusp course: DONE within ``--t-max``). The last line is a ``MPC_RESULT {json}``
+other courses: DONE within ``--t-max``). The run ends on any terminal mode
+(v2.0.1: ``DONE``, ``GOAL-MISSED``, ``MPC-ABORT``; ``PathFollower.TERMINAL_MODES``)
+and reports it with ``stop_reason``; only ``DONE`` is a PASS. The last line is a ``MPC_RESULT {json}``
 record (consumed by ``bench_path_follower.py``).
 
 | abbr | meaning |
@@ -69,15 +90,16 @@ GRID_FLAGS = ["--v-list=-2,0,2,4,6,8,10,12,14,16", "--throttle-list=-1,-0.5,0,0.
               "--steer-list=-1,-0.5,0,0.5,1", "--pitch-list=-10,-5,0,5,10", "--roll-list=0"]
 
 
-def demo_course(v=8.0, ramp=1.0):
-    """Field demo course (dense 0.1 m line -> 0.5 m waypoints). Returns
+def demo_course(v=8.0, ramp=1.0, radius=30.0):
+    """Field demo course (dense 0.1 m line -> 0.5 m waypoints): straight 20 m,
+    a 90 degree left turn of ``radius`` (field: 30 m), straight 15 m. Returns
     ``(path, dense polyline (n, 2))``."""
     pts = [(x, 0.0) for x in np.arange(0.0, 20.0, 0.1)]
-    R = 30.0
+    R = float(radius)
     for th in np.arange(0.0, math.pi / 2, 0.1 / R):
         pts.append((20.0 + R * math.sin(th), R - R * math.cos(th)))
     for d in np.arange(0.0, 15.0 + 1e-9, 0.1):
-        pts.append((50.0, 30.0 + d))
+        pts.append((20.0 + R, R + d))
     P = np.array(pts)
     S = np.r_[0.0, np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
     V = np.minimum(v, np.sqrt(2 * ramp * (S + 0.5)))
@@ -93,6 +115,42 @@ def cusp_course(v_fwd=4.0, v_rev=-2.0, ramp=1.0):
            [(float(x), 0.0, 0.0, v_rev) for x in xr]
     P = np.array([(x, 0.0) for x in np.arange(0.0, 20.0 + 1e-9, 0.1)])
     return path, P
+
+
+def _polyline(corners, step=0.1):
+    """Dense ``(n, 2)`` polyline through ``corners`` (for the CTE)."""
+    pts = []
+    for (x0, y0), (x1, y1) in zip(corners[:-1], corners[1:]):
+        n = max(1, int(math.ceil(math.hypot(x1 - x0, y1 - y0) / step)))
+        pts += [(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n) for i in range(n)]
+    pts.append(corners[-1])
+    return np.array(pts, float)
+
+
+#: The path the 2.0.0 MPC stall was documented on (spawn on its first waypoint).
+MISALIGNED_CORNERS = [(30.0, 0.0), (10.0, -8.0), (-10.0, -8.0), (-30.0, 0.0)]
+
+
+def misaligned_course(v=2.0):
+    """The documented 2.0.0 stall path: 4 sparse waypoints at ``v``."""
+    path = [(x, y, 0.0, float(v)) for x, y in MISALIGNED_CORNERS]
+    return path, _polyline(MISALIGNED_CORNERS)
+
+
+def vertex_course(deg=90.0, v=4.0, spacing=0.5):
+    """Straight 20 m, a vertex with heading change ``deg``, straight 20 m;
+    waypoints every ``spacing`` m, all at ``v`` (start from rest)."""
+    th = math.radians(deg)
+    corners = [(0.0, 0.0), (20.0, 0.0), (20.0 + 20.0 * math.cos(th), 20.0 * math.sin(th))]
+    path = []
+    for (x0, y0), (x1, y1) in zip(corners[:-1], corners[1:]):
+        n = max(1, int(math.hypot(x1 - x0, y1 - y0) / spacing))
+        path += [(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n, 0.0, float(v)) for i in range(n)]
+    path.append((*corners[-1], 0.0, float(v)))
+    return path, _polyline(corners)
+
+
+COURSE_V = {"demo": 8.0, "cusp": 4.0, "misaligned": 2.0, "vertex": 4.0}
 
 
 def ensure_cache(urdf, preset, remeasure=False, gpu=False, log=print):
@@ -118,22 +176,40 @@ def ensure_cache(urdf, preset, remeasure=False, gpu=False, log=print):
 
 
 def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="bicycle",
-        mpc_impl="nonlinear", plant="table", course="demo", v=8.0, ramp=1.0, t_max=40.0,
-        on_solve_failure="pd", gpu=False, viewer=False, log=print):
-    """Drive one run; returns the result dict (also the ``MPC_RESULT`` record)."""
+        mpc_impl="nonlinear", plant="table", course="demo", v=None, ramp=1.0, t_max=40.0,
+        on_solve_failure="pd", gpu=False, viewer=False, log=print, radius=30.0,
+        vertex_deg=90.0, start_yaw=None, align_gate=True, stall_timeout=True, log_path=None):
+    """Drive one run; returns the result dict (also the ``MPC_RESULT`` record).
+
+    ``v`` None = the course's speed (demo 8, cusp 4, misaligned 2, vertex 4 m/s).
+    ``align_gate`` / ``stall_timeout`` False pass ``mpc_align_gate=None`` /
+    ``mpc_stall_timeout=None`` (MPC only). ``log_path``: one JSON line per step."""
     import genesis as gs
     import genesis_vehicle as gv
     from genesis_vehicle import DifferentiablePlant, PathFollower, VehicleScene, presets
     from genesis_vehicle.control import extract_state
 
-    path, P = demo_course(v, ramp) if course == "demo" else cusp_course(ramp=ramp)
+    v = COURSE_V[course] if v is None else float(v)
+    if course == "demo":
+        path, P = demo_course(v, ramp, radius)
+    elif course == "cusp":
+        path, P = cusp_course(v_fwd=v, ramp=ramp)
+    elif course == "misaligned":
+        path, P = misaligned_course(v)
+    elif course == "vertex":
+        path, P = vertex_course(vertex_deg, v)
+    else:
+        raise ValueError(f"unknown course {course!r}")
+    spawn = MISALIGNED_CORNERS[0] if course == "misaligned" else (0.0, 0.0)
+    yaw0 = 0.0 if start_yaw is None else float(start_yaw)
+    quat = (math.cos(yaw0 / 2), 0.0, 0.0, math.sin(yaw0 / 2))
     VehicleScene.init_backend("gpu" if gpu else "cpu")
     vs = VehicleScene(dt=DT, substeps=SUBSTEPS, n_envs=1, raycast_mode="dual_scene",
                       show_viewer=viewer, solver="per_vehicle",
                       rigid_options=gs.options.RigidOptions(enable_collision=True))
     vs.add_ground_plane(friction=1.0)
-    veh = vs.add_vehicle(urdf, getattr(presets, preset), pos=(0.0, 0.0, 0.5),
-                         material=gs.materials.Rigid(friction=1.0))
+    veh = vs.add_vehicle(urdf, getattr(presets, preset), pos=(spawn[0], spawn[1], 0.5),
+                         quat=quat, material=gs.materials.Rigid(friction=1.0))
     vs.build()
     for _ in range(int(0.5 / DT)):                  # settle on the brake
         veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
@@ -141,10 +217,15 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
     stage2 = table if plant == "table" else DifferentiablePlant(veh.physics)
     kw = {} if mpc_model == "off" else dict(mpc_params=params, mpc_impl=mpc_impl,
                                             on_solve_failure=on_solve_failure)
+    if mpc_model != "off" and not align_gate:
+        kw["mpc_align_gate"] = None
+    if mpc_model != "off" and not stall_timeout:
+        kw["mpc_stall_timeout"] = None
     t0 = time.perf_counter()
     fol = PathFollower(path, stage2, mpc_model=mpc_model, steer_cap=STEER_CAP, **kw)
     ctor_ms = (time.perf_counter() - t0) * 1e3
     tc, ts, xy, modes, rev_entry, solve_ms = [], [], [], {}, None, []
+    rows, seq = [], []
     for k in range(int(t_max / DT)):
         st = extract_state(veh)
         t1 = time.perf_counter()
@@ -152,13 +233,24 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
                                      st["roll"], yaw_rate=st["yaw_rate"], v_lat=st["v_lat"],
                                      t=k * DT)
         tc.append((time.perf_counter() - t1) * 1e3)
-        if fol._law is not None and fol._law.n_solve > len(solve_ms):
+        solved = fol._law is not None and fol._law.n_solve > len(solve_ms)
+        if solved:
             solve_ms.append(fol._law.last_solve_ms)
         modes[fol.last_mode] = modes.get(fol.last_mode, 0) + 1
+        if seq and seq[-1][0] == fol.last_mode:
+            seq[-1][1] += 1
+        else:
+            seq.append([fol.last_mode, 1, round(k * DT, 3)])
+        if log_path is not None:
+            rows.append(dict(k=k, t=k * DT, x=float(st["pos_xy"][0]), y=float(st["pos_xy"][1]),
+                             yaw=float(st["yaw"]), v=float(st["v_long"]),
+                             regime=fol.regime, mode=fol.last_mode, thr=float(thr),
+                             steer=float(steer), brake=float(brake),
+                             status=fol._law.last_status if solved else None))
         if rev_entry is None and fol.last_mode == "DRV-1":
             rev_entry = k
         xy.append(st["pos_xy"])
-        if fol.last_mode == "DONE":
+        if fol.last_mode in PathFollower.TERMINAL_MODES:   # v2.0.1: DONE / GOAL-MISSED / MPC-ABORT
             ts.append(0.0)
             break
         t2 = time.perf_counter()
@@ -185,13 +277,26 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
         solve_p95_ms=float(np.percentile(solve_ms[1:], 95)) if len(solve_ms) > 1 else None,
         solve_max_ms=float(np.max(solve_ms[1:])) if len(solve_ms) > 1 else None,
         mpc_stats=fol.mpc_stats, sdk=gv.__version__, genesis=gs.__version__,
+        end_mode=fol.last_mode, stop_reason=fol.stop_reason,
+        mode_seq=seq[:60], mode_seq_len=len(seq), start_xy=[float(c) for c in xy[0]],
+        end_xy=[float(c) for c in xy[-1]], start_yaw=yaw0,
+        align_gate=bool(align_gate) if mpc_model != "off" else None,
+        stall_timeout=bool(stall_timeout) if mpc_model != "off" else None,
         conditions=dict(dt=DT, substeps=SUBSTEPS, steer_cap=STEER_CAP, v=v, ramp=ramp,
+                        radius=radius if course == "demo" else None,
+                        vertex_deg=vertex_deg if course == "vertex" else None,
                         t_max=t_max, backend="gpu" if gpu else "cpu",
                         env_threads={k_: os.environ.get(k_) for k_ in
                                      ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS")}))
     ok = done and (course != "demo" or res["cte_max"] < 1.0)
     res["pass"] = bool(ok)
-    log(f"\n{'PASS' if ok else 'FAIL'}: done={done} t={res['t_end']:.2f}s  CTE mean/max "
+    if log_path is not None:
+        with open(log_path, "w") as fh:
+            for r_ in rows:
+                fh.write(json.dumps(r_) + "\n")
+    log(f"\n{'PASS' if ok else 'FAIL'}: done={done} end mode {fol.last_mode}"
+        + (f" ({fol.stop_reason})" if fol.stop_reason else "")
+        + f" t={res['t_end']:.2f}s  CTE mean/max "
         f"{res['cte_mean']:.3f}/{res['cte_max']:.3f} m  ctrl mean {res['ctrl_mean_ms']:.2f} ms, "
         f"control+sim > 25 ms on {res['tot_over25_pct']:.1f} % of steps  modes {modes}")
     if fol.mpc_stats is not None:
@@ -207,13 +312,20 @@ def main():
     ap.add_argument("--mpc-impl", choices=("nonlinear", "linear"), default="nonlinear")
     ap.add_argument("--on-solve-failure", choices=("pd", "hold"), default="pd")
     ap.add_argument("--plant", choices=("table", "diff"), default="table")
-    ap.add_argument("--course", choices=("demo", "cusp"), default="demo")
+    ap.add_argument("--course", choices=("demo", "cusp", "misaligned", "vertex"), default="demo")
+    ap.add_argument("--radius", type=float, default=30.0, help="demo course turn radius (m)")
+    ap.add_argument("--vertex-deg", type=float, default=90.0, help="vertex course heading change")
+    ap.add_argument("--start-yaw", type=float, default=None, help="spawn yaw (rad), default 0")
+    ap.add_argument("--align-gate", choices=("on", "off"), default="on")
+    ap.add_argument("--stall-timeout", choices=("on", "off"), default="on")
+    ap.add_argument("--log", default=None, help="per-step JSON-lines log path")
     ap.add_argument("--table", default=None, help="existing sweep CSV (skips the cache)")
     ap.add_argument("--params", default=None, help="existing MPC params JSON (skips the cache)")
     ap.add_argument("--remeasure", action="store_true")
-    ap.add_argument("--v", type=float, default=8.0)
+    ap.add_argument("--v", type=float, default=None, help="course speed (default per course)")
     ap.add_argument("--ramp", type=float, default=1.0)
-    ap.add_argument("--t-max", type=float, default=40.0)
+    ap.add_argument("--t-max", type=float, default=40.0,
+                    help="run length (s); --course misaligned needs 60 (DONE at 41.775 s)")
     ap.add_argument("--viewer", action="store_true")
     ap.add_argument("--gpu", action="store_true")
     a = ap.parse_args()
@@ -223,7 +335,10 @@ def main():
         table, params = table or ct, params or cp
     res = run(table=table, params=params, preset=a.preset, urdf=a.urdf, mpc_model=a.mpc_model,
               mpc_impl=a.mpc_impl, plant=a.plant, course=a.course, v=a.v, ramp=a.ramp,
-              t_max=a.t_max, on_solve_failure=a.on_solve_failure, gpu=a.gpu, viewer=a.viewer)
+              t_max=a.t_max, on_solve_failure=a.on_solve_failure, gpu=a.gpu, viewer=a.viewer,
+              radius=a.radius, vertex_deg=a.vertex_deg, start_yaw=a.start_yaw,
+              align_gate=a.align_gate == "on", stall_timeout=a.stall_timeout == "on",
+              log_path=a.log)
     print("MPC_RESULT " + json.dumps(res, default=str), flush=True)
     return 0 if res["pass"] else 1
 

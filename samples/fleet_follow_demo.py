@@ -202,6 +202,7 @@ def run(mode, args, n_lanes, recorder=None):
     goals = [p[-1] for p in paths]
     devs = [[] for _ in range(n_lanes)]
     done_at = [None] * n_lanes
+    end_mode = [None] * n_lanes     # v2.0.1: terminal mode each member ended on
     t_ctrl = t_sim = 0.0
     n_steps = int(T_MAX / DT)
     REC_EVERY = 2
@@ -219,9 +220,12 @@ def run(mode, args, n_lanes, recorder=None):
                     for f, s in zip(followers, states)]
         t_ctrl += time.perf_counter() - t0
 
+        # v2.0.1: a member ends on ANY terminal mode (DONE / GOAL-MISSED);
+        # only DONE counts as arrived.
         for k, f in enumerate(followers):
-            if f.last_mode == "DONE" and done_at[k] is None:
+            if f.last_mode in PathFollower.TERMINAL_MODES and done_at[k] is None:
                 done_at[k] = step * DT
+                end_mode[k] = f.last_mode
         if all(d is not None for d in done_at):
             break
 
@@ -232,7 +236,7 @@ def run(mode, args, n_lanes, recorder=None):
         t_sim += time.perf_counter() - t0
 
         if recorder is not None and cam is not None and step % REC_EVERY == 0:
-            n_done = sum(d is not None for d in done_at)
+            n_done = sum(m == "DONE" for m in end_mode)
             recorder.add(cam.render()[0], lines=(
                 f"[{mode}]  t={step * DT:6.2f}s   {n_done}/{n_lanes} arrived",
                 f"control {t_ctrl / (step + 1) * 1e3:6.2f} ms/step   "
@@ -240,11 +244,15 @@ def run(mode, args, n_lanes, recorder=None):
             ))
         if step % int(5.0 / DT) == 0:
             v = np.mean([abs(s["v_long"]) for s in states])
-            print(f"    t={step * DT:5.1f}s  arrived {sum(d is not None for d in done_at)}"
+            print(f"    t={step * DT:5.1f}s  arrived {sum(m == 'DONE' for m in end_mode)}"
                   f"/{n_lanes}  mean |v|={v:4.2f}  "
                   f"control {t_ctrl / (step + 1) * 1e3:6.2f} ms/step", flush=True)
 
     used = step + 1
+    stopped = [(k, m, followers[k].stop_reason) for k, m in enumerate(end_mode)
+               if m is not None and m != "DONE"]
+    if stopped:
+        print(f"    [{mode}] members stopped without arriving: {stopped}")
     err = [math.hypot(float(t.get_pos()[0][0]) - g[0],
                       float(t.get_pos()[0][1]) - g[1])
            for t, g in zip(tanks, goals)]
@@ -252,13 +260,13 @@ def run(mode, args, n_lanes, recorder=None):
     return {
         "mode": mode,
         "n": n_lanes,
-        "arrived": sum(d is not None for d in done_at),
+        "arrived": sum(m == "DONE" for m in end_mode),
         "err": np.array(err),
         "dev_mean": float(dev.mean()),
         "dev_max": float(max(np.max(d) for d in devs)),
         "ctrl_ms": t_ctrl / used * 1e3,
         "sim_ms": t_sim / max(1, used - 1) * 1e3,
-        "t_finish": max([d for d in done_at if d is not None], default=None),
+        "t_finish": max([d for d, m in zip(done_at, end_mode) if m == "DONE"], default=None),
     }
 
 

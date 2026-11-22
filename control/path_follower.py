@@ -156,8 +156,16 @@ class FollowerPlan:
     command: Optional[tuple] = None
     #: (v2.0.0, appended) which stage 1 produced this plan: ``"R-OFF"`` (PD,
     #: MPC layer off), ``"R-MPC"``, ``"R-REV"`` (PD in a reverse block),
-    #: ``"R-FAIL"`` (PD after a failed solve), ``"CMD"`` (DONE / cusp brake
-    #: with the MPC layer on). ``a_ff`` / ``w_ff``: the MPC feedforward.
+    #: ``"R-FAIL"`` (PD after a failed solve), ``"CMD"`` (DONE / cusp brake /
+    #: since v2.0.1 the terminal ``GOAL-MISSED`` and ``MPC-ABORT``, with the
+    #: MPC layer on; with it off those are ``"R-OFF"``), and since v2.0.1
+    #: ``"R-ALIGN"`` (PD on a
+    #: forward block while the heading gate holds, ``mpc_align_gate``) and
+    #: ``"R-STALL"`` (PD after the no-progress watchdog fired,
+    #: ``mpc_stall_timeout``). ``a_ff`` / ``w_ff``: the MPC feedforward.
+    #: Under R-MPC ``v_target`` is the PD's value, which since v2.0.1 can
+    #: differ in sign from 1.x at a block end (W2); the MPC command does not
+    #: use it.
     regime: str = "R-OFF"
     a_ff: Optional[float] = None
     w_ff: Optional[float] = None
@@ -184,6 +192,10 @@ class FleetFollower:
         fleet = FleetFollower([PathFollower(p, plant, mpc_model="off")
                                for p in paths], plant)
         cmds = fleet.step([extract_state(t) for t in tanks])
+
+    Each member stops on its own terminal mode (v2.0.1: ``DONE``,
+    ``GOAL-MISSED``); the fleet does not aggregate — check
+    ``fleet.last_modes`` against ``PathFollower.TERMINAL_MODES``.
     """
 
     def __init__(self, followers, plant):
@@ -291,6 +303,63 @@ class _Unset:
 
     def __repr__(self):
         return repr(self.value)
+
+
+#: v2.0.1 watchdog distances (m), chosen values, not public: the anchor moves
+#: once the chassis is this far from it; R-STALL ends once the reported
+#: position is this far (straight-line displacement) from the R-STALL entry point.
+STALL_ANCHOR_M = 0.25
+STALL_EXIT_M = 1.0
+#: v2.0.1 F5: R-STALL entries allowed per run of entries without
+#: STALL_PROGRESS_M of new path progress; the next one aborts.
+STALL_MAX_PER_BLOCK = 3
+#: F5: new path progress (projection arc length beyond the furthest earlier
+#: entry in the block) that starts a new run. Chosen value, not public.
+STALL_PROGRESS_M = 3.0
+#: v2.0.1 GP-AWAY2 (goal-passed stop), chosen values: the distance to the goal
+#: must grow by more than GP_INC_M on each of two consecutive plan() calls, at
+#: least GP_MARGIN_M beyond arrival_goal.
+GP_INC_M = 1e-3
+GP_MARGIN_M = 0.1
+# _handover_step results.
+_HO_LAW, _HO_PD, _HO_ABORT = 0, 1, 2
+
+
+def _is_real(x) -> bool:
+    import numbers
+    return isinstance(x, numbers.Real) and not isinstance(x, bool)
+
+
+def _check_align_gate(gate):
+    """``None`` or ``(theta_on, theta_off)`` as floats with
+    ``0 < theta_off < theta_on <= pi``; ``ValueError`` otherwise."""
+    if gate is None:
+        return None
+    msg = ("mpc_align_gate must be None or (theta_on, theta_off) in rad with "
+           f"0 < theta_off < theta_on <= pi; got {gate!r}")
+    if isinstance(gate, (str, bytes)):
+        raise ValueError(msg)
+    try:
+        vals = list(gate)
+    except TypeError:
+        raise ValueError(msg) from None
+    if len(vals) != 2 or not all(_is_real(v) for v in vals):
+        raise ValueError(msg)
+    on, off = float(vals[0]), float(vals[1])
+    # Written so that a NaN fails every comparison and raises.
+    if not (math.isfinite(on) and math.isfinite(off) and 0.0 < off < on <= math.pi):
+        raise ValueError(msg)
+    return (on, off)
+
+
+def _check_stall_timeout(timeout):
+    """``None`` or a finite real ``> 0`` (as float); ``ValueError`` otherwise."""
+    if timeout is None:
+        return None
+    if not _is_real(timeout) or not (math.isfinite(float(timeout)) and float(timeout) > 0.0):
+        raise ValueError(f"mpc_stall_timeout must be None or a finite number of seconds > 0; "
+                         f"got {timeout!r}")
+    return float(timeout)
 
 
 #: The U1 error: an MPC follower (the 2.0.0 default) without its params.
@@ -440,8 +509,14 @@ class PathFollower:
             :class:`~genesis_vehicle.control.mpc.MPCVehicleParams`. REQUIRED
             unless ``mpc_model="off"``.
         mpc_model: ``"bicycle"`` (default; the field AlpaSim bicycle model) or
-            ``"off"`` (no MPC layer: the 1.x PD follower, bit-identical to
-            1.8.0 on the scenarios ``tests/test_pd_golden.py`` replays).
+            ``"off"`` (no MPC layer: the 1.x PD follower). Since 2.0.1, for
+            the same sequence of inputs, identical to 1.8.0 on every step
+            before the first ``GOAL-MISSED`` step, except at steps where 1.x
+            planned a speed against the block direction (W2; none in the PD
+            golden). In closed loop a W2 step changes the run from that step
+            on. ``tests/test_pd_golden.py`` enforces it on its 38 scenarios
+            (34 on every step, 4 up to their ``GOAL-MISSED`` step). (Through
+            2.0.0 this said "bit-identical to 1.8.0", true then.)
         mpc_impl: ``"nonlinear"`` (default; do_mpc + IPOPT) or ``"linear"``
             (OSQP). The nonlinear solve is NOT guaranteed to fit a 25 ms
             control period: on the measured machine a share of the control
@@ -453,7 +528,25 @@ class PathFollower:
             ``"linear"`` (measure it too).
         on_solve_failure: ``"pd"`` (default) — a solve that is not applicable
             hands the step to the PD law until the next applicable solve —
-            or ``"hold"``, the parity mode with the field controller. What
+            or ``"hold"``, the parity mode with the field controller. **Since
+            2.0.1 ``"hold"`` is field parity only with
+            ``mpc_align_gate=None, mpc_stall_timeout=None`` and only on runs
+            with no ``GOAL-MISSED`` and no W2 step** (the gate and watchdog
+            are on by default under either policy; ``GOAL-MISSED`` and W2
+            cannot be switched off). Under ``"pd"`` the PD drives after a
+            failed solve only up to a travel budget per forward block, reset
+            by :meth:`set_path` (F8: at most pi * R_min plus the travel of one
+            :meth:`plan` interval; then ``MPC-ABORT``,
+            ``stop_reason == "fail_budget"``), also with both new kwargs
+            ``None``. The budget integrates the distance between successive
+            positions passed to :meth:`plan`, so position noise alone can fill
+            it — but only with ``mpc_stall_timeout=None``: with the watchdog on
+            (default), a vehicle blocked in R-FAIL enters R-STALL after
+            ``mpc_stall_timeout`` and stays there without a time limit
+            (measured with a fake always-raising solver: R-STALL at 2.0 s,
+            still there at 100 s). With ``mpc_stall_timeout=None`` a blocked
+            vehicle stays in R-FAIL without a time limit if its pose is
+            noise-free. What
             ``"hold"`` applies depends on ``mpc_impl``: with ``"nonlinear"``
             it APPLIES INFEASIBLE SOLUTIONS — every solve that did not raise,
             including an infeasible or iteration-capped one and the stale
@@ -469,6 +562,109 @@ class PathFollower:
         mpc_v_floor: speed floor for timing the MPC reference (m/s, default
             0.5).
         dt_ctrl: control period (s); default the params file's ``dt``.
+        mpc_align_gate: (v2.0.1) ``(theta_on, theta_off)`` in rad, default
+            ``(pi/2, pi/4)``, or ``None``. The heading gate, evaluated on
+            every forward non-command step outside R-STALL (in R-STALL only
+            at the 1 m exit): when the heading
+            error e_psi = wrap(per-waypoint path yaw at the projection −
+            chassis yaw) exceeds ``theta_on`` the PD law drives
+            (``last_mode == "PD-ALIGN"``, regime ``"R-ALIGN"``, no solve);
+            once |e_psi| < ``theta_off`` the MPC reference is re-timed from
+            the current projection (``u_prev`` reset as in :meth:`set_path`)
+            and the MPC drives again from that step. Needs
+            ``0 < theta_off < theta_on <= pi``. It also takes over starts
+            the 2.0.0 MPC drove away from: on the reference car (ray-wheel,
+            NMPC, ``samples/mpc_follow_demo.py``) a start at |e_psi| = 1.67 rad
+            reached DONE with the 2.0.0 behaviour and a start at 2.36 rad stood
+            still; a Genesis-free sweep of the first MPC command on one stall
+            path gave a positive acceleration up to 2.2 rad. It also takes
+            over mid-path corners sharp enough to put |e_psi| above
+            ``theta_on`` — such runs differ from 2.0.0 and from the field
+            controller. Bounds (v2.0.1, chosen values): R-ALIGN travel is
+            budgeted per forward block, reset by :meth:`set_path`, at most
+            pi * R_min plus the travel of one :meth:`plan` interval (R_min =
+            wheelbase / tan(steer_cap * max_steer_rad)); beyond it
+            ``MPC-ABORT`` (``"align_budget"``). A final block too short for
+            the turn is not refused: the R-ALIGN entry is handled like any
+            other (F3 budget). Measured on the reference car, C-v150 with a
+            5 m second leg (ray-wheel, NMPC, 60 s, final 2.0.1 tree, from the
+            per-step log): 43.9 m of travel, of which 23.3 m in PD-ALIGN and
+            1.5 m braking, CTE 23.95 m, then ``MPC-ABORT`` /
+            ``"align_budget"``. The budgets
+            integrate the distance between successive positions passed to
+            :meth:`plan`, so position noise alone fills them: a blocked
+            vehicle with noisy pose eventually aborts (``align_budget``; one
+            measurement: pose noise 5 mm / 0.002 rad at 40 Hz,
+            ``align_budget`` after 65.95 s); with a noise-free pose it stays
+            in R-ALIGN without a time limit (the watchdog does not run in
+            R-ALIGN). Distance driven under the MPC itself (R-MPC) has no
+            budget.
+        mpc_stall_timeout: (v2.0.1) seconds, default ``2.0``, or ``None``. The
+            no-progress watchdog: while the MPC drives a forward block
+            (regimes ``R-MPC`` / ``R-FAIL``), if the chassis position passed
+            to :meth:`plan` stays within 0.25 m of an anchor for
+            ``mpc_stall_timeout`` of follower time ``t`` while farther than
+            ``arrival_goal`` from the last waypoint, the PD law drives from
+            that step (``"PD-STALL"``, regime ``"R-STALL"``) until the
+            vehicle has moved 1.0 m; then the reference is re-timed and the
+            MPC (or the gate) takes over. A stop that creeps 0.25 m or more
+            every ``mpc_stall_timeout`` is NOT caught. A vehicle held still
+            by the user (own brake / e-stop) while the follower keeps being
+            stepped also hands over; on release the PD law (its low-speed
+            KICK saturates the throttle) drives 1 m. User-held stops long
+            enough to fire the watchdog, the 2nd to 4th of a run each less
+            than 3.0 m of new path progress beyond the earlier ones, end the
+            run with ``"stall_budget"``. Time
+            is the ``t`` passed to :meth:`step` (or the internal clock), in
+            the caller's units; a forward jump of ``t`` by more than half the
+            timeout between two calls re-anchors on that call, so the jump
+            itself does not fire the watchdog (a fire can still follow
+            ``mpc_stall_timeout`` later). An R-STALL entry aborts (``MPC-ABORT``,
+            ``"stall_budget"``) when it is the fourth in a run. A run starts
+            at the block's first entry, or at an entry whose projection lies
+            at least 3.0 m (arc length along the block) beyond the furthest
+            projection of every earlier entry in this block. Progress is
+            measured along the PATH PROJECTION, not on the ground: on the
+            inside of a path curve of radius R, at offset d from the path
+            toward the centre, 1 m of ground motion is about R/(R − d) m of
+            path progress, so a vehicle that stops repeatedly on the inside
+            of a tight curve can start a new run at every entry without
+            getting anywhere (constructed: hairpin of radius 7.4 m, vehicle
+            1.9 m from the centre, entries 1.03 m apart on the ground: 6
+            entries, 6 new runs, no abort). The entries in one forward block
+            are bounded by the block length: at most
+            3 * (floor(L_block / 3.0 m) + 1) entries before an abort.
+            Stop-and-go where every stop lies at least 3.0 m of path beyond
+            every earlier stop in the block does not end on
+            ``"stall_budget"``. Reset by :meth:`set_path` and on a block
+            change. An R-STALL episode ends on 1.0 m of displacement from its
+            entry point; its travel is not limited. R-STALL has no timer: a
+            blocked vehicle that does not reach the 1.0 m displacement stays
+            in R-STALL without a time limit (zero-mean pose noise of a few mm
+            is far below 1.0 m).
+
+        For these two, ``None`` DISABLES the feature — unlike
+        ``mpc_v_floor`` / ``mpc_gains`` / ``dt_ctrl``, where ``None`` means
+        the default. Which kwarg turns off what: ``mpc_align_gate=None`` the
+        gate with its travel budget (F3); ``mpc_stall_timeout=None`` the
+        watchdog with its run-of-entries limit including the progress rule
+        and the ``t``-jump rule (F5 / F6); never off: F8 (``"pd"`` only),
+        ``GOAL-MISSED``, W2. So ``mpc_align_gate=None, mpc_stall_timeout=None`` gives the
+        2.0.0 commands only on runs with no ``GOAL-MISSED``, no W2 step and,
+        under ``"pd"``, no ``fail_budget`` abort — no kwarg combination
+        restores 2.0.0's ``"pd"`` exactly (``mpc_stats`` also gains the
+        ``handover`` key). MPC followers only: with ``mpc_model="off"``
+        passing either, even as ``None``, raises like every MPC argument.
+        Gate, watchdog, F3 / F5 / F8 also apply to ``mpc_impl="linear"``.
+        The 2.0.1 ray-wheel acceptance courses were all measured on the
+        nonlinear MPC; the linear MPC on two of them only (the misaligned
+        stall course: ``MPC-ABORT`` / ``"fail_budget"``; a 150 degree vertex
+        with a 20 m second leg: ``GOAL-MISSED``) and, for the F5 progress
+        rule, in a kinematic search (40 random paths: 12 DONE, one run lost
+        to F8). The linear MPC was not measured on the ray-wheel short-leg
+        courses. While PD drives under either, the
+        law is not called: ``mpc_stats["plan_age_s"]`` keeps growing and
+        :attr:`last_plan` is the last pre-handover plan.
 
     The MPC layer runs on FORWARD blocks only and models a 2-axle Ackermann
     vehicle; reverse blocks are driven by the PD law. It needs the chassis yaw
@@ -481,17 +677,53 @@ class PathFollower:
     and with the MPC layer on also ``MPC`` / ``MPC-HOLD`` (standing, brake
     instead of a negative throttle) / ``MPC-HOLDCMD`` (``"hold"``: previous
     command kept after a failed solve) / ``PD-FALLBACK`` (``"pd"``: PD after
-    a failed solve).
+    a failed solve) / ``PD-ALIGN`` (heading gate) / ``PD-STALL`` (watchdog),
+    and since v2.0.1 the terminal ``GOAL-MISSED`` (every mode: on the final
+    block, past the goal's normal plane on the last segment, at least
+    ``arrival_goal + 0.1`` m from the goal, and the distance grew by more than
+    1e-3 m on each of the last two :meth:`plan` calls — so a vehicle moving
+    away slower than 1e-3 m per call, i.e. 1e-3/h m/s at call interval h, is
+    not stopped, and calling :meth:`plan` more than once per control step
+    shortens the window) / ``MPC-ABORT`` (MPC layer budgets, see
+    :attr:`stop_reason`). Both command ``(0, 0, 1)`` and stay set until
+    :meth:`set_path` or a ``DONE`` step. A ``DONE`` (inside ``arrival_goal``
+    of the last waypoint) sets :attr:`stop_reason` to None, and the follower
+    drives again if the vehicle leaves the circle; the block's MPC budgets
+    stay as spent — only :meth:`set_path` resets them. A ``DONE`` can clear
+    only an abort on the final block: an abort on an earlier block is sticky
+    until :meth:`set_path`. See :attr:`TERMINAL_MODES`. Neither is a bound on
+    travel, and ``"off"`` and R-REV have no MPC budget: the follower is NOT
+    guaranteed not to run away. Observed in a kinematic test of the 1.x PD
+    with these stops (``tests/test_pd_runaway_property.py``, seed 21, 120 s),
+    runs that neither finished nor stopped: pinned mid-path and receding;
+    on the near side of the last segment and receding; on a non-final
+    forward block; and on the final block beyond the goal plane either
+    approaching slowly (-1.8 m over the last 10 s) or moving at 2 m/s at a
+    nearly constant distance from the goal (+0.4 m over the last 10 s), so
+    the distance does not grow on two consecutive calls and GP-AWAY2 does
+    not fire. Runs pinned near the path start and run-aways on reverse blocks
+    were observed in the planner's emulation of these rules on other seeds,
+    not on the shipped code.
     """
 
     #: Release-specific accepted values of ``mpc_model``.
     MPC_MODELS = ("bicycle", "off")
+    #: (v2.0.1) ``last_mode`` values that end a run: ``DONE`` (inside
+    #: ``arrival_goal`` of the last waypoint; recomputed every step, as in
+    #: 1.x), ``GOAL-MISSED`` and ``MPC-ABORT`` (both stay set until
+    #: :meth:`set_path` or a ``DONE`` step; a ``DONE`` can clear only an abort
+    #: on the final block, sets ``stop_reason`` to None and resets no MPC
+    #: budget). Loop on
+    #: ``last_mode in PathFollower.TERMINAL_MODES`` and read :attr:`stop_reason`.
+    TERMINAL_MODES = ("DONE", "GOAL-MISSED", "MPC-ABORT")
 
     def __init__(self, path, plant=None, *, sweep=None,
                  mpc_params=_Unset(None), mpc_model: str = "bicycle",
                  mpc_impl=_Unset("nonlinear"), on_solve_failure=_Unset("pd"),
                  mpc_gains=_Unset(None), mpc_v_floor=_Unset(0.5),
                  dt_ctrl=_Unset(None),
+                 mpc_align_gate=_Unset((math.pi / 2, math.pi / 4)),
+                 mpc_stall_timeout=_Unset(2.0),
                  lookahead: float = 3.5, arrival_goal: float = 1.5,
                  cusp_goal: float = 1.0, k_v: float = 2.0, k_w: float = 1.5,
                  k_approach: float = 1.0, v_stop: float = 0.05,
@@ -508,7 +740,8 @@ class PathFollower:
                 "sweep CSV path for the measured one")
         mpc_kw = {"mpc_params": mpc_params, "mpc_impl": mpc_impl,
                   "on_solve_failure": on_solve_failure, "mpc_gains": mpc_gains,
-                  "mpc_v_floor": mpc_v_floor, "dt_ctrl": dt_ctrl}
+                  "mpc_v_floor": mpc_v_floor, "dt_ctrl": dt_ctrl,
+                  "mpc_align_gate": mpc_align_gate, "mpc_stall_timeout": mpc_stall_timeout}
         # (3) the model name.
         if mpc_model not in self.MPC_MODELS:
             raise ValueError(f"mpc_model must be one of {list(self.MPC_MODELS)}; "
@@ -520,7 +753,9 @@ class PathFollower:
             given = [k for k, v in (("mpc_params", mpc_params), ("mpc_impl", mpc_impl),
                                     ("on_solve_failure", on_solve_failure),
                                     ("mpc_gains", mpc_gains), ("mpc_v_floor", mpc_v_floor),
-                                    ("dt_ctrl", dt_ctrl)) if not isinstance(v, _Unset)]
+                                    ("dt_ctrl", dt_ctrl), ("mpc_align_gate", mpc_align_gate),
+                                    ("mpc_stall_timeout", mpc_stall_timeout))
+                     if not isinstance(v, _Unset)]
             if given:
                 raise ValueError(f"mpc_model=\"off\" takes no MPC argument; got {', '.join(given)}")
             mpc_setup = None
@@ -564,16 +799,21 @@ class PathFollower:
         self.last_mode = "INIT"
         self.regime = None
         self._law = None
+        # v2.0.1 terminal state and GP-AWAY2 history (every mode, "off" too).
+        self._terminal = None           # None | (mode, stop_reason); DONE is not stored
+        self._gp_hist = []              # distance to the final waypoint, last 3 calls
         if mpc_on:
             self._init_mpc(mpc_setup, steer_cap)
 
     # -- MPC layer: construction ------------------------------------------------
 
     def _check_mpc_args(self, plant, mpc_model, *, mpc_params, mpc_impl,
-                        on_solve_failure, mpc_gains, mpc_v_floor, dt_ctrl):
+                        on_solve_failure, mpc_gains, mpc_v_floor, dt_ctrl,
+                        mpc_align_gate, mpc_stall_timeout):
         """Steps 5-10 of the constructor's check order (each raises before any
-        side effect): live-vehicle steering, params present, implementation,
-        dependencies, params file, forward blocks."""
+        side effect): live-vehicle steering, params present, implementation /
+        policy / heading gate / stall timeout (v2.0.1: after U1, before the
+        dependencies), dependencies, params file, forward blocks."""
         # (5) a live vehicle can be checked for what the model describes.
         steering, n_axles = _live_steering(plant)
         if steering is not None and not _is_two_axle_ackermann(steering, n_axles):
@@ -588,6 +828,8 @@ class PathFollower:
             raise ValueError(f"mpc_impl must be 'nonlinear' or 'linear'; got {mpc_impl!r}")
         if on_solve_failure not in ("pd", "hold"):
             raise ValueError(f"on_solve_failure must be 'pd' or 'hold'; got {on_solve_failure!r}")
+        gate = _check_align_gate(mpc_align_gate)
+        stall = _check_stall_timeout(mpc_stall_timeout)
         # (8) dependencies.
         from .mpc._deps import require_mpc_deps
         require_mpc_deps(mpc_impl)
@@ -596,7 +838,7 @@ class PathFollower:
         params = load_mpc_params(mpc_params)
         return dict(params=params, impl=mpc_impl, policy=on_solve_failure,
                     gains=mpc_gains, v_floor=0.5 if mpc_v_floor is None else float(mpc_v_floor),
-                    dt_ctrl=dt_ctrl, model=mpc_model)
+                    dt_ctrl=dt_ctrl, model=mpc_model, align_gate=gate, stall_timeout=stall)
 
     def _init_mpc(self, st, steer_cap):
         import warnings
@@ -620,6 +862,17 @@ class PathFollower:
                 UserWarning, stacklevel=3)
             _cross_check_live(self.plant, params)        # (12)
         sp = params.solver_params(st["model"], steer_cap=abs(steer_cap), dt_ctrl=dt_ctrl)
+        # (v2.0.1) minimum turn radius from the solver's own steering limit:
+        # the scale of the PD budgets (F3 / F8: pi * R_min of travel per block).
+        # The check stays: an infinite R_min would silently disable F3 / F8.
+        wb, smax = float(sp.wheelbase), float(sp.steer_max)
+        if not (math.isfinite(wb) and wb > 0.0 and math.isfinite(smax)
+                and 0.0 < smax < math.pi / 2):
+            raise ValueError(
+                "the MPC layer needs wheelbase > 0 and a steering limit "
+                "steer_cap * max_steer_rad in (0, pi/2) rad; got wheelbase="
+                f"{wb!r}, steering limit {smax!r}")
+        r_min = wb / math.tan(smax)
         from .mpc.law import _MPCLaw
         if st["impl"] == "nonlinear":
             from .mpc.alpasim_nonlinear import NonlinearMPC
@@ -637,6 +890,27 @@ class PathFollower:
         self._mpc_block = None          # block index the law's reference belongs to
         self._t_next = 0.0              # internal clock (when step() gets no t)
         self._t_now = None
+        # v2.0.1 heading gate / no-progress watchdog (plan_r210 section 3.3-3.4).
+        self._align_gate = st["align_gate"]        # (theta_on, theta_off) or None
+        self._stall_timeout = st["stall_timeout"]  # s or None
+        self._handover = {"align": 0, "stall": 0}  # cumulative, survives set_path
+        self._ho_regime = None          # None | "R-ALIGN" | "R-STALL"
+        self._ho_block = None           # block the handover state belongs to
+        self._anchor = None             # (t, x, y) of the watchdog, or None
+        self._stall_entry = None        # (x, y) where R-STALL began, or None
+        # v2.0.1 per-block PD budgets (plan_r210 section 3B.3).
+        self._r_min = r_min
+        self._pd_budget = math.pi * r_min   # F3 (R-ALIGN) and F8 (R-FAIL) travel, m
+        self._reset_budgets()
+
+    def _reset_budgets(self) -> None:
+        self._bud_block = None          # block the budgets below belong to
+        self._d_align = 0.0             # travel after R-ALIGN steps in that block
+        self._d_fail = 0.0              # travel after R-FAIL steps in that block
+        self._n_stall = 0               # watchdog fires in the current run of that block
+        self._stall_s_hw = None         # furthest projection arc length over the block's fires
+        self._prev_regime = None        # regime of the previous plan() call
+        self._prev_xy = None            # its position
 
     # -- Path geometry ---------------------------------------------------------
 
@@ -948,43 +1222,94 @@ class PathFollower:
 
         Runs the path state machine (projection, blocks, cusp, DONE) every
         step, and returns a :class:`FollowerPlan`. With ``mpc_model="off"``
-        that is the 1.x PD plan, unchanged. With the MPC layer on, a forward
+        that is the 1.x PD plan plus the v2.0.1 goal-passed stop and W2 (see
+        the class docstring; through 2.0.0 this said "unchanged"). With the
+        MPC layer on, a forward
         block is planned by the MPC (``regime="R-MPC"``); a reverse block
         (``"R-REV"``) and a step after a failed solve under
-        ``on_solve_failure="pd"`` (``"R-FAIL"``) get the PD plan.
+        ``on_solve_failure="pd"`` (``"R-FAIL"``) get the PD plan, and so do
+        (v2.0.1) forward steps held by the heading gate (``"R-ALIGN"``) or
+        handed over by the no-progress watchdog (``"R-STALL"``) — both decided
+        here from this method's inputs, so a caller that runs its own finish
+        gets them too. A terminal step (``DONE``, ``GOAL-MISSED``,
+        ``MPC-ABORT``) carries ``command=(0, 0, 1)``.
         """
         if self._law is None:
             pd = self._plan_pd(pos_xy, yaw, v_long, pitch_deg, roll_deg)
             self.regime = pd.regime
             return pd
+        out = self._plan_mpc(pos_xy, yaw, v_long, pitch_deg, roll_deg, yaw_rate, v_lat, t)
+        # (v2.0.1) what drove the step that ends here: the next call charges
+        # the travel in between to the R-ALIGN / R-FAIL budget of this block.
+        self._prev_regime = self.regime
+        self._prev_xy = (float(pos_xy[0]), float(pos_xy[1]))
+        return out
+
+    def _plan_mpc(self, pos_xy, yaw, v_long, pitch_deg, roll_deg, yaw_rate, v_lat, t):
+        """:meth:`plan` with the MPC layer on."""
         missing = yaw_rate is None or v_lat is None
         if missing:                     # restorable: nothing moves if we raise below
             snap = (self.block_i, self.current_idx, self.projection_t,
-                    self.projection_xy, self.transitioning)
+                    self.projection_xy, self.transitioning, list(self._gp_hist),
+                    self._terminal)
         pd = self._plan_pd(pos_xy, yaw, v_long, pitch_deg, roll_deg)
         if missing and pd.command is None and self.blocks[self.block_i][2] > 0:
             (self.block_i, self.current_idx, self.projection_t,
-             self.projection_xy, self.transitioning) = snap
+             self.projection_xy, self.transitioning, self._gp_hist, self._terminal) = snap
             raise TypeError(
                 "the MPC layer needs yaw_rate= and v_lat= on every step of a forward "
                 "block — extract_state() returns both")
         t_now = self._t_next if t is None else float(t)
         self._t_next = t_now + self.dt_ctrl
+        t_prev = self._t_now
         self._t_now = t_now
+        handover_on = self._align_gate is not None or self._stall_timeout is not None
         if pd.command is not None:
+            if handover_on:
+                self._clear_handover()
             pd.regime = "CMD"
             self.regime = "CMD"
             return pd
         bs, be, sgn = self.blocks[self.block_i]
         if sgn < 0:
+            if handover_on:
+                self._clear_handover()
             pd.regime = "R-REV"
             self.regime = "R-REV"
             return pd
+        # Per-block budgets (F3 / F5 / F8): reset on a block change, charged
+        # with the travel that followed an R-ALIGN / R-FAIL step. Independent
+        # of the gate / watchdog (F8 is live with both None).
+        x, y = float(pos_xy[0]), float(pos_xy[1])
+        if self._bud_block != self.block_i:
+            self._bud_block = self.block_i
+            self._d_align = self._d_fail = 0.0
+            self._n_stall = 0
+            self._stall_s_hw = None
+        elif self._prev_xy is not None:
+            d_step = math.hypot(x - self._prev_xy[0], y - self._prev_xy[1])
+            if self._prev_regime == "R-ALIGN":
+                self._d_align += d_step
+            elif self._prev_regime == "R-FAIL":
+                self._d_fail += d_step
+        if handover_on:
+            ho = self._handover_step(t_now, pos_xy, yaw, t_prev)
+            if ho == _HO_ABORT:
+                return self._abort_plan(v_long, pitch_deg, roll_deg)
+            if ho == _HO_PD:
+                # PD drives this step (R-ALIGN / R-STALL); the law is not called.
+                pd.mode = "PD-ALIGN" if self._ho_regime == "R-ALIGN" else "PD-STALL"
+                pd.regime = self._ho_regime
+                self.regime = self._ho_regime
+                return pd
         if self._mpc_block != self.block_i:
             self._law.start_block(self._block_waypoints(self.block_i), t0=t_now)
             self._mpc_block = self.block_i
         o = self._law.step(t_now, pos_xy, yaw, v_long, yaw_rate, v_lat)
         if o.mode == "PD-FALLBACK":
+            if self._d_fail > self._pd_budget:          # F8
+                self._abort("fail_budget")
+                return self._abort_plan(v_long, pitch_deg, roll_deg)
             pd.mode = "PD-FALLBACK"
             pd.regime = "R-FAIL"
             self.regime = "R-FAIL"
@@ -994,6 +1319,171 @@ class PathFollower:
                             v_long=v_long, v_target=pd.v_target,
                             pitch_deg=pitch_deg, roll_deg=roll_deg,
                             regime="R-MPC", a_ff=o.a_t, w_ff=o.w_t)
+
+    # -- terminal modes (v2.0.1) --------------------------------------------------------
+
+    @property
+    def stop_reason(self):
+        """Why the follower stopped in a terminal mode other than ``DONE``.
+        Exactly one of:
+
+        * ``"goal_passed"`` (``GOAL-MISSED``): every mode, cannot be disabled;
+        * ``"align_budget"`` (``MPC-ABORT``): MPC layer on and
+          ``mpc_align_gate`` not None;
+        * ``"stall_budget"`` (``MPC-ABORT``): MPC layer on and
+          ``mpc_stall_timeout`` not None;
+        * ``"fail_budget"`` (``MPC-ABORT``): MPC layer on and
+          ``on_solve_failure="pd"``, whatever the two kwargs.
+
+        ``None`` before the first step, while driving, and on ``DONE`` (a
+        ``DONE`` step clears it); reset by :meth:`set_path`. Read-only."""
+        return None if self._terminal is None else self._terminal[1]
+
+    def _abort(self, reason) -> int:
+        """Enter the sticky ``MPC-ABORT`` terminal state (brake to a stop)."""
+        self._terminal = ("MPC-ABORT", reason)
+        self._clear_handover()
+        return _HO_ABORT
+
+    def _abort_plan(self, v_long, pitch_deg, roll_deg):
+        self.regime = "CMD"
+        return FollowerPlan(mode="MPC-ABORT", command=(0.0, 0.0, 1.0), v_long=v_long,
+                            pitch_deg=pitch_deg, roll_deg=roll_deg, regime="CMD")
+
+    def _goal_passed(self, pos_xy, d_goal) -> bool:
+        """GP-AWAY2 (v2.0.1): on the final block with the projection on its
+        last segment, beyond the goal's segment-normal plane, at least
+        ``arrival_goal + 0.1`` m from the goal, and the distance to the goal
+        grew by more than 1e-3 m on each of the last two :meth:`plan` calls
+        (``_gp_hist`` holds the last three distances, this call's last)."""
+        h = self._gp_hist
+        if len(h) < 3 or not (h[1] - h[0] > GP_INC_M and h[2] - h[1] > GP_INC_M):
+            return False
+        if d_goal < self.arrival_goal + GP_MARGIN_M:
+            return False
+        if self.block_i != len(self.blocks) - 1:
+            return False
+        bs, be, _ = self.blocks[self.block_i]
+        if self.current_idx < be - 1:
+            return False
+        g = self.path[be]
+        j = be - 1
+        while j > bs and math.hypot(g[0] - self.path[j][0], g[1] - self.path[j][1]) < 1e-9:
+            j -= 1
+        return ((pos_xy[0] - g[0]) * (g[0] - self.path[j][0])
+                + (pos_xy[1] - g[1]) * (g[1] - self.path[j][1])) > 0
+
+    def _heading_error(self, yaw) -> float:
+        """e_psi = wrap(per-waypoint path yaw at the projection − chassis yaw)."""
+        return (self.yaws[self.current_idx] - yaw + math.pi) % (2 * math.pi) - math.pi
+
+    def _clear_handover(self) -> None:
+        """Release R-ALIGN / R-STALL and drop the watchdog anchor (no re-seed);
+        the ``handover`` counts are kept."""
+        self._ho_regime = None
+        self._ho_block = None
+        self._anchor = None
+        self._stall_entry = None
+
+    def _proj_s(self) -> float:
+        """Arc length along the active block from its first waypoint to the
+        projection point (read-only; called at watchdog fires only)."""
+        bs, be, _ = self.blocks[self.block_i]
+        i = min(self.current_idx, be)
+        s = 0.0
+        for k in range(bs, i):
+            s += math.hypot(self.path[k + 1][0] - self.path[k][0],
+                            self.path[k + 1][1] - self.path[k][1])
+        return s + math.hypot(self.projection_xy[0] - self.path[i][0],
+                              self.projection_xy[1] - self.path[i][1])
+
+    def _enter_align(self, e) -> int:
+        """An R-ALIGN entry (both paths). F3: the block's R-ALIGN travel budget
+        already spent — abort ``align_budget``. (``e`` is unused; kept,
+        private.)"""
+        if self._d_align > self._pd_budget:
+            return self._abort("align_budget")
+        self._ho_regime = "R-ALIGN"
+        self._handover["align"] += 1
+        self._anchor = None
+        return _HO_PD
+
+    def _handover_step(self, t_now, pos_xy, yaw, t_prev=None) -> int:
+        """The gate / watchdog state machine for one forward, non-command step.
+        Returns ``_HO_PD`` when the PD law drives this step
+        (``self._ho_regime`` says which), ``_HO_LAW`` when the MPC law does,
+        ``_HO_ABORT`` on an ``MPC-ABORT`` (F3 / F5). Reads the path state
+        only; touches the law only through :meth:`_reseed_block` on a
+        release. ``t_prev``: the previous :meth:`plan` call's time (F6)."""
+        if self._ho_block != self.block_i:              # block changed: release
+            self._clear_handover()
+            self._ho_block = self.block_i
+        gate, timeout = self._align_gate, self._stall_timeout
+        x, y = float(pos_xy[0]), float(pos_xy[1])
+        e = abs(self._heading_error(yaw))
+        if self._ho_regime == "R-STALL":
+            ex, ey = self._stall_entry
+            if math.hypot(x - ex, y - ey) < STALL_EXIT_M:
+                return _HO_PD
+            self._ho_regime = None
+            self._stall_entry = None
+            self._reseed_block(t_now)
+            if gate is not None and e > gate[0]:
+                return self._enter_align(e)
+            self._anchor = (t_now, x, y)
+            return _HO_LAW
+        if self._ho_regime == "R-ALIGN":
+            if e >= gate[1]:
+                if self._d_align > self._pd_budget:     # F3
+                    return self._abort("align_budget")
+                return _HO_PD
+            self._ho_regime = None
+            self._reseed_block(t_now)
+            self._anchor = (t_now, x, y) if timeout is not None else None
+            return _HO_LAW
+        if gate is not None and e > gate[0]:
+            return self._enter_align(e)
+        if timeout is not None:
+            a = self._anchor
+            jump = t_prev is not None and t_now - t_prev > timeout / 2      # F6
+            if (a is None or t_now < a[0] or jump
+                    or math.hypot(x - a[1], y - a[2]) >= STALL_ANCHOR_M):
+                self._anchor = (t_now, x, y)
+            elif t_now - a[0] >= timeout:
+                gx, gy = self.path[-1][0], self.path[-1][1]
+                if math.hypot(x - gx, y - gy) > self.arrival_goal:
+                    # F5 run of entries: an entry whose projection lies at least
+                    # STALL_PROGRESS_M beyond every earlier entry of the block
+                    # starts a new run (the count restarts at this entry).
+                    s_now = self._proj_s()
+                    hw = self._stall_s_hw
+                    if hw is not None and max(hw, s_now) - hw >= STALL_PROGRESS_M:
+                        self._n_stall = 0
+                    self._stall_s_hw = s_now if hw is None else max(hw, s_now)
+                    self._n_stall += 1
+                    if self._n_stall > STALL_MAX_PER_BLOCK:             # F5
+                        return self._abort("stall_budget")
+                    self._ho_regime = "R-STALL"
+                    self._handover["stall"] += 1
+                    self._stall_entry = (x, y)
+                    self._anchor = None
+                    return _HO_PD
+        return _HO_LAW
+
+    def _reseed_block(self, t_now) -> None:
+        """Re-time the active forward block's reference so the current
+        projection is due at ``t_now``, and restart the law (command,
+        acceleration history and ``u_prev`` reset by ``start_block``). Does not
+        touch ``_t_next``."""
+        bs, _, _ = self.blocks[self.block_i]
+        wps = self._block_waypoints(self.block_i)
+        self._law.start_block(wps, t0=0.0)
+        tt = self._law.ref[0]
+        k = self.current_idx - bs
+        k1 = min(k + 1, len(tt) - 1)
+        t_ref = float(tt[k] + self.projection_t * (tt[k1] - tt[k]))
+        self._law.start_block(wps, t0=t_now - t_ref)
+        self._mpc_block = self.block_i
 
     def _block_waypoints(self, i):
         """Block ``i``'s waypoints for the MPC reference: speeds floored at 0
@@ -1012,10 +1502,16 @@ class PathFollower:
     def mpc_stats(self):
         """``{n_solve, status: {converged, capped, capped_infeasible,
         "failed:<status>", exception, nan}, last_status, last_solve_ms,
-        plan_age_s}`` — ``None`` with ``mpc_model="off"``."""
+        plan_age_s, handover: {align, stall}}`` — ``None`` with
+        ``mpc_model="off"``. ``handover`` (v2.0.1) counts entries into
+        R-ALIGN / R-STALL since construction (``set_path`` keeps it):
+        cumulative, not a per-block count, and ``handover["stall"]`` is not
+        bounded by 3 per block (the R-STALL limit is per run of entries)."""
         if self._law is None:
             return None
-        return self._law.mpc_stats(self._t_now)
+        stats = self._law.mpc_stats(self._t_now)
+        stats["handover"] = dict(self._handover)
+        return stats
 
     @property
     def last_plan(self):
@@ -1044,6 +1540,21 @@ class PathFollower:
         and the MPC restarts: held command and acceleration history cleared,
         do_mpc's ``u_prev`` reset to the measured ``(d0, a0)`` before the
         next solve.
+
+        (v2.0.1) It also clears ``GOAL-MISSED`` / ``MPC-ABORT`` and
+        :attr:`stop_reason`, the GP-AWAY2 history, and every MPC budget
+        (R-ALIGN / R-FAIL travel, R-STALL count and progress mark): the
+        budgets are per forward block per path, so a caller that re-plans
+        repeatedly is not bounded by them. With ``mpc_model="off"`` it clears
+        only the terminal state and the GP-AWAY2 history; with the MPC layer
+        it also clears R-ALIGN / R-STALL, the watchdog anchor and entry point,
+        the R-ALIGN and R-FAIL travel, the R-STALL count and progress mark;
+        the ``handover`` counts are kept, and the heading gate is evaluated
+        again on the next :meth:`plan` (a vehicle still misaligned enters
+        R-ALIGN at once). Measured by the impl reviewer (fake solver, states
+        fed directly): a car in R-ALIGN at 0.1 m per call with
+        ``set_path(same path)`` every 100 calls travelled 40 m without an
+        abort (budget 23.24 m).
         """
         if len(path) < 2:
             raise ValueError("path needs at least 2 waypoints")
@@ -1056,6 +1567,8 @@ class PathFollower:
         self.projection_t = 0.0
         self.projection_xy = (self.path[blk_start][0], self.path[blk_start][1])
         self.transitioning = False
+        self._terminal = None           # (v2.0.1) terminal state and GP-AWAY2 history
+        self._gp_hist = []
         if pos_xy is not None:
             self._snap(pos_xy)
         if self._law is None:
@@ -1067,17 +1580,12 @@ class PathFollower:
         t_now = self._t_next if t is None else float(t)
         self._t_next = t_now
         self._mpc_block = None
+        self._clear_handover()
+        self._reset_budgets()
         if sgn > 0:
-            wps = self._block_waypoints(0)
-            self._law.start_block(wps, t0=0.0)
-            t_ref = 0.0
-            if pos_xy is not None:
-                tt, X, Y, H = self._law.ref
-                k = self.current_idx - blk_start
-                k1 = min(k + 1, len(tt) - 1)
-                t_ref = float(tt[k] + self.projection_t * (tt[k1] - tt[k]))
-            self._law.start_block(wps, t0=t_now - t_ref)
-            self._mpc_block = 0
+            # block 0; without pos_xy the projection is the block start, so
+            # t_ref = tt[0] = 0.0 exactly (as through 2.0.0).
+            self._reseed_block(t_now)
 
     def _snap(self, pos_xy):
         """Project ``pos_xy`` onto the nearest segment of the active block."""
@@ -1100,24 +1608,37 @@ class PathFollower:
                                   p0[1] + self.projection_t * (p1[1] - p0[1]))
 
     def _plan_pd(self, pos_xy, yaw, v_long, pitch_deg, roll_deg):
-        """The 1.x stage 1 (PD law + path state machine), unchanged.
+        """The 1.x stage 1 (PD law + path state machine), plus two v2.0.1
+        changes that apply in every mode, ``"off"`` included, and cannot be
+        switched off: the goal-passed stop GP-AWAY2 (``GOAL-MISSED``, see
+        :meth:`_goal_passed`) and W2 (at a block end the target speed keeps
+        the CURRENT block's direction sign; 1.x read the next block's sign
+        there when the lookahead sat exactly on the block-end waypoint
+        without being capped). Otherwise the 1.x law, unchanged.
 
         Advances the path state machine and turns the geometry into the
         physical response the vehicle should produce — a desired acceleration
         and yaw rate. Returns a :class:`FollowerPlan`; when its ``command`` is
-        set the step is already decided (DONE, cusp brake) and no inversion is
-        needed.
+        set the step is already decided (DONE, cusp brake, a terminal mode)
+        and no inversion is needed.
         """
         last_block = self.block_i == len(self.blocks) - 1
         blk_start, blk_end, dir_sign = self.blocks[self.block_i]
 
         # DONE: near the final waypoint while driving the final block.
         last = self.path[-1]
-        if last_block and math.hypot(pos_xy[0] - last[0],
-                                     pos_xy[1] - last[1]) < self.arrival_goal:
+        d_goal = math.hypot(pos_xy[0] - last[0], pos_xy[1] - last[1])
+        if last_block and d_goal < self.arrival_goal:
+            self._terminal = None       # (v2.0.1) DONE takes precedence, clears stop_reason
             return FollowerPlan(mode="DONE", command=(0.0, 0.0, 1.0),
                                 v_long=v_long, pitch_deg=pitch_deg,
                                 roll_deg=roll_deg)
+        # (v2.0.1) GOAL-MISSED / MPC-ABORT are sticky until set_path.
+        if self._terminal is not None:
+            return FollowerPlan(mode=self._terminal[0], command=(0.0, 0.0, 1.0),
+                                v_long=v_long, pitch_deg=pitch_deg,
+                                roll_deg=roll_deg)
+        self._gp_hist = (self._gp_hist + [d_goal])[-3:]
 
         # Cusp state machine: brake to a stop at the block boundary, then
         # switch to the next block (flipped direction).
@@ -1151,6 +1672,13 @@ class PathFollower:
 
         self._advance(pos_xy)
 
+        # (v2.0.1) GP-AWAY2: past the goal on the final segment, moving away.
+        if self._goal_passed(pos_xy, d_goal):
+            self._terminal = ("GOAL-MISSED", "goal_passed")
+            return FollowerPlan(mode="GOAL-MISSED", command=(0.0, 0.0, 1.0),
+                                v_long=v_long, pitch_deg=pitch_deg,
+                                roll_deg=roll_deg)
+
         la_idx, capped = self._lookahead()
         la = self.path[la_idx]
         v_target = la[3]
@@ -1163,6 +1691,11 @@ class PathFollower:
                                 pos_xy[1] - self.path[blk_end][1])
             v_mag = min(abs(v_target), self.k_approach * d_cusp + 0.3)
             v_target = math.copysign(v_mag, dir_sign)
+        if la_idx == blk_end and not last_block and v_target * dir_sign < 0:
+            # (v2.0.1) W2: the block-end waypoint carries the NEXT block's
+            # speed; keep this block's direction (forward->reverse and
+            # reverse->forward). The magnitude is still that waypoint's.
+            v_target = math.copysign(abs(la[3]), dir_sign)
 
         # Heading error: blend of path yaw and bearing-to-lookahead.
         dx = la[0] - pos_xy[0]; dy = la[1] - pos_xy[1]
