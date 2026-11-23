@@ -23,6 +23,10 @@ this docstring called ``DifferentiablePlant`` "the default inverse plant
   ``(throttle >= 0, steer, brake, gear)``; ``.signed()`` gives the 2.0.1
   3-tuple. The brake-to-deceleration model of its stage 2 is in
   :mod:`genesis_vehicle.control.brake`.
+- :class:`KTurnParams` — (v2.0.3) enables the opt-in K-turn of a gear-mode
+  MPC :class:`PathFollower` (``mpc_kturn=KTurnParams()``; the default
+  ``mpc_kturn=None`` is off). Geometry, trigger and planner in
+  :mod:`genesis_vehicle.control.kturn`.
 - :class:`MPCVehicleParams` / :class:`MPCGains` / :func:`load_mpc_params` —
   the MPC layer's measured vehicle record and cost weights.
 - :func:`identify_mpc_params` — measure that record (needs Genesis); CLI
@@ -40,11 +44,12 @@ from .plant import DifferentiablePlant, PlantMassProperties, plant_mass_properti
 from .path_follower import (PathFollower, FleetFollower, FollowerPlan, GearCommand,
                             extract_state, extract_state_from_arrays)
 from .mpc import MPCGains, MPCVehicleParams, load_mpc_params
+from .kturn import KTurnParams
 
 __all__ = [
     "DifferentiablePlant", "PlantMassProperties", "plant_mass_properties",
     "SweepTable", "SWEEP_COLUMNS",
-    "PathFollower", "FleetFollower", "FollowerPlan", "GearCommand",
+    "PathFollower", "FleetFollower", "FollowerPlan", "GearCommand", "KTurnParams",
     "extract_state", "extract_state_from_arrays",
     "MPCVehicleParams", "MPCGains", "load_mpc_params", "identify_mpc_params",
 ]

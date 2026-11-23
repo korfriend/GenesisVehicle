@@ -337,7 +337,7 @@ Detailed docs live under [`docs/`](docs/):
 | [`docs/quickstart.md`](docs/quickstart.md) | Minimal example, runnable end-to-end |
 | [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855, hook intuition, batched-by-default |
 | [`docs/batching.md`](docs/batching.md) | The L1 / L2 / L3 vectorization axes — when to use which, measured speedups, the L2 × L3 combined pattern |
-| [`docs/path-following.md`](docs/path-following.md) | `PathFollower`: the MPC layer (v2.0.0 default) and the 1.x PD law, the two inverse plants, sweep measurement, identify, the v2.0.2 gear command mode and its stage-2 brake model (§5.9), migrating from 1.x and between 2.0.x releases |
+| [`docs/path-following.md`](docs/path-following.md) | `PathFollower`: the MPC layer (v2.0.0 default) and the 1.x PD law, the two inverse plants, sweep measurement, identify, the v2.0.2 gear command mode and its stage-2 brake model (§5.9), the v2.0.3 opt-in K-turn (§5.10), migrating from 1.x and between 2.0.x releases |
 | [`docs/tire-and-contact.md`](docs/tire-and-contact.md) | Tire model (Pacejka vs Coulomb) & ground-contact mechanism (raycast wheel etc.) — the two axes, standard names, recommendation |
 | [`docs/server.md`](docs/server.md) | OSC physics server for external clients (Unreal / Unity) — purpose, modes, full wire-schema reference |
 | [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default) |
@@ -368,7 +368,7 @@ genesis_vehicle/
 ├── tire_models/                    TireModel ABC + Pacejka + Coulomb
 ├── strategies/                     steering / drivetrain / coupling / stability
 ├── presets.py                      4 ready-to-use VehicleConfig builders
-├── control/                        PathFollower (MPC layer + PD; gear mode v2.0.2), inverse plants, brake model, sweep_measure, identify
+├── control/                        PathFollower (MPC layer + PD; gear mode v2.0.2; opt-in K-turn v2.0.3), inverse plants, brake model, sweep_measure, identify
 ├── docs/                           the wiki
 └── tests/                          pure-Python unit tests (no Genesis needed)
 ```
@@ -381,7 +381,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-1225 tests covering URDF parsing, config resolve, suspension sizing, strategy
+1285 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity witness
@@ -425,15 +425,19 @@ drive-torque rules on both solvers, every skid-steer refusal site, a
 platform-gated byte-identity check of signed inputs against the 2.0.1 tree,
 the stage-2 brake model and its low-speed coast, `SHIFT` / `GUARD` /
 `GEAR-ABORT` against an independent oracle),
+the opt-in K-turn (v2.0.3 — the trigger and planner, mirror symmetry, the leg
+budgets across re-plans, every K-turn limit on exactly the next call, and the
+default follower replayed against a 2.0.2 capture),
 and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v2.0.2 tree with the optional MPC packages installed, `1225 passed, 3 skipped`
-in three groups of files, 433.5 s summed (CPU/WSL2, genesis-world 1.4.5,
+v2.0.3 tree with the optional MPC packages installed, `1285 passed, 3 skipped`
+in five parts of files, 527.3 s summed (CPU/WSL2, genesis-world 1.4.5,
 `test_fusion_probe.py` excluded;
 the 3 skips are the env-gated live server tests,
 run them with `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`; without casadi + do_mpc the
-solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1127 passed,
+solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1225 passed,
+3 skipped` in 433.5 s at v2.0.2, `1127 passed,
 3 skipped` in 347.1 s at v2.0.1, `1010 passed,
 3 skipped` in 226.1 s at v2.0.0, `824 passed,
 3 skipped in 278.5s` at v1.8.0, `712 passed, 3 skipped in
@@ -458,10 +462,24 @@ including `mpc_model="off"`), by user decision; its CHANGELOG section says why.
 2.0.2 is a patch that carries a breaking change — the default MPC
 `PathFollower` returns a 4-field `GearCommand` — plus new public surface (the
 opt-in gear mode), again by user decision; CHANGELOG 2.0.2 §1 lists every
-departure.
+departure. 2.0.3 is a patch that adds an opt-in kwarg (`mpc_kturn`) and new
+modes without changing any default; by the minor-bump rule it would be 2.1.0,
+and its number follows the 2.0.2 roadmap (CHANGELOG 2.0.3 §1.3).
 (This line said "pre-1.0, so minor bumps
 may break" — stale since 1.0.) Current version: `genesis_vehicle.__version__`. Per-release notes
 in [`CHANGELOG.md`](CHANGELOG.md).
+
+**Upgrading to 2.0.3:** nothing changes unless you opt in — a follower that
+does not pass `mpc_kturn` issues the 2.0.2 commands (measured per step on 51
+runs); `FollowerPlan` gains a trailing `steer_cmd` field and `mpc_stats` a
+`kturn` dict. `PathFollower(..., mpc_kturn=KTurnParams())` (gear mode, MPC layer)
+lets the follower stop and turn with reverse legs when a forward-only turn is
+predicted not to fit. It does not know about obstacles, and one acceptance
+criterion FAILED: on a 150° vertex course with a 5 m final leg, without gear
+feedback, the run ends `DONE` with a cross-track error of 16.007 m against an
+11.5 m limit (re-plans flip on sub-metre pose differences, because
+legs planned at 1.2 × the minimum turn radius are driven at full lock). Read CHANGELOG 2.0.3 and
+`docs/path-following.md` §5.10 first.
 
 **Upgrading to 2.0.2:** an MPC `PathFollower` constructed without
 `command_mode=` now runs gear mode and returns `GearCommand(throttle, steer,

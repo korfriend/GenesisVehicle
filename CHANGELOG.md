@@ -10,6 +10,634 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [2.0.3] — 2026-11-23
+
+**Added (opt-in): a gear-mode MPC `PathFollower` constructed with
+`mpc_kturn=KTurnParams()` can, at the first heading-gate entry of a forward
+block, decide that a forward-only turn will not fit, stop, plan a multi-point
+turn ("K-turn") of full-lock legs in forward and reverse gear, drive it, and
+hand back to the MPC — with no reverse block in the path.** The default is
+`mpc_kturn=None`: **a follower that does not pass `mpc_kturn` issues the same
+commands as 2.0.2** (§1). The user requirement "the controller engages reverse
+as the situation requires" is therefore met **only when `mpc_kturn=KTurnParams(...)`
+is given**. It ships opt-in because its trigger rule fires on a course that
+2.0.2 completes (`straight 10`: the 2.0.2 forward turn reaches `DONE` with
+1.471 m of the 1.5 m arrival radius), and the rule was not re-fitted (§1.2).
+
+**What this release does NOT give you, stated plainly:** one acceptance
+criterion **FAILED** and ships as a documented failure — C-v150 L5 without gear
+feedback ends `DONE` with a cross-track error of 16.007 m against the 11.5 m
+limit fixed before measuring (§5.3); legs are planned at 8.876 m radius but
+driven at full lock at 7.57-7.72 m, so plans are discarded and re-planned and
+the choice can flip on sub-metre pose differences — an attempt to fix that by
+steering legs to the planned radius made every course measured worse (7 E-runs;
+that round stopped early) and was withdrawn,
+and the acceptance courses were used to choose between those variants (§6);
+the K-turn does not know about obstacles; the trigger is a fitted proxy
+measured on one vehicle (§2.1); stop and settle travel is bounded only by call
+counts, and nothing is bounded across `set_path` (§4); slopes, low μ,
+`single_scene`, `DifferentiablePlant` as stage 2, GPU and vehicles other than
+the reference car were not measured (§8).
+
+| abbr | meaning |
+|---|---|
+| K-turn | multi-point turn: stop, plan, then legs in forward and reverse gear, then hand back to the MPC |
+| leg | one K-turn arc driven in one gear at full steering lock (`steer_cap`) |
+| MPC / NMPC / LMPC | Model Predictive Control / nonlinear MPC (do_mpc + IPOPT, default) / linear MPC (OSQP) |
+| PD | the 1.x `PathFollower` law; it drives the 2.0.1 forward alignment (R-ALIGN) |
+| R-ALIGN / R-KTURN / CMD | `PathFollower.regime`: PD while the v2.0.1 heading gate holds / (new) a K-turn call / a fixed command |
+| SHIFT / GUARD / GEAR-ABORT | v2.0.2 gear-mode follower modes: brake for a gear change / brake while moving against the wanted gear / terminal |
+| e | heading error at the decision, wrap(chassis yaw − path yaw at the projection) (rad) |
+| y' | signed lateral offset of the chassis from the projection segment (m, left positive) |
+| s_rem | arc length from the projection point to the active block's end (m) |
+| b | distance of the chassis behind the block's first waypoint along its first segment (m, ≥ 0) |
+| G | `arrival_goal` on the final block, `cusp_goal` on an earlier block (m) |
+| R_min | `wheelbase / tan(steer_cap · max_steer_rad)`; 7.397 m on the reference car |
+| r_plan | planning radius, 1.2 · R_min (8.876 m on the reference car) |
+| d / g / phi | a leg's turn direction (yaw-rate sign, +1 counter-clockwise) / its gear (+1 forward, −1 reverse) / its planned rotation angle |
+| F45, R60, … | a leg sequence: F = forward, R = reverse leg, number = planned angle in degrees |
+| class N | the courses whose trigger does not fire (must not K-turn) |
+| v_stop | the follower's standstill speed, constructor default 0.05 m/s |
+| dt_ctrl | the follower's control period (0.025 s in every measurement here) |
+| CTE | cross-track error: distance to the course polyline (m); "CTE" in a table is its maximum over the run |
+| C-vNNN Lk / straight N m behind / stall course | the CHANGELOG 2.0.1 test courses (straight 20 m, a vertex of NNN°, a k m leg / a straight N m path behind the spawned car / the 2.0.0 stall start) |
+| fb | gear feedback: the engaged gear passed to `step(gear=)` |
+| AC | acceptance criterion; every threshold was fixed in the plan before any acceptance measurement |
+| B0 | baseline: the same harness run on the committed 2.0.2 tree (`76a6b24`, untouched) |
+| D-run / E-run | a 2.0.3 run with `mpc_kturn` left at its default / with `mpc_kturn=KTurnParams()` (or the stated fields) |
+| lat 8 / lat 2 | `KTurnParams(lateral_limit=8.0)` / `(lateral_limit=2.0)` |
+| μ | tyre-road friction coefficient |
+| WSL2 | Windows Subsystem for Linux 2 (the measurement machine's environment) |
+
+**Conditions of every Genesis number in this entry unless a row says
+otherwise:** CPU/WSL2, genesis-world 1.4.5, `OPENBLAS/OMP_NUM_THREADS=1`, one
+foreground process at a time, the reference car (`samples/urdf/car_4w.urdf`,
+`car_4w_rwd_ackermann`, `"control"` profile), plane μ 1.0, dt 0.025 × 4
+substeps, `dual_scene`, `n_envs` 1, `steer_cap` 0.5, NMPC, gear mode with
+feedback, the sweep table and params file the 2.0.0 release was measured with.
+Harnesses (outside the repo): a closed-loop driver on the 2.0.2 review's scene
+running the CHANGELOG 2.0.1 courses, and `samples/mpc_follow_demo.py` through a
+wrapper that counts vehicle-side rule violations. "Implementation" and
+"impl-review" name who measured; where both measured, they agreed unless a line
+says otherwise. Measured 2026-11-23.
+
+### 1. Opt-in, and what "the default is unchanged" rests on
+
+#### 1.1 The default follower issues the 2.0.2 commands
+
+- **Per-step equality in Genesis (AC-0).** Every B0 run was repeated as a
+  D-run on the final tree — 51 runs: the closed-loop driver with and without
+  feedback, the sample's MPC / PD / no-feedback runs, the wall-pen run and the
+  LMPC run — and every step's `(throttle, steer, brake, gear)` was `==` the B0
+  run's, with 0 R-KTURN steps and the same terminal mode (implementation).
+  `mpc_kturn=None` passed explicitly on C-v150 L5 is also `==` B0. impl-review
+  re-ran 7 of these per step, plus the explicit-`None` run, and found them `==`
+  (C-v150 L5 default and explicit `None`, straight 6 without feedback, straight 10, the stall course,
+  and the sample's PD / MPC / no-feedback `--log` files, byte-identical). After
+  the last (docstring and sample-CLI) fix round the implementation re-checked
+  3 D-runs and the sample's default log (byte-identical), impl-review 1 D-run.
+  B0 itself is deterministic: two B0 runs each of C-v150 L14 and the demo course
+  were `==` per step.
+- **Fixture test (AC-6).** `tests/data/kturn_off_2_0_2.json`, captured on the
+  untouched 2.0.2 tree with the fake solver: gear-mode and signed commands on
+  three state sequences (the straight-6 trigger state, C-v150, the stall
+  course). `test_default_and_explicit_none_match_the_2_0_2_capture` replays all
+  six against a default follower and an explicit `mpc_kturn=None` follower;
+  impl-review re-captured the fixture on 2.0.2 and got the same file contents.
+- **In code** (impl-review audit): every K-turn hook — the constructor,
+  `_init_mpc`, `_reset_budgets`, `step`, `finish`, `_desired_gear`, the `CMD`
+  branch and the episode dispatch of `_plan_mpc`, `_abort`, `_enter_align`,
+  `set_path` and the two `_plan_pd` sites — checks `self._kturn is not None`
+  first and returns before any computation or state write.
+- **What does change for every follower** (not a command change):
+  `FollowerPlan` gains the appended field `steer_cmd` (always `None` without
+  `mpc_kturn`), and every MPC follower's `mpc_stats` gains a `kturn` dict
+  (zeros without `mpc_kturn`). Code that compares `FollowerPlan` field lists or
+  `mpc_stats` dicts exactly sees both.
+- The existing locks pass unmodified: `tests/test_pd_golden.py` (38 runs),
+  `tests/test_mpc_field_replay.py`, the contact-path witness and
+  `tests/test_legacy_inputs_bit_identity.py`.
+
+The wording is "the same commands as 2.0.2", measured as above — not a claim
+about every input a caller can construct.
+
+#### 1.2 Why opt-in: the trigger fires where 2.0.2 already succeeds
+
+The plan first made the K-turn the default, on the premise that the rule fires
+only where the 2.0.2 forward turn fails. The baseline run before any code was
+written falsified that: **`straight 10` (the car 10 m from the goal, facing
+away; rule margin +1.794 m) reaches `DONE` on 2.0.2** at 20.350 s, on the one
+call where it first enters the 1.5 m goal circle — 1.471 m from the goal, 75.8°
+off the path heading, 2.34 m/s, CTE 15.061 m. A second such course was found
+later: C-v170 L10 (margin +1.897 m, 2.0.2 `DONE` 14.150 s, CTE 13.368 m). Keeping
+straight 10 un-triggered would have needed the rule's 1.5 m constant to be at
+least 3.294 m, which un-triggers C-v150 L8 and leaves C-v135 L6 at +0.011 m; the rule was not
+re-fitted. The rule predicts the size of the forward swing, not whether the
+forward turn reaches the goal circle. Whether the K-turn becomes the default is
+deferred to a later release with Genesis and field evidence.
+
+With the K-turn enabled both courses still end `DONE`, later and with less
+deviation (§5.2).
+
+#### 1.3 Version number
+
+By the project rule a new kwarg bumps the minor version; this release is
+2.0.3 because the 2.0.2 roadmap (§11 of that entry) placed the K-turn at 2.0.3,
+as 2.0.1 and 2.0.2 also departed from the rule. No default changes.
+
+### 2. What it does
+
+```mermaid
+stateDiagram-v2
+    [*] --> DRIVE
+    DRIVE --> STOP: first R-ALIGN entry of the forward block, inside the domain, trigger fires
+    STOP --> PLAN: 2 consecutive calls with planar speed below 0.45 m/s
+    PLAN --> PLAN: search not finished (at most 1000 nodes per call)
+    PLAN --> SETTLE: plan found, or remaining plan kept, or old plan continued
+    PLAN --> FALLBACK: no plan before the first leg, no lateral_limit
+    PLAN --> ABORT: no plan before the first leg with a lateral_limit (kturn_infeasible)
+    SETTLE --> LEG: a call with abs(v_long) at most v_stop (that call drives)
+    LEG --> SETTLE: SHIFT or GUARD inside the leg
+    LEG --> STOP: leg ended (signed rotation or distance cap), legs remain
+    LEG --> RELEASE: last leg ended
+    LEG --> ABORT: leg call cap (kturn_budget), no displacement (kturn_blocked)
+    STOP --> ABORT: more than 120 counted stop calls in one hand-over (kturn_budget)
+    SETTLE --> ABORT: more than 120 counted stop calls in one hand-over (kturn_budget)
+    STOP --> CANCEL: BRAKE_TRANS, DONE or a terminal mode
+    PLAN --> CANCEL: BRAKE_TRANS, DONE or a terminal mode
+    SETTLE --> CANCEL: BRAKE_TRANS, DONE or a terminal mode
+    LEG --> CANCEL: BRAKE_TRANS, DONE or a terminal mode
+    RELEASE --> DRIVE: MPC reference re-timed, watchdog anchored, gate re-armed
+    FALLBACK --> DRIVE: the 2.0.2 forward alignment for the rest of the block
+    CANCEL --> DRIVE: BRAKE_TRANS or DONE (episode consumed, block stays decided)
+    CANCEL --> [*]: terminal mode (sticky)
+    ABORT --> [*]
+```
+
+#### 2.1 Where it acts, and the trigger
+
+- **Only** with the MPC layer, `command_mode="gear"`, the heading gate on
+  (`mpc_align_gate` not `None`) and `mpc_kturn` a `KTurnParams`; on a forward
+  block; decided **once per forward block per path**, at the block's first
+  R-ALIGN entry (`_enter_align`, after the 2.0.1 `align_budget` check). A later
+  R-ALIGN entry of the same block, the rest of a block after a FALLBACK or a
+  release, a reverse block, `mpc_model="off"`, signed mode, `FleetFollower`
+  (PD followers only) and tanks (refused by the MPC layer's two-axle-Ackermann
+  check and by gear mode) never K-turn. Each forward block gets its own
+  decision; `set_path` resets them.
+- **Domain** (outside it the decision is "no K-turn"): `|v_long| <= 4.5 m/s` at
+  the decision, and the remaining bend of the block — the sum of `|Δyaw|` over
+  consecutive segment headings from the projection segment to the block end
+  (`kturn.remaining_bend`) — at most 45°. The stall course measures 43.6°, just
+  inside. Heading jitter on a densely or noisily sampled path adds up in that
+  sum and can push it past 45°, which silently disables the K-turn for that
+  block.
+- **Rule** (`kturn.trigger`): fire when
+  `R_min (1 − cos e) − |y'| > s_rem + b + G + 1.5`, or, with a `lateral_limit`
+  L, also when `R_min (1 − cos e) + |y'| > L`. The left side is a lower bound of
+  the forward swing (exact when the chassis sits on the side opposite to where
+  it points), so the rule leans against firing. It is a fitted proxy chosen from
+  2.0.2 results on one vehicle; agreement with the courses it was chosen on is
+  not evidence. Measured margins (positive = fires), at each course's first
+  R-ALIGN entry on 2.0.2:
+
+| course (arrival_goal 1.5 unless stated) | margin (m) | 2.0.2 end | K-turn enabled |
+|---|---|---|---|
+| C-v150 L5 (and its mirror image) | +4.793 | `MPC-ABORT` `align_budget` | fires |
+| straight 6 | +5.794 | `GOAL-MISSED` | fires |
+| C-v150 L8 | +1.793 | `GOAL-MISSED` | fires |
+| C-v135 L6 | +1.805 | `GOAL-MISSED` | fires |
+| straight 12, arrival_goal 1.0 | +0.294 | `MPC-ABORT` `align_budget` | fires |
+| **straight 10** | **+1.794** | **`DONE`** | fires |
+| **C-v170 L10** | **+1.897** | **`DONE`** | fires |
+| C-v150 L10 / L12 | −0.207 / −2.207 | `GOAL-MISSED` | does not fire — still `GOAL-MISSED` |
+| C-v135 L10 / L12 / L14 | −2.19 / −4.19 / −6.19 | `GOAL-MISSED` | does not fire — still `GOAL-MISSED` |
+| C-v120 L8 / L10 / L12 | −2.36 / −4.36 / −6.36 | `GOAL-MISSED` | does not fire — still `GOAL-MISSED` |
+| straight 12 … 22, C-v150 L14-L20, C-v120 L20 | −0.206 … −14.355 | `DONE` | does not fire |
+| stall course (bend 43.6°) | −51.817 | `DONE` | fires only with a `lateral_limit` (lat 8: yes) |
+
+  Eight courses on which 2.0.2 fails are on the no-fire side; enabling the
+  K-turn does not change them (every class-N E-run is `==` its D-run, §5.5).
+
+#### 2.2 The episode
+
+- **Stop** (`KTURN-STOP`, regime `R-KTURN`): command `(0, 0, 1)` in the
+  current wanted gear until two consecutive calls with
+  `hypot(v_long, v_lat) < 0.45 m/s` (the 2.0.2 shift "slow" test).
+- **Plan** (`KTURN-PLAN`, `(0, 0, 1)`): `control/kturn.py`'s deterministic
+  planner in the local frame of the projection segment, advanced at most 1000
+  nodes per follower call, at most 20000 per search. Iterative deepening over
+  the plan's leg count n = 1 … legs left; both turn directions searched
+  completely per level, and a level the node cap interrupts is discarded whole,
+  so a mirrored input gives the mirrored plan. Within one plan the legs
+  alternate gear, end forward (n odd starts forward, n even in reverse) and all
+  turn the same way; leg angles on a 15° grid, forward ≤ 180°, reverse
+  `r_plan · phi <= max_reverse` (≤ 90° at the defaults). Every arc sample stays
+  at or before the block end along the path (x' ≤ s_rem at the start) and, with
+  a `lateral_limit`, within L of a window of the path polyline (from
+  `4 · r_plan + L` behind the start point to the block end; path parts outside
+  the window are ignored). Goal after the last leg: |e| ≤ the gate's release
+  angle (π/4 by default), |y'| ≤ 1.0 m, and room to rejoin the path heading before the
+  block end. Cost: length + R_min per gear change + 2.0 · max |y'|. Ties:
+  first turn direction −sign(e), then the angle sequence.
+- **Legs** (`KTURN-REV` / `KTURN-FWD`): the wanted gear is the leg's gear (the
+  2.0.2 `SHIFT` brakes until it is engaged — with feedback exactly, without
+  feedback after two slow calls); then `KTURN-SETTLE` brakes until a call with
+  `|v_long| <= v_stop` (§7); then the leg drives at steer
+  `d · g · steer_cap · steer_input_sign` (full lock), target speed `g · 1.0 m/s`,
+  `a_target = k_v (v_t − v_long)` inverted by the plant's `throttle_for` (also
+  for a coupled plant), through the gear finish (KICK, brake model, brake at
+  rest). A leg ends when its signed rotation reaches its planned angle less 2°,
+  or on its distance cap (§4). Between legs: a stop, then (i) the remaining
+  plan is kept if it still fits from the actual pose, else (ii) a new search
+  with the leg budgets left, else (iii) the old plan is continued (with a
+  `lateral_limit`, (iii) aborts `kturn_infeasible` if the old plan would leave
+  it).
+- **Release** after the last leg: back to the MPC — reference re-timed,
+  watchdog anchored, heading gate re-armed, `GOAL-MISSED` history cleared; the
+  block stays decided.
+- **No plan before the first leg**: without a `lateral_limit` the block falls
+  back to the 2.0.2 forward alignment (FALLBACK); with one, `MPC-ABORT`
+  `kturn_infeasible`.
+- **Interactions.** `SHIFT` / `GUARD` inside an episode keep it (regime
+  `R-KTURN`, `last_mode` `SHIFT` / `GUARD`, counted on the leg or stop counter);
+  `BRAKE_TRANS`, `DONE` and every terminal mode end it. `DONE` keeps its 1.x
+  precedence, so a leg can end in `DONE`, possibly in reverse gear (in the four
+  runs impl-review checked, `DONE` came in gear +1). On an R-KTURN call the heading gate, the
+  stall watchdog and the 2.0.1 budgets do not run and K-turn travel is not
+  charged to them; **`GOAL-MISSED` is not evaluated on R-KTURN calls** (that
+  call's goal distance is taken back out of the history) and needs three calls
+  again after the release. `set_path` cancels an episode in progress.
+
+### 3. Public surface
+
+- `PathFollower(..., mpc_kturn=None)` — an MPC-only kwarg: given with
+  `mpc_model="off"` it raises `ValueError` even as `None`. A `KTurnParams` with
+  `command_mode="signed"` or with `mpc_align_gate=None` raises `ValueError`
+  (before any attribute is set); anything other than `None` / `KTurnParams`
+  raises `ValueError`. Like `mpc_align_gate` / `mpc_stall_timeout`, `None`
+  disables.
+- `KTurnParams` (frozen dataclass, `from genesis_vehicle.control import
+  KTurnParams`; not re-exported from the root):
+  - `lateral_limit: float | None = None` — `None`: no lateral limit on the
+    planned arcs (the excursion is then bounded only through the leg distance
+    caps). A number L > 0 (m): every sample of every planned arc within L of the
+    path window, the trigger also fires on `R_min (1 − cos e) + |y'| > L`, and
+    "no plan" before the first leg (or a continued plan leaving L) ends
+    `kturn_infeasible`. Planned arcs only: the executed trajectory is not
+    guaranteed inside L, and the 2.0.2 forward alignment is never limited by it.
+  - `max_reverse: float | None = None` — `None`: `2.0 · R_min` (14.79 m on the
+    reference car; always finite). A number > 0 (m): the distance cap of one
+    reverse leg.
+  - `max_legs: int = 4` — 2..4: legs per episode across re-plans; reverse legs
+    ≤ `max_legs // 2`. An episode can contain zero reverse legs.
+  - Validation raises `ValueError` (non-finite, ≤ 0, `bool`, `max_legs` outside
+    2..4).
+- `regime` `"R-KTURN"`; `last_mode` `"KTURN-STOP"`, `"KTURN-PLAN"`,
+  `"KTURN-SETTLE"`, `"KTURN-REV"`, `"KTURN-FWD"` (and `SHIFT` / `GUARD` inside
+  an episode); `stop_reason` `"kturn_budget"`, `"kturn_infeasible"`,
+  `"kturn_blocked"`, each with `last_mode == "MPC-ABORT"`.
+  `PathFollower.TERMINAL_MODES` is unchanged.
+- `FollowerPlan.steer_cmd` (appended, default `None`): the leg's steer on a
+  leg's driving call, `None` on every other plan. A caller that runs its own
+  inversion after `plan()` must apply it instead of inverting `omega_target`
+  (which is then `d · 1.0 / r_plan`), or call `finish`, which does.
+  `FollowerPlan.gear` on an R-KTURN call is the leg's gear.
+- `mpc_stats["kturn"] = {episodes, legs, reverse_m, plan_nodes, plan_calls,
+  plan_ms}` for every MPC follower, cumulative since construction (`set_path`
+  keeps it); `plan_ms` is wall clock.
+- `samples/mpc_follow_demo.py`: `--kturn {off,on}` (default `off`),
+  `--lateral-limit L`, `--max-reverse M` (both imply `--kturn on`),
+  `--course behind --behind-len N` (a straight path N m behind the spawned car,
+  default 6). `--kturn on` / `--lateral-limit` / `--max-reverse` with
+  `--mpc-model off`, `--command-mode signed` or `--align-gate off` exit 2 with an argparse error.
+  `reverse_entry_step` still counts only `DRV-1`, not a K-turn reverse leg.
+
+### 4. Bounds, exactly as the code enforces them
+
+Reference car (R_min 7.397 m, r_plan 8.876 m), defaults (`max_legs` 4,
+`max_reverse` 14.79 m), dt_ctrl 0.025 s. Leg distance is the sum of the
+displacements between successive positions passed to `plan()` on the leg's
+driving and `SHIFT` / `GUARD` calls.
+
+| bound | enforced by | value |
+|---|---|---|
+| legs per episode ≤ `max_legs`, across re-plans | every search gets `legs_left = max_legs − executed`; release at `executed >= max_legs` | 4 |
+| reverse legs ≤ `max_legs // 2`, across re-plans | every search gets `rev_left`; levels with `n // 2 > rev_left` are skipped (R R R F is refused, tested) | 2 |
+| forward leg distance | leg ends at `dist >= 1.25 · r_plan · phi + 0.5`, phi ≤ 180° | ≤ 35.36 m |
+| reverse leg distance | the same cap, also ≤ `max_reverse` | ≤ 14.79 m |
+| what a leg can exceed its cap by | — | the travel of one call, plus the uncounted braking travel of mid-leg re-settle calls (at most 120 brake-1 calls per hand-over) |
+| reverse travel per episode | 2 reverse legs (e.g. R F R F, F R R F) | ≤ 29.59 m (+ the overruns) |
+| leg travel per episode | worst reachable sequence F F R F (one reverse leg) | ≤ 120.86 m (+ the overruns) |
+| calls on one leg | a call that takes the leg past `callcap = ceil(2 · cap / (1.0 m/s · dt_ctrl)) + 120` without ending it → `MPC-ABORT` `kturn_budget`; the leg-end test runs first, so a leg can END on call `callcap + 1` | callcap: forward 2949, reverse 1304 |
+| counted stop calls per hand-over: the STOP-phase calls (stamped `KTURN-STOP`; the last one, on which the stop ends, is stamped `KTURN-PLAN`), `KTURN-SETTLE` calls, and `SHIFT` / `GUARD` calls outside a leg | more than 120 → `kturn_budget`; reset only when a leg ends and at episode start; the settling call itself and the further `KTURN-PLAN` calls of a multi-call search are not counted | 120 (3.0 s at 40 Hz) |
+| a blocked leg | `round(2.0 / dt_ctrl)` settled driving calls without 0.25 m of DISPLACEMENT → `MPC-ABORT` `kturn_blocked`; `SHIFT` / `GUARD` / re-settle calls inside the leg neither advance nor reset the window | 80 driving calls (2.0 s if uninterrupted) |
+| planning | ≤ 1000 nodes per call, ≤ 20000 per search → ≤ 20 calls per search (the first is the counted STOP-phase call), one search per hand-over | ≤ 19 uncounted calls per hand-over |
+| episode calls (worst reachable sequence F F R F) | 3 · 2950 + 1305 leg calls (each callcap + 1) + 4 · 120 counted stop calls + 4 · 19 further planning calls | ≤ 10711 calls = 267.8 s at 40 Hz, including the call on which an abort fires |
+| episodes | one decision per forward block (`_kt_block`), reset by `set_path` | ≤ 1 per block between `set_path` calls |
+
+Each limit was tested Genesis-free to end on exactly the next call (stop: 121st
+counted call; leg call cap + 1; no-progress: 81st driving call; node cap; leg
+count; leg distance cap — the last added after impl-review's mutant that
+removed it survived the suite).
+
+**Not bounded:**
+
+- **Stop and settle travel in distance** — only by call count (≤ 120 brake-1
+  calls per hand-over, ≤ 4 hand-overs; entry speed ≤ 4.5 m/s by the domain).
+- **Anything across `set_path`**: each call resets the decision, so a caller
+  that re-plans repeatedly can start a K-turn on every path.
+- **The lateral excursion with `lateral_limit=None`** — bounded only through the
+  leg distance caps; **with a `lateral_limit`, the executed trajectory** (only
+  the planned arcs are checked).
+- **Collisions**: the K-turn does not know about obstacles. It assumes the area
+  every planned arc sweeps is free; a blocked leg ends after 80 driving calls without
+  0.25 m of displacement — a vehicle scraping along a wall or rolling back
+  resets that window, and then only the leg call cap applies (§5.4: a car
+  driven into a wall pen ended `kturn_blocked` at 3.40 s).
+- **That the follower reaches `DONE` after a K-turn**: after the release the MPC
+  and the 2.0.1 / 2.0.2 mechanisms run as before (`GOAL-MISSED`, the R-ALIGN
+  budget and the forward alignment's ~2·R_min of lateral room after a FALLBACK
+  or a second entry).
+- **Planning time**: the node budget is a count; time per call was measured
+  (§5.6), not bounded.
+- **Rolling back under throttle on a grade after the settling call** (a hill
+  start; the vehicle rule allows it).
+- **The trigger's accuracy** (§1.2, §2.1), and anything about the 2.0.1 / 2.0.2
+  unbounded items (`docs/path-following.md` §5.8-§5.9).
+- **`DifferentiablePlant` as stage 2**: on a leg the follower calls only
+  `throttle_for`; a `DifferentiablePlant` keeps its pending acceleration. Not
+  modelled, not measured.
+
+### 5. Measured results (final tree)
+
+#### 5.1 2.0.2 baseline of the trigger courses (B0, feedback on)
+
+| course | B0 end | t (s) | CTE (m) |
+|---|---|---|---|
+| C-v150 L5 / its mirror | `MPC-ABORT` `align_budget` | 10.925 | 22.492 |
+| C-v150 L8 | `GOAL-MISSED` | 12.650 | 11.579 |
+| C-v135 L6 | `GOAL-MISSED` | 9.625 | 16.720 |
+| straight 6 | `GOAL-MISSED` | 22.450 | 15.057 |
+| straight 12, arrival_goal 1.0 | `MPC-ABORT` `align_budget` | 20.650 | 15.061 |
+| straight 10 | `DONE` | 20.350 | 15.061 |
+| C-v170 L10 | `DONE` | 14.150 | 13.368 |
+| stall course | `DONE` | 41.775 | 15.117 |
+| LMPC C-v150 L5 | `MPC-ABORT` `align_budget` | 11.550 | 21.971 |
+
+#### 5.2 K-turn enabled, feedback on (AC-1, AC-1b)
+
+Limits fixed before measuring from a kinematic probe (`ceil₀.₅(max(1.5·p,
+p + 3.0))` of the probe's CTE p; time ≥ 60 s); AC-1b's gate is the course's own
+B0 CTE.
+
+| E-run | limit (t / CTE) | end, t (s) | CTE (m) | legs (gear, planned angle) | result |
+|---|---|---|---|---|---|
+| C-v150 L5 | 60 / 11.5 | `DONE` 25.075 | 6.560 | F45 R60 F15 | pass |
+| C-v150 L5 mirrored | as L5 | `DONE` 25.075 | 6.560 | the mirror (turn direction flipped) | pass, = L5 |
+| C-v150 L8 | 60 / 10.0 | `DONE` 28.550 | 6.561 | F45 R60 R15 F15 | pass |
+| C-v135 L6 | 75 / report only | `DONE` 41.475 | 14.875 (B0 16.720) | F165 R45 F15 | pass |
+| straight 6 | 60 / 13.5 | `DONE` 29.300 | 10.536 | F60 F30 R75 F15 | pass |
+| stall course, lat 8 | 70 / 6.5 | `DONE` 49.175 | 3.943 | R30 F45 R45 F15 | pass |
+| straight 22, lat 8 | 60 / 9.0 | `DONE` 30.675 | 5.566 | F30 F15 R60 F45 | pass |
+| straight 10 (AC-1b) | 60 / ≤ 15.061 | `DONE` 27.400 | 7.457 | F60 R60 F45 | pass |
+| C-v170 L10 (AC-1b) | 60 / ≤ 13.368 | `DONE` 27.825 | 6.386 | F45 R60 F30 | pass |
+| straight 12, arrival_goal 1.0 | report only | `DONE` 28.725 | 7.457 | F60 R60 F45 | — |
+
+One episode per run, ≤ 4 legs, ≤ 2 reverse legs, 0 R-ALIGN steps in the K-turn
+block. impl-review re-ran C-v150 L5, straight 6, straight 10 and C-v135 L6 with
+identical results, and found `DONE` in gear +1 on those four. On straight 10 and C-v170 L10 the K-turn
+ends 7.05 s / 13.675 s later than the 2.0.2 grazing forward turn, with less
+CTE. Leg sequences are from the implementation's per-step mechanism table.
+
+#### 5.3 AC-5 without feedback — one FAIL
+
+| E-run, no feedback | limit (t / CTE) | end, t (s) | CTE (m) | result |
+|---|---|---|---|---|
+| **C-v150 L5** | 60 / 11.5 | `DONE` 49.000 | **16.007** | **FAIL** |
+| C-v150 L8 | 60 / 10.0 | `DONE` 25.750 | 6.084 | pass |
+| C-v135 L6 | 75 / report only | `DONE` 41.175 | 13.615 | pass |
+| straight 6 | 60 / 13.5 | `DONE` 29.375 | 10.542 | pass |
+| stall course, lat 8 | 70 / 6.5 | `DONE` 49.300 | 3.957 | pass |
+| straight 22, lat 8 | 60 / 9.0 | `DONE` 30.750 | 5.561 | pass |
+| straight 10 (AC-1b) | 60 / ≤ 15.061 | `DONE` 27.475 | 7.457 | pass |
+
+In the six AC-5 runs: 0 `GUARD`, 0 `GEAR-ABORT`, 0 calls with throttle while
+the requested gear differed from the engaged one.
+
+**C-v150 L5 without feedback FAILS its criterion: CTE 16.007 m against the
+11.5 m limit fixed before measuring.** It was not tuned to, the limit was not
+changed, and it ships as a documented failure, accepted by the user. The same
+course on 2.0.2 without feedback ends `MPC-ABORT` `align_budget` with CTE
+22.380 m. Cause (implementation, per-call logs; impl-review re-ran the run and
+got the same numbers):
+
+1. The run diverges before the K-turn: without feedback the first two calls
+   are 2.0.2's no-feedback `SHIFT` sync, and a 4-call `PD-FALLBACK` follows at
+   call 142 that the feedback run does not have (why that solve failed is not
+   established). The K-turn starts at call 206 (x 18.62, y 0.38, yaw 19.7°,
+   3.284 m/s) instead of 201 (19.00, 0.33, 21.8°, 3.758 m/s).
+2. Both first plans start with the same forward leg. Leg 1 ends 0.53 m / 2.5°
+   apart in the two runs, and both runs re-plan (the kept-plan check fails in
+   both).
+3. The re-plans choose differently: with feedback a reverse leg next (F R F,
+   CTE 6.560); without, a forward leg turning the other way, planned 105°,
+   which carries the car to x 34.82, then R15, F120 (F F R F, CTE 16.007).
+4. The same F F R F sequence fails the same way **with** feedback on the LMPC
+   (C-v150 L5, LMPC: `DONE` 49.450 s, CTE 16.428 m, report only). The failure is
+   therefore not specific to missing feedback: it is a re-plan whose choice
+   flips on sub-metre pose differences, and re-plans happen because legs do not
+   follow their planned arcs (§6). Passing feedback does not remove it.
+
+#### 5.4 Vehicle rules and bounded failures (AC-3, AC-4)
+
+- **AC-3** — every counter 0 in all 104 final-tree runs (52 D-runs, 52 E-runs):
+  no drive torque against the engaged gear, no shift with throttle > 0 or at
+  ≥ 0.5 m/s, no negative throttle command, no throttle with requested ≠ engaged
+  gear (feedback runs), no throttle while rolling more than 0.1 m/s against the
+  engaged gear (feedback runs; also 0 on the 8 no-feedback E-runs, report only).
+  impl-review's own analysis of 7 E-runs: 0 on each counter, and the first
+  driving call of every leg at `|v_long| <= 0.05` m/s (18 of 18 legs).
+- **AC-4(a)** — straight 6 inside a pen of four fixed 2 m walls (inner faces
+  1.0 m beyond the chassis ends, 1.5 m beside its sides): `MPC-ABORT`
+  `kturn_blocked` at 3.40 s after 80 no-progress throttle calls, chassis
+  within |x| 0.926 / |y| 0.257 m of the start (walls at 3.15 / 2.35 m), no wall
+  crossed. On 2.0.2 the same pen gave no terminal mode in 60 s (PD alignment
+  against the wall). One oblique-hit case is not measured.
+- **AC-4(b)** — straight 6 with lat 2: `MPC-ABORT` `kturn_infeasible` at
+  0.05 s, 0.0 m moved.
+
+#### 5.5 Enabled but not triggered (AC-2E)
+
+32 of 32 E-runs on courses whose rule does not fire (the closed-loop driver's
+class-N courses with feedback, the stall course and straight 22 without
+feedback, the sample's six MPC runs) were per-step `==` their D-runs with 0
+R-KTURN steps. Every course 2.0.2 completes, the K-turn-enabled follower
+completes (30 / 30).
+
+#### 5.6 Cost (AC-8, report only)
+
+174 planning calls over the E-runs: median 2.80 ms (1000 nodes, about
+2.8 µs/node), maximum 28.0 ms (the lat-8 runs, which compute the window CTE).
+Largest first search: 9096 nodes (straight 12, arrival_goal 1.0), under the
+20000 cap. impl-review saw 14-24 ms of `plan_ms` per run. Wall clock, not
+bounded, one machine.
+
+#### 5.7 Sample
+
+`python -m genesis_vehicle.samples.mpc_follow_demo --course behind --behind-len 6
+--kturn on --t-max 60`: exit 0, PASS, `DONE` 29.30 s, CTE 10.536 m
+(implementation and impl-review). The default `--course vertex --vertex-deg 150`
+run's `--log` is byte-identical to the 2.0.2 run's.
+
+### 6. Known limitation: legs are planned at r_plan and driven at full lock
+
+The planner plans every arc at r_plan = 1.2 · R_min (8.876 m); a leg is driven
+at full lock, R_min (7.397 m kinematic). **Executed leg radius 7.571-7.724 m on
+all 63 legs that ended on rotation (0.853-0.870 of r_plan)**, forward and
+reverse (one more leg, the wall-pen one, ended on no-progress at 5.7°). A leg
+ends on rotation, so it ends short of and inside its planned arc; at the next
+hand-over the kept-plan check then often fails and the planner re-plans — of
+the ten feedback E-runs that reached `DONE`, every one re-planned at least once
+— and a re-plan's choice can flip on sub-metre pose differences (§5.3).
+
+**Steering legs open-loop to r_plan was measured and WITHDRAWN.** Round 2
+commanded the feedforward steer for r_plan (0.4219 instead of full lock 0.5):
+executed radius / r_plan became 1.018-1.035 and every leg ended on rotation,
+but CTE rose on every course measured in both rounds, one course failed its
+limit (straight 6) and one became worse than its 2.0.2 baseline (C-v135 L6,
+18.217 m vs 16.720 m); straight 6 still re-planned. It was
+reverted. Three variants were measured on the same acceptance courses with the
+same thresholds — round 1 (full lock, no settle), round 2 (KTURN-SETTLE +
+steering to r_plan, stopped after 7 E-runs on the straight-6 FAIL), final
+(KTURN-SETTLE, full lock):
+
+| E-run | limit (t / CTE) | round 1 | round 2 | final |
+|---|---|---|---|---|
+| C-v150 L5 | 60 / 11.5 | `DONE` 25.050 / 6.560 | `DONE` 31.200 / 7.640 | `DONE` 25.075 / 6.560 |
+| C-v150 L5 mirrored | as L5 | `DONE` 25.050 / 6.560 | `DONE` 31.200 / 7.640 | `DONE` 25.075 / 6.560 |
+| C-v150 L8 | 60 / 10.0 | `DONE` 28.550 / 6.561 | `DONE` 31.850 / 7.640 | `DONE` 28.550 / 6.561 |
+| C-v135 L6 | 75 / report (B0 16.720) | `DONE` 41.475 / 14.875 | `DONE` 47.675 / 18.217 | `DONE` 41.475 / 14.875 |
+| straight 6 | 60 / 13.5 | `DONE` 29.350 / 10.539 | `DONE` 36.925 / **14.460 FAIL** | `DONE` 29.300 / 10.536 |
+| straight 10 | 60 / ≤ 15.061 | `DONE` 27.450 / 7.461 | `DONE` 29.900 / 10.728 | `DONE` 27.400 / 7.457 |
+| straight 12, arrival_goal 1.0 | report | `DONE` 28.775 / 7.460 | `DONE` 33.100 / 8.871 | `DONE` 28.725 / 7.457 |
+| stall course, lat 8 | 70 / 6.5 | `DONE` 49.225 / 3.951 | not run | `DONE` 49.175 / 3.943 |
+| straight 22, lat 8 | 60 / 9.0 | `DONE` 30.600 / 5.557 | not run | `DONE` 30.675 / 5.566 |
+| straight 10, no feedback | 60 / ≤ 15.061 | `DONE` 27.475 / 7.457 | not run | `DONE` 27.475 / 7.457 |
+| C-v170 L10 | 60 / ≤ 13.368 | `DONE` 27.825 / 6.386 | not run | `DONE` 27.825 / 6.386 |
+| C-v150 L5, no feedback | 60 / 11.5 | `DONE` 49.000 / **16.007 FAIL** | not run | `DONE` 49.000 / **16.007 FAIL** |
+| C-v150 L8, no feedback | 60 / 10.0 | `DONE` 25.750 / 6.084 | not run | `DONE` 25.750 / 6.084 |
+| C-v135 L6, no feedback | 75 / report | `DONE` 41.175 / 13.615 | not run | `DONE` 41.175 / 13.615 |
+| straight 6, no feedback | 60 / 13.5 | `DONE` 29.375 / 10.542 | not run | `DONE` 29.375 / 10.542 |
+| stall course, lat 8, no feedback | 70 / 6.5 | `DONE` 49.300 / 3.957 | not run | `DONE` 49.300 / 3.957 |
+| straight 22, lat 8, no feedback | 60 / 9.0 | `DONE` 30.625 / 5.548 | not run | `DONE` 30.750 / 5.561 |
+| LMPC C-v150 L5 | report | `DONE` 49.550 / 16.431 | not run | `DONE` 49.450 / 16.428 |
+| wall pen, straight 6 | `kturn_blocked` ≤ 15 s | blocked 3.400 s | not run | blocked 3.400 s |
+| straight 6, lat 2 | `kturn_infeasible`, ≤ 0.5 m | 0.050 s, 0.0 m | not run | 0.050 s, 0.0 m |
+| AC-3 throttle-against-gear calls | 0 | **15 in 7 runs FAIL** | 0 in 7 runs | 0 in all runs |
+
+**The final variant was chosen with knowledge of these courses, so its results
+are not selection-free evidence.** Closing the mismatch needs closed-loop
+tracking of the planned arc; that is an open item (a candidate for 2.2.0), not
+a promise.
+
+### 7. Round 1's throttle against the gear, and KTURN-SETTLE
+
+Round 1 failed AC-3: **15 calls in 7 E-runs** (2 / 2 / 2 / 2 / 2 / 1 in six
+feedback runs, 4 in the LMPC run) commanded throttle while the car still rolled
+more than 0.1 m/s against the newly engaged gear — against the gear-mode rule
+that a command never decelerates with throttle against its gear. Mechanism
+(straight 6, calls 518-521): the stop phase ended on the second call below
+0.45 m/s, the plan was accepted on that call or the next, the new gear engaged
+(allowed below 0.5 m/s), and the leg's first driving calls commanded throttle
+1.0 while the car still rolled 0.172 / 0.106 m/s the old way. 2.0.2 never hits
+this because its cusp transition waits for `|v_long| <= v_stop`.
+
+Fix (kept in the final tree): **a K-turn leg commands throttle only on or after
+a call at which `|v_long| <= v_stop`** — the cusp test and threshold. Enforced
+in the settle branch of the K-turn step, reached by every leg start (first leg,
+leg to leg, kept, new and continued plans); a `SHIFT` / `GUARD` call inside a
+leg requires it again. Settle calls (`KTURN-SETTLE`, `(0, 0, 1)` in the leg's
+gear) are charged to the hand-over's 120-call stop counter, so repeated
+`GUARD`s in one leg can end on `kturn_budget`; the call that reaches standstill
+drives and is not counted; a re-settle keeps the leg's start heading and
+distance, so the leg distance cap is not reset, and its braking travel is not
+counted toward the cap. Final: 0 calls in every run (§5.4).
+
+### 8. Not measured / still open
+
+- Not measured: slopes (and a hill start after the settling call), low μ,
+  `single_scene`, `DifferentiablePlant` as stage 2, GPU, vehicles other than
+  the reference car, `n_envs > 1`, an external reset during a leg in
+  simulation (Genesis-free tests cover `resync_gear()` during a leg), an oblique
+  wall hit, LMPC beyond one run.
+- impl-review re-ran 7 E-runs in Genesis (C-v150 L5 with and without feedback,
+  straight 6, straight 10, C-v135 L6, the wall pen, lat 2) and did not re-run:
+  C-v150 L8, C-v170 L10, straight 12 at arrival_goal 1.0, the two lat-8 runs,
+  the mirrored run, the LMPC run, the other no-feedback runs, the class-N
+  E-runs, 44 of the 51 D-runs, and the AC-8 timing; nor the round-2 runs
+  behind §6.
+- Open: the AC-5 FAIL (§5.3); the planned-vs-driven radius (§6); default-on
+  (§1.2); a second misalignment in the same block and the rest of a block after
+  a FALLBACK or release (2.0.2 behaviour); a tank built from a sweep table alone
+  is not refused at construction (the 2.0.2 gap; a live tank is refused).
+
+### 9. Roadmap (planned, not present)
+
+The light-brake slope hold (CHANGELOG 2.0.2 §7) is planned as the next release
+after 2.0.3 (2.0.4 in the current plan) — a plan, not a commitment. 2.1.0: the Pacejka
+prediction model and a deceleration bound widened to the brake's limit. 2.2.0:
+feedforward from the MPC plan and a PD correction on the predicted trajectory
+(closed-loop K-turn arc tracking is a candidate there). 2.3.0: a hold-release
+rule, a KICK redesign and a wider default sweep speed grid. Default-on K-turn:
+deferred, no release assigned. None of this is in 2.0.3.
+
+### Documentation
+
+New: `docs/path-following.md` §5.10 (the K-turn: trigger, domain, episode,
+bounds, measured results, the FAIL, the radius limitation, non-guarantees) and
+"From 2.0.2 to 2.0.3" in its §6; `docs/physics-contracts.md` §7.21 (what the
+code enforces, with the enforcing paths, and what nothing enforces). Qualified
+"unless `mpc_kturn` is given" (each was true and stays true for a default
+follower — none needed a "this was wrong" correction): `docs/path-following.md`
+"Which follower" (reverse only on reverse blocks), the quick start (the
+forward-only U-turn's room), §3 (modes, `GOAL-MISSED`), §5.3 (regimes,
+roadmap), §5.4, §5.5 (`GOAL-MISSED` cannot be switched off), §5.8 (the U-turn's
+2·R_min, the short final block not refused, `GOAL-MISSED`, `stop_reason`), §5.9
+(reverse only on reverse blocks, "controller-initiated reverse is 2.0.3"), §6
+item 9; `docs/physics-contracts.md` §7.19 (`GOAL-MISSED`, lateral room),
+§7.20.2 (the wanted gear); `docs/api-reference.md` §11 (signature, modes,
+regimes, `stop_reason`, `FollowerPlan.steer_cmd`, `mpc_stats`, `KTurnParams`);
+`docs/index.md`, `docs/testing.md`, `README.md`, `samples/README.md`.
+
+### Tests
+
+**1285 passed, 3 skipped** on the final tree: implementation in five foreground
+parts of files (384 + 50 + 46 + 352 + 453 passed, 527.3 s summed); impl-review
+in six foreground groups (325 + 179 + 54 + 252 + 232 + 243), timing not
+reported. CPU/WSL2, genesis-world 1.4.5, `requirements-mpc.txt` installed,
+`test_fusion_probe.py` excluded. 2.0.2: 1225 passed, 3 skipped. New (60):
+`test_kturn_geometry.py` (19, Genesis-free: trigger and its boundaries, domain,
+the remaining bend on the stall course 43.6° ± 0.1, planner properties over
+random poses, the leg budgets across re-plans, mirror symmetry over 200 poses
+and 40 with a lateral limit, a capped level discarded whole, the per-call node
+budget, parameter validation) and `test_path_follower_kturn.py` (41, fake
+solver and a kinematic bicycle with the vehicle's shift rule: construction and
+kwarg errors, default-off identity and the 2.0.2 fixture, the decision's
+heading-error sign, a full straight-6 episode, `SHIFT` / `GUARD` inside an
+episode, cancellation, no second decision in a block, `GOAL-MISSED`
+suppression, every cap on exactly the next call, re-plan (i)/(ii)/(iii) and the
+leg budgets, `set_path`, no feedback, KTURN-SETTLE in every hand-over, full-lock
+steer, `resync_gear()` during a leg). Changed: the appended-field tail in
+`test_path_follower_mpc_api.py` (`FollowerPlan` gains `steer_cmd`) and the
+docstring of `test_pd_goal_passed.py`; no test deleted. **Mutants**: the
+implementation's 36 on the final tree, all killed, plus a leg-distance-cap
+mutant killed by the test added after review; impl-review's 12, of which one
+(the distance cap) survived round 1 and was killed after the fix. The version
+bump changes no test.
+
+---
+
 ## [2.0.2] — 2026-11-23
 
 **A vehicle can now be driven in an opt-in GEAR MODE — a forward/reverse gear

@@ -13,8 +13,10 @@ the forward block and the inverse plant in stage 2.
     python -m genesis_vehicle.samples.mpc_follow_demo --course misaligned --t-max 60  # the 2.0.0 stall start
     python -m genesis_vehicle.samples.mpc_follow_demo --course vertex --vertex-deg 150
     python -m genesis_vehicle.samples.mpc_follow_demo --radius 17 --v 10  # tighter demo turn
+    python -m genesis_vehicle.samples.mpc_follow_demo --course behind --behind-len 6 --kturn on --t-max 60  # 2.0.3 K-turn
 
-Courses (v2.0.1 adds the last two and ``--radius``): ``demo`` (the field
+Courses (v2.0.1 adds ``misaligned``, ``vertex`` and ``--radius``; v2.0.3 adds
+``behind``, described under K-turn below): ``demo`` (the field
 course; ``--radius`` sets the turn radius, default 30 m); ``cusp``;
 ``misaligned`` — the path (30,0) -> (10,-8) -> (-10,-8) -> (-30,0) at 2 m/s,
 the car spawned on its first waypoint with yaw ``--start-yaw`` (default 0,
@@ -31,9 +33,19 @@ only if none of them acts. ``--log PATH`` writes one JSON line per control step 
 state, regime, mode, command, solve status; v2.0.2 also the commanded and the engaged
 gear).
 
+K-turn (v2.0.3, opt-in): ``--kturn on`` passes ``mpc_kturn=KTurnParams()`` (default ``off``: the
+follower's default ``mpc_kturn=None``, so every default run is unchanged); ``--lateral-limit L`` /
+``--max-reverse M`` pass those ``KTurnParams`` fields and imply ``--kturn on``. ``--course behind`` is a
+straight path ``--behind-len`` m (default 6) BEHIND the spawned car (path from the spawn along -X at
+2 m/s, the car facing +X): the reference K-turn case — with the K-turn the follower stops, plans, and drives
+forward/reverse legs before handing back to the MPC; without it, it makes the 2.0.2 forward U-turn. The
+K-turn legs are reported as regime ``R-KTURN`` in ``--log`` and counted in ``mpc_stats["kturn"]``;
+``reverse_entry_step`` counts only ``DRV-1`` (a reverse block), not a K-turn reverse leg.
+
 Gear mode (v2.0.2): ``--command-mode gear`` (default, also with ``--mpc-model off``)
 drives the car with ``set_inputs(..., gear=)`` from the follower's ``GearCommand``
-(decelerations by brake, reverse only on the cusp course's reverse block);
+(decelerations by brake, reverse only on the cusp course's reverse block —
+and, with ``--kturn on``, on a K-turn's reverse legs);
 ``--gear-feedback on`` (default) passes the engaged gear ``int(veh.gear[0])`` back to
 ``PathFollower.step(gear=)``, ``off`` lets the follower run without it.
 ``--command-mode signed`` is the 2.0.1 signed-throttle loop.
@@ -163,7 +175,15 @@ def vertex_course(deg=90.0, v=4.0, spacing=0.5):
     return path, _polyline(corners)
 
 
-COURSE_V = {"demo": 8.0, "cusp": 4.0, "misaligned": 2.0, "vertex": 4.0}
+def behind_course(length=6.0, v=2.0, spacing=0.5):
+    """(v2.0.3) A straight path ``length`` m behind the spawn: from (0, 0) along -X at ``v`` (the car
+    spawns at (0, 0) facing +X) — the reference K-turn case."""
+    n = max(1, int(length / spacing))
+    path = [(-length * i / n, 0.0, 0.0, float(v)) for i in range(n + 1)]
+    return path, _polyline([(0.0, 0.0), (-length, 0.0)])
+
+
+COURSE_V = {"demo": 8.0, "cusp": 4.0, "misaligned": 2.0, "vertex": 4.0, "behind": 2.0}
 
 
 def ensure_cache(urdf, preset, remeasure=False, gpu=False, log=print):
@@ -192,7 +212,8 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
         mpc_impl="nonlinear", plant="table", course="demo", v=None, ramp=1.0, t_max=40.0,
         on_solve_failure="pd", gpu=False, viewer=False, log=print, radius=30.0,
         vertex_deg=90.0, start_yaw=None, align_gate=True, stall_timeout=True, log_path=None,
-        command_mode="gear", gear_feedback=True):
+        command_mode="gear", gear_feedback=True, kturn=False, lateral_limit=None, max_reverse=None,
+        behind_len=6.0):
     """Drive one run; returns the result dict (also the ``MPC_RESULT`` record).
 
     ``command_mode`` ``"gear"`` (default) / ``"signed"`` is passed to
@@ -201,7 +222,9 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
 
     ``v`` None = the course's speed (demo 8, cusp 4, misaligned 2, vertex 4 m/s).
     ``align_gate`` / ``stall_timeout`` False pass ``mpc_align_gate=None`` /
-    ``mpc_stall_timeout=None`` (MPC only). ``log_path``: one JSON line per step."""
+    ``mpc_stall_timeout=None`` (MPC only). ``log_path``: one JSON line per step.
+    ``kturn`` (v2.0.3): pass ``mpc_kturn=KTurnParams(lateral_limit, max_reverse)`` (MPC only; False
+    leaves the follower's default ``None``); ``behind_len``: the ``"behind"`` course length."""
     import genesis as gs
     import genesis_vehicle as gv
     from genesis_vehicle import DifferentiablePlant, PathFollower, VehicleScene, presets
@@ -216,6 +239,8 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
         path, P = misaligned_course(v)
     elif course == "vertex":
         path, P = vertex_course(vertex_deg, v)
+    elif course == "behind":
+        path, P = behind_course(behind_len, v)
     else:
         raise ValueError(f"unknown course {course!r}")
     spawn = MISALIGNED_CORNERS[0] if course == "misaligned" else (0.0, 0.0)
@@ -239,6 +264,9 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
         kw["mpc_align_gate"] = None
     if mpc_model != "off" and not stall_timeout:
         kw["mpc_stall_timeout"] = None
+    if kturn:
+        from genesis_vehicle.control import KTurnParams
+        kw["mpc_kturn"] = KTurnParams(lateral_limit=lateral_limit, max_reverse=max_reverse)
     if mpc_model == "off" and command_mode == "gear" and plant == "table":
         # The PD follower gets no mpc_params, so its brake gain comes from the
         # same params file explicitly (a DifferentiablePlant has brake_gain()).
@@ -336,6 +364,8 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
         conditions=dict(dt=DT, substeps=SUBSTEPS, steer_cap=STEER_CAP, v=v, ramp=ramp,
                         radius=radius if course == "demo" else None,
                         vertex_deg=vertex_deg if course == "vertex" else None,
+                        behind_len=behind_len if course == "behind" else None,
+                        kturn=bool(kturn), lateral_limit=lateral_limit, max_reverse=max_reverse,
                         t_max=t_max, backend="gpu" if gpu else "cpu",
                         env_threads={k_: os.environ.get(k_) for k_ in
                                      ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS")}))
@@ -365,7 +395,15 @@ def main():
     ap.add_argument("--mpc-impl", choices=("nonlinear", "linear"), default="nonlinear")
     ap.add_argument("--on-solve-failure", choices=("pd", "hold"), default="pd")
     ap.add_argument("--plant", choices=("table", "diff"), default="table")
-    ap.add_argument("--course", choices=("demo", "cusp", "misaligned", "vertex"), default="demo")
+    ap.add_argument("--course", choices=("demo", "cusp", "misaligned", "vertex", "behind"), default="demo")
+    ap.add_argument("--behind-len", type=float, default=6.0,
+                    help="'behind' course: path length behind the car (m)")
+    ap.add_argument("--kturn", choices=("off", "on"), default="off",
+                    help="v2.0.3 K-turn: on = mpc_kturn=KTurnParams() (MPC layer, gear mode)")
+    ap.add_argument("--lateral-limit", type=float, default=None,
+                    help="KTurnParams.lateral_limit (m); implies --kturn on")
+    ap.add_argument("--max-reverse", type=float, default=None,
+                    help="KTurnParams.max_reverse (m); implies --kturn on")
     ap.add_argument("--radius", type=float, default=30.0, help="demo course turn radius (m)")
     ap.add_argument("--vertex-deg", type=float, default=90.0, help="vertex course heading change")
     ap.add_argument("--start-yaw", type=float, default=None, help="spawn yaw (rad), default 0")
@@ -386,6 +424,10 @@ def main():
     ap.add_argument("--viewer", action="store_true")
     ap.add_argument("--gpu", action="store_true")
     a = ap.parse_args()
+    if a.kturn == "on" or a.lateral_limit is not None or a.max_reverse is not None:
+        if a.mpc_model == "off" or a.command_mode == "signed" or a.align_gate == "off":
+            ap.error("--kturn on / --lateral-limit / --max-reverse need the MPC layer in gear mode with the "
+                     "heading gate (not --mpc-model off, not --command-mode signed, not --align-gate off)")
     table, params = a.table, a.params
     if table is None or params is None:
         ct, cp = ensure_cache(a.urdf, a.preset, a.remeasure, a.gpu)
@@ -396,7 +438,9 @@ def main():
               radius=a.radius, vertex_deg=a.vertex_deg, start_yaw=a.start_yaw,
               align_gate=a.align_gate == "on", stall_timeout=a.stall_timeout == "on",
               log_path=a.log, command_mode=a.command_mode,
-              gear_feedback=a.gear_feedback == "on")
+              gear_feedback=a.gear_feedback == "on",
+              kturn=(a.kturn == "on" or a.lateral_limit is not None or a.max_reverse is not None),
+              lateral_limit=a.lateral_limit, max_reverse=a.max_reverse, behind_len=a.behind_len)
     print("MPC_RESULT " + json.dumps(res, default=str), flush=True)
     return 0 if res["pass"] else 1
 

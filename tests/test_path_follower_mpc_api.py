@@ -243,6 +243,6 @@ def test_followerplan_new_fields_are_appended():
     names = [f.name for f in fields(FollowerPlan)]
     assert names[:8] == ["mode", "a_target", "omega_target", "v_long", "v_target",
                          "pitch_deg", "roll_deg", "command"]
-    assert names[8:] == ["regime", "a_ff", "w_ff", "gear", "a_coast"]
+    assert names[8:] == ["regime", "a_ff", "w_ff", "gear", "a_coast", "steer_cmd"]
     p = FollowerPlan("DRV+1", 1.0, 0.5, 2.0, 3.0, 0.0, 0.0, None)    # 1.x positional
     assert p.regime == "R-OFF"

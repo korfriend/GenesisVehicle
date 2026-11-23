@@ -1404,6 +1404,14 @@ After build, the server also emits topology once:
 > `PathFollower` therefore uses `command_mode="signed"` (the `mpc_model="off"`
 > default) or sends `GearCommand.signed()`. Server code and wire schema are
 > unchanged in 2.0.2.
+>
+> **2.0.3 K-turn over the wire:** a client-side follower given
+> `mpc_kturn=KTurnParams()` (gear mode) whose reverse legs are sent as
+> `GearCommand.signed()` reaches the vehicle as a signed (negative) throttle, so
+> the vehicle's gear-mode shift rule and drive-torque clamp
+> (`physics-contracts.md` §7.20.1) do not apply on the wire — only the
+> follower's own `SHIFT` / `KTURN-SETTLE` stops stand between the legs, and the
+> follower gets no engaged-gear feedback. Not measured over the server.
 
 ### 4.5 Runtime — server → client
 

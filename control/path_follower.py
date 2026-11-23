@@ -79,6 +79,8 @@ from typing import Optional
 
 from .sweep import SweepTable
 from ..gear import GEAR_SHIFT_MAX_SPEED, refuses_gear
+from .kturn import (KTURN_KAPPA, KTURN_LEG_TOL, KTURN_MAX_REVERSE_FACTOR, KTURN_NOPROG_S, KTURN_V,
+                    KTurnParams, KTurnPlanner, remaining_bend, trigger, wrap)
 
 
 # --- State extraction --------------------------------------------------------
@@ -163,7 +165,8 @@ class FollowerPlan:
     #: ``"R-ALIGN"`` (PD on a
     #: forward block while the heading gate holds, ``mpc_align_gate``) and
     #: ``"R-STALL"`` (PD after the no-progress watchdog fired,
-    #: ``mpc_stall_timeout``). ``a_ff`` / ``w_ff``: the MPC feedforward.
+    #: ``mpc_stall_timeout``), and since v2.0.3 ``"R-KTURN"`` (a K-turn call,
+    #: only with ``mpc_kturn`` given). ``a_ff`` / ``w_ff``: the MPC feedforward.
     #: Under R-MPC ``v_target`` is the PD's value, which since v2.0.1 can
     #: differ in sign from 1.x at a block end (W2); the MPC command does not
     #: use it.
@@ -174,12 +177,23 @@ class FollowerPlan:
     #: otherwise): the gear the command of this step requests — the active
     #: block's sign, except on a terminal step (``DONE`` / ``GOAL-MISSED`` /
     #: ``MPC-ABORT`` / ``GEAR-ABORT``), which keeps the gear the follower
-    #: believes engaged. ``a_coast``: the plant's coast acceleration (throttle
+    #: believes engaged, and (v2.0.3, only with ``mpc_kturn`` given) on an
+    #: ``R-KTURN`` call, which requests the K-turn's current leg gear.
+    #: ``a_coast``: the plant's coast acceleration (throttle
     #: 0, brake 0) for the brake model, filled by :class:`FleetFollower` from
     #: one batched prediction; ``None`` lets :meth:`PathFollower.finish` ask
     #: the plant's ``accel_at`` when it needs it.
     gear: Optional[int] = None
     a_coast: Optional[float] = None
+    #: (v2.0.3, appended) the steering command of a K-turn leg's driving call
+    #: (``regime="R-KTURN"``, ``mode`` ``"KTURN-REV"`` / ``"KTURN-FWD"``):
+    #: ``+-steer_cap`` in the direction of the leg; ``None`` on every other
+    #: plan (always ``None`` without ``mpc_kturn``). A caller running its own
+    #: inversion after :meth:`PathFollower.plan` must apply it instead of
+    #: inverting ``omega_target`` (which is then ``d * 1.0 / r_plan``, the
+    #: leg's nominal yaw rate) — or call :meth:`PathFollower.finish`, which
+    #: does.
+    steer_cmd: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -406,12 +420,20 @@ GP_INC_M = 1e-3
 GP_MARGIN_M = 0.1
 # _handover_step results.
 _HO_LAW, _HO_PD, _HO_ABORT = 0, 1, 2
+# (v2.0.3) the gate entry started a K-turn episode.
+_HO_KTURN = 3
 #: v2.0.2 gear mode, chosen values: GUARD latches while the vehicle moves
 #: faster than V_AGAINST (m/s) against the desired gear; more than
 #: SHIFT_MAX_CALLS consecutive SHIFT / GUARD calls end on GEAR-ABORT
 #: ("shift_timeout"; 120 calls = 3 s at 40 Hz — a call count, not a time).
 V_AGAINST = 0.3
 SHIFT_MAX_CALLS = 120
+#: (v2.0.3, chosen value) more than this many counted calls in one hand-over of
+#: a K-turn episode end on ``MPC-ABORT`` / ``"kturn_budget"`` (a call count).
+#: Counted: stop-phase calls (the last one is stamped KTURN-PLAN), KTURN-SETTLE
+#: calls, and SHIFT / GUARD calls outside a leg. NOT counted: the further
+#: KTURN-PLAN calls of a continued search (bounded by the node caps instead).
+KTURN_STOP_MAX_CALLS = 120
 #: Planar speed below which a SHIFT / GUARD call counts as "slow": 90 % of the
 #: vehicle's shift limit (GEAR_SHIFT_MAX_SPEED). The margin covers the
 #: differences between the follower's ``hypot(v_long, v_lat)`` and the
@@ -459,6 +481,14 @@ def _check_stall_timeout(timeout):
         raise ValueError(f"mpc_stall_timeout must be None or a finite number of seconds > 0; "
                          f"got {timeout!r}")
     return float(timeout)
+
+
+def _check_kturn(kt):
+    """``None`` or a :class:`~genesis_vehicle.control.kturn.KTurnParams`;
+    ``ValueError`` naming ``mpc_kturn`` otherwise (v2.0.3)."""
+    if kt is None or isinstance(kt, KTurnParams):
+        return kt
+    raise ValueError(f"mpc_kturn must be None (off, the default) or a KTurnParams(); got {kt!r}")
 
 
 #: The U1 error: an MPC follower (the 2.0.0 default) without its params.
@@ -604,10 +634,13 @@ class PathFollower:
             ``mpc_model="off"``. ``"signed"`` returns the 2.0.1
             ``(throttle, steer, brake)`` 3-tuple: the same commands as 2.0.1
             for the same inputs. ``"gear"`` returns a :class:`GearCommand`
-            (throttle in [0, 1], brake, gear = the active block's sign) for a
-            vehicle driven with ``set_inputs(..., gear=)``. The COMMAND never
-            asks for reverse outside a reverse block already in the path and
-            never decelerates with a throttle against the commanded gear; the
+            (throttle in [0, 1], brake, gear = the active block's sign — or,
+            with ``mpc_kturn`` given (v2.0.3, opt-in), a K-turn leg's gear) for
+            a vehicle driven with ``set_inputs(..., gear=)``. The COMMAND never
+            asks for reverse outside a reverse block already in the path
+            (unless ``mpc_kturn`` is given: a K-turn drives reverse legs on a
+            forward block) and never decelerates with a throttle against the
+            commanded gear; the
             VEHICLE behaves the same with ``gear=`` feedback, or absent an
             external change of its engaged gear — without feedback, after an
             external reset (or a follower constructed on a vehicle rolling the
@@ -658,7 +691,9 @@ class PathFollower:
             ``mpc_align_gate=None, mpc_stall_timeout=None`` and only on runs
             with no ``GOAL-MISSED`` and no W2 step** (the gate and watchdog
             are on by default under either policy; ``GOAL-MISSED`` and W2
-            cannot be switched off). Under ``"pd"`` the PD drives after a
+            cannot be switched off — ``GOAL-MISSED`` is not evaluated on
+            ``R-KTURN`` calls, which exist only with ``mpc_kturn`` given).
+            Under ``"pd"`` the PD drives after a
             failed solve only up to a travel budget per forward block, reset
             by :meth:`set_path` (F8: at most pi * R_min plus the travel of one
             :meth:`plan` interval; then ``MPC-ABORT``,
@@ -724,6 +759,73 @@ class PathFollower:
             in R-ALIGN without a time limit (the watchdog does not run in
             R-ALIGN). Distance driven under the MPC itself (R-MPC) has no
             budget.
+        mpc_kturn: (v2.0.3, OPT-IN) ``None`` (default: no K-turn, the 2.0.2
+            commands) or a :class:`~genesis_vehicle.control.kturn.KTurnParams`.
+            Given, a gear-mode follower with the heading gate on may, at the
+            FIRST R-ALIGN entry of a forward block, stop and drive a multi-point
+            turn (regime ``"R-KTURN"``: ``KTURN-STOP`` until two consecutive
+            calls below 0.45 m/s, ``KTURN-PLAN`` while a deterministic planner
+            runs at most 1000 nodes per call / 20000 per plan with the vehicle
+            braked, then legs ``KTURN-REV`` / ``KTURN-FWD`` at full steering lock
+            and 1.0 m/s in the leg's gear, a stop and a re-plan between legs),
+            then hand back to the MPC (reference re-timed, watchdog anchored,
+            gate re-armed). A leg commands throttle only after a call at which
+            ``|v_long| <= v_stop`` (``KTURN-SETTLE`` brakes until then, enforced in
+            the settle branch of the K-turn step, reached by every leg start; a
+            ``SHIFT`` / ``GUARD`` call inside a leg requires it again; such a
+            re-settle keeps the leg's start heading and distance, so the leg
+            distance cap is not reset, and shares the hand-over's 120-call stop
+            budget, so repeated GUARDs in one leg can end on ``"kturn_budget"``;
+            travel during settle calls is not counted toward the leg cap — at most
+            120 calls at brake 1); nothing is stated about rolling back under
+            throttle on a grade after that call. Known limitation: legs are
+            PLANNED at r_plan = 1.2 R_min (8.876 m on the reference car) but
+            DRIVEN at full lock (7.57-7.72 m measured), so a leg ends short of its
+            planned end, the kept-plan check often fails and the planner re-plans
+            — and a re-plan's choice can flip on sub-metre pose differences.
+            Steering legs open-loop to r_plan was measured and made the
+            cross-track error worse on every course measured; closed-loop
+            tracking of the planned arc is an open item, not implemented.
+            Trigger, only when ``|v_long| <= 4.5`` m/s and the
+            remaining block bends by at most 45 deg (sum of the segment heading
+            changes; heading jitter on a dense or noisy path adds up and can
+            disable it): ``R_min (1 - cos e) - |y'| > s_rem + b + G + 1.5``
+            (e = chassis - path heading, y' lateral offset, s_rem the remaining
+            block length, b the distance behind the block start, G
+            ``arrival_goal`` on the final block else ``cusp_goal``; the left
+            side is a LOWER BOUND of the forward swing), or with a
+            ``lateral_limit`` L also ``R_min (1 - cos e) + |y'| > L``. It is a
+            fitted proxy: it predicts the size of the forward swing, not whether
+            the forward turn reaches the goal circle — on the reference car's
+            "straight 10" course it fires although the 2.0.2 forward turn
+            reaches ``DONE`` (grazing the 1.5 m circle at 1.471 m). Decided once
+            per forward block per path: a later R-ALIGN entry of the same block,
+            or the rest of the block after a FALLBACK, is the 2.0.2 alignment.
+            Bounds enforced (reference car, defaults): legs <= ``max_legs`` and
+            reverse legs <= ``max_legs // 2`` across re-plans; a leg ends on
+            its signed rotation or on its distance cap (forward
+            ``1.25 r_plan phi + 0.5`` <= 35.36 m, reverse also <=
+            ``max_reverse``, 14.79 m; each + the travel of one call + the
+            uncounted braking travel of mid-leg re-settle calls, at most 120
+            brake-1 calls per hand-over); more than
+            ``ceil(2 cap / (1.0 m/s * dt_ctrl)) + 120`` calls on a leg, or more
+            than 120 stop + settle calls (``SHIFT`` / ``GUARD`` calls outside a
+            leg included) in one hand-over -> ``MPC-ABORT`` /
+            ``"kturn_budget"``; ``round(2.0 / dt_ctrl)`` driving calls (80 at
+            dt_ctrl 0.025 s, 2.0 s) without 0.25 m of DISPLACEMENT ->
+            ``"kturn_blocked"`` (a vehicle scraping along a wall or rolling back
+            resets it; then only the leg call cap applies); no plan before the
+            first leg -> the 2.0.2 alignment (FALLBACK) without a lateral
+            limit, ``"kturn_infeasible"`` with one. The K-turn does NOT know
+            about obstacles. ``SHIFT`` / ``GUARD`` calls inside an episode keep
+            it; ``BRAKE_TRANS``, ``DONE`` and a terminal mode end it.
+            ``GOAL-MISSED`` is not evaluated on R-KTURN calls (three calls are
+            needed again after the release). Explicit non-None with
+            ``command_mode="signed"`` or ``mpc_align_gate=None`` raises
+            ``ValueError``. Not modelled by ``DifferentiablePlant``'s
+            prediction (on a leg the follower calls only ``throttle_for``; a
+            ``DifferentiablePlant`` keeps its pending acceleration —
+            non-guaranteed). See ``docs/path-following.md``.
         mpc_stall_timeout: (v2.0.1) seconds, default ``2.0``, or ``None``. The
             no-progress watchdog: while the MPC drives a forward block
             (regimes ``R-MPC`` / ``R-FAIL``), if the chassis position passed
@@ -768,7 +870,8 @@ class PathFollower:
             in R-STALL without a time limit (zero-mean pose noise of a few mm
             is far below 1.0 m).
 
-        For these two, ``None`` DISABLES the feature — unlike
+        For these two (and ``mpc_kturn``, v2.0.3, off by default), ``None``
+        DISABLES the feature — unlike
         ``mpc_v_floor`` / ``mpc_gains`` / ``dt_ctrl``, where ``None`` means
         the default. Which kwarg turns off what: ``mpc_align_gate=None`` the
         gate with its travel budget (F3); ``mpc_stall_timeout=None`` the
@@ -805,14 +908,18 @@ class PathFollower:
     a failed solve) / ``PD-ALIGN`` (heading gate) / ``PD-STALL`` (watchdog),
     and in gear mode (v2.0.2) the non-terminal ``SHIFT`` / ``GUARD`` and the
     terminal ``GEAR-ABORT`` (see :meth:`plan`),
-    and since v2.0.1 the terminal ``GOAL-MISSED`` (every mode: on the final
+    and (v2.0.3, only with ``mpc_kturn`` given) ``KTURN-STOP`` /
+    ``KTURN-PLAN`` / ``KTURN-SETTLE`` / ``KTURN-REV`` / ``KTURN-FWD`` (regime
+    ``"R-KTURN"``),
+    and since v2.0.1 the terminal ``GOAL-MISSED`` (every mode — not evaluated
+    on R-KTURN calls: on the final
     block, past the goal's normal plane on the last segment, at least
     ``arrival_goal + 0.1`` m from the goal, and the distance grew by more than
     1e-3 m on each of the last two :meth:`plan` calls — so a vehicle moving
     away slower than 1e-3 m per call, i.e. 1e-3/h m/s at call interval h, is
     not stopped, and calling :meth:`plan` more than once per control step
     shortens the window) / ``MPC-ABORT`` (MPC layer budgets, see
-    :attr:`stop_reason`). Both command ``(0, 0, 1)`` and stay set until
+    :attr:`stop_reason`). Both — and ``GEAR-ABORT`` (v2.0.2) — command ``(0, 0, 1)`` and stay set until
     :meth:`set_path` or a ``DONE`` step. A ``DONE`` (inside ``arrival_goal``
     of the last waypoint) sets :attr:`stop_reason` to None, and the follower
     drives again if the vehicle leaves the circle; the block's MPC budgets
@@ -854,6 +961,7 @@ class PathFollower:
                  dt_ctrl=_Unset(None),
                  mpc_align_gate=_Unset((math.pi / 2, math.pi / 4)),
                  mpc_stall_timeout=_Unset(2.0),
+                 mpc_kturn=_Unset(None),
                  lookahead: float = 3.5, arrival_goal: float = 1.5,
                  cusp_goal: float = 1.0, k_v: float = 2.0, k_w: float = 1.5,
                  k_approach: float = 1.0, v_stop: float = 0.05,
@@ -872,7 +980,8 @@ class PathFollower:
         mpc_kw = {"mpc_params": mpc_params, "mpc_impl": mpc_impl,
                   "on_solve_failure": on_solve_failure, "mpc_gains": mpc_gains,
                   "mpc_v_floor": mpc_v_floor, "dt_ctrl": dt_ctrl,
-                  "mpc_align_gate": mpc_align_gate, "mpc_stall_timeout": mpc_stall_timeout}
+                  "mpc_align_gate": mpc_align_gate, "mpc_stall_timeout": mpc_stall_timeout,
+                  "mpc_kturn": mpc_kturn}
         # (3) the model name.
         if mpc_model not in self.MPC_MODELS:
             raise ValueError(f"mpc_model must be one of {list(self.MPC_MODELS)}; "
@@ -885,7 +994,8 @@ class PathFollower:
                                     ("on_solve_failure", on_solve_failure),
                                     ("mpc_gains", mpc_gains), ("mpc_v_floor", mpc_v_floor),
                                     ("dt_ctrl", dt_ctrl), ("mpc_align_gate", mpc_align_gate),
-                                    ("mpc_stall_timeout", mpc_stall_timeout))
+                                    ("mpc_stall_timeout", mpc_stall_timeout),
+                                    ("mpc_kturn", mpc_kturn))
                      if not isinstance(v, _Unset)]
             if given:
                 raise ValueError(f"mpc_model=\"off\" takes no MPC argument; got {', '.join(given)}")
@@ -898,6 +1008,16 @@ class PathFollower:
         command_mode, k_b = self._check_command_mode(
             plant_obj, mpc_on, command_mode, brake_gain,
             None if mpc_setup is None else mpc_setup["params"])
+        # (v2.0.3) a K-turn needs gear mode and the heading gate (before any
+        # attribute is set; the default mpc_kturn=None has no requirement).
+        if mpc_setup is not None and mpc_setup["kturn"] is not None:
+            if command_mode != "gear":
+                raise ValueError("mpc_kturn=KTurnParams(...) needs command_mode=\"gear\" (a K-turn "
+                                 "drives reverse legs in reverse gear); got command_mode="
+                                 f"{command_mode!r}")
+            if mpc_setup["align_gate"] is None:
+                raise ValueError("mpc_kturn=KTurnParams(...) needs the heading gate (the K-turn is "
+                                 "decided at a gate entry); got mpc_align_gate=None")
 
         self.mpc_model = mpc_model
         self.command_mode = command_mode
@@ -955,6 +1075,11 @@ class PathFollower:
         self._guard_slow = 0
         self._fb_gear = None
         self._fb_vlat = None
+        # v2.0.3 K-turn: None = off (the default; every K-turn hook returns
+        # before any computation or state write).
+        self._kturn = None
+        self._kt = None
+        self._kt_block = None
         if mpc_on:
             self._init_mpc(mpc_setup, steer_cap)
 
@@ -1022,7 +1147,7 @@ class PathFollower:
 
     def _check_mpc_args(self, plant, mpc_model, *, mpc_params, mpc_impl,
                         on_solve_failure, mpc_gains, mpc_v_floor, dt_ctrl,
-                        mpc_align_gate, mpc_stall_timeout):
+                        mpc_align_gate, mpc_stall_timeout, mpc_kturn=None):
         """Steps 5-10 of the constructor's check order (each raises before any
         side effect): live-vehicle steering, params present, implementation /
         policy / heading gate / stall timeout (v2.0.1: after U1, before the
@@ -1043,6 +1168,7 @@ class PathFollower:
             raise ValueError(f"on_solve_failure must be 'pd' or 'hold'; got {on_solve_failure!r}")
         gate = _check_align_gate(mpc_align_gate)
         stall = _check_stall_timeout(mpc_stall_timeout)
+        kturn = _check_kturn(mpc_kturn)
         # (8) dependencies.
         from .mpc._deps import require_mpc_deps
         require_mpc_deps(mpc_impl)
@@ -1051,7 +1177,8 @@ class PathFollower:
         params = load_mpc_params(mpc_params)
         return dict(params=params, impl=mpc_impl, policy=on_solve_failure,
                     gains=mpc_gains, v_floor=0.5 if mpc_v_floor is None else float(mpc_v_floor),
-                    dt_ctrl=dt_ctrl, model=mpc_model, align_gate=gate, stall_timeout=stall)
+                    dt_ctrl=dt_ctrl, model=mpc_model, align_gate=gate, stall_timeout=stall,
+                    kturn=kturn)
 
     def _init_mpc(self, st, steer_cap):
         import warnings
@@ -1114,6 +1241,20 @@ class PathFollower:
         # v2.0.1 per-block PD budgets (plan_r210 section 3B.3).
         self._r_min = r_min
         self._pd_budget = math.pi * r_min   # F3 (R-ALIGN) and F8 (R-FAIL) travel, m
+        # v2.0.3 K-turn (opt-in). The stats exist for every MPC follower (zeros
+        # when off); the rest only with mpc_kturn given.
+        self._kt_stats = {"episodes": 0, "legs": 0, "reverse_m": 0.0,
+                          "plan_nodes": 0, "plan_calls": 0, "plan_ms": 0.0}
+        self._kturn = st["kturn"]
+        if self._kturn is not None:
+            self._kt_r_plan = KTURN_KAPPA * r_min
+            mr = self._kturn.max_reverse
+            self._kt_max_rev = KTURN_MAX_REVERSE_FACTOR * r_min if mr is None else mr
+            self._kt_sign = float(params.steer_input_sign)
+            self._kt_noprog = int(round(KTURN_NOPROG_S / dt_ctrl))
+            self._kt_call = None
+            self._kt_gp_saved = None
+            self._kt_last_decision = None
         self._reset_budgets()
 
     def _reset_budgets(self) -> None:
@@ -1124,6 +1265,8 @@ class PathFollower:
         self._stall_s_hw = None         # furthest projection arc length over the block's fires
         self._prev_regime = None        # regime of the previous plan() call
         self._prev_xy = None            # its position
+        if self._kturn is not None:
+            self._kt_block = None       # (v2.0.3) block whose K-turn decision was taken
 
     # -- Path geometry ---------------------------------------------------------
 
@@ -1367,6 +1510,12 @@ class PathFollower:
                          yaw_rate=yaw_rate, v_lat=v_lat, t=t, gear=gear)
         if plan.command is not None:
             return self.finish(plan, 0.0, 0.0)
+        if self._kturn is not None and plan.steer_cmd is not None:
+            # (v2.0.3) a K-turn leg: the steering is fixed at the leg's lock,
+            # only the throttle is inverted (also with a coupled plant).
+            throttle = self.plant.throttle_for(
+                v_long, plan.a_target, plan.pitch_deg, plan.roll_deg)
+            return self.finish(plan, throttle, plan.steer_cmd)
         if self._coupled_plant:
             # One 2x2 inversion for both channels: a DifferentiablePlant knows
             # that steering bleeds speed and that throttle shifts the yaw
@@ -1512,6 +1661,8 @@ class PathFollower:
         else:
             thr_out, brake = 0.0, _brake()
         st = max(-self.steer_cap, min(self.steer_cap, float(steer)))
+        if self._kturn is not None and plan.steer_cmd is not None:
+            st = float(plan.steer_cmd)       # (v2.0.3) K-turn leg: the leg's lock
         if thr_out < 0.02 and abs(v_long) < 0.1:
             brake = 1.0
         self._report_applied(g * thr_out, st)
@@ -1541,7 +1692,10 @@ class PathFollower:
         the projection advances), then after ``GOAL-MISSED`` ``GUARD``. Both
         are non-terminal ``command=(0, 0, 1)`` plans with ``gear`` = the
         active block's sign (regime ``"CMD"`` with the MPC layer: no solve, no
-        budget charged), and neither counts toward ``GOAL-MISSED`` (that call's
+        budget charged; v2.0.3, with ``mpc_kturn`` given, inside a K-turn
+        episode: ``gear`` = the episode's leg gear, regime ``"R-KTURN"``,
+        counted on the leg / stop call counter), and neither counts toward
+        ``GOAL-MISSED`` (that call's
         goal distance is taken back out of the history).
 
         * ``SHIFT`` — the engaged gear (feedback ``gear=``) differs from the
@@ -1608,7 +1762,11 @@ class PathFollower:
     def _desired_gear(self) -> int:
         """The gear the follower wants: the active block's direction sign
         (+1 forward block, -1 reverse block). The single source of the wanted
-        gear — the 2.0.3 seam."""
+        gear — the 2.0.3 seam. (v2.0.3) During a K-turn episode
+        (``mpc_kturn`` given): the episode's current gear — the block's sign
+        until the first leg is planned, then the planned / driven leg's."""
+        if self._kturn is not None and self._kt is not None:
+            return self._kt["gear"]
         return 1 if self.blocks[self.block_i][2] >= 0 else -1
 
     def _stamp_gear(self, plan) -> None:
@@ -1733,6 +1891,17 @@ class PathFollower:
         self._t_now = t_now
         handover_on = self._align_gate is not None or self._stall_timeout is not None
         if pd.command is not None:
+            if self._kturn is not None and self._kt is not None:
+                # (v2.0.3, D1) SHIFT / GUARD keep the episode and count on its
+                # leg (or stop) counter; BRAKE_TRANS, DONE and a terminal mode
+                # end it (the block stays decided).
+                if pd.mode in ("SHIFT", "GUARD"):
+                    if self._kt_cmd_call(float(pos_xy[0]), float(pos_xy[1])):
+                        return self._kt_abort("kturn_budget", v_long, pitch_deg, roll_deg)
+                    pd.regime = "R-KTURN"
+                    self.regime = "R-KTURN"
+                    return pd
+                self._kt = None
             if handover_on:
                 self._clear_handover()
             pd.regime = "CMD"
@@ -1760,8 +1929,20 @@ class PathFollower:
                 self._d_align += d_step
             elif self._prev_regime == "R-FAIL":
                 self._d_fail += d_step
+        if self._kturn is not None and self._kt is not None:
+            # (v2.0.3) an active K-turn episode: no gate, no watchdog.
+            out = self._kturn_step(t_now, pos_xy, yaw, v_long, pitch_deg, roll_deg)
+            if out is not None:
+                return out
         if handover_on:
+            if self._kturn is not None:
+                self._kt_call = (x, y, float(yaw), float(v_long))
             ho = self._handover_step(t_now, pos_xy, yaw, t_prev)
+            if ho == _HO_KTURN:
+                # this call is the episode's first KTURN-STOP; its goal
+                # distance is taken back out of the GOAL-MISSED history.
+                self._gp_hist = self._kt_gp_saved
+                return self._kturn_step(t_now, pos_xy, yaw, v_long, pitch_deg, roll_deg)
             if ho == _HO_ABORT:
                 return self._abort_plan(v_long, pitch_deg, roll_deg)
             if ho == _HO_PD:
@@ -1795,7 +1976,9 @@ class PathFollower:
         """Why the follower stopped in a terminal mode other than ``DONE``.
         Exactly one of:
 
-        * ``"goal_passed"`` (``GOAL-MISSED``): every mode, cannot be disabled;
+        * ``"goal_passed"`` (``GOAL-MISSED``): every mode, cannot be disabled
+          (not evaluated on R-KTURN calls, which exist only with ``mpc_kturn``
+          given, v2.0.3);
         * ``"align_budget"`` (``MPC-ABORT``): MPC layer on and
           ``mpc_align_gate`` not None;
         * ``"stall_budget"`` (``MPC-ABORT``): MPC layer on and
@@ -1803,7 +1986,14 @@ class PathFollower:
         * ``"fail_budget"`` (``MPC-ABORT``): MPC layer on and
           ``on_solve_failure="pd"``, whatever the two kwargs;
         * ``"shift_timeout"`` (``GEAR-ABORT``, v2.0.2): gear mode, more than
-          ``SHIFT_MAX_CALLS`` consecutive ``SHIFT`` / ``GUARD`` calls.
+          ``SHIFT_MAX_CALLS`` consecutive ``SHIFT`` / ``GUARD`` calls;
+        * ``"kturn_budget"`` / ``"kturn_infeasible"`` / ``"kturn_blocked"``
+          (``MPC-ABORT``, v2.0.3, ``mpc_kturn`` given): a K-turn call limit
+          (leg calls, or stop + settle calls of one hand-over, ``SHIFT`` /
+          ``GUARD`` calls outside a leg included); no plan before
+          the first leg (or an old plan leaving the limit) with a
+          ``lateral_limit``; ``round(2.0 / dt_ctrl)`` driving calls of a leg (80
+          at dt_ctrl 0.025 s) without 0.25 m of displacement.
 
         ``None`` before the first step, while driving, and on ``DONE`` (a
         ``DONE`` step clears it); reset by :meth:`set_path`. Read-only."""
@@ -1813,6 +2003,8 @@ class PathFollower:
         """Enter the sticky ``MPC-ABORT`` terminal state (brake to a stop)."""
         self._terminal = ("MPC-ABORT", reason)
         self._clear_handover()
+        if self._kturn is not None:
+            self._kt = None
         return _HO_ABORT
 
     def _abort_plan(self, v_long, pitch_deg, roll_deg):
@@ -1869,10 +2061,14 @@ class PathFollower:
 
     def _enter_align(self, e) -> int:
         """An R-ALIGN entry (both paths). F3: the block's R-ALIGN travel budget
-        already spent — abort ``align_budget``. (``e`` is unused; kept,
-        private.)"""
+        already spent — abort ``align_budget``. (v2.0.3, ``mpc_kturn`` given)
+        then, at the block's FIRST entry only, the K-turn decision: a firing
+        trigger returns ``_HO_KTURN`` (no R-ALIGN count, no F3 charge). (``e``
+        is unused; kept, private.)"""
         if self._d_align > self._pd_budget:
             return self._abort("align_budget")
+        if self._kturn is not None and self._kt_block != self.block_i and self._kt_decide():
+            return _HO_KTURN
         self._ho_regime = "R-ALIGN"
         self._handover["align"] += 1
         self._anchor = None
@@ -1966,14 +2162,264 @@ class PathFollower:
             return [(*self.path[k][:3], max(self.path[k][3], 0.0), self.wp_yaws[k]) for k in idx]
         return [(*self.path[k][:3], max(self.path[k][3], 0.0)) for k in idx]
 
+    # -- K-turn (v2.0.3, opt-in: mpc_kturn=KTurnParams()) -----------------------------------------
+    #
+    # Every entry point below checks ``self._kturn is None`` first and returns before any computation or
+    # state write (plan r203 Amendment 1, A4): a follower with the default ``mpc_kturn=None`` issues the
+    # 2.0.2 commands.
+
+    def _kt_geometry(self, x, y, yaw):
+        """Decision geometry at the current projection: ``(e, y', s_rem, b, bend, path_yaw)``; ``e`` is
+        chassis - path (``-_heading_error``, api-review condition 1)."""
+        bs, be, _ = self.blocks[self.block_i]
+        ci = self.current_idx
+        if ci < be:
+            py = self.yaws[ci]
+            e = -self._heading_error(yaw)
+            p1 = self.path[ci + 1]
+            s_rem = math.hypot(p1[0] - self.projection_xy[0], p1[1] - self.projection_xy[1])
+            for k in range(ci + 1, be):
+                s_rem += math.hypot(self.path[k + 1][0] - self.path[k][0],
+                                    self.path[k + 1][1] - self.path[k][1])
+            b = 0.0
+            if ci == bs:
+                p0 = self.path[bs]
+                b = max(0.0, -((x - p0[0]) * math.cos(py) + (y - p0[1]) * math.sin(py)))
+            bend = remaining_bend(self.yaws[ci:be])
+        else:
+            py = (self.yaws[ci] if self.block_i == len(self.blocks) - 1
+                  else self._block_end_yaw[self.block_i])
+            e = wrap(yaw - py)
+            s_rem = b = bend = 0.0
+        px, pyy = self.projection_xy
+        ylat = -(x - px) * math.sin(py) + (y - pyy) * math.cos(py)
+        return e, ylat, s_rem, b, bend, py
+
+    def _kt_decide(self) -> bool:
+        """At the block's first R-ALIGN entry: evaluate the trigger once and start an episode if it
+        fires. Records the decision in ``_kt_block`` (and ``_kt_last_decision``)."""
+        self._kt_block = self.block_i
+        x, y, yaw, v = self._kt_call
+        e, ylat, s_rem, b, bend, py = self._kt_geometry(x, y, yaw)
+        last = self.block_i == len(self.blocks) - 1
+        goal_r = self.arrival_goal if last else self.cusp_goal
+        lat = self._kturn.lateral_limit
+        fire, margin, dom = trigger(e, ylat, s_rem, b, goal_r, bend, v, self._r_min, lat)
+        self._kt_last_decision = dict(block=self.block_i, e=e, ylat=ylat, s_rem=s_rem, b=b, bend=bend,
+                                      v=v, goal_r=goal_r, margin=margin, domain=dom, fire=fire)
+        if not fire:
+            return False
+        poly = self._kt_window(py, s_rem, lat) if lat is not None else None
+        planner = KTurnPlanner(s_rem, self._kt_r_plan, self._r_min, self._kt_max_rev,
+                               self._align_gate[1], self.lookahead, lateral_limit=lat, poly=poly)
+        self._kt = dict(phase="STOP", gear=self._desired_block_gear(), frame=(*self.projection_xy, py),
+                        planner=planner, legs=[], executed=0, rev_executed=0, slow=0, n_stop=0,
+                        search=None, leg=None, block=self.block_i)
+        self._kt_stats["episodes"] += 1
+        return True
+
+    def _kt_window(self, py, s_rem, lat):
+        """The window polyline of the lateral limit, in the episode's local frame: the path (all blocks)
+        between arc length ``-(4 r_plan + lat)`` and ``+s_rem`` from the projection point. Path parts
+        outside the window are ignored."""
+        pts = [(p[0], p[1]) for p in self.path]
+        cum = [0.0]
+        for k in range(1, len(pts)):
+            cum.append(cum[-1] + math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]))
+        ci = min(self.current_idx, len(pts) - 1)
+        s0 = cum[ci] + math.hypot(self.projection_xy[0] - pts[ci][0], self.projection_xy[1] - pts[ci][1])
+        lo, hi = s0 - (4.0 * self._kt_r_plan + lat), s0 + s_rem
+
+        def at(s, k):
+            l = cum[k + 1] - cum[k]
+            t = 0.0 if l < 1e-12 else (s - cum[k]) / l
+            return (pts[k][0] + t * (pts[k + 1][0] - pts[k][0]), pts[k][1] + t * (pts[k + 1][1] - pts[k][1]))
+        out = []
+        for k in range(len(pts) - 1):
+            a, bb = cum[k], cum[k + 1]
+            if bb < lo or a > hi:
+                continue
+            if not out:
+                out.append(at(max(a, lo), k))
+            out.append(at(min(bb, hi), k))
+        fx, fy = self.projection_xy
+        c, s = math.cos(py), math.sin(py)
+        return [((X - fx) * c + (Y - fy) * s, -(X - fx) * s + (Y - fy) * c) for X, Y in out]
+
+    def _desired_block_gear(self) -> int:
+        return 1 if self.blocks[self.block_i][2] >= 0 else -1
+
+    def _kt_local(self, x, y, yaw):
+        fx, fy, py = self._kt["frame"]
+        c, s = math.cos(py), math.sin(py)
+        return (x - fx) * c + (y - fy) * s, -(x - fx) * s + (y - fy) * c, wrap(yaw - py)
+
+    def _kt_cmd(self, mode, v_long, pitch_deg, roll_deg):
+        self.regime = "R-KTURN"
+        return FollowerPlan(mode=mode, command=(0.0, 0.0, 1.0), v_long=v_long,
+                            pitch_deg=pitch_deg, roll_deg=roll_deg, regime="R-KTURN")
+
+    def _kt_abort(self, reason, v_long, pitch_deg, roll_deg):
+        self._abort(reason)                      # clears the episode too
+        return self._abort_plan(v_long, pitch_deg, roll_deg)
+
+    def _kt_leg_start(self, legs, x, y, yaw):
+        kt = self._kt
+        kt["legs"] = list(legs)
+        g, d, phi = kt["legs"][0]
+        cap = 1.25 * self._kt_r_plan * phi + 0.5
+        if g < 0:
+            cap = min(cap, self._kt_max_rev)
+        kt["gear"] = g
+        kt["phase"] = "LEG"
+        kt["leg"] = dict(gdp=(g, d, phi), yaw0=float(yaw), px=float(x), py=float(y), dist=0.0, cap=cap,
+                         callcap=int(math.ceil(2.0 * cap / (KTURN_V * self.dt_ctrl))) + SHIFT_MAX_CALLS,
+                         calls=0, drive=0, anchor=None, settled=False, started=False)
+
+    def _kt_release(self, t_now, x, y) -> None:
+        """Last leg ended: back to the MPC (re-timed reference, watchdog anchor, gate re-armed). The
+        block stays decided."""
+        self._kt = None
+        self._clear_handover()
+        self._ho_block = self.block_i
+        self._reseed_block(t_now)
+        self._anchor = (t_now, x, y) if self._stall_timeout is not None else None
+        self._gp_hist = []
+
+    def _kt_cmd_call(self, x, y) -> bool:
+        """A SHIFT / GUARD call during an episode (plan-review D1): counted on the leg (or stop) counter.
+        True when that counter is past its limit (the caller aborts ``kturn_budget``)."""
+        kt = self._kt
+        leg = kt["leg"]
+        if kt["phase"] == "LEG":
+            leg["dist"] += math.hypot(x - leg["px"], y - leg["py"])
+            leg["px"], leg["py"] = x, y
+            leg["calls"] += 1
+            # (Amendment 2, A2-C1) throttle resumes only after a further call
+            # at |v_long| <= v_stop.
+            leg["settled"] = False
+            return leg["calls"] > leg["callcap"]
+        kt["n_stop"] += 1
+        return kt["n_stop"] > KTURN_STOP_MAX_CALLS
+
+    def _kturn_step(self, t_now, pos_xy, yaw, v_long, pitch_deg, roll_deg):
+        """One call of an active episode. Returns the plan, or ``None`` when the episode ended on this
+        call without a command (release, or no plan -> FALLBACK); the caller then continues with the gate
+        and the MPC."""
+        kt = self._kt
+        x, y = float(pos_xy[0]), float(pos_xy[1])
+        if kt["phase"] == "LEG":
+            leg = kt["leg"]
+            if not leg["settled"]:
+                # (Amendment 2, Fix 1) KT-SETTLE: a leg commands throttle only
+                # from the first call with |v_long| <= v_stop (the BRAKE_TRANS
+                # test); until then brake 1 in the leg's gear, charged to the
+                # hand-over's stop counter (not reset at leg start). The
+                # settling call itself drives.
+                if abs(float(v_long)) > self.v_stop:
+                    kt["n_stop"] += 1
+                    if kt["n_stop"] > KTURN_STOP_MAX_CALLS:
+                        return self._kt_abort("kturn_budget", v_long, pitch_deg, roll_deg)
+                    return self._kt_cmd("KTURN-SETTLE", v_long, pitch_deg, roll_deg)
+                leg["settled"] = True
+                if not leg["started"]:
+                    # A2-C3: the leg starts (rotation, distance, anchor) at its
+                    # first settling call; a re-settle after a SHIFT / GUARD
+                    # inside the leg keeps them (the leg caps stay bounded).
+                    leg["started"] = True
+                    leg["yaw0"] = float(yaw)
+                    leg["dist"] = 0.0
+                    leg["anchor"] = None
+                leg["px"], leg["py"] = x, y
+            leg["dist"] += math.hypot(x - leg["px"], y - leg["py"])
+            leg["px"], leg["py"] = x, y
+            leg["calls"] += 1
+            g, d, phi = leg["gdp"]
+            if d * wrap(yaw - leg["yaw0"]) >= phi - KTURN_LEG_TOL or leg["dist"] >= leg["cap"]:
+                kt["executed"] += 1
+                self._kt_stats["legs"] += 1
+                if g < 0:
+                    kt["rev_executed"] += 1
+                    self._kt_stats["reverse_m"] += leg["dist"]
+                kt["legs"] = kt["legs"][1:]
+                kt["leg"] = None
+                if not kt["legs"] or kt["executed"] >= self._kturn.max_legs:
+                    self._kt_release(t_now, x, y)
+                    return None
+                kt["phase"] = "STOP"
+                kt["n_stop"] = 0
+                kt["slow"] = 0
+            else:
+                if leg["calls"] > leg["callcap"]:
+                    return self._kt_abort("kturn_budget", v_long, pitch_deg, roll_deg)
+                leg["drive"] += 1
+                a = leg["anchor"]
+                if a is None or math.hypot(x - a[1], y - a[2]) >= STALL_ANCHOR_M:
+                    leg["anchor"] = (leg["drive"], x, y)
+                elif leg["drive"] - a[0] >= self._kt_noprog:
+                    return self._kt_abort("kturn_blocked", v_long, pitch_deg, roll_deg)
+                v_t = g * KTURN_V
+                self.regime = "R-KTURN"
+                return FollowerPlan(
+                    mode="KTURN-REV" if g < 0 else "KTURN-FWD",
+                    a_target=self.k_v * (v_t - v_long), omega_target=d * KTURN_V / self._kt_r_plan,
+                    v_long=v_long, v_target=v_t, pitch_deg=pitch_deg, roll_deg=roll_deg,
+                    regime="R-KTURN", steer_cmd=d * g * abs(self.steer_cap) * self._kt_sign)
+        if kt["phase"] == "STOP":
+            kt["n_stop"] += 1
+            if kt["n_stop"] > KTURN_STOP_MAX_CALLS:
+                return self._kt_abort("kturn_budget", v_long, pitch_deg, roll_deg)
+            kt["slow"] = kt["slow"] + 1 if self._slow(v_long) else 0
+            if kt["slow"] < 2:
+                return self._kt_cmd("KTURN-STOP", v_long, pitch_deg, roll_deg)
+            kt["phase"] = "PLAN"
+        # KT-PLAN
+        import time
+        pl = kt["planner"]
+        lx, ly, lp = self._kt_local(x, y, yaw)
+        self._kt_stats["plan_calls"] += 1
+        t0 = time.perf_counter()
+        if kt["search"] is None:
+            if kt["legs"] and pl.remaining_ok(lx, ly, lp, kt["legs"]):          # (i) keep
+                self._kt_stats["plan_ms"] += 1e3 * (time.perf_counter() - t0)
+                self._kt_leg_start(kt["legs"], x, y, yaw)
+                return self._kt_cmd("KTURN-PLAN", v_long, pitch_deg, roll_deg)
+            mx = self._kturn.max_legs
+            kt["search"] = pl.start(lx, ly, lp, legs_left=mx - kt["executed"],
+                                    rev_left=mx // 2 - kt["rev_executed"])
+        n0 = pl.nodes
+        done = kt["search"].advance()
+        self._kt_stats["plan_ms"] += 1e3 * (time.perf_counter() - t0)
+        self._kt_stats["plan_nodes"] += pl.nodes - n0
+        if not done:
+            return self._kt_cmd("KTURN-PLAN", v_long, pitch_deg, roll_deg)
+        res = kt["search"].result
+        kt["search"] = None
+        if res is None:
+            if kt["legs"]:                                                       # (iii) continue
+                if pl.lateral_violated(lx, ly, lp, kt["legs"]):                  # N6
+                    return self._kt_abort("kturn_infeasible", v_long, pitch_deg, roll_deg)
+                res = kt["legs"]
+            elif self._kturn.lateral_limit is not None:
+                return self._kt_abort("kturn_infeasible", v_long, pitch_deg, roll_deg)
+            else:                                                                # FALLBACK
+                self._kt = None
+                self._gp_hist = []
+                return None
+        self._kt_leg_start(res, x, y, yaw)                                       # (ii) new plan
+        return self._kt_cmd("KTURN-PLAN", v_long, pitch_deg, roll_deg)
+
     # -- MPC layer: reporting -----------------------------------------------------
 
     @property
     def mpc_stats(self):
         """``{n_solve, status: {converged, capped, capped_infeasible,
         "failed:<status>", exception, nan}, last_status, last_solve_ms,
-        plan_age_s, handover: {align, stall}}`` — ``None`` with
-        ``mpc_model="off"``. ``handover`` (v2.0.1) counts entries into
+        plan_age_s, handover: {align, stall}, kturn: {episodes, legs,
+        reverse_m, plan_nodes, plan_calls, plan_ms}}`` — ``None`` with
+        ``mpc_model="off"``. ``kturn`` (v2.0.3) is present for every MPC
+        follower (zeros without ``mpc_kturn``), cumulative since construction
+        (``set_path`` keeps it); ``plan_ms`` is wall-clock (perf_counter). ``handover`` (v2.0.1) counts entries into
         R-ALIGN / R-STALL since construction (``set_path`` keeps it):
         cumulative, not a per-block count, and ``handover["stall"]`` is not
         bounded by 3 per block (the R-STALL limit is per run of entries)."""
@@ -1981,6 +2427,7 @@ class PathFollower:
             return None
         stats = self._law.mpc_stats(self._t_now)
         stats["handover"] = dict(self._handover)
+        stats["kturn"] = dict(self._kt_stats)
         return stats
 
     @property
@@ -2065,6 +2512,8 @@ class PathFollower:
         self._t_next = t_now
         self._mpc_block = None
         self._clear_handover()
+        if self._kturn is not None:
+            self._kt = None             # (v2.0.3) an episode in progress is cancelled
         self._reset_budgets()
         if sgn > 0:
             # block 0; without pos_xy the projection is the block start, so
@@ -2094,7 +2543,8 @@ class PathFollower:
     def _plan_pd(self, pos_xy, yaw, v_long, pitch_deg, roll_deg):
         """The 1.x stage 1 (PD law + path state machine), plus two v2.0.1
         changes that apply in every mode, ``"off"`` included, and cannot be
-        switched off: the goal-passed stop GP-AWAY2 (``GOAL-MISSED``, see
+        switched off (v2.0.3: GP-AWAY2 is skipped on an R-KTURN call, only with
+        ``mpc_kturn`` given): the goal-passed stop GP-AWAY2 (``GOAL-MISSED``, see
         :meth:`_goal_passed`) and W2 (at a block end the target speed keeps
         the CURRENT block's direction sign; 1.x read the next block's sign
         there when the lookahead sat exactly on the block-end waypoint
@@ -2124,6 +2574,8 @@ class PathFollower:
                                 roll_deg=roll_deg)
         gp_saved = list(self._gp_hist) if self._gear_mode else None
         self._gp_hist = (self._gp_hist + [d_goal])[-3:]
+        if self._kturn is not None:
+            self._kt_gp_saved = gp_saved
 
         # Cusp state machine: brake to a stop at the block boundary, then
         # switch to the next block (flipped direction).
@@ -2164,7 +2616,11 @@ class PathFollower:
         self._advance(pos_xy)
 
         # (v2.0.1) GP-AWAY2: past the goal on the final segment, moving away.
-        if self._goal_passed(pos_xy, d_goal):
+        # (v2.0.3) Not evaluated on an R-KTURN call (an active episode), whose
+        # goal distance is taken back out of the history.
+        if self._kturn is not None and self._kt is not None:
+            self._gp_hist = gp_saved
+        elif self._goal_passed(pos_xy, d_goal):
             self._terminal = ("GOAL-MISSED", "goal_passed")
             return FollowerPlan(mode="GOAL-MISSED", command=(0.0, 0.0, 1.0),
                                 v_long=v_long, pitch_deg=pitch_deg,

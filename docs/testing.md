@@ -28,6 +28,8 @@
 | SHA-256 | the hash the legacy bit-identity fixture stores per vehicle over 300 steps |
 | k_b | v2.0.2 brake gain: modelled deceleration per unit brake (m/s² per unit brake) |
 | v_h | a sweep table's grid speed nearest 0, excluding 0 (the gear-mode coast model's hold speed) |
+| K-turn / R-KTURN | v2.0.3 opt-in multi-point turn of the gear-mode MPC follower / its `regime` value |
+| v_stop | the follower's standstill speed (default 0.05 m/s) |
 
 ## Running the tests
 
@@ -37,13 +39,18 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-1225 tests, mostly pure-Python, plus three env-gated live tests that skip by
-default. Measured on the v2.0.2 tree with the optional MPC packages installed:
-`1225 passed, 3 skipped`, run as three foreground groups of files (562 passed
-in 293.82 s + 386 passed in 121.05 s + 277 passed, 3 skipped in 18.66 s =
-433.53 s summed; implementation, final tree; impl-review the same counts in 291.6 +
-119.8 + 18.4 s), CPU/WSL2, genesis-world 1.4.5, `test_fusion_probe.py`
-excluded. One run of the whole directory was not timed for v2.0.2. v2.0.2
+1285 tests, mostly pure-Python, plus three env-gated live tests that skip by
+default. Measured on the v2.0.3 tree with the optional MPC packages installed:
+`1285 passed, 3 skipped`, run in five foreground parts of files (384 + 50 + 46 +
+352 + 453 passed, 527.3 s summed; implementation, final tree; impl-review the
+same total in six foreground groups, 325 + 179 + 54 + 252 + 232 + 243, timing
+not reported), CPU/WSL2, genesis-world 1.4.5, `test_fusion_probe.py` excluded.
+One run of the whole directory was not timed for v2.0.3. v2.0.3 added 60 tests
+(1225 → 1285) in two new files — `test_kturn_geometry.py` (19, Genesis-free)
+and `test_path_follower_kturn.py` (41, needs casadi + do_mpc) — and edited two
+existing test files (one field list, one docstring). Previous
+figure, v2.0.2: `1225 passed, 3 skipped` in three foreground groups (562 + 386 +
+277, 433.53 s summed; impl-review 429.8 s). v2.0.2
 added 98 tests (1127 → 1225) in four new files — `test_gear_mode.py` (25),
 `test_legacy_inputs_bit_identity.py` (17, platform-gated),
 `test_brake_model.py` (18), `test_path_follower_gear.py` (38). Previous figure,
@@ -177,6 +184,8 @@ CI without GPU.
 | Signed inputs are bit-identical to 2.0.1 | `test_legacy_inputs_bit_identity.py` | v2.0.2, 17 tests. SHA-256 over 300 steps of pose / quat / vel / ang / ω / `last_T_drive` / `last_T_brake` per vehicle against `tests/data/legacy_inputs_2_0_1.json` (captured on `47be3e9`, genesis-world 1.4.5, linux-x86_64; SKIPS on any other pair): 9 scenes (2 solvers × 2 raycast modes × `n_envs` 1 / 3, car ×2 + tank, plus a direct `VehiclePhysics.step(distances=)`), and 8 with one car in gear mode while the others stay byte-identical. Proves nothing on another platform and nothing about gear mode itself |
 | Brake → deceleration model (stage 2) | `test_brake_model.py` | v2.0.2, 18 tests. `brake_for`; the closed-form k_b on a fake wheel meta and on the reference car; the params key and its derivation (`null` = absent); `SweepTable.accel_at` = its forward map, exactly, also below `v_h` (kills a correction moved into `accel_at`); `coast_for_brake` against an independent expression — flat fade, pitched slope term never faded, mirror on a one-sided table keeping the slope sign, gear choosing the side at rest, passthrough for a plant without `coast_hold_speeds`, `COAST_FADE_SPEED` equals `RollingResistance`'s default; an `identify` run recording `brake_gain` 5.0152 (about 15-18 s); the round-1 failing AC-5a point (2 m/s, brake 0.1) within 5 % in Genesis, and the AC-5a acceleration criterion at 6 m/s, brake 0.5 |
 | Gear-mode `PathFollower` | `test_path_follower_gear.py` | v2.0.2, 38 tests, Genesis-free. The golden states replayed through a gear follower against an oracle written independently of `brake_for` / `coast_for_brake`; braking in both gears; `SHIFT` with feedback repeating to `GEAR-ABORT` (terminal keeps the assumed gear); two slow calls without feedback (a fast call restarts the count); `GUARD` latch / release and its `GOAL-MISSED` history; the KICK guard at `u_g` < 1; `set_path` at speed keeps the gear, `resync_gear` always shifts without feedback and clears the latch; the construction motion rule; `GearCommand` shape (four-value unpack, no indexing); defaults; `FleetFollower` one mode and one batched coast prediction; construction errors; the MPC gear finish (brake instead of a negative throttle, brake at rest kept); braking below `v_h` uses the faded coast |
+| K-turn geometry, trigger and planner | `test_kturn_geometry.py` | v2.0.3, 19 tests, Genesis-free. The forward-swing lower bound and its `\|y'\|` sign independence; trigger boundaries (`>` not `>=`, the 1.5 m margin, `G` choice, `b`), the domain (4.5 m/s, 45°), the remaining bend on the stall course 43.6° ± 0.1; planner properties over random poses (last leg forward, end within π/4 and 1.0 m, leg and reverse budgets, reverse distance ≤ `max_reverse`, every sample in the region); the leg budgets carried across re-plans (R R R F refused); mirror symmetry over 200 poses and 40 with a lateral limit; a node-capped level discarded whole; ≤ 1000 nodes per call; `KTurnParams` validation |
+| K-turn in the follower | `test_path_follower_kturn.py` | v2.0.3, 41 tests, needs casadi + do_mpc; fake solver, synthetic table, and a kinematic bicycle with the vehicle's shift rule. Construction (default off with zero stats, `KTurnParams` with signed / gate `None` → `ValueError`, any `mpc_kturn` with `"off"` → `ValueError`); the default follower never enters R-KTURN on the straight-6 trigger state and equals an explicit `mpc_kturn=None` follower; **the 2.0.2 fixture `tests/data/kturn_off_2_0_2.json` (captured on `76a6b24`, fake solver; gear and signed commands on three state sequences) replayed `==` by a default and an explicit-`None` follower**; the decision's heading-error sign; a full straight-6 episode (stop, multi-call plan, legs with the leg gear, full-lock steer and yaw-rate sign, signed leg end, release with re-seed); `SHIFT` / `GUARD` inside an episode; cancellation by `BRAKE_TRANS` / `DONE` / terminal; no second decision in a block or after FALLBACK; `GOAL-MISSED` suppressed on R-KTURN calls and three calls needed after release; every cap at exactly the next call (121st stop call, leg call cap, 81st no-progress call, leg distance cap); `kturn_infeasible` with a small limit; re-plan keep / new / continue within the leg budgets (and the N6 abort); `set_path`; no feedback; `KTURN-SETTLE` before throttle in every hand-over, on the stop counter, re-required after `SHIFT` / `GUARD`, keeping the leg's start heading and distance; `resync_gear()` during a leg (bounded by `GEAR-ABORT`). Mutants: 36 + the leg-distance-cap mutant, all killed |
 | Heading gate, watchdog, budgets, stickiness | `test_mpc_handover.py` | v2.0.1, 81 tests, needs casadi + do_mpc; fake solver, states fed directly. Gate entry / release and re-seed (no `_t_next` change), watchdog anchor and 1.0 m exit, the `t`-jump rule, `set_path` effects (every budget, terminal state, goal-passed history cleared; `handover` kept), the R-ALIGN and R-FAIL budgets cumulative per block (also with both kwargs `None` for R-FAIL), the R-STALL run-of-entries rule (3.0 m of new path progress on the high-water mark, not ground distance, not the previous entry; reset by block change and `set_path`; NOT by a `DONE` step), a short final block handed over (not refused), the hairpin case where projection progress starts a run every entry, a jittering blocked car filling the R-ALIGN budget, `DONE` precedence and the terminal command. Every listed mutant has a measured kill |
 | Gate vs the 2.0.0 path | `test_mpc_gate_parity.py` | v2.0.1, real NMPC on a KINEMATIC bicycle plant (not ray-wheel), synthetic params. 90° vertex and a gentle arc: default and both kwargs `None` `==` with no hand-over; 150° vertex: the default hands over and reaches `DONE`, both `None` stands in `MPC-HOLD` ≥ 400 steps (1024 measured on linux-x86_64; an IPOPT path may differ elsewhere); C-v150 L5 ends `MPC-ABORT` / `align_budget` |
 | The 2.0.0 stall, controller side | `test_mpc_stall_repro.py` | v2.0.1, real NMPC, the stall course's constant state, synthetic params: both kwargs `None` → every solve converges to standstill and every step brakes; the default → the first step is `PD-ALIGN` with no solve and no MPC reference during that R-ALIGN |
@@ -253,7 +262,8 @@ and that the lazy names (`VehiclePhysics`, `WheelRayPattern`,
 | `_hotset.py` | the HOT set and its build-time derivations: `derived()` (dependent cache, off-instance), `prime_derived()`, `HOT_DEPENDENTS`, `square_f64`, `row_tensor` (v1.6.4; contract in `docs/physics-contracts.md` §7.13) |
 | `_version.py` | `__version__`, `VERSION_INFO` (single source of truth) |
 | `control/plant.py` | `DifferentiablePlant` — autodiff inverse plant (the no-measurement option; this row said "the default for `PathFollower`", stale since 2.0.0), batched over (vehicle, env) members |
-| `control/path_follower.py` | `PathFollower` (stage 1: MPC layer or the 1.x PD law; regimes; `set_path`), `FleetFollower`, `FollowerPlan`, `extract_state*` |
+| `control/path_follower.py` | `PathFollower` (stage 1: MPC layer or the 1.x PD law; regimes; `set_path`; v2.0.3 the opt-in K-turn state machine), `FleetFollower`, `FollowerPlan`, `extract_state*` |
+| `control/kturn.py` | v2.0.3 `KTurnParams`, the K-turn trigger (`trigger`, `forward_swing_lower`, `remaining_bend`), `KTurnPlanner` and the chosen constants; numpy / math only, Genesis-free |
 | `control/mpc/` | v2.0.0 MPC layer: `params.py` (params record, gains; numpy only), `law.py` (control law, solve classification), `alpasim_nonlinear.py` / `alpasim_linear.py` (do_mpc / OSQP solvers), `models.py` (bicycle model), `_deps.py` (optional-package gate) |
 | `control/brake.py` | v2.0.2 the gear-mode follower's stage-2 brake model: `brake_for`, `coast_for_brake`, `brake_gain_closed_form`, `brake_gain_from_params`, `COAST_FADE_SPEED` |
 | `control/identify.py` | v2.0.0 `identify_mpc_params` + the `python -m genesis_vehicle.control.identify` CLI |

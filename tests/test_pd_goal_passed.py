@@ -1,4 +1,6 @@
-"""GP-AWAY2, the goal-passed stop (v2.0.1, every mode, cannot be switched off).
+"""GP-AWAY2, the goal-passed stop (v2.0.1, every mode, cannot be switched off;
+since v2.0.3 not evaluated on R-KTURN calls, which exist only with ``mpc_kturn``
+given — covered in ``test_path_follower_kturn.py``).
 
 Predicate (``PathFollower._goal_passed``): final block, projection on its last
 segment, beyond the goal's segment-normal plane, distance to the goal at least
