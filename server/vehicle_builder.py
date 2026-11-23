@@ -22,9 +22,9 @@ import torch
 from genesis_vehicle import (
     VehicleConfig, parse_urdf,
     AWD, PartialAckermann, Independent, PacejkaAnisotropic,
-    RollingResistance, LowSpeedRegularizer
 )
 from genesis_vehicle._gs_compat import COARSE_SDF_MATERIAL_KW
+from genesis_vehicle.presets import stability_hooks_for_profile
 from genesis_vehicle.config import WheelConfig
 from dataclasses import fields as _dataclass_fields
 
@@ -431,7 +431,12 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
             drivetrain=drivetrain,
             coupling=coupling,
             tire=PacejkaAnisotropic(),
-            stability_hooks=[RollingResistance(), LowSpeedRegularizer()],
+            # (v2.0.4) The "control" hook set, StaticFrictionLock included
+            # (through 2.0.3: RollingResistance + LowSpeedRegularizer only, so a
+            # generic vehicle crept down any slope at every brake). RR and LSR
+            # here equal the profile's; the lock's spring is capped per wheel by
+            # the SDK from the vehicle's static load and the scene dt.
+            stability_hooks=stability_hooks_for_profile("control", "car"),
             visual_susp_mode="kinematic"
         )
 

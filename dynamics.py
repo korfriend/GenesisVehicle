@@ -11,6 +11,10 @@ The functions encode the physical contracts the SDK promises:
   - `deadbeat_scale` / `YawInertia` / `DEADBEAT_G` (v1.8.0): the rigid-body
     scale ``s`` of the low-speed deadbeat bounds (held wheel, lateral,
     ``StaticFrictionLock`` damper) and its inputs.
+  - `static_mass_shares` (v2.0.4): per-wheel static mass share from
+    elastic-support statics, the input of ``StaticFrictionLock``'s spring cap.
+  - `rigid_share_factor` / `RigidShareFactor` (v2.0.4): the planar
+    rigid-body factor ``beta`` of that cap's rigid-body term.
   - (`brake_torque_signed`, deprecated in 1.8.0, was removed in 2.0.0; the
     brake is `brake_projection`.)
   - `suspension_normal_force`: per-wheel asymmetric damper + non-negative
@@ -107,6 +111,202 @@ def yaw_inertia_from_mass_props(mass: float, com: Any, izz: float,
     rho_sq = ((positions[..., 0] - cx) ** 2
               + (positions[..., 1] - cy) ** 2).detach().clone()
     return YawInertia(i_cg, rho_sq)
+
+
+#: Equal-share fallback threshold of :func:`static_mass_shares` (v2.0.4): a
+#: solved share at or below this fraction of the equal share ``M / n`` (or a
+#: non-finite one) makes the whole solve fall back to equal shares.
+STATIC_SHARE_MIN_FRACTION = 0.05
+
+
+class StaticMassShares(NamedTuple):
+    """Result of :func:`static_mass_shares` (v2.0.4).
+
+    ``shares``: ``(n_wheels,)`` float64 numpy array, kg, summing to the mass.
+    ``fallback``: ``None`` when ``shares`` are the elastic-statics solution;
+    otherwise a short reason string, and ``shares`` are the equal shares
+    ``M / n`` (the caller logs it)."""
+    shares: Any
+    fallback: Optional[str]
+
+
+def static_mass_shares(mass: float, com: Any, positions: Any,
+                       k_susp: Any) -> StaticMassShares:
+    """Per-wheel STATIC mass share from elastic-support statics (v2.0.4).
+
+    A rigid chassis on linear springs at rest on level ground: each wheel's
+    load is ``N_i = k_i * (a + b*x_i + c*y_i)`` (the chassis plane's
+    deflection at the wheel times its spring rate), with ``a, b, c`` fixed by
+    force and moment balance, ``sum N_i = M g``, ``sum N_i x_i = M g c_x``,
+    ``sum N_i y_i = M g c_y``. Solved by least squares (determinate for any
+    wheel count; a rank-deficient layout gets the minimum-norm solution), and
+    returned as ``m_i = N_i / g`` — ``g`` cancels, so no gravity enters.
+
+    ``mass`` (kg) and ``com`` (body frame, m; x and y used) are the
+    ``control.plant.PlantMassProperties`` convention; ``positions`` are the
+    wheels' ray origins ``(n_wheels, 3)`` in the same frame, ``k_susp`` the
+    spring rates ``(n_wheels,)`` (tensors or arrays).
+
+    Guard (plan r204 condition C1): when ANY solved share is non-finite or
+    ``<= STATIC_SHARE_MIN_FRACTION * M / n`` — a centre of mass outside the
+    spring-weighted support polygon gives NEGATIVE shares, a zero-rate wheel a
+    zero share — the result is the equal shares ``M / n`` with ``fallback`` set
+    to the reason. Raises ``ValueError`` when ``mass`` is not a positive
+    finite number or there are no wheels: there is then no share at all."""
+    import numpy as np
+
+    def _np(x):
+        if torch.is_tensor(x):
+            x = x.detach().cpu().double().numpy()
+        return np.asarray(x, dtype=np.float64)
+
+    m = float(mass)
+    if not (math.isfinite(m) and m > 0.0):
+        raise ValueError(f"static_mass_shares: mass {mass!r} is not a positive "
+                         f"finite number")
+    pos = _np(positions).reshape(-1, 3)
+    k = _np(k_susp).reshape(-1)
+    n = int(k.shape[0])
+    if n == 0 or pos.shape[0] != n:
+        raise ValueError(f"static_mass_shares: {pos.shape[0]} positions vs "
+                         f"{n} spring rates")
+    cx, cy = float(com[0]), float(com[1])
+    equal = np.full(n, m / n)
+    if not (math.isfinite(cx) and math.isfinite(cy)) or not np.isfinite(k).all() \
+            or not np.isfinite(pos[:, :2]).all():
+        return StaticMassShares(equal, "non-finite centre of mass, position "
+                                       "or spring rate")
+    x, y = pos[:, 0], pos[:, 1]
+    A = np.array([[k.sum(), (k * x).sum(), (k * y).sum()],
+                  [(k * x).sum(), (k * x * x).sum(), (k * x * y).sum()],
+                  [(k * y).sum(), (k * x * y).sum(), (k * y * y).sum()]])
+    rhs = m * np.array([1.0, cx, cy])
+    try:
+        sol = np.linalg.lstsq(A, rhs, rcond=None)[0]
+    except np.linalg.LinAlgError as exc:
+        return StaticMassShares(equal, f"least-squares solve failed ({exc})")
+    shares = k * (sol[0] + sol[1] * x + sol[2] * y)
+    if not np.isfinite(shares).all():
+        return StaticMassShares(equal, "non-finite solved share")
+    floor = STATIC_SHARE_MIN_FRACTION * m / n
+    if (shares <= floor).any():
+        i = int(np.argmin(shares))
+        return StaticMassShares(
+            equal, f"solved share {shares[i]:.3g} kg on wheel {i} is at or "
+                   f"below {STATIC_SHARE_MIN_FRACTION} x M/n = {floor:.3g} kg "
+                   f"(centre of mass outside the spring-weighted support, or a "
+                   f"zero-rate wheel)")
+    return StaticMassShares(shares, None)
+
+
+class RigidShareFactor(NamedTuple):
+    """Result of :func:`rigid_share_factor` (v2.0.4), two python floats.
+
+    ``beta``: the largest generalised eigenvalue of ``S v = beta P v`` (see
+    :func:`rigid_share_factor`); ``>= 1`` up to rounding. ``yaw_fraction``:
+    the yaw coordinate's ``P``-weighted energy share of the leading
+    eigenvector, in ``[0, 1]`` — used only to label the
+    ``[genesis_vehicle:sfl-cap]`` log line ("yaw mode" when ``> 0.5``)."""
+    beta: float
+    yaw_fraction: float
+
+
+def rigid_share_factor(mass: float, com: Any, izz: float, positions: Any,
+                       shares: Any) -> RigidShareFactor:
+    """The planar rigid-body factor ``beta`` of ``StaticFrictionLock``'s
+    spring cap (v2.0.4).
+
+    Planar rigid body (surge x, sway y, yaw psi about the centre of mass);
+    wheel ``i`` at ``(a_i, b_i)`` = ray-origin x / y minus the centre of mass,
+    contact-point Jacobian ``J_i = [[1, 0, -b_i], [0, 1, a_i]]``,
+    ``G_i = J_i^T J_i``. With ``S = sum_i m_i G_i`` (``m_i`` = ``shares``) and
+    ``P = diag(M, M, I_cg)``, ``beta = lambda_max(S, P)`` — solved exactly as
+    a 3x3 symmetric eigenproblem in float64, NOT the closed form
+    ``max(1, sum m_i rho_i^2 / I_cg)`` (which drops the off-diagonal terms of
+    ``S`` when the centre of mass is not at the share-weighted wheel
+    centroid, e.g. under the equal-share fallback of
+    :func:`static_mass_shares`). ``beta >= sum m_i / M`` (= 1 when the
+    shares sum to the mass).
+
+    Why: for per-wheel isotropic in-plane springs ``k_i <= C * m_i /
+    (beta * dt^2)``, ``K = sum_i k_i G_i <= (C / (beta dt^2)) S <= (C / dt^2)
+    P`` (positive semi-definite order), so ``lambda(K, P) * dt^2 <= C`` for
+    ANY subset of grounded wheels (dropping a wheel removes a PSD term) and
+    any steer angle (the spring is isotropic in the ground plane). That is a
+    bound on ``lambda(K)`` of the planar model ONLY. It is not a stability
+    statement: the explicit spring-damper map of one mode is stable iff
+    ``c + 2b < 4`` and ``0 < b < 2`` (``c`` the mode's spring number, ``b``
+    its damper number), so ``c <= C`` gives stability only together with a
+    bound on ``b``. Not covered by this bound: pitch / roll coupling through
+    the contact height, loads not in moment balance (for ``b``), and anything
+    the planar model omits.
+
+    Inputs follow ``control.plant.PlantMassProperties``: ``mass`` (kg),
+    ``com`` body-frame centre of mass (x, y used), ``izz`` the yaw inertia
+    about the base-link ORIGIN (``I_cg = izz - M (cx^2 + cy^2)``, parallel
+    axis); ``positions`` ``(n_wheels, 3)`` ray origins in the same frame;
+    ``shares`` ``(n_wheels,)`` static mass shares (kg). Tensors or arrays.
+
+    Raises ``ValueError`` when any input is non-finite, the mass or a share is
+    not positive, the shapes disagree, ``I_cg`` is not positive, or ``beta <
+    1 - 1e-6`` — which catches SOME share sets summing to less than the mass,
+    not all (``beta >= sum m_i / M`` bounds it from below only: the low-yaw
+    car's shares x 0.5 give beta 1.734 and pass; no SDK path produces such
+    shares). On a raise the driver logs and applies the per-wheel cap only —
+    ``StaticFrictionLock`` keeps its own assert on ``beta`` as a second line
+    of defence."""
+    import numpy as np
+
+    def _np(x):
+        if torch.is_tensor(x):
+            x = x.detach().cpu().double().numpy()
+        return np.asarray(x, dtype=np.float64)
+
+    m_tot = float(mass)
+    cx, cy = float(com[0]), float(com[1])
+    izz_f = float(izz)
+    pos = _np(positions).reshape(-1, 3)
+    m = _np(shares).reshape(-1)
+    if not all(math.isfinite(v) for v in (m_tot, cx, cy, izz_f)):
+        raise ValueError(
+            f"rigid_share_factor: non-finite mass properties (mass={mass!r}, "
+            f"com=({cx!r}, {cy!r}), izz={izz!r})")
+    if not m_tot > 0.0:
+        raise ValueError(f"rigid_share_factor: mass {mass!r} is not positive")
+    if m.shape[0] == 0 or pos.shape[0] != m.shape[0]:
+        raise ValueError(f"rigid_share_factor: {pos.shape[0]} positions vs "
+                         f"{m.shape[0]} shares")
+    if not np.isfinite(pos[:, :2]).all() or not np.isfinite(m).all():
+        raise ValueError("rigid_share_factor: non-finite position or share")
+    if not (m > 0.0).all():
+        raise ValueError(f"rigid_share_factor: shares {m.tolist()} are not all "
+                         f"positive")
+    i_cg = izz_f - m_tot * (cx * cx + cy * cy)
+    if not i_cg > 0.0:
+        raise ValueError(
+            f"rigid_share_factor: yaw inertia about the centre of mass is "
+            f"{i_cg!r} (izz={izz!r} about the base-link origin, mass={mass!r}, "
+            f"com=({cx!r}, {cy!r})): not a physical rigid body")
+    a = pos[:, 0] - cx
+    b = pos[:, 1] - cy
+    S = np.array([[m.sum(), 0.0, -(m * b).sum()],
+                  [0.0, m.sum(), (m * a).sum()],
+                  [-(m * b).sum(), (m * a).sum(), (m * (a * a + b * b)).sum()]])
+    ph = np.array([m_tot ** -0.5, m_tot ** -0.5, i_cg ** -0.5])
+    A = ph[:, None] * S * ph[None, :]
+    w, u = np.linalg.eigh(A)
+    beta = float(w[-1])
+    lead = u[:, -1]
+    yaw_fraction = float(lead[2] * lead[2] / float(lead @ lead))
+    if not math.isfinite(beta):
+        raise ValueError(f"rigid_share_factor: eigenvalue {beta!r} not finite")
+    if beta < 1.0 - 1e-6:
+        # beta >= sum m_i / M; below 1 the shares do not sum to the mass, and
+        # the bound argument (S <= beta P) would not cover the translation.
+        raise ValueError(
+            f"rigid_share_factor: beta {beta!r} < 1 (shares sum to "
+            f"{float(m.sum())!r} kg, mass {m_tot!r} kg)")
+    return RigidShareFactor(beta, yaw_fraction)
 
 
 def deadbeat_scale(N: torch.Tensor, yaw_inertia: YawInertia) -> torch.Tensor:

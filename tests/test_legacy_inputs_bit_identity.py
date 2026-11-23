@@ -1,9 +1,10 @@
-"""AC-1b / AC-1c (v2.0.2): signed (``gear=None``) inputs are bit-identical to 2.0.1.
+"""AC-1b / AC-1c (v2.0.2): signed (``gear=None``) inputs are bit-identical to the
+capture — the 2.0.4 capture since v2.0.4 (the 2.0.1 one through 2.0.3).
 
 What it proves: on the platform and genesis-world version the fixture was
 captured on, 300 scripted steps of LEGACY inputs (negative throttle, brake,
 steer; Python scalars at n_envs 1, per-env throttle tensors at n_envs 3) give,
-byte for byte, the 2.0.1 pose / quat / velocity / angular velocity / wheel
+byte for byte, the captured pose / quat / velocity / angular velocity / wheel
 omega / ``last_T_drive`` / ``last_T_brake`` of every vehicle after every step —
 through ``VehicleScene.step`` on both solvers x both raycast modes x n_envs
 1 and 3 (the batched scene holds two car kinds' worth: the reference car twice
@@ -18,11 +19,29 @@ What it does NOT prove: anything on another platform / genesis version (the
 fixture is a float32 bit pattern; an uncaptured pair SKIPS, like
 ``test_fan_default_identity.py``), or anything about gear mode itself.
 
-Fixture: ``tests/data/legacy_inputs_2_0_1.json``, captured 2026-11-22 from a
-``git archive`` of 47be3e9 (SDK 2.0.1) with this file's scenario code
-(``run_scene``), genesis-world 1.4.5, CPU, linux-x86_64 (WSL2). Each vehicle
+Fixture: ``tests/data/legacy_inputs_2_0_4.json``, captured 2026-11-23 from the
+2.0.4 working tree (pedal-free ``StaticFrictionLock``) with this file's scenario
+code (``run_scene``), genesis-world 1.4.5, CPU, linux-x86_64 (WSL2). Each vehicle
 entry holds a SHA-256 over all 300 steps and the raw values at
 ``CHECKPOINTS`` (the values only make a failure readable).
+
+Why it was re-captured (2.0.4): the lock change moves all three vehicles
+(first at checkpoint 179 for both cars, 239 / 299 for the tank). It was written
+only after a PHYSICAL acceptance proof on all 9 scenes and all three vehicles
+(plan r204 §6.1, harness ``.pm_r2/r204/fixture_proof204.py`` outside the repo):
+per vehicle, env and braked segment the per-wheel torque balance
+(H = sum max(T_b - |T_d|, 0), U = sum max(|T_d| - T_b, 0)) predicts REST or
+MOVE; no lock hold may be applied on a wheel the drive overpowers; no wheel
+may turn against its contact while its brake dominates; post-stop back-travel
+<= 2 mm; and on a run with every braked segment stretched by 160 steps the
+REST-predicted segments must be at rest (<= 1e-4 m/s over 80 steps) and the
+MOVE-predicted ones must not. ``direct_single_3`` injects a 1 cm, 0.45 Hz
+ray-distance forcing, so its base link cannot be at rest on any tree; for that
+scene (amended rule) the full proof ran with the forcing off, the hold / turning
+checks with it on, and the net base-link movement over 4 whole forcing periods
+was bounded (<= 1 mm, and <= the 2.0.3 value + 0.1 mm where 2.0.3 had its lock
+engaged). This scene is not a rest measurement. ``legacy_inputs_2_0_1.json``
+stays in the repository and is no longer asserted.
 """
 import hashlib
 import os
@@ -148,7 +167,7 @@ def run_scene(name, solver, raycast_mode, n_envs, direct, *, gear_b=False):
     return {w: {"sha": hs[w].hexdigest(), "cp": cps[w]} for w in vehs}
 
 
-FIXTURE = os.path.join(HERE, "data", "legacy_inputs_2_0_1.json")
+FIXTURE = os.path.join(HERE, "data", "legacy_inputs_2_0_4.json")
 
 
 def _platform_key():
@@ -176,13 +195,13 @@ def _compare(name, who, got, want):
         for field_name, vals in fields.items():
             g = got["cp"][step][field_name]
             assert g == vals, (f"{name}/{who}: {field_name} at step {step} differs from "
-                               f"2.0.1:\n  2.0.1 {vals}\n  now   {g}")
-    raise AssertionError(f"{name}/{who}: per-step digest differs from 2.0.1 (the "
+                               f"the capture:\n  captured {vals}\n  now      {g}")
+    raise AssertionError(f"{name}/{who}: per-step digest differs from the capture (the "
                          f"checkpoint values agree, so a non-checkpoint step moved)")
 
 
 @pytest.mark.parametrize("scene", SCENES, ids=[s[0] for s in SCENES])
-def test_legacy_inputs_are_bit_identical_to_2_0_1(scene):
+def test_legacy_inputs_are_bit_identical_to_the_capture(scene):
     fx = _fixture()
     got = run_scene(*scene)
     want = fx["scenes"][scene[0]]

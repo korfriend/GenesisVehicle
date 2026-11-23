@@ -281,6 +281,16 @@ class _StateSource:
                 "kind (they share the force model and the wheel meta) — build "
                 "one plant per kind")
         self.physics = physics
+        # (v2.0.4 Step D) Compute the live driver's StaticFrictionLock static
+        # shares and rigid-body factor now (normally done on its first step),
+        # so a plant built before the first live step predicts with the same
+        # capped spring the live driver will use. Covers construction and the
+        # rebind after mark_config_dirty(). They come from the LIVE vehicle's
+        # link walk (shared wheel meta); the plant's own mass= / izz= / com=
+        # do not change them.
+        ensure_share = getattr(physics, "_ensure_static_mass_share", None)
+        if callable(ensure_share):
+            ensure_share()
         self.entities = [p[1] for p in parts]
         self.kind = parts[0][3]
         K = parts[0][4]

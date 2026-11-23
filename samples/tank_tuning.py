@@ -26,12 +26,15 @@ class TankTuning:
     T_BRAKE_MAX = 200_000.0     # N*m total — brake can out-torque tire friction
     I_WHEEL = 100.0             # kg*m^2 — damps brake-friction oscillation
     MU_LAT = 0.5                # flat lateral friction — responsive skid spin
-    # StaticFrictionLock ENGAGES (brake > 0.3) below 5 m/s planar contact
-    # speed, i.e. right below cruise. Since SDK 1.8.0 that only forces the
-    # braked wheels' spin to 0; the lock's spring-damper takes over the tyre
-    # force only once the contact is at REST (StaticFrictionLock.REST_SPEED /
-    # creep test). Through 1.7.0 it replaced the tyre force from 5 m/s down,
-    # anchored where it engaged. Value unchanged in 1.8.0.
+    # StaticFrictionLock v_thr. Since SDK 2.0.4 the engage window is
+    # min(v_thr, 0.5) m/s (StaticFrictionLock.V_ENGAGE_MAX), so this 5.0 ACTS
+    # AS 0.5: the lock engages on a wheel the brake holds (ctx.brake_rem > 0)
+    # below 0.5 m/s planar contact speed, at any pedal, never forces the spin,
+    # and takes over the tyre force only through its creep test. Through 2.0.3
+    # it engaged at brake > 0.3 below 5 m/s, forced the braked wheels' spin to
+    # 0 and also took over below REST_SPEED (0.05 m/s); brake_thr and
+    # REST_SPEED were removed in 2.0.4. Through 1.7.0 it replaced the tyre
+    # force from 5 m/s down, anchored where it engaged. Value kept.
     SFL_V_THR = 5.0
     SFL_K_SPRING = 1_000_000.0
     # Since 1.8.0 a FLOOR: the lock damps with max(k_damp, 2*sqrt(k_spring*N/g)),

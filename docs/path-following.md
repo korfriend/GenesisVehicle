@@ -1273,10 +1273,12 @@ model nor a PD correction on the MPC's predicted trajectory exists in 2.0.1
 bound is still the throttle-based one** (`decel_throttle_by_speed`, about −2.15
 m/s² on the reference car) in 2.0.2: gear mode's brake model is in stage 2 only
 (§5.9). The MPC itself still plans forward only (`v_cg_x >= 0`): the v2.0.3
-K-turn (§5.10, opt-in) is a separate state machine outside the MPC. Planned,
-not present: the light-brake slope hold, planned as the next release after
-2.0.3 (2.0.4 in the current plan — a plan, not a commitment), 2.1.0 the Pacejka prediction
-model with a deceleration bound widened to the brake's limit, 2.2.0 feedforward
+K-turn (§5.10, opt-in) is a separate state machine outside the MPC. The
+light-brake slope hold, listed here as planned through 2.0.3, shipped in 2.0.4
+(a vehicle-side change, `physics-contracts.md` §7.22). Planned, not present:
+2.1.0 the Pacejka prediction model with a deceleration bound widened to the
+brake's limit (and, vehicle-side, unifying the lock's spring cap on one
+constant), 2.2.0 feedforward
 from the MPC plan and the PD correction (closed-loop tracking of the K-turn's
 planned arcs is a candidate there), 2.3.0 a hold-release rule, a KICK redesign
 and a wider default sweep grid. (Through 2.0.0 this paragraph named 2.1.0 /
@@ -1746,7 +1748,9 @@ and planar speed below 0.5 m/s, otherwise the request is deferred. A negative
 Python scalar throttle with a gear raises; a negative tensor element is clamped
 to 0 (and so permits a shift). Tanks (`PerSide` drivetrain or `SkidSteer`
 steering) refuse a gear. `gear=None` is the 2.0.1 signed input, bit-identical
-to 2.0.1 on the measured scenes.
+to 2.0.1 on the measured scenes through 2.0.3; since 2.0.4 the braking physics
+changed for every input (`physics-contracts.md` §7.22), so braked scenes no
+longer reproduce 2.0.1 numbers.
 
 The follower side: `PathFollower(command_mode="gear")` — the default with the
 MPC layer on — returns a `GearCommand(throttle, steer, brake, gear)` for such
@@ -1960,15 +1964,18 @@ persists until the stall watchdog hands over to `PD-STALL`, as designed.
   and `GUARD` clears the stall watchdog. Not measured.
 - Travel between an R-ALIGN step and a following `GUARD` step is not charged to
   `align_budget`.
-- **On a slope, a brake ≤ 0.3 does not bring the vehicle to rest** even with
-  enough brake torque: the wheels stop (ω = 0, never reversed) but the chassis
-  slides on tyre slip, because `StaticFrictionLock` engages only when brake >
-  `brake_thr` (0.3 in `"control"`) — reference car, 5°, brake 0.3: 0.0250 m/s
-  for 30 s; brake 0.31 stops in 2.2 s. Pre-existing (identical on 2.0.1),
-  `physics-contracts.md` §7.17; the follower's terminal, `SHIFT` and `GUARD`
-  stops use brake 1; a `brake_for` value ≤ 0.3 at very low speed on a slope
-  would creep (not measured in closed loop). The fix is planned for a later
-  release.
+- **Through 2.0.3, on a slope, a brake ≤ 0.3 did not bring the vehicle to
+  rest** even with enough brake torque: the wheels stopped (ω = 0, never
+  reversed) but the vehicle crept, because `StaticFrictionLock` engaged only
+  when brake > `brake_thr` (0.3 in `"control"`) — reference car, 5°, brake
+  0.3: 0.0250 m/s for 30 s; brake 0.31 stopped in 2.2 s. This bullet said the
+  chassis "slides on tyre slip" — the mechanism was wrong (the held-wheel
+  deadbeat acts as a damper, creep speed `g·tan θ·dt/s` — g gravity, θ slope
+  angle, s the deadbeat's rigid-body scale, `physics-contracts.md`
+  §7.16). **Fixed in 2.0.4**: the lock engages on every brake-held wheel at any
+  pedal, so a `brake_for` value ≤ 0.3 at very low speed on a slope now holds
+  where the brake can (the same row rests at 4e-6 m/s;
+  `physics-contracts.md` §7.22). Not measured in closed loop on a slope.
 - Not measured in gear mode: the LMPC, GPU, closed-loop `n_envs > 1`, a
   multi-member `FleetFollower`, the 6-wheel truck in the repo, vehicles other
   than the reference car.
@@ -2322,7 +2329,9 @@ is breaking in a patch release, by user decision):
 
 **From 2.0.2 to 2.0.3** (CHANGELOG 2.0.3; nothing changes unless you opt in):
 
-- a follower that does not pass `mpc_kturn` issues the 2.0.2 commands;
+- a follower that does not pass `mpc_kturn` issues the 2.0.2 commands (for the
+  same inputs; since 2.0.4 the vehicle brakes differently at low speed, so a
+  closed loop no longer reproduces 2.0.2 / 2.0.3 runs step for step);
   `FollowerPlan` gains the appended field `steer_cmd` (always `None` then) and
   every MPC follower's `mpc_stats` a `kturn` dict (zeros) — code comparing field
   lists or stats dicts exactly sees both;
@@ -2335,6 +2344,42 @@ is breaking in a patch release, by user decision):
   `plan.steer_cmd` when it is not `None`, or call `finish`;
 - read the measured FAIL and the radius limitation in §5.10 before relying on
   it.
+
+**From 2.0.3 to 2.0.4** (CHANGELOG 2.0.4; no follower code changed — the
+vehicle's braking did):
+
+- `StaticFrictionLock` engages on every brake-held wheel at any pedal, so the
+  follower's light-brake decelerations (`brake_for` at low speed) and its
+  `(0, 0, 1)` stops now hold on a slope where the brake can; the
+  closed-loop acceptance runs of 2.0.2 / 2.0.3 (104 runs: PD, MPC, no
+  feedback, K-turn, LMPC) kept their terminal modes, `DONE` moved by at most
+  0.175 s and every K-turn leg started from |v| ≤ 0.0127 m/s (implementation,
+  CPU/WSL2, genesis-world 1.4.5, dt 0.025 × 4; not re-run by impl-review);
+- **a brake no longer overrides the drive**: a PD follower on the BARE
+  `tank_skid_belt` preset can turn in place while braking at rest when it
+  commands `abs(steer) > 1/n` (n = wheel count; 0.1 on the 10-wheel reference
+  tank, whose brake is `30000·brake/n` per wheel against the whole side torque
+  `30000·abs(0.3·throttle ± steer)` on every wheel) — its brake-at-rest command keeps the steer
+  (`control/path_follower.py`) and the tank's per-wheel drive then exceeds its
+  brake (brake 1.0 + steer 0.3 at rest: −13° in 5 s). Derived, not observed in a
+  follower run: the measured bare-tank course (`path_follow_demo.py` with
+  `TankTuning` patched out, `--plant jacobian`) had 0 such calls and is
+  identical to 2.0.3. The in-repo tank demos apply `TankTuning`, whose brake
+  holds against steer up to 0.5 (derived from its torques, not measured). Gear-mode followers do not apply: tanks refuse
+  gear mode, and a car's steer is a wheel angle, not a torque;
+- **sweep tables are unaffected by construction** (`sweep_measure` drives brake 0
+  on every row; the `--quick` CSV is byte-identical to 2.0.3). **identify**:
+  every MPC-model field identical on the reference car (measured, braked-settle
+  diagnostics within 7.9e-6 relative); re-run it for a vehicle where the
+  lock's cap reports (`[genesis_vehicle:sfl-cap]`: the reference car above
+  dt 0.0257 s, light or low-yaw-inertia vehicles), whose braked settle runs on
+  the capped spring;
+- the stage-2 brake model (§5.9) was re-validated on 2.0.4 at its 12 points
+  (reference car, plane μ 1.0, 2-12 m/s, brake 0.1-1.0): all within 5 %
+  (−0.19 % .. −2.85 %; implementation);
+- a `DifferentiablePlant` built before the vehicle's first step predicts with
+  the same capped lock spring as the live vehicle (it computes the lock's
+  inputs at bind).
 
 ## See also
 
@@ -2356,5 +2401,6 @@ is breaking in a patch release, by user decision):
   constructor and regime selection enforce, and what nothing enforces; §7.19 —
   the v2.0.1 gate, watchdog, budgets and stops; §7.20 — v2.0.2 gear mode, the
   vehicle rules and the follower's `SHIFT` / `GUARD` / `GEAR-ABORT`; §7.21 —
-  the v2.0.3 opt-in K-turn.
+  the v2.0.3 opt-in K-turn; §7.22 — the v2.0.4 vehicle-side brake hold every
+  follower's brake commands now meet.
 - [`api-reference.md`](api-reference.md) §11 — `control` API surface.

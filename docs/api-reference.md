@@ -584,7 +584,7 @@ rest gap. See [`physics-contracts.md`](physics-contracts.md) §7.6, §7.8, §7.1
 Resolved internals:
 
 - `resolved: ResolvedConfig` — post-merge config; the only source of truth at runtime
-- `wheel_meta: WheelMeta` — cached per-wheel tensors (positions, radius, side masks, axle indices, etc.). Since v1.8.0 its last field `yaw_inertia` (`dynamics.YawInertia` or `None`) holds the deadbeat-scale inputs this driver computed on its first step; `_pipeline.compute_wheel_step(..., yaw_inertia=)` (keyword, default `None`) takes precedence over it, which is how `DifferentiablePlant` passes its own without writing the shared wheel meta
+- `wheel_meta: WheelMeta` — cached per-wheel tensors (positions, radius, side masks, axle indices, etc.). Since v1.8.0 its field `yaw_inertia` (`dynamics.YawInertia` or `None`) holds the deadbeat-scale inputs this driver computed on its first step; `_pipeline.compute_wheel_step(..., yaw_inertia=)` (keyword, default `None`) takes precedence over it, which is how `DifferentiablePlant` passes its own without writing the shared wheel meta. **Through v2.0.3 this line called `yaw_inertia` "its last field"; since v2.0.4 two fields follow it**, appended in this order: `static_mass_share` (`(n_wheels,)` kg, `dynamics.static_mass_shares` of the build-time link masses, or `None`) and `static_rigid_factor` (`dynamics.RigidShareFactor` or `None`), both set by the driver on its first step (or by a `DifferentiablePlant` at bind) as the inputs of `StaticFrictionLock`'s spring cap (`physics-contracts.md` §7.22). A `static_mass_share` you write after the first step keeps the old `static_rigid_factor`: reset that to `None` or recompute it
 
 `step()` accepts either the strategy's `InputType` (e.g. `AckermannInputs`)
 or a unified `VehicleInputs`. The latter is auto-converted via
@@ -885,6 +885,12 @@ one-step lag detail.
 | `s` | the rigid-body deadbeat scale, `ctx.deadbeat_scale` (v1.8.0) |
 | SFL | `StaticFrictionLock` |
 | D / Y | v1.8.0 held-wheel deadbeat on `F_long` / lateral deadbeat on `F_lat` (`physics-contracts.md` §7.16) |
+| `k_eff` | v2.0.4: the lock's per-wheel spring rate actually used, `k_spring` capped (N/m) |
+| `m_static` | v2.0.4: per-wheel static mass share, `WheelMeta.static_mass_share` (kg) |
+| `beta` (β) | v2.0.4: planar rigid-body factor, `WheelMeta.static_rigid_factor.beta` (largest eigenvalue of the shares' planar stiffness against `diag(M, M, I_cg)`) |
+| `f` | v2.0.4: cap factor `min(SPRING_C_MAX, SPRING_C_RB / beta)` |
+| `lambda(K)` | largest generalised eigenvalue of the planar spring matrix K against `diag(M, M, I_cg)` |
+| `brake_rem` / B_rem | v2.0.4: brake torque left after the brake projection (N·m) |
 
 ```python
 class RollingResistance(StabilityHook):
@@ -904,18 +910,37 @@ class LowSpeedRegularizer(StabilityHook):
                  disable_when_control_active=True, control_threshold=0.01)
 
 class StaticFrictionLock(StabilityHook):
-    def __init__(brake_thr=0.3, v_thr=0.5, k_spring=500_000.0, k_damp=20_000.0)
-    REST_SPEED = 0.05      # v1.8.0: planar contact speed (m/s) counted as rest
+    def __init__(*, v_thr=0.5, k_spring=500_000.0, k_damp=20_000.0)   # keyword-only (v2.0.4)
     CREEP_RATIO = 0.96     # v1.8.0: creep test, v^2 >= CREEP_RATIO * v_prev^2
+    V_ENGAGE_MAX = 0.5     # v2.0.4: engage window is min(v_thr, V_ENGAGE_MAX) m/s
+    SPRING_C_MAX = 1.0     # v2.0.4: per-wheel spring-number cap on the static load
+    SPRING_C_RB = 1.5      # v2.0.4: planar rigid-body constant -- chosen by the user, NOT derived
     STATE_ATTRS = ("_d_long", "_d_lat", "_was_active",
                    "_s_eng", "_rested", "_rest", "_v_prev_sq")   # v1.8.0: last four new
-    # ENGAGES when brake > brake_thr AND sqrt(v_long^2 + v_lat^2) < v_thr:
-    # omega forced to 0 at once. Since v1.8.0 the 2D spring-damper replaces the
-    # tyre force only once the contact is at REST (REST_SPEED, or the creep test)
-    # and holds the point where it stopped; v_thr gates only the omega lock.
-    # k_damp is a FLOOR: damping = max(k_damp, 2*sqrt(k_spring*N/g)), bounded by
+    # v2.0.4: ENGAGES per wheel where ctx.brake_rem > 0 (the brake holds the
+    # wheel) AND sqrt(v_long^2 + v_lat^2) < min(v_thr, 0.5), at ANY pedal.
+    # v_thr above 0.5 no longer widens the window (TankTuning's 5.0 acts as
+    # 0.5). Never sets ctx.omega_override. The 2D spring-damper replaces the
+    # tyre force only after the creep test and holds the point where the
+    # contact stopped. A wheel whose drive torque exceeds its brake torque has
+    # brake_rem == 0 and turns (brake does not override drive).
+    # Spring rate actually used (spring, anchor re-placement, damper floor):
+    #   k_eff_i = min(k_spring, f * m_static_i / dt^2),
+    #   f = min(SPRING_C_MAX, SPRING_C_RB / wheel_meta.static_rigid_factor.beta)
+    # (f = SPRING_C_MAX without a beta; uncapped without a static share). A bound
+    # on the planar lambda(K) only, not a stability guarantee; one
+    # [genesis_vehicle:sfl-cap] WARNING per process per (wheel meta, k_spring,
+    # dt) where it binds. physics-contracts.md §7.22.
+    # k_damp is a FLOOR: damping = max(k_damp, 2*sqrt(k_eff*N/g)), bounded by
     # the one-step deadbeat s*(N/g)*|v|/dt. Hold force limited to
     # ctx.F_long_bounds (brake-limited). physics-contracts.md §7.17.
+    # REMOVED in v2.0.4: brake_thr (constructor TypeError; attribute read /
+    # write raises AttributeError, also on the class) and REST_SPEED (same).
+    # Positional arguments and unknown keywords raise TypeError.
+    # Through v2.0.3 this block read: __init__(brake_thr=0.3, v_thr=0.5, ...),
+    # REST_SPEED = 0.05, "ENGAGES when brake > brake_thr AND speed < v_thr:
+    # omega forced to 0 at once ... REST_SPEED, or the creep test" -- the
+    # 2.0.3 code, replaced in v2.0.4 (CHANGELOG 2.0.4 §3, §5).
     # Copying the lock's state between hooks (MPPI rollouts): copy EVERY name in
     # STATE_ATTRS; a hard-coded three-name list is silently wrong since v1.8.0.
 
@@ -970,6 +995,14 @@ class PipelineContext:
                                      # decision, or None when no input of the step carried a gear; set
                                      # before PRE_LOOP. On gear rows `throttle` above is the EFFECTIVE
                                      # signed throttle gear * clamp(throttle, 0, 1). READ-ONLY
+    brake_rem                        # v2.0.4: (n_envs, n_wheels) N*m >= 0, the brake torque LEFT after
+                                     # dynamics.brake_projection (> 0 only where the brake holds the
+                                     # wheel; 0 on a wheel it stops with no torque to spare -- at
+                                     # standstill an exact drive == brake tie). None in apply_pre_tire,
+                                     # set before POST_TIRE; pre-coupling; NOT masked for airborne
+                                     # wheels; not seen on the first-step protection step (no hook
+                                     # runs). READ-ONLY: a write changes nothing the pipeline computes,
+                                     # but a LATER hook in the list (StaticFrictionLock included) sees it
 ```
 
 `omega` means the pre-step ω in `apply_pre_tire` and `omega_t` in
@@ -978,7 +1011,7 @@ torque, equal to the pre-step ω when no hook set `T_resist`). `F_long` /
 `F_lat` are `None` in `apply_pre_tire`. The read-only fields are copies: the
 pipeline computes with its own, so writing them changes nothing it computes.
 New fields are appended after `T_resist`, so positional construction keeps its
-meaning.
+meaning; the last one is `brake_rem` (v2.0.4).
 
 Fields are `None` in slots where the pipeline has not produced them yet; a hook
 mutates the ones it owns in place. Which slot a hook runs in
@@ -1164,11 +1197,34 @@ DEADBEAT_G = 9.81
     # the scene's gravity. Under |g| != 9.81 the bounds scale by |g| / 9.81.
 class YawInertia(NamedTuple): i_cg: float; rho_sq: torch.Tensor
     # Inputs of deadbeat_scale. YawInertia(float("inf"), rho_sq) gives s == 1.
+    # v2.0.4: presetting wheel_meta.yaw_inertia changes the deadbeat damper,
+    # NOT StaticFrictionLock's rigid-body cap (beta comes from the link walk).
+    # A preset whose I_cg differs from the entity's (incl. inf) is NOT covered
+    # by the cap's bound: on tests/data/low_yaw_inertia_car.urdf a preset
+    # YawInertia(inf, ...) still cycles in yaw at 0.260 rad/s under a held
+    # brake (physics-contracts §7.22.3).
 yaw_inertia_from_mass_props(mass, com, izz, positions) -> YawInertia
     # izz about the base-link ORIGIN; i_cg = izz - mass*(cx^2 + cy^2). Raises
     # ValueError when i_cg is not positive (or NaN).
 deadbeat_scale(N, yaw_inertia) -> torch.Tensor     # (B, 1)
     # s = min(1, i_cg / sum_i (N_i / g) * rho_i^2). physics-contracts §7.16.
+# --- genesis_vehicle.dynamics, v2.0.4 (NOT re-exported from the package root) ---
+STATIC_SHARE_MIN_FRACTION = 0.05
+class StaticMassShares(NamedTuple): shares: numpy.ndarray; fallback: Optional[str]
+static_mass_shares(mass, com, positions, k_susp) -> StaticMassShares
+    # Per-wheel static mass share (kg) from elastic-support statics (least
+    # squares, any wheel count), summing to mass. Any share non-finite or
+    # <= STATIC_SHARE_MIN_FRACTION * M/n -> equal shares M/n, fallback = reason.
+    # ValueError for a mass that is not positive and finite, or no wheels.
+class RigidShareFactor(NamedTuple): beta: float; yaw_fraction: float
+rigid_share_factor(mass, com, izz, positions, shares) -> RigidShareFactor
+    # beta = largest eigenvalue of S v = beta P v, S = sum_i m_i J_i^T J_i
+    # (planar x, y, yaw contact Jacobians about the centre of mass),
+    # P = diag(M, M, I_cg), I_cg = izz - M (cx^2 + cy^2); exact 3x3 float64.
+    # yaw_fraction labels the cap log line only. ValueError on non-finite
+    # input, a non-positive mass / share / I_cg, or beta < 1 - 1e-6 (shares
+    # summing to less than the mass are NOT detected in general).
+    # physics-contracts §7.22.
 # genesis_vehicle.dynamics.cap_resist_torque (v1.7.0; NOT re-exported from the
 # package root): sign(t) * min(|t|, |omega| * i_wheel / dt). physics-contracts §7.15.
 cap_resist_torque(
@@ -1553,7 +1609,7 @@ layer (the 2.0.0 default stage 1) needs the optional packages of
 | `FollowerPlan` | `from genesis_vehicle.control import FollowerPlan` | `plan()`'s result: `mode, a_target, omega_target, v_long, v_target, pitch_deg, roll_deg, command`, and (v2.0.0, appended with defaults) `regime="R-OFF"`, `a_ff=None`, `w_ff=None` — on an `R-MPC` plan `a_ff` / `w_ff` are the MPC's commanded `a` / `ω_z`, otherwise `None`; not the planned (2.2.0) feedforward. No field added in v2.0.1; `regime` can also be `R-ALIGN` / `R-STALL` (and, v2.0.3 with `mpc_kturn` given, `R-KTURN`), a terminal step is `CMD` (`R-OFF` with the layer off) with `command=(0, 0, 1)`; under `R-MPC` `v_target` is the PD's value, which since v2.0.1 can differ in sign from 1.x at a block end (the MPC command does not use it). v2.0.2 appended `gear=None` (gear mode only: the gear the step's command requests — the block's sign, the assumed gear on a terminal step; `None` in signed mode) and `a_coast=None` (the coast a `FleetFollower` fills from one batched prediction; `None` lets `finish` ask the plant). v2.0.3 appended `steer_cmd=None`: on a K-turn leg's driving call (`regime="R-KTURN"`, mode `KTURN-REV` / `KTURN-FWD`) the leg's full-lock steer `d · g · steer_cap · steer_input_sign`, `None` on every other plan (always `None` without `mpc_kturn`); `omega_target` is then `d · 1.0 / r_plan`, the leg's nominal yaw rate, not something to invert; on an R-KTURN call `gear` is the leg's gear |
 | `KTurnParams(lateral_limit=None, max_reverse=None, max_legs=4)` | `from genesis_vehicle.control import KTurnParams` (not re-exported from the root) | v2.0.3. Frozen dataclass enabling the opt-in K-turn (`PathFollower(..., mpc_kturn=KTurnParams())`). `lateral_limit` (m, > 0): `None` = no lateral limit on the planned arcs; a value keeps every planned arc sample within it of a window of the path, also fires the trigger when the forward swing `R_min (1 − cos e) + \|y'\|` exceeds it, and turns "no plan" into `MPC-ABORT` `kturn_infeasible` (planned arcs only; the executed path is not guaranteed inside it). `max_reverse` (m, > 0): `None` = `2.0 · R_min` (14.79 m on the reference car); the distance cap of one reverse leg. `max_legs`: int 2..4, legs per episode across re-plans, reverse legs ≤ `max_legs // 2`. Invalid values raise `ValueError`. Geometry, trigger and planner: module `genesis_vehicle.control.kturn` (its constants are chosen values, not public API). Bounds and the measured FAIL: `path-following.md` §5.10, `physics-contracts.md` §7.21 |
 | `FleetFollower(followers, plant)` | `from genesis_vehicle import FleetFollower` | drives N `PathFollower`s off ONE batched plant: `plan` per follower → one batched `solve` → `finish` per follower. `step(states)` → list of `(throttle, steer, brake)`. Needs `plant.n_members == len(followers)`. **v2.0.0: PD followers only** — any follower with the MPC layer on raises `TypeError` before a follower is modified. v2.0.1: members get the goal-passed stop and the block-end speed sign; the fleet does not aggregate — a member that stops brakes while the rest drive on, so check `fleet.last_modes` against `PathFollower.TERMINAL_MODES`. v2.0.2: every follower must have the same `command_mode` (`ValueError`); in gear mode `step` returns `GearCommand`s, reads a dict state's optional `"gear"` key as feedback, and fills braking members' `a_coast` from ONE batched `predict` at throttle 0 (the plant's constant brake held at 0) |
-| `DifferentiablePlant(vehicle, horizon=4, **tuning)` | `from genesis_vehicle import DifferentiablePlant` | the no-measurement inverse plant (v1.3.0; this row called it "the DEFAULT inverse plant" through 1.8.0 — stale since 2.0.0, whose documented default stack is a sweep table + the MPC layer): unrolls the SDK's own ray-wheel force model and differentiates it with `torch.autograd` for `J = d(a, ω_z)/d(throttle, steer)`, then Newton-solves. No sweep measurement, no CSV. `solve(v, a_target, ω_target, pitch, roll)` → `(throttle, steer)`; `predict` / `jacobian` / `set_applied` / `reset`; diagnostics in `last_jacobian` / `last_response` / `last_target` / `last_singular` / `last_restarted`. `saturation_restart=True` (v1.7.0): a warm start at a range limit is also solved from 0 in the same batch and the lower residual wins (`path-following.md`). Pass a SEQUENCE of vehicles (and/or of `env_idx`) for a fleet: M members inverted in one batch, every entry point taking and returning length-M arrays, `set_applied_member(i, ...)` for a single row. **v2.0.2**: `accel_at(v, throttle, pitch_deg=0, roll_deg=0)` — forward prediction from the LIVE state at the last applied steer and at brake 0 (`v` / pitch / roll ignored, like `throttle_for`; single-member only, `ValueError` otherwise); `brake_gain()` — the closed-form k_b of the source vehicle (`control.brake.brake_gain_closed_form`, valid below the friction limit; 5.0152 on the reference car) |
+| `DifferentiablePlant(vehicle, horizon=4, **tuning)` | `from genesis_vehicle import DifferentiablePlant` | the no-measurement inverse plant (v1.3.0; this row called it "the DEFAULT inverse plant" through 1.8.0 — stale since 2.0.0, whose documented default stack is a sweep table + the MPC layer): unrolls the SDK's own ray-wheel force model and differentiates it with `torch.autograd` for `J = d(a, ω_z)/d(throttle, steer)`, then Newton-solves. No sweep measurement, no CSV. `solve(v, a_target, ω_target, pitch, roll)` → `(throttle, steer)`; `predict` / `jacobian` / `set_applied` / `reset`; diagnostics in `last_jacobian` / `last_response` / `last_target` / `last_singular` / `last_restarted`. `saturation_restart=True` (v1.7.0): a warm start at a range limit is also solved from 0 in the same batch and the lower residual wins (`path-following.md`). Pass a SEQUENCE of vehicles (and/or of `env_idx`) for a fleet: M members inverted in one batch, every entry point taking and returning length-M arrays, `set_applied_member(i, ...)` for a single row. **v2.0.2**: `accel_at(v, throttle, pitch_deg=0, roll_deg=0)` — forward prediction from the LIVE state at the last applied steer and at brake 0 (`v` / pitch / roll ignored, like `throttle_for`; single-member only, `ValueError` otherwise); `brake_gain()` — the closed-form k_b of the source vehicle (`control.brake.brake_gain_closed_form`, valid below the friction limit; 5.0152 on the reference car). **v2.0.4**: binding to a vehicle (construction, and the rebind after `mark_config_dirty()`) computes that vehicle's `StaticFrictionLock` static shares and rigid-body factor, so a plant built before the first live step predicts with the same capped lock spring as the live driver; the plant's own `mass=` / `izz=` / `com=` do not change the lock's cap (it comes from the live vehicle's link walk) |
 | `SweepTable` | `from genesis_vehicle import SweepTable` | the measured inverse plant: (v, throttle, steer, pitch, roll) → (a, ω_z) grid; `.load(csv)` / `.save(csv)`; inverse lookups `throttle_for(v, a, pitch, roll)` / `steer_for(v, ω, pitch, roll)`. numpy-only, so it is the option for a controller running without a simulator. **v2.0.2**: `accel_at(v, throttle, pitch_deg=0, roll_deg=0)` — the forward map (multilinear, clamped to the grid; unchanged by the gear-mode coast model); `coast_hold_speeds` — read-only `(v_neg, v_pos)`, the grid speeds nearest 0 on each side (`None` for a side without one) |
 | `genesis_vehicle.control.brake` | module (v2.0.2; functions not re-exported) | the gear-mode follower's stage-2 brake model — NOT in the MPC prediction. `brake_for(a_target, a_coast, v, gear, k_b)` → brake in [0, 1] = `clip(s·(a_coast − a_target)/k_b, 0, 1)`, `s = sign(v)` (\|v\| > 1e-3) else `gear`; `brake_gain_closed_form(resolved, wheel_meta, mass)`; `brake_gain_from_params(params, accel_at)` (the `brake_gain` key, else the mean of `accel_at(v, 0, 0, 0) − decel_brake_by_speed[v]`, else `None`); `coast_for_brake(plant, v, pitch_deg, roll_deg, gear)` (a `SweepTable`'s flat coast below `v_h` faded by `tanh(\|v\|/0.5)`, slope term never faded; any other plant's `accel_at` passed through); `COAST_FADE_SPEED` (0.5, read from `RollingResistance`'s default `tanh_scale`). Conditions and validity: `path-following.md` §5.9 |
 | `extract_state(vehicle, env_idx=0)` | `from genesis_vehicle.control import extract_state` | Genesis entity / `Vehicle` wrapper → state dict for `PathFollower.step`: `pos_xy, yaw, v_long, pitch, roll` (degrees), and since 2.0.0 `yaw_rate` (world ω_z; equals the chassis yaw rate only on level ground) and `v_lat` when the object has `get_ang()` |

@@ -176,11 +176,11 @@ def test_t_resist_is_followed_only_by_the_1_8_0_context_fields():
     construction keeps its meaning; v1.8.0 appended its four fields after it,
     in this order, all defaulting to None (so positional construction up to
     ``T_resist`` still means what it meant); v2.0.2 appended ``gear`` (default
-    None) after them."""
+    None) after them; v2.0.4 appended ``brake_rem`` (default None) after it."""
     names = [f.name for f in dataclasses.fields(PipelineContext)]
     i = names.index("T_resist")
     assert names[i:] == ["T_resist", "F_long_bounds", "F_long_deadbeat",
-                         "hold_applied", "deadbeat_scale", "gear"]
+                         "hold_applied", "deadbeat_scale", "gear", "brake_rem"]
     ctx = PipelineContext()
     for name in names[i:]:
         assert getattr(ctx, name) is None, name

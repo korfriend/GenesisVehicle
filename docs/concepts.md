@@ -138,9 +138,14 @@ interceptor works. Examples:
 - `LowSpeedRegularizer` runs once pre-loop (computes a `moving ∈ [0, 1]`
   factor) and once per wheel post-tire (scales `F_long`/`F_lat` by `moving`
   and pulls `omega` toward rolling-without-slip).
-- `StaticFrictionLock` runs post-tire when `brake > thr` and planar
-  wheel speed `< thr`: it forces `omega = 0` at once, and once the contact
-  is at REST (v1.8.0) it replaces the tyre force with a 2D spring-damper
+- `StaticFrictionLock` runs post-tire on every wheel the brake holds this
+  step (`ctx.brake_rem > 0`) whose planar contact speed is below
+  `min(v_thr, 0.5)`, at any pedal (v2.0.4; through 2.0.3 this bullet said
+  "when `brake > thr` … it forces `omega = 0` at once" — the 2.0.3 rule, which
+  never engaged at brake ≤ 0.3 and slid locked wheels above it; it no longer
+  forces ω). Once its creep test detects the stop it replaces the tyre force
+  with a 2D spring-damper (spring rate capped per wheel since v2.0.4,
+  [`physics-contracts.md` §7.22](physics-contracts.md))
   `F = -K_spring·displacement - D·velocity` around the point where the
   contact stopped, projected onto the per-wheel friction ellipse and limited
   to what the brake can transmit. Stuck = held at that point; slipping =

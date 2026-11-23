@@ -63,7 +63,8 @@ The clamp and the bounds (each a guard, with what it does NOT bound):
   ``|F_long| <= s * (N/g) * |v_long - r * omega_t| / dt`` -- the force that
   stops the contact slip in one step on the wheel's mass share. Exposed as
   ``ctx.F_long_deadbeat``. Not applied on wheels a hook holds
-  (``ctx.hold_applied``).
+  (``ctx.hold_applied``). ``B_rem`` itself is exposed as ``ctx.brake_rem``
+  (v2.0.4, a detached copy, set before the POST_TIRE phase).
 * B2, friction ellipse on the transmitted force: where the clamp binds on the
   RAW tyre force, ``F_lat`` and ``kappa`` are taken from
   ``tire.at_long_force`` at the clamped force (a closed form for
@@ -102,8 +103,9 @@ The clamp and the bounds (each a guard, with what it does NOT bound):
   ``9.81/|g|``" here, the reverse direction; that was wrong.)
 
 None of these bound the drive torque (it acts within the step), the
-``LowSpeedRegularizer`` ω pull or ``StaticFrictionLock``'s ω override, which
-act on the ω update AFTER the clamp, as before.
+``LowSpeedRegularizer`` ω pull or a hook's ``ctx.omega_override``, which act
+on the ω update AFTER the clamp, as before. (Through 2.0.3
+``StaticFrictionLock`` set ``ctx.omega_override``; since 2.0.4 it does not.)
 """
 
 from __future__ import annotations
@@ -330,6 +332,7 @@ def compute_wheel_step(
     ctx.omega_pull_factor = None; ctx.omega_pull_target = None
     ctx.T_resist = None
     ctx.F_long_bounds = None; ctx.F_long_deadbeat = None; ctx.hold_applied = None
+    ctx.brake_rem = None          # (v2.0.4) set before the POST_TIRE phase below
     ctx.deadbeat_scale = s.clone() if torch.is_tensor(s) else s   # hooks get a copy
     ctx.dt = float(DT)
     for hook in post_tire_hooks:
@@ -391,6 +394,7 @@ def compute_wheel_step(
     # cannot move the clamp).
     ctx.F_long_bounds = (F_lo.clone(), F_hi.clone())
     ctx.F_long_deadbeat = F_db.clone()
+    ctx.brake_rem = B_rem.detach().clone()   # (v2.0.4) brake left on a held wheel
     v_roll = radius_b * omega_e
 
     # (C) Tire force — single batched call.

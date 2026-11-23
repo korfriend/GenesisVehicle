@@ -81,10 +81,15 @@ def stability_hooks_for_profile(
     if profile in ("raw", "research"):
         return []
     # profile == "control" — applied to every vehicle_kind. Prior to v0.5.8
-    # StaticFrictionLock was tank-only; the new stick-slip lock is cheap
-    # enough (no work when not engaged) that there's no reason to leave
-    # cars without it. Removing it caused a real footgun where any car
-    # preset on a slope or after impact creeped indefinitely under brake.
+    # StaticFrictionLock was tank-only; the stick-slip lock is cheap enough
+    # that there's no reason to leave cars without it (it computes every step
+    # — no short-circuit, to avoid a device sync — but replaces no force while
+    # no wheel is engaged). Removing it caused a real footgun where any car
+    # preset on a slope or after impact crept indefinitely under brake.
+    # Since 2.0.4 it engages on every wheel the brake holds (ctx.brake_rem > 0)
+    # below min(v_thr, 0.5) m/s at ANY pedal (brake_thr was removed), never
+    # forces omega, and its spring is capped per wheel
+    # (docs/physics-contracts.md §7.22).
     hooks: list[StabilityHook] = [
         RollingResistance(),
         LowSpeedRegularizer(
@@ -100,7 +105,7 @@ def stability_hooks_for_profile(
             # via `stability="research"` + a custom hook list.)
             disable_when_control_active=True,
         ),
-        StaticFrictionLock(brake_thr=0.3, v_thr=0.5),
+        StaticFrictionLock(v_thr=0.5),
     ]
     return hooks
 

@@ -241,7 +241,8 @@ def row_tensor(value: float, ref: torch.Tensor) -> torch.Tensor:
 #: attributes of the owner (see :data:`_CACHES` for why).
 #:
 #: Enforcement: every pair below is covered by a named gate in
-#: ``tests/test_build_time_hoists.py`` / ``tests/test_tire_coulomb_eps.py``,
+#: ``tests/test_build_time_hoists.py`` / ``tests/test_tire_coulomb_eps.py`` /
+#: ``tests/test_sfl_spring_cap.py`` (the ``("hook", "k_spring")`` pair, v2.0.4),
 #: which writes the source AFTER the value has been derived once and asserts
 #: the next call moves. The table is descriptive of the call sites; it does not
 #: itself invalidate anything.
@@ -255,6 +256,11 @@ HOT_DEPENDENTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("drivetrain", "omega_max_drive"): ("_omega_cap",),
     ("tire", "eps_v"):                ("_eps2",),
     ("hook", "v_thr"):                ("_v_thr_sq",),
+    # (v2.0.4) StaticFrictionLock's capped stiffness; also keyed on ctx.dt,
+    # wheel_meta.static_mass_share (by value) and, since Step D,
+    # wheel_meta.static_rigid_factor (by value). At build (no dt known) it
+    # derives the uncapped placeholder; the first step re-derives.
+    ("hook", "k_spring"):             ("_k_eff",),
 }
 
 

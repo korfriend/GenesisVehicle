@@ -511,6 +511,10 @@ class MultiVehicleKindPhysics:
         # happen here. The proto's entity is entities[0] — see the class
         # docstring for what that means for a kind of mixed-mass vehicles.
         p._ensure_yaw_inertia()
+        # (v2.0.4) The StaticFrictionLock spring cap's static shares and its
+        # rigid-body factor beta (Step D), on the same proto (entities[0]'s
+        # mass) — the same limitation as above.
+        p._ensure_static_mass_share()
         K = self.K
         N = self.n_envs
         NK = self.NK

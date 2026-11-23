@@ -1175,6 +1175,16 @@ wheel, CHANGELOG 1.8.0 §2), and the start lag no longer shows in the distance.
 The cause of the sleep / wake cycling is still not established, L3 with
 `n_envs > 1` is still not measured, and hibernation stays ON.
 
+**Re-measured for v2.0.4** (implementation; the L2 server's `RigidOptions`,
+z 1.0, substeps 10, 160 braked steps then 120 at throttle 0.5, `per_vehicle`,
+CPU/WSL2, genesis-world 1.4.5; the generic vehicle built by the real
+`build_cfg`, not through the server process): preset car, hibernation on, hold
+brake 1.0 — 46 zero-velocity steps, 3.9683 m on 2.0.4 and on 2.0.3; hold brake
+0.2 — 3.9680 vs 3.9681 m; hibernation off — 3.9684 m on both; generic vehicle,
+on, brake 1.0 — 49 steps, 4.0393 m (2.0.4, with the lock) vs 4.0394 m (2.0.3
+builder, no lock). The 2.0.4 lock does not change the start from rest in this
+harness.
+
 `docs/differentiable-sot.md` §7 notes that a `requires_grad` scene bans
 hibernation; that is unrelated to the delay above.
 
@@ -1394,7 +1404,58 @@ After build, the server also emits topology once:
 > chassis slides on tyre slip (reference car, 5° downhill, brake 0.3: 0.025 m/s,
 > no rest in 30 s; brake 0.31 stops in 2.2 s), identical on 2.0.1 —
 > `physics-contracts.md` §7.17, CHANGELOG 2.0.2 §7. A fix is planned for a later
-> release.
+> release. **(v2.0.4: superseded — fixed; the "slides on tyre slip" mechanism
+> above was also wrong: the held-wheel deadbeat acts as a damper, so the vehicle
+> crept at `g·tan θ·dt/s` — g gravity, θ slope angle, s the deadbeat's
+> rigid-body scale. See the next note.)**
+>
+> **SDK v2.0.4 changes stop and hold behaviour for every server vehicle
+> (client-visible; the wire is unchanged).** Field-team note, CHANGELOG 2.0.4
+> §10; contract `physics-contracts.md` §7.22. Measured on CPU/WSL2,
+> genesis-world 1.4.5, dt 0.025 × 4 substeps, plane μ 1.0, through the SDK —
+> no UE client was attached and the live server loop was not exercised.
+>
+> 1. Preset car / tank / truck: in the measured rows (reference car, tank,
+>    truck demo URDF; CHANGELOG 2.0.4 §7) a braked vehicle at low speed came to
+>    rest on a slope where its brake could hold it, at ANY brake value
+>    (reference car, 5° downhill, brake 0.3: 4e-6 m/s; 2.0.3 crept at 0.02497
+>    m/s), and rolled where it could not (2.0.3 slid on locked wheels above
+>    brake 0.3). Measured, not enforced (`physics-contracts.md` §7.22.3).
+> 2. Generic (non-preset) mapping vehicles now get the `"control"` hook set,
+>    `StaticFrictionLock` included (`build_cfg`, both modes; through 2.0.3 only
+>    `RollingResistance` + `LowSpeedRegularizer`, and they crept down any slope
+>    at every brake — 0.02497 m/s at 5° even at brake 1.0). The lock's spring
+>    is capped per wheel from the vehicle's static load and **the scene dt the
+>    client sends** (the init message, or `--override-dt`): the reference car
+>    is capped above dt 0.0257 s, and a capped vehicle prints one
+>    `[genesis_vehicle:sfl-cap]` WARNING; a capped wheel holds with an offset
+>    up to `μ·g·dt²/f × N/N_static` (μ friction, N / N_static the wheel's load
+>    over its static load, f the cap factor `min(1, 1.5/β)`, β the planar
+>    rigid-body factor) — 6.1 / 10.9 / 15.7 mm at dt 0.025 / 1/30 / 0.04 where
+>    f = 1, as on every reference vehicle (more on a downhill wheel, more on a
+>    vehicle with a small yaw inertia, where f < 1). A 266 kg light car built through `build_cfg`
+>    rested on all 6 REST rows at dt 0.025, 1/30 and 0.04.
+> 3. **Brake does NOT override drive.** Per wheel, drive torque above brake
+>    torque turns the wheel. The tank preset drives every wheel of a side with
+>    the whole side torque `30000·abs(0.3·throttle ± steer)` N·m and brakes each
+>    of its n wheels with `30000·brake/n` N·m — `3000·brake` on the 10-wheel
+>    reference tank, where at brake 1.0 a steer above 0.1 (in general 1/n)
+>    pivots it at standstill (steer 1.0: −409° in 5 s; 2.0.3 −0.09°), a throttle above 0.33
+>    drives it (throttle 0.5: 3.6 m in 5 s; 2.0.3 0.12 m). The car preset moves
+>    at throttle 1.0 with brake 0.31. These are the PRESET torques; mapping
+>    `maxTorque` / `maxBrake` move the boundary. Send throttle 0 and steer 0
+>    with the brake to stop and hold.
+> 4. Start from rest with `use_hibernation` on: unchanged (§2.7).
+> 5. A teleport / reset with the brake still held lands within about 2 mm and
+>    rests within 2 s (SDK-level emulation of the L2 / L3 reset call shapes,
+>    reference car, 5° slope, brake 0.3: 0.827 mm to flat, 2.056 mm to the
+>    opposite slope). The server does not clear `StaticFrictionLock`'s state on
+>    a reset (`physics-contracts.md` §7.12 known gap); with a clear the same
+>    rows measured 0.298 / 1.498 mm.
+>
+> The OSC schema (addresses, type tags, ports, mapping keys, `/Genesis/Config/*`,
+> CLI flags) is unchanged; the only new output is the `[genesis_vehicle:sfl-cap]`
+> log line.
 >
 > **Gear mode (SDK v2.0.2) is NOT on the wire.** The SDK's opt-in vehicle gear
 > mode (`Vehicle.set_inputs(..., gear=)`, `physics-contracts.md` §7.20) has no
@@ -1456,7 +1517,7 @@ and PascalCase both accepted):
 | `drivingJoints` / `steeringJoints` | `[{jointName}]` | which joints propel / steer (Manual path) |
 | `drivetrainStrategy` | int | 0 AWD, 1 RWD, 2 FWD, 3 PerSide |
 | `couplingStrategy` | int | 0 Independent, 1 SameSideBelt |
-| `maxTorque` / `maxBrake` | float | drive / brake torque (N·m) |
+| `maxTorque` / `maxBrake` | float | drive / brake torque (N·m). Since v2.0.4 their ratio per wheel decides whether a braked wheel is held: a wheel whose drive torque exceeds its brake torque turns (`physics-contracts.md` §7.22.2) |
 | `steerScale` *(= `maxSteerRad`)* | float | max steer angle (rad) at \|steer\|=1. **UE serializes `SteerScale`; the server also accepts `maxSteerRad`.** Should stay within the URDF steer joint `<limit>` |
 | `brakeBiasFrontRatio` | float | front brake fraction (rest to rear) |
 | `topSpeed` | float | **top speed in m/s** (v1.2.4) — radius-independent; the server converts it to the drive omega cap via the mean wheel radius. Preferred over `omegaMaxDrive`. e.g. `18.6` ≈ 67 km/h |

@@ -220,27 +220,31 @@ def test_omega_max_drive_is_still_live_after_the_cap_was_derived():
 
 def _sfl_f_long(hook, wm, n_calls: int = 5) -> list[float]:
     """SFL's contribution to ctx.F_long after `n_calls` steps at
-    v_long=0.7, brake=0.5, N=3000."""
+    v_long=0.7, brake=0.5, N=3000 (duck-typed ctx, no `brake_rem`)."""
     return _sfl_run(hook, wm, n_calls)[0]
 
 
-def _sfl_engaged(hook, wm, n_calls: int = 5) -> list[bool]:
-    """Which wheels the lock ENGAGED on (its ω override) after `n_calls` steps
-    at v_long=0.7, brake=0.5, N=3000 — the G6 observable since v1.8.0.
+def _sfl_engaged(hook, wm, n_calls: int = 5, v: float = 0.7,
+                 held: bool = False) -> list[bool]:
+    """Which wheels the lock ENGAGED on (`hook._was_active`) after `n_calls`
+    steps at v_long=`v`, brake=0.5, N=3000 — the G6 observable since v2.0.4.
 
     Through 1.7.0 the G6 observable was the force the lock wrote into
-    ctx.F_long (-3000 N once engaged). Since 1.8.0 the lock replaces the tyre
-    force only after the contact comes to REST (A6), and a contact held at
-    0.7 m/s never does, so the force stays 0 either way; `v_thr` now decides
-    only engagement, which the ω override mask shows."""
-    return _sfl_run(hook, wm, n_calls)[1]
+    ctx.F_long (-3000 N once engaged); from 1.8.0 through 2.0.3 it was the ω
+    override mask (the lock forced an engaged wheel's spin to 0). Since 2.0.4
+    the lock engages only on a wheel the brake holds (`ctx.brake_rem > 0`),
+    below min(v_thr, 0.5) m/s, and never forces ω, so the observable is the
+    engage mask itself, on a ctx carrying `brake_rem` (`held=True`) at a
+    contact speed inside 0.5 m/s. The property tested — a `v_thr` write after
+    the hoisted square still lands — is unchanged."""
+    return _sfl_run(hook, wm, n_calls, v=v, held=held)[1]
 
 
-def _sfl_run(hook, wm, n_calls):
+def _sfl_run(hook, wm, n_calls, v=0.7, held=False):
     ctx = types.SimpleNamespace()
     for _ in range(n_calls):
         ctx.brake = torch.tensor([0.5])
-        ctx.v_long = torch.full((1, wm.n_wheels), 0.7)
+        ctx.v_long = torch.full((1, wm.n_wheels), v)
         ctx.v_lat = torch.zeros(1, wm.n_wheels)
         ctx.N = torch.full((1, wm.n_wheels), 3000.0)
         ctx.dt = 0.02
@@ -248,26 +252,33 @@ def _sfl_run(hook, wm, n_calls):
         ctx.F_long = torch.zeros(1, wm.n_wheels)
         ctx.F_lat = torch.zeros(1, wm.n_wheels)
         ctx.omega_override = None
+        if held:
+            ctx.brake_rem = torch.full((1, wm.n_wheels), 100.0)
         hook.apply_post_tire(ctx)
-    return _row(ctx.F_long), [bool(x) for x in ctx.omega_override.active.reshape(-1)]
+    return _row(ctx.F_long), [bool(x) for x in hook._was_active.reshape(-1)]
 
 
 def test_g6_v_thr_below_the_speed_leaves_the_lock_inactive():
     _resolved, wm = _built(car_4w_rwd_ackermann)
-    hook = StaticFrictionLock(brake_thr=0.3, v_thr=0.5)
-    assert _sfl_engaged(hook, wm) == [False] * wm.n_wheels
-    assert _sfl_f_long(StaticFrictionLock(brake_thr=0.3, v_thr=0.5), wm) == [0.0] * wm.n_wheels
+    hook = StaticFrictionLock(v_thr=0.5)
+    assert _sfl_engaged(hook, wm) == [False] * wm.n_wheels            # duck-typed, 0.7 m/s
+    assert _sfl_f_long(StaticFrictionLock(v_thr=0.5), wm) == [0.0] * wm.n_wheels
+    hook = StaticFrictionLock(v_thr=0.2)
+    assert _sfl_engaged(hook, wm, v=0.3, held=True) == [False] * wm.n_wheels
 
 
 def test_g6_v_thr_is_still_live_after_the_square_was_derived():
     """The gate for the `_v_thr_sq` hoist, in the shape `TankTuning` uses it
     (write v_thr on the constructed hook). Derive first, then write. Observed
-    through the engagement mask (see `_sfl_engaged`)."""
+    through the engagement mask (see `_sfl_engaged`) on a held wheel at
+    0.3 m/s: v_thr 0.5 -> engaged, 0.2 -> not, 0.5 -> engaged again."""
     _resolved, wm = _built(car_4w_rwd_ackermann)
-    hook = StaticFrictionLock(brake_thr=0.3, v_thr=0.5)
-    assert _sfl_engaged(hook, wm) == [False] * wm.n_wheels
-    hook.v_thr = 5.0                          # TankTuning's value
-    assert _sfl_engaged(hook, wm) == [True] * wm.n_wheels
+    hook = StaticFrictionLock(v_thr=0.5)
+    assert _sfl_engaged(hook, wm, v=0.3, held=True) == [True] * wm.n_wheels
+    hook.v_thr = 0.2
+    assert _sfl_engaged(hook, wm, v=0.3, held=True) == [False] * wm.n_wheels
+    hook.v_thr = 0.5
+    assert _sfl_engaged(hook, wm, v=0.3, held=True) == [True] * wm.n_wheels
 
 
 def test_g6_the_square_is_computed_in_double_and_stored_per_row():
@@ -305,7 +316,7 @@ def test_a_derived_cache_is_invisible_to_a_generic_attribute_sweep():
     from genesis_vehicle._hotset import prime_derived
 
     resolved, wm = _built(car_4w_rwd_ackermann)
-    hook = StaticFrictionLock(brake_thr=0.3, v_thr=0.5)
+    hook = StaticFrictionLock(v_thr=0.5)
     resolved.stability_hooks = list(resolved.stability_hooks) + [hook]
     roles = [resolved.steering, resolved.drivetrain, resolved.tire, hook]
     before = [set(vars(o)) for o in roles]

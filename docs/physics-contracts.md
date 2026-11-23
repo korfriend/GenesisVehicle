@@ -36,7 +36,9 @@ enforced by `genesis_vehicle.dynamics` (pure-Python, unit-tested in
 | G | explicit per-step lateral tyre gain on a wheel's mass share, `B_y·C_y·μ·g·DT / max(|v_long|, eps_v)` |
 | `g` | 9.81 m/s², `dynamics.DEADBEAT_G` |
 | SFL | `StaticFrictionLock` (§7.17) |
-| `brake_thr` | the brake level `StaticFrictionLock` must EXCEED to engage (0.3 in the `"control"` profile) |
+| `brake_thr` | REMOVED in v2.0.4: through 2.0.3, the brake level `StaticFrictionLock` had to EXCEED to engage (0.3 in the `"control"` profile) |
+| `brake_rem` | v2.0.4 `PipelineContext` field: `B_rem` per wheel, read-only for hooks; the lock engages on `brake_rem > 0` (§7.22) |
+| `k_eff` / β / f | v2.0.4: the lock's capped per-wheel stiffness / its planar rigid-body factor / its cap factor `min(1.0, 1.5/β)` (§7.22) |
 | MPPI | Model Predictive Path Integral (a sampling-based controller that copies hook state between rollouts) |
 | ζ / θ | damping ratio / slope angle |
 | MPC / NMPC / LMPC | Model Predictive Control / its nonlinear (do_mpc + IPOPT) and linear (OSQP) implementations in `PathFollower` (§7.18) |
@@ -78,7 +80,8 @@ B_rem     = T_brake - stop_T                 if held, else 0
 - Enforced: brake + drive + resisting torque never reverse ω in one step
   (`test_n10_brake_drive_and_rr_never_reverse_omega`, random grid). Not
   bounded by it: the tyre friction torque, the `LowSpeedRegularizer` ω pull,
-  the `StaticFrictionLock` ω override.
+  a hook's `ctx.omega_override` (through 2.0.3 `StaticFrictionLock` set one on
+  every engaged wheel; since v2.0.4 no SDK hook does).
 - **A held WHEEL is not a vehicle at rest (corrected in v2.0.2).** This
   section and the docs that cite it said the brake "holds a stopped wheel" and,
   in places, that braked stops "hold" on a slope, without saying that the
@@ -91,6 +94,18 @@ B_rem     = T_brake - stop_T                 if held, else 0
   stops in 2.2 s (impl-review probe, CPU/WSL2, genesis-world 1.4.5, dt 0.025 ×
   4, plane μ 1.0; identical on 2.0.1; CHANGELOG 2.0.2 §7). The measured slope
   holds of v1.8.0 were all at brake 1.0. A fix is planned for a later release.
+  **Correction (v2.0.4): the mechanism in this bullet was wrong, and the fix is
+  in 2.0.4.** The chassis does not "slide on the tyre's slip": on a held wheel
+  the held-wheel deadbeat D (§7.16) limits `F_long` to
+  `s·(N/g)·|v_long|/DT`, a damper with zero force at zero speed, so with no
+  position hold the vehicle creeps at `v* = g·tan θ·DT/s`, s at the slope's
+  wheel loads (5°: 0.02497 m/s
+  predicted, 0.024974 measured; halving DT halves it). Since v2.0.4
+  `StaticFrictionLock` engages on every wheel the brake holds (`B_rem > 0`) at
+  any pedal (§7.22): reference car, 5° downhill, brake 0.3 now rests (4e-6
+  m/s; 2.0.3 0.02497 m/s; impl-review, same conditions, CHANGELOG 2.0.4 §7). A
+  held WHEEL is still not, by itself, a vehicle at rest: the vehicle rests
+  where the lock takes over, and only if the brakes can hold the load.
 
 **What this section said through v1.7.0, and why it no longer holds.** It gave
 `T_brake_eff = T_brake * tanh(omega / smoothing_scale)` inside
@@ -284,7 +299,9 @@ parameter-fit sees a force that may be reduced from its raw output near
 rolling. Where the clamp binds on the RAW tyre force, `F_lat` and `kappa` are
 taken at the TRANSMITTED force (`TireModel.at_long_force`, v1.8.0 — the
 friction ellipse of the force that reaches the road, not of the raw request).
-The interval is exposed read-only to POST_TIRE hooks as `ctx.F_long_bounds`.
+The interval is exposed read-only to POST_TIRE hooks as `ctx.F_long_bounds`,
+and since v2.0.4 the `B_rem` that widens it as `ctx.brake_rem` (a detached
+copy, §7.22).
 
 **What this section showed through v1.7.0, and why it changed.** The clamp
 used `omega_nofric = omega' + DT·(T_drive - T_brake_eff)/I_wheel` with the
@@ -532,7 +549,10 @@ earlier release.** What the tests prove about it, since v1.8.0, exactly:
   6.018499851226807). A regression lock for later releases, not evidence that
   1.8.0 kept the old path — it did NOT: 1.8.0 moved the driving rollout
   (5.920469284057617 → 6.018499851226807 contact path, 5.224289894104004 →
-  5.349795818328857 full profile; CHANGELOG 1.8.0 §9).
+  5.349795818328857 full profile; CHANGELOG 1.8.0 §9). It passes unchanged on
+  v2.0.4 (the 2.0.4 suite; the reference car's lock spring is uncapped at dt
+  0.025); that is a regression check of this rollout only, not evidence about
+  the 2.0.4 lock.
 
 **What this paragraph said through v1.7.0:** "`point` … is the single-ray
 behaviour of every earlier release, bit-for-bit" on the driving rollout. That
@@ -830,9 +850,18 @@ reset path touches it — not `VehiclePhysics.reset`, not
 `MultiVehiclePhysics.reset(vehicle_ids=)`. A reset-then-reposition-then-brake
 sequence can therefore reuse a stale anchor for a moment, pulling the vehicle
 toward where it used to be held. Since v1.8.0 also: a stale `_rest = True`
-(with the brake still above `brake_thr` and the contact below `v_thr`) skips
-the rest test and re-applies the hold at once on the stale anchor, and a stale
-`_v_prev_sq` can trigger one early creep takeover. Clear every `STATE_ATTRS`
+(with the wheel still engaged — through 2.0.3 "the brake still above
+`brake_thr`", since v2.0.4 the brake still holding the wheel, `B_rem > 0`, at
+ANY pedal — and the contact below the engage speed) skips the creep test and
+re-applies the hold at once on the stale anchor, and a stale `_v_prev_sq` can
+trigger one early creep takeover. The anchor is velocity-integrated, so a
+teleport does not displace it, and the force is bounded by μN per wheel.
+Measured for v2.0.4 (SDK-level emulation of the OSC server's L2 / L3 reset
+call shapes, reference car resting on 5° at brake 0.3, teleported +10 m with
+the brake held, no state clear; implementation, CPU/WSL2, genesis-world 1.4.5,
+dt 0.025 × 4, plane μ 1.0): at most 0.827 mm (to flat) / 2.056 mm (to the
+opposite 5° slope) of displacement, at rest within 2 s; with a manual
+`STATE_ATTRS` clear 0.298 / 1.498 mm. Not run through the live server. Clear every `STATE_ATTRS`
 entry yourself after a reset that teleports a braked vehicle. Separately
 ticketed; the fix needs the hooks to carry row-indexed reset. (This section
 cited `strategies/stability.py:204-206` for the anchors through v1.7.0; that
@@ -1130,8 +1159,9 @@ fields have already been reset. In `apply_post_tire`, `ctx.omega` is `omega_t`
 projection; through v1.7.0 it was ω′, after the resisting torque only), and
 `PipelineResult.kappa` / `last_kappa` are the slip at `omega_e` (`omega_t` clipped to ±`omega_max`, the speed the tyre is evaluated at) — replaced by
 `kappa_eq`, the slip of the TRANSMITTED force, wherever the clamp binds
-(v1.8.0). Both methods are looked up with `getattr`, so a duck-typed hook
-lacking one is skipped for that phase.
+(v1.8.0). Since v2.0.4 `ctx.brake_rem` (`B_rem`, §7.1) is `None` in
+`apply_pre_tire` and set in `apply_post_tire` (§7.22). Both methods are looked
+up with `getattr`, so a duck-typed hook lacking one is skipped for that phase.
 
 **Not covered.**
 
@@ -1187,6 +1217,26 @@ SFL:  damper force <= s * (N/g) * |v| / DT                  (§7.17)
   demo car: 3.9). `s` scales every bound so no PLANAR mode overshoots.
   Measured `s` at static load: HJW demo car 0.254, reference car 0.856,
   reference tank 0.935, `tests/data/low_yaw_inertia_car.urdf` 0.288.
+  **Incomplete through v2.0.3, qualified in v2.0.4:** this bullet's "no planar
+  mode overshoots" was stated without saying that it covers only the DAMPER
+  side (modal damper number b ≤ 1, for moment-balanced loads). It does not
+  bound `StaticFrictionLock`'s spring, whose yaw-mode spring number is
+  about `c / s` for a per-wheel `c`: on the low-yaw car above (s 0.288) the
+  lock cycled in yaw at about 0.27 rad/s under a full brake on 2.0.3 with every
+  wheel's `c` below 1. The spring is bounded since v2.0.4 by the cap of §7.22.
+- **D is a damper, so a held wheel alone does not stop a vehicle on a slope**
+  (added v2.0.4). D bounds a held wheel's `F_long` by a force proportional to
+  the contact slip speed, zero at zero speed. With nothing holding position, a
+  braked vehicle on a slope therefore settles where D balances gravity, at
+  `v* = g·tan θ·DT/s` with `s` at the slope's wheel loads (≈ `g·sin θ·DT/s`
+  with `s` at the static flat load, 0.856 on the reference car — exact when
+  s < 1 at both loads and every wheel load scales by cos θ; this is the
+  arithmetic that gives the 0.02497 below) (planner measurement on 2.0.3, reference car, CPU/WSL2,
+  genesis-world 1.4.5, DT 0.025 × 4, plane μ 1.0: 5° predicted 0.02497,
+  measured 0.024974 m/s; 3° 0.0150 / 0.014998 m/s; halving DT halves it). What
+  holds position is `StaticFrictionLock`'s spring after its creep test detects
+  this equilibrium (§7.17, §7.22); through 2.0.3 it engaged only above brake
+  0.3, so every lighter brake crept at `v*`.
 - **Where Y binds.** Where the tyre's own explicit gain exceeds `s`: at static
   load only below `B_y·C_y·μ·g·DT·(N/N_static)/s` (reference car 2.98 m/s at
   DT 0.025, μ 1.0); for a low-yaw-inertia vehicle that `v*` is high (8.9 m/s
@@ -1245,26 +1295,40 @@ review) the Truck6w and AWD car.
   speed. On 0.08 m bumps no dt-0.025 tree is within 67% of an unconverged
   reference. Nothing here shows Y closer to the reference.
 
-## 7.17 `StaticFrictionLock` holds the point where the contact came to rest (v1.8.0)
+## 7.17 `StaticFrictionLock` holds the point where the contact came to rest (v1.8.0; engage rule v2.0.4)
 
-ENGAGES per env, per wheel when `brake > brake_thr` and planar contact speed
-`sqrt(v_long² + v_lat²) < v_thr`. From the first engaged step the wheel's ω is
-forced to 0 (the ω override, unchanged). The lock REPLACES the tyre force only
-after the contact is at REST, per wheel:
+**Since v2.0.4** the lock ENGAGES per env, per wheel where the brake holds the
+wheel this step (`ctx.brake_rem > 0`) and the planar contact speed
+`sqrt(v_long² + v_lat²)` is below `min(v_thr, 0.5)`, at any pedal; it never
+forces ω; it REPLACES the tyre force only after a creep equilibrium — the
+held-wheel deadbeat binds on the raw tyre force (`|ctx.F_long| >=
+ctx.F_long_deadbeat`) and the planar speed did not fall this step (`v² >=
+CREEP_RATIO · v_prev²`, `CREEP_RATIO` 0.96). This is how a stop is detected:
+the deadbeat-limited brake balances the load at `v* = g·tan θ·DT/s` with `s`
+at the slope's wheel loads (§7.16), ≈ `g·sin θ·DT/s` with `s` at the static
+(flat) load (equal when s < 1 at both loads and every wheel load scales by
+`cos θ`) — 0.050 m/s at 10°, 0.098 m/s
+at 20° on the reference car (s 0.856; derived). Full contract of the
+2.0.4 rule, the spring cap and what is not covered: §7.22.
 
-- planar contact speed `< StaticFrictionLock.REST_SPEED` (0.05 m/s), or
-- a creep equilibrium: the held-wheel deadbeat binds on the raw tyre force
-  (`|ctx.F_long| >= ctx.F_long_deadbeat`) and the planar speed did not fall
-  this step (`v² >= CREEP_RATIO · v_prev²`, `CREEP_RATIO` 0.96). This is how a
-  downhill stop is detected: the deadbeat-limited brake balances gravity at
-  `v ≈ g·sinθ·DT/s` (0.050 m/s at 10°, 0.098 m/s at 20° on the reference car).
+**What this paragraph said through v2.0.3, and why it changed.** "ENGAGES per
+env, per wheel when `brake > brake_thr` and planar contact speed `< v_thr`. From
+the first engaged step the wheel's ω is forced to 0. The lock replaces the tyre
+force only after the contact is at REST: planar contact speed
+`< StaticFrictionLock.REST_SPEED` (0.05 m/s), or a creep equilibrium." That was
+the 2.0.3 code; it had two defects, both removed in v2.0.4: at a pedal ≤ 0.3 the
+lock never engaged, so a braked vehicle crept down any slope at `v*`; above 0.3
+the forced ω = 0 slid a vehicle whose brake could NOT hold it on locked wheels
+(reference car 10°, brake 0.31: 0.0404 m/s, ω 0) and held wheels the drive
+should have turned (§7.22). `brake_thr` and `REST_SPEED` are removed.
 
 Before rest the anchor follows the contact and the brake (§7.1, D) does the
 stopping. The takeover step anchors at the END of the step, so only the damper
 acts on it. The first step after engagement on which `s_eng·v_long <= 0` (the
 contact stopped or reversed) re-anchors the longitudinal spring at the contact.
-The damper is `max(k_damp, 2·sqrt(k_spring·N/g))` (at least critical for the
-wheel's mass share; `k_damp` is a floor) and its force is bounded by
+The damper is `max(k_damp, 2·sqrt(k_eff·N/g))` (at least critical for the
+wheel's mass share; `k_damp` is a floor; `k_eff` is `k_spring` capped per wheel
+since v2.0.4, §7.22 — through 2.0.3 it was `k_spring`) and its force is bounded by
 `s·(N/g)·|v|/DT`. The hold force is projected onto the friction ellipse and
 then limited to `ctx.F_long_bounds`, what the wheel can transmit this step
 including the brake capacity left; where limited, the anchor moves so the
@@ -1275,9 +1339,9 @@ ORed into `ctx.hold_applied` and are exempt from D and Y.
 |---|---|---|
 | No back-slide after a stop: back-travel ≤ 2 mm and vmin ≥ -0.01 m/s after the first \|v\| < 0.05 m/s | measured on the 14-row matrix of CHANGELOG 1.8.0 §6.2 (car and tank; brake 0.5 / 1.0; both pedals; from reverse; 10° downhill), CPU, dt 0.025 x 4. **One accepted exception:** car throttle 1.0 + brake 1.0 reaches -0.01036 m/s for one step with zero back-travel. Car 20° downhill: -0.0208 m/s (from 3 m/s, 0 mm) and -0.0258 m/s (from rest, 0.81 mm), reported | `test_n17_no_back_travel_or_reverse_speed_after_a_stop` (floor -0.0104 on the exception row) |
 | The lock holds where the contact came to rest | measured (tank brake 1.0 from ±5 m/s: back-travel from the furthest point ≤ 0.5 mm; with A disabled 0.98 mm) | `test_n20_the_lock_holds_where_the_tank_came_to_rest` |
-| A downhill stop is taken over and held | measured at **brake 1.0**: car 10° / 20° from 3 m/s stop in 0.95 / 1.575 s, hold ≤ 6e-6 m/s. **Only above `brake_thr`** — this row did not say so through v2.0.1 (see below) | `test_n12_*`, `test_n18_*` |
+| A downhill stop is taken over and held | measured at **brake 1.0**: car 10° / 20° from 3 m/s stop in 0.95 / 1.575 s, hold ≤ 6e-6 m/s. Through 2.0.3 **only above `brake_thr`** (this row did not say so through v2.0.1). Since v2.0.4 at any pedal whose brake can hold the load: the 420-row car slope matrix of CHANGELOG 2.0.4 §7.2 (REST 276 / 276, signed and gear inputs; implementation) | `test_n12_*`, `test_n18_*`, `tests/test_light_brake_hold.py` |
 | ~~"The vehicle truly stops when external force ≤ μ·N"~~ | **wrong since v0.5.7**: the hold is also limited by what the wheel can transmit — by the brake capacity since v1.8.0 (the `tank_skid_belt` preset, 75 kN of brake, does not hold 10°: 99 kN slope load) | SFL docstring, corrected in place |
-| The explicit spring is stable | derived, not measured: `c + 2b < 4` and `b < 2` (`c = k_spring·DT²/m_share`, `b = D·DT/m_share`); the damper bound keeps `b <= s`, so `c < 4 - 2s` suffices — a wheel share above about 156 kg at the defaults and DT 0.025 (137 kg at s 0.856) | `StaticFrictionLock` docstring |
+| ~~The explicit spring is stable: `c < 4 - 2s` suffices~~ | **wrong** (corrected in v2.0.4). The per-mode condition `c + 2b < 4`, `0 < b < 2` is right, but this row applied it to each wheel as an independent mass share. In the planar YAW mode the damper bound puts modal b at 1 and the spring number is about `c / s`, set by mass and yaw inertia, not by the wheel loads: `tests/data/low_yaw_inertia_car.urdf` (s 0.288, every wheel's `c` 0.93-0.95) cycled in yaw at about 0.27 rad/s under a full brake on 2.0.3 (impl-review, CPU/WSL2, genesis-world 1.4.5, DT 0.025 × 4, plane μ 1.0). Since v2.0.4 the spring is capped (§7.22); that bounds λ(K) of the planar model only and is NOT a stability guarantee | `StaticFrictionLock` docstring (corrected) |
 
 **State.** `StaticFrictionLock.STATE_ATTRS` lists every per-wheel tensor
 (`_d_long`, `_d_lat`, `_was_active`, `_s_eng`, `_rested`, `_rest`,
@@ -1285,13 +1349,27 @@ ORed into `ctx.hold_applied` and are exempt from D and Y.
 rollouts) must copy all of them; a hard-coded three-name list is silently wrong
 since v1.8.0. The state survives every reset (§7.12 known gap). Not covered:
 the A6 thresholds were chosen on the reference car, tank and HJW demo car only;
-a light brake on a shallow slope still creeps (car 3°, brake 0.1: 0.0173 m/s);
 on a low-yaw-inertia vehicle the hold keeps a sub-mm/s yaw jitter (HJW demo car
 brake phase: 526 / 792 flips, final speed 0.0004 m/s; 1.7.0 612 / 792,
-0.0024 m/s).
+0.0024 m/s). Through v2.0.3 this paragraph also said "a light brake on a
+shallow slope still creeps (car 3°, brake 0.1: 0.0173 m/s)" — the creep of
+§7.16 below brake 0.3; since v2.0.4 the reference car on 3° at brake 0.1 rests
+(an EITHER row of the acceptance matrix, reported, not gated: the brake torque
+is about 1.02 × the slope's demand there — ρ 1.023, derived in the release
+plan, not measured). The HJW yaw-jitter figures are v1.8.0
+measurements; on v2.0.4 the HJW demo car (now capped by the rigid-body term,
+§7.22) rested in impl-review's 25 s braked holds at DT 0.025 × 4 substeps.
 
-**At brake ≤ `brake_thr` the lock does not engage, so a braked vehicle on a
-slope does not come to rest (corrected in v2.0.2).** The sentence above
+**Superseded in v2.0.4 — kept as the 2.0.3 record; its mechanism sentence
+was wrong.** The paragraph below explains the creep as the chassis settling "at
+the slip speed where the tyre force equals gravity". The measured mechanism is
+the held-wheel deadbeat D acting as a damper (§7.16): `v* = g·tan θ·DT/s`
+(s at the slope's wheel loads). Since
+v2.0.4 the lock engages at any pedal on a brake-held wheel and the 5° / brake
+0.3 row rests (§7.22).
+
+**(2.0.3 record) At brake ≤ `brake_thr` the lock does not engage, so a braked
+vehicle on a slope does not come to rest (corrected in v2.0.2).** The sentence above
 presented the slope creep as an effect of a LIGHT brake; that was incomplete.
 The lock's engage test is strict (`brake > brake_thr`, 0.3 in `"control"`), so
 at brake 0.3 nothing takes over the tyre force: the brake holds every wheel at
@@ -1587,7 +1665,7 @@ through them `MultiVehiclePhysics.step` and `VehicleScene.step`.
 
 | guarantee | enforced by | scope |
 |---|---|---|
-| no input of a step carries a gear → the 2.0.1 numbers | `encode_requests` returns `None`; the drivers then run their 2.0.1 lines in the 2.0.1 order | the four paths above; byte-identity measured on nine scenes (`tests/test_legacy_inputs_bit_identity.py`, platform-gated) |
+| no input of a step carries a gear → the 2.0.1 gear-free code path | `encode_requests` returns `None`; the drivers then run their 2.0.1 lines in the 2.0.1 order | the four paths above. **Through 2.0.3 this row said "the 2.0.1 numbers"**, byte-identity measured on nine scenes against `tests/data/legacy_inputs_2_0_1.json`. Since v2.0.4 the physics of a braked wheel changed for every input (§7.22): the gear-free path is still the 2.0.1 path, but a scene with a brake no longer reproduces the 2.0.1 numbers; `tests/test_legacy_inputs_bit_identity.py` (platform-gated) now asserts the 2.0.4 capture `legacy_inputs_2_0_4.json`, and the 2.0.1 file is kept but no longer asserted |
 | the gear is read off the caller's ORIGINAL input object, before `from_unified` | `getattr(inputs, "gear", None)` at the head of `VehiclePhysics.step`; the batched kind reads the input list directly | a custom `InputType.from_unified` that drops the field does not switch gear mode off |
 | on a gear row the drivetrain sees `thr_eff`; hooks see it as `ctx.throttle`; `ctx.gear` holds the post-shift gear | `effective_throttle`, `with_throttle` (`dataclasses.replace`, the caller's object untouched) | `ctx.gear` is `None` on a step with no gear; set before the `PRE_LOOP` hooks |
 | every wheel's `last_T_drive · g >= 0` on a gear row, g = the gear engaged AFTER this step's shift decision | `clamp_drive_to_gear`, after `update_gear`, before `compute_wheel_step` | custom drivetrains included — so a custom non-`PerSide` drivetrain's deliberate opposite-sign wheel torque is ZEROED in gear mode; driving in the gear's direction while rolling the other way (hill start) is allowed. `DifferentiablePlant`'s unroll is signed and not covered |
@@ -1599,8 +1677,10 @@ through them `MultiVehiclePhysics.step` and `VehicleScene.step`.
 | the engaged gear is +1 after a reset of its rows, and carried across a config rebuild | `VehiclePhysics.reset` (both branches; reached by `MultiVehicleKindPhysics.reset(rows=)`, `MultiVehiclePhysics.reset(vehicle_ids=)`, `VehicleScene.reset()`), `RUNTIME_STATE_ROW_ATTRS` (§7.12) | the OSC server's L3 reset uses `set_pos` / `set_quat` and does not touch it (the server never sends a gear) |
 | a step with no gear request leaves the stored gear as it was | `update_gear` runs only on gear steps; legacy rows of a mixed kind are `torch.where`-ed through | `gear` / `gear_list()` are meaningful only for a vehicle driven with gear inputs |
 
-**Not enforced:** that a braked vehicle on a slope comes to rest — at brake ≤
-`brake_thr` it slides with its wheels held (§7.1, §7.17); that a vehicle driven
+**Not enforced:** that a braked vehicle on a slope comes to rest — through
+2.0.3 at brake ≤ `brake_thr` it crept with its wheels held (§7.1, §7.17); since
+v2.0.4 the lock engages at any pedal where the brake holds a wheel, and whether
+the vehicle rests is measured, not enforced (§7.22); that a vehicle driven
 with `GearCommand.signed()` obeys the shift rule; anything about the friction
 limit (the brake model below is linear only below it).
 
@@ -1729,7 +1809,7 @@ planner) and the K-turn methods of `control/path_follower.py` (`_kt_decide`,
 
 | guarantee | enforced by | scope |
 |---|---|---|
-| `mpc_kturn=None` (the default): no K-turn code runs; the 2.0.2 commands | every hook checks `self._kturn is not None` first (`_init_mpc`, `_reset_budgets`, `step`, `finish`, `_desired_gear`, the `CMD` branch and episode dispatch of `_plan_mpc`, `_abort`, `_enter_align`, `set_path`, `_plan_pd`) | measured per step on 51 Genesis runs and the fixture `tests/data/kturn_off_2_0_2.json`; the always-present additions are `FollowerPlan.steer_cmd = None` and the zero `mpc_stats["kturn"]` |
+| `mpc_kturn=None` (the default): no K-turn code runs; the 2.0.2 commands | every hook checks `self._kturn is not None` first (`_init_mpc`, `_reset_budgets`, `step`, `finish`, `_desired_gear`, the `CMD` branch and episode dispatch of `_plan_mpc`, `_abort`, `_enter_align`, `set_path`, `_plan_pd`) | measured per step on 51 Genesis runs (on the 2.0.3 tree) and the fixture `tests/data/kturn_off_2_0_2.json`; the always-present additions are `FollowerPlan.steer_cmd = None` and the zero `mpc_stats["kturn"]`. A claim about the FOLLOWER for the same inputs: since v2.0.4 the vehicle brakes differently at low speed (§7.22), so a closed loop no longer reproduces the 2.0.2 / 2.0.3 runs step for step (104 closed-loop runs on 2.0.4: terminal modes unchanged, `DONE` within 0.175 s; implementation, CHANGELOG 2.0.4 §7.2) |
 | a `KTurnParams` needs gear mode and the heading gate | constructor, after `_check_command_mode`, before any attribute is set (`ValueError`); `_check_kturn` for the type; `mpc_kturn` in the MPC-only list (`ValueError` with `"off"`, even as `None`) | — |
 | decided once per forward block, at its first R-ALIGN entry, after the `align_budget` check | `_enter_align` → `_kt_decide` (`_kt_block`), reset by `_reset_budgets` (`set_path`) | later entries of the block, and the rest of the block after a FALLBACK or release, are the 2.0.2 alignment; across `set_path` unbounded |
 | no K-turn outside the domain: `abs(v_long) <= 4.5` m/s and remaining bend `<= 45°` | `kturn.trigger`, `kturn.remaining_bend` (sum of `abs(wrap(Δyaw))` over the segment headings from the projection segment to the block end) | heading jitter in the path adds to the bend and can disable it |
@@ -1787,3 +1867,127 @@ window is 80 settled driving calls, 2.0 s only if uninterrupted (`SHIFT` /
   derived; measured on CPU, flat ground, μ 1.0, the reference car only — slopes,
   low μ, `single_scene`, `DifferentiablePlant` as stage 2, GPU, other vehicles,
   `n_envs > 1` and an external reset during a leg were not measured in Genesis.
+
+## 7.22 `StaticFrictionLock`: pedal-free engagement, `brake_rem`, and the spring cap (v2.0.4)
+
+A vehicle-physics contract for the `"control"` profile's lock (`raw` /
+`research` profiles carry no lock and are not covered). Measurements and
+conditions: CHANGELOG 2.0.4; the v1.8.0 rest-anchor mechanics (anchor, damper,
+ellipse, transmit bound) are §7.17.
+
+| abbr | meaning |
+|---|---|
+| SFL | `StaticFrictionLock` |
+| B_rem | brake torque left on a wheel after `dynamics.brake_projection` (N·m, §7.1); `ctx.brake_rem` |
+| T_d / T_b | per-wheel drive / brake torque (N·m) |
+| H / U | `Σ max(T_b − abs(T_d), 0)` / `Σ max(abs(T_d) − T_b, 0)` over the wheels at rest |
+| m_i | `WheelMeta.static_mass_share`, per-wheel static mass share (kg) |
+| M / I_cg | vehicle mass (kg) / yaw inertia about the centre of mass (kg·m²) |
+| N_static | a wheel's load at static equilibrium on level ground, `m_i·g` |
+| D / s | the held-wheel one-step deadbeat on `F_long` / its rigid-body scale `min(1, I_cg / Σ (N_i/g)ρ_i²)` (§7.16) |
+| n | the vehicle's wheel count |
+| AC-2 | the 2.0.4 acceptance criterion "no counter-rotation on brake-dominated wheels" (CHANGELOG 2.0.4 §7.2) |
+| β | `WheelMeta.static_rigid_factor.beta`, largest eigenvalue of `S v = β P v`, `S = Σ m_i J_iᵀJ_i` (planar contact Jacobians), `P = diag(M, M, I_cg)` |
+| f | `min(SPRING_C_MAX, SPRING_C_RB / β)` = `min(1.0, 1.5 / β)` |
+| k_eff | `min(k_spring, f · m_i / DT²)` per wheel (N/m) |
+| c / b | spring number `k·DT²/m` / damper number `D·DT/m` of one mode |
+| λ(K) | largest generalised eigenvalue of `K v = λ P v` |
+
+### 7.22.1 Enforced (code path named)
+
+| guarantee | enforced by | scope |
+|---|---|---|
+| a wheel engages iff `brake_rem > 0` and `v_long² + v_lat² < min(v_thr, 0.5)²` | `StaticFrictionLock.apply_post_tire`, `_v_thr_squared` / `_engage_speed` (`V_ENGAGE_MAX` 0.5) | the pedal is not read. A ctx without `brake_rem` (duck-typed) engages nothing. `v_thr` above 0.5 does not widen the window (`TankTuning`'s 5.0 acts as 0.5); a tensor `v_thr` is clamped |
+| `brake_rem > 0` only where the brake holds the wheel this step (not conversely) | `dynamics.brake_projection` (`held = T_b > 0 and T_b ≥ abs(ω_d)·I/DT`, `B_rem = T_b − abs(ω_d)·I/DT` on held wheels, else 0) | a held wheel whose brake has no torque to spare (`T_b` exactly equal to the stopping torque) has `B_rem` = 0 and does NOT engage the lock; at standstill that is an exact drive == brake tie |
+| the force is replaced only after the creep test (held-wheel deadbeat binds on the raw tyre force AND the planar speed did not fall this step) | `apply_post_tire` (`_rest`) | no rest-speed takeover (the 0.05 m/s `REST_SPEED` path was removed). Exceptions from state that survives a reset (§7.22.3, §7.12 known gap): a stale `_rest` re-applies the hold without a new creep test; a stale `_v_prev_sq` can trigger one early takeover |
+| the lock never forces ω | `apply_post_tire` sets no `ctx.omega_override` | the pipeline feature stays for user hooks |
+| `ctx.brake_rem` is `None` in `apply_pre_tire` and a detached copy of `B_rem` in `apply_post_tire` | `_pipeline.compute_wheel_step` (reset with the other per-step fields; set with `F_long_bounds`) | N·m, ≥ 0, pre-coupling, NOT masked for airborne wheels; not observable on the first-step protection step (no hook is called); writes are not detected — the pipeline keeps its own tensor, but a LATER hook in the list (the lock included) sees a written value |
+| `brake_thr` and `REST_SPEED` are gone | constructor (`TypeError` for `brake_thr=`, any positional argument, any unknown keyword), raising properties on the instance and, through a metaclass, on the class (`AttributeError` on read / write / delete) | a ≤ 2.0.3 pickled hook unpickles; reading its `brake_thr` raises |
+| per wheel `k_eff_i ≤ SPRING_C_MAX · m_i / DT²`; and `λ(K_eff)·DT² ≤ SPRING_C_RB` for the PLANAR (x, y, yaw) model, for any subset of grounded wheels and any steer angle | by construction of `k_eff` in `StaticFrictionLock._compute_k_eff` (no eigenvalue is computed at run time); three `AssertionError`s: β not finite or < 1 − 1e-6, a cap not positive and finite, a `k_eff` not positive | only where BOTH `static_mass_share` and `static_rigid_factor` exist; β ≤ 1.5 → `f` is `SPRING_C_MAX` itself, bit-for-bit the per-wheel cap; no wheel capped → `k_eff` is the `k_spring` object and the lock computes the 2.0.3 expression; to float32 rounding of the stored share (about 1e-7 relative). Verified over every wheel subset and steer in [−0.6, 0.6] rad on five fixtures (`tests/test_sfl_rigid_bound.py`) |
+| `m_i` and β are computed once per driver, on its first step, from the build-time link masses | `VehiclePhysics._ensure_static_mass_share` (top of `step`, also when `yaw_inertia` was preset; on a batched kind's proto in `MultiVehicleKindPhysics.step`), `dynamics.static_mass_shares`, `dynamics.rigid_share_factor`; `DifferentiablePlant` triggers it at bind | β never reads `wheel_meta.yaw_inertia`; a batched kind uses `entities[0]`; runtime `set_mass` / per-env masses are not reflected; `DT` is `ctx.dt` only |
+| the listed failure paths are logged once and do not raise: `AttributeError` or `ValueError` from the share read and solve, and `ValueError` from β (any other exception type propagates) | `_ensure_static_mass_share`: share `ValueError` / `AttributeError` → share `None` → UNCAPPED, one `[genesis_vehicle:sfl-cap]` line; equal-share fallback (a share ≤ 5 % of `M/n` or non-finite) → one line; β `ValueError` → β `None`, per-wheel cap only, one line | `rigid_share_factor` raises for β < 1 − 1e-6, but shares summing to LESS than the mass are not detected in general (a probe at shares × 0.5 on the low-yaw car gave β 1.734 and no error; no SDK path produces such shares) |
+| one cap report per process per (wheel meta, `k_spring`, DT), naming the binding term | `_compute_k_eff` + the module registry (`register_sfl_cap_name`) | a plant's prediction copies share the wheel meta and do not re-print |
+
+### 7.22.2 Brake does not override drive (a user decision)
+
+Per wheel, the brake holds the wheel while `T_b` exceeds that wheel's drive
+demand; where `abs(T_d) > T_b`, `B_rem = 0` and the wheel turns; the lock does
+not engage there. Whether the VEHICLE moves follows from H vs U. Through 2.0.3
+the forced ω = 0 held every engaged wheel whatever the drive. `tank_skid_belt`
+(preset torques, `PerSide` drivetrain): every wheel of a side gets the WHOLE
+side torque, `abs(T_d) = t_drive_max·abs(gear_cap·throttle ± steer)` =
+`30000·abs(0.3·throttle ± steer)` N·m, while the brake is split over all n
+wheels, `T_b = t_brake_max·brake/n` = `30000·brake/n` N·m
+(`strategies/drivetrain.py`). So at brake 1.0 and standstill a wheel turns when
+`abs(steer) > 1/n` or `throttle > 1/(0.3·n)`. On the 10-wheel reference tank
+(`tests/data/tank_ref.urdf`): `T_b = 3000·brake`, thresholds steer 0.1 /
+throttle 0.333 (a 6-wheel tank: 5000 N·m, steer 0.15 holds; a 14-wheel tank:
+2143 N·m, steer 0.08 pivots — derived). Measured on the 10-wheel reference
+tank: brake 1.0 + steer 1.0: −409.3° of yaw
+in 5 s (2.0.3: −0.09°); brake 1.0 + throttle 0.5: 3.614 m (2.0.3: 0.122 m)
+(impl-review, CPU/WSL2, genesis-world 1.4.5, DT 0.025 × 4, plane μ 1.0, 60
+braked settle steps). Server mapping `maxTorque` / `maxBrake` move the
+boundary. "No counter-rotation" (AC-2) is a measurement on
+brake-dominated wheels and excludes exact ties, where the wheel is free.
+
+### 7.22.3 Not enforced / not covered
+
+- **Stability.** The cap bounds λ(K) of the planar model only. A mode is
+  linearly stable iff `c + 2b < 4` and `0 < b < 2`; the deadbeat scale gives
+  b = 1 only for planar modes under moment-balanced loads, and then
+  `C_RB` = 1.5 means `1 − λ·DT² ≥ −0.5` (oscillation amplitude per step ≤ 0.5
+  on the oscillating side). `C_RB` = 1.5 is the user's constant, not derived
+  (any value in about 1.17-2 leaves the reference vehicles unchanged; one
+  constant, 1, is planned for 2.1.0 — a plan, not a commitment). NOT covered:
+  roll / pitch-coupled modes (a light 10-wheel tank's roll-coupled damper mode
+  has modal b 1.257 and a linear 6-DOF spectral radius 1.31 before and after
+  v2.0.4 — a linear computation, not a measurement; measured holds on that
+  vehicle keep a peak speed up to 4.13e-2 m/s at ≤ 0.193 mm net over 30 s and
+  are not called rest); loads not in moment balance; a wheel-load sum away from
+  M·g (landing, bump stop: the translational damper number `s·ΣN/(g·M)`
+  exceeds 1; pre-existing); a caller-supplied `wheel_meta.yaw_inertia` whose
+  I_cg differs from the entity's (β uses the entity's, the damper the
+  caller's; a preset `YawInertia(inf, ...)` on `low_yaw_inertia_car.urdf`
+  still cycles at 0.260 rad/s at flat brake 0.3 — implementation, not gated);
+  mixed-mass batched kinds; one wheel in contact.
+- **A user-written `static_mass_share` after the first step keeps the OLD β**:
+  set `static_rigid_factor` to `None` (per-wheel cap only) or to a
+  `dynamics.rigid_share_factor` of the new shares. `load_runtime_state` does
+  not refresh either (a `mark_config_dirty()` rebuild builds a new wheel meta
+  and recomputes both).
+- **Hold offset.** A capped wheel holds with deflection
+  `F/k_eff ≤ μN/k_eff = μ·g·DT²/f · (N/N_static)`: 6.1 / 10.9 / 15.7 mm at
+  DT 0.025 / 1/30 / 0.04 where f = 1 and μ = 1; 14.2 mm at 0.025 on the low-yaw
+  car (f 0.4324). Its 36.3 mm at 0.04 is a formula value only: that URDF
+  diverges at DT ≥ 0.03 with no hooks and no brake on 2.0.3 as well
+  (pre-existing, independent of the lock, cause not established). The bound
+  covers spring deflection per unit of static load, not total post-rest travel
+  (an ungated 3° / brake 0.1 row on the low-yaw car drifted 22.1 mm after first
+  coming to rest).
+- **That a braked vehicle rests.** Measured, not enforced: on the reference
+  car (420-row slope matrix), tank, truck demo URDF, server generic car, a
+  266 kg light car (DT 0.025 / 1/30 / 0.04) and the low-yaw car (DT 0.02 /
+  0.025); CPU, plane μ 1.0, gravity-tilt slopes. Nothing about GPU, μ ≠ 1,
+  inclined meshes, `swept_envelope`, brake 0, an external push.
+- **Reset.** The lock's state survives every reset (§7.12 known gap); since
+  v2.0.4 the stale-anchor path is reachable at any pedal. No engage / release
+  hysteresis. `_rest` can latch on an airborne braked wheel (no force there;
+  a 1 m drop at brake 1.0 lands identically to 2.0.3).
+
+### 7.22.4 Measured anchors (with conditions)
+
+CPU/WSL2, genesis-world 1.4.5, `per_vehicle`, `dual_scene`, plane μ 1.0, DT
+0.025 × 4, gravity-tilt slopes, `"control"`:
+
+- reference car, 5° downhill, brake 0.3, 50 s: rests, 4e-6 m/s, 0.004 mm over
+  [20, 50] s (2.0.3: creeps 0.02497 m/s); brake 0.1 rolls identically on both
+  trees (impl-review);
+- `tests/data/low_yaw_inertia_car.urdf` (β 3.468797, k_eff 231 780.64 /
+  228 321.22 N/m): 10 REST rows rest with yaw rate ≤ 3.6e-7 rad/s over
+  [20, 50] s (implementation; impl-review 1.79e-7 .. 3.2e-7 on 6 rows); the
+  2.0.4 draft without the rigid-body term cycled at 0.229 rad/s (flat, brake
+  0.3) — never shipped; at brake 1.0 the cycle (about 0.27 rad/s) exists on
+  2.0.3;
+- reference car at DT 1/30 / 0.04: capped (301 501 / 297 001 and 209 375 /
+  206 250 N/m), the 6 REST rows rest (implementation; DT 0.04 re-run by
+  impl-review).

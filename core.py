@@ -19,8 +19,10 @@ from genesis.utils.geom import transform_by_quat
 from ._version import __version__
 from .config import ResolvedConfig, VehicleConfig, check_rolling_resistance_cr, resolve
 from ._gs_compat import apply_links_wrench, check_genesis_floor, check_link_inertial_api
-from .dynamics import YawInertia, yaw_inertia_from_mass_props
+from .dynamics import (YawInertia, rigid_share_factor, static_mass_shares,
+                       yaw_inertia_from_mass_props)
 from ._hotset import prime_derived
+from .strategies.stability import register_sfl_cap_name
 from ._pipeline import compute_wheel_step, pw, pw3
 from .inputs import VehicleInputs, VehicleStepInputs
 from .gear import (check_vehicle_request, clamp_drive_to_gear, effective_throttle,
@@ -250,6 +252,24 @@ class WheelMeta:
     # this field (it shares this object with the live driver). Appended LAST
     # (keyword default) so the positional fields above keep their order.
     yaw_inertia: Optional[YawInertia] = None
+    # (v2.0.4) Per-wheel STATIC mass share, kg, (n_wheels,) on this meta's
+    # device/dtype: dynamics.static_mass_shares (elastic-support statics) from
+    # the build-time link masses of the owning driver's entity (a batched
+    # kind: its proto's, i.e. entities[0]). Input of StaticFrictionLock's
+    # spring cap. None until VehiclePhysics._ensure_static_mass_share() sets it
+    # on the first step(); stays None (the lock then runs UNCAPPED) when the
+    # mass properties cannot be read. Runtime mass changes are not reflected.
+    # Appended after yaw_inertia so every earlier field keeps its position.
+    static_mass_share: Optional[torch.Tensor] = None
+    # (v2.0.4 Step D) dynamics.RigidShareFactor (beta, yaw_fraction; python
+    # floats) of the planar rigid-body term of StaticFrictionLock's spring cap,
+    # from the same link walk and shares as static_mass_share (never from
+    # yaw_inertia). Written by _ensure_static_mass_share just before the share;
+    # None when the share was preset by the caller, could not be computed, or
+    # beta could not be computed (logged) — the cap is then per wheel only.
+    # A static_mass_share written by the user later keeps this (old) beta.
+    # Appended last so every earlier field keeps its position.
+    static_rigid_factor: Optional[Any] = None
 
 
 @dataclass
@@ -347,6 +367,18 @@ class PipelineContext:
     # (gear * clamp(throttle, 0, 1) on gear rows). Read-only for hooks.
     # Appended last so positional construction keeps its meaning.
     gear: Optional[torch.Tensor] = None
+    # (v2.0.4) (n_envs, n_wheels), N*m, >= 0: the brake torque LEFT on each
+    # wheel after this step's brake projection (dynamics.brake_projection's
+    # ``B_rem``) -- > 0 only where the brake holds the wheel this step; a wheel
+    # the brake stops with no torque to spare is held with 0 (at standstill:
+    # an exact drive == brake tie). Pre-coupling value; not masked for airborne
+    # wheels. Reset to None by the pipeline before the PRE_TIRE phase and set
+    # before the POST_TIRE phase, so it is None in ``apply_pre_tire``. A
+    # detached copy, READ-ONLY for hooks: the pipeline computes with its own
+    # tensor, so a write changes nothing it computes -- but a later hook in the
+    # list sees the written value. ``StaticFrictionLock`` engages on it.
+    # Appended last so positional construction keeps its meaning.
+    brake_rem: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -436,6 +468,9 @@ class VehiclePhysics:
         # Planar mass properties for the deadbeat scale (v1.8.0), read on the
         # first step() by _ensure_yaw_inertia (the entity is built by then).
         self._mass_props = None
+        # (v2.0.4) The wheel meta whose static-share read failed (attempted and
+        # logged once), see _ensure_static_mass_share.
+        self._static_share_failed_for = None
         #: Identifier for messages about THIS driver's config (the dt-stability
         #: warning). ``VehicleScene`` passes the ``Vehicle.name`` the user gave
         #: ``add_vehicle``; a direct ``VehiclePhysics(...)`` / plain
@@ -829,6 +864,100 @@ class VehiclePhysics:
         self._mass_props = mp
         wm.yaw_inertia = yi
 
+    def _ensure_static_mass_share(self) -> None:
+        """Compute ``wheel_meta.static_mass_share`` once (v2.0.4).
+
+        The input of ``StaticFrictionLock``'s per-wheel spring cap:
+        ``dynamics.static_mass_shares`` (elastic-support statics) from the
+        vehicle's mass and centre of mass and ``wheel_meta.positions`` /
+        ``k_susp``. Its own computation with its own guard, called right after
+        :meth:`_ensure_yaw_inertia` at the top of :meth:`step` and of
+        ``MultiVehicleKindPhysics.step`` (on the proto), so it runs on the
+        FIRST step, before the first-step early return, and also when
+        ``wheel_meta.yaw_inertia`` was set by the caller.
+
+        * Already set → nothing (one attribute test per step).
+        * Mass properties: ``self._mass_props`` when :meth:`_ensure_yaw_inertia`
+          (or a config rebuild) has them; otherwise one read of
+          ``control.plant.plant_mass_properties(self.entity)``, NOT stored on
+          the driver (so what :meth:`export_runtime_state` carries is
+          unchanged).
+        * Never raises: an entity without ``links``, an unknown inertial API
+          (``AttributeError``) or a mass that is NaN, infinite or not positive
+          (``ValueError``) leaves the share ``None`` — the lock then runs
+          UNCAPPED — logs one ``[genesis_vehicle:sfl-cap]`` WARNING naming
+          ``self.vehicle_name``, and records the failure on the driver
+          (``_static_share_failed_for`` = this wheel meta), so later steps
+          neither re-read the mass nor log again. A driver with a new wheel
+          meta (a config rebuild builds a new driver) tries once more. An
+          equal-share fallback (plan r204 condition C1, see
+          ``dynamics.static_mass_shares``) logs one line and sets the share.
+        * (Step D of 2.0.4) Also computes ``wheel_meta.static_rigid_factor``
+          (``dynamics.rigid_share_factor``: beta of the cap's planar
+          rigid-body term) from the same mass properties and the solved
+          shares, written just before the share. Its ``ValueError`` is caught
+          separately, after the share is solved: beta stays ``None``, the
+          share IS set, the lock is capped per wheel only, and one
+          ``[genesis_vehicle:sfl-cap]`` WARNING says "rigid-body factor
+          unavailable". A share preset by the caller (the early return above)
+          leaves beta ``None`` too. beta never reads
+          ``wheel_meta.yaw_inertia``.
+        """
+        wm = self.wheel_meta
+        if getattr(wm, "static_mass_share", None) is not None:
+            return
+        if getattr(self, "_static_share_failed_for", None) is wm:
+            return
+        import logging
+        log = logging.getLogger("genesis_vehicle")
+        mp = self._mass_props
+        try:
+            if mp is None:
+                from .control.plant import plant_mass_properties
+                links = getattr(self.entity, "links", None)
+                if not links:
+                    raise AttributeError(
+                        f"the entity ({type(self.entity).__name__}) exposes no "
+                        "'links'")
+                check_link_inertial_api(links[0])
+                mp = plant_mass_properties(self.entity)
+            res = static_mass_shares(mp.mass, mp.com, wm.positions, wm.k_susp)
+        except (AttributeError, ValueError) as exc:
+            log.warning(
+                "[genesis_vehicle:sfl-cap] vehicle '%s': no static load (%s); "
+                "the StaticFrictionLock spring is uncapped.",
+                self.vehicle_name, exc)
+            log.debug("static mass share read failed", exc_info=True)
+            self._static_share_failed_for = wm
+            return
+        if res.fallback is not None:
+            log.warning(
+                "[genesis_vehicle:sfl-cap] vehicle '%s': elastic-statics wheel "
+                "shares rejected (%s); using equal shares M/n = %.1f kg for "
+                "the StaticFrictionLock spring cap.",
+                self.vehicle_name, res.fallback, float(res.shares[0]))
+        share = torch.as_tensor(res.shares, device=wm.positions.device,
+                                dtype=wm.positions.dtype)
+        # (v2.0.4 Step D) The planar rigid-body factor beta, from the same
+        # mass properties and the solved shares, in its OWN guard after the
+        # share is solved: a ValueError here (e.g. a yaw inertia about the
+        # centre of mass that is not positive) leaves beta None — the cap is
+        # then per wheel only — and the share is still set.
+        rigid = None
+        try:
+            rigid = rigid_share_factor(mp.mass, mp.com, mp.izz, wm.positions,
+                                       res.shares)
+        except ValueError as exc:
+            log.warning(
+                "[genesis_vehicle:sfl-cap] vehicle '%s': rigid-body factor "
+                "unavailable (%s); the lock spring is capped per wheel only "
+                "(C_MAX), the rigid-body term is not applied.",
+                self.vehicle_name, exc)
+            log.debug("rigid-body factor failed", exc_info=True)
+        register_sfl_cap_name(wm, self.vehicle_name)
+        wm.static_rigid_factor = rigid
+        wm.static_mass_share = share
+
     def reset(self, env_ids: Optional[torch.Tensor] = None) -> None:
         if env_ids is None:
             self.omega.zero_()
@@ -1204,6 +1333,8 @@ class VehiclePhysics:
         # Deadbeat-scale inputs, once per driver, on the first call (the
         # entity is built by then); one attribute test afterwards.
         self._ensure_yaw_inertia()
+        # (v2.0.4) StaticFrictionLock spring-cap input, same pattern, own guard.
+        self._ensure_static_mass_share()
 
         steering = self.resolved.steering
         if not isinstance(inputs, steering.InputType):

@@ -343,7 +343,7 @@ Detailed docs live under [`docs/`](docs/):
 | [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default) |
 | [`docs/pipeline-and-hooks.md`](docs/pipeline-and-hooks.md) | Hook insertion points in the 5-step pipeline |
 | [`docs/stability-profiles.md`](docs/stability-profiles.md) | `control` / `raw` / `research` profiles + the "one rule" for MPPI / Real2Sim |
-| [`docs/physics-contracts.md`](docs/physics-contracts.md) | Brake sign, non-negative N, `i_wheel` truth policy, steering / coupling order, URDF contracts (§7.9) |
+| [`docs/physics-contracts.md`](docs/physics-contracts.md) | Brake sign, non-negative N, `i_wheel` truth policy, steering / coupling order, URDF contracts (§7.9), the v2.0.4 `StaticFrictionLock` engage rule and spring cap (§7.22) |
 | [`docs/testing.md`](docs/testing.md) | Test inventory + module map |
 
 ## Repository Layout
@@ -381,7 +381,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-1285 tests covering URDF parsing, config resolve, suspension sizing, strategy
+1369 tests covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a bit-identity witness
@@ -422,21 +422,28 @@ stall reproduced on the real NMPC, the PD golden up to its four `GOAL-MISSED`
 steps, a pre-registered run-away property test on a kinematic plant),
 the opt-in gear mode and the gear-mode follower (v2.0.2 — the shift and
 drive-torque rules on both solvers, every skid-steer refusal site, a
-platform-gated byte-identity check of signed inputs against the 2.0.1 tree,
+a platform-gated byte-identity check of signed inputs, since v2.0.4 against its
+own 2.0.4 capture (the 2.0.1 fixture is kept, not asserted),
 the stage-2 brake model and its low-speed coast, `SHIFT` / `GUARD` /
 `GEAR-ABORT` against an independent oracle),
 the opt-in K-turn (v2.0.3 — the trigger and planner, mirror symmetry, the leg
 budgets across re-plans, every K-turn limit on exactly the next call, and the
 default follower replayed against a 2.0.2 capture),
+the pedal-free `StaticFrictionLock` and its spring cap (v2.0.4 — `brake_rem`,
+the engage window, holds at any pedal where the brake can hold, the drive
+overpowering the brake, the per-wheel and rigid-body caps over every wheel
+subset and steer angle, the cap report, a light vehicle and a low-yaw-inertia
+car at rest, the server's generic hook set),
 and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v2.0.3 tree with the optional MPC packages installed, `1285 passed, 3 skipped`
-in five parts of files, 527.3 s summed (CPU/WSL2, genesis-world 1.4.5,
-`test_fusion_probe.py` excluded;
+v2.0.4 tree with the optional MPC packages installed, `1369 passed, 3 skipped`
+(implementation in 14 foreground calls, impl-review in 10; no timing quoted;
+CPU/WSL2, genesis-world 1.4.5, `test_fusion_probe.py` excluded;
 the 3 skips are the env-gated live server tests,
 run them with `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`; without casadi + do_mpc the
-solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1225 passed,
+solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1285 passed,
+3 skipped` in five parts, 527.3 s summed, at v2.0.3, `1225 passed,
 3 skipped` in 433.5 s at v2.0.2, `1127 passed,
 3 skipped` in 347.1 s at v2.0.1, `1010 passed,
 3 skipped` in 226.1 s at v2.0.0, `824 passed,
@@ -464,10 +471,37 @@ including `mpc_model="off"`), by user decision; its CHANGELOG section says why.
 opt-in gear mode), again by user decision; CHANGELOG 2.0.2 §1 lists every
 departure. 2.0.3 is a patch that adds an opt-in kwarg (`mpc_kturn`) and new
 modes without changing any default; by the minor-bump rule it would be 2.1.0,
-and its number follows the 2.0.2 roadmap (CHANGELOG 2.0.3 §1.3).
+and its number follows the 2.0.2 roadmap (CHANGELOG 2.0.3 §1.3). 2.0.4 is a
+patch that changes braking physics with no opt-out and REMOVES
+`StaticFrictionLock`'s `brake_thr` / `REST_SPEED` (breaking), by user decision
+(CHANGELOG 2.0.4 §1).
 (This line said "pre-1.0, so minor bumps
 may break" — stale since 1.0.) Current version: `genesis_vehicle.__version__`. Per-release notes
 in [`CHANGELOG.md`](CHANGELOG.md).
+
+**Upgrading to 2.0.4:** `StaticFrictionLock` (in every `"control"` preset and,
+new, on the OSC server's generic-mapping vehicles) engages on every wheel the
+brake holds, at ANY pedal. In the measured rows (reference car, tank, truck
+demo URDF, a light car; plane μ 1.0, CPU) a braked vehicle on a slope came to
+rest where its brakes could hold it (reference car, 5°, brake 0.3: 4e-6 m/s;
+2.0.3 crept at 0.025 m/s) and rolled where they could not (2.0.3 slid on
+locked wheels above brake 0.3) — measured, not enforced
+(`docs/physics-contracts.md` §7.22.3). The brake no longer overrides the drive:
+a wheel whose drive torque exceeds its brake torque turns — `tank_skid_belt`
+brakes each of its n wheels with `30000·brake/n` N·m but drives each with the
+whole side torque, so the 10-wheel reference tank at full brake pivots at
+standstill under steer above 0.1 (in general 1/n; steer 1.0: −409° in 5 s;
+2.0.3 −0.09°). The
+lock's spring is capped per wheel from the static load, the planar rigid-body
+factor and `dt` (one `[genesis_vehicle:sfl-cap]` WARNING where it binds — the
+reference car above dt 0.0257 s); the cap bounds a planar stiffness eigenvalue
+only and is not a stability guarantee. `StaticFrictionLock(brake_thr=...)`, a
+positional call, and `brake_thr` / `REST_SPEED` attributes raise. Brake-free
+rollouts and sweep tables are byte-identical to 2.0.3 (measured on the scenes
+listed in CHANGELOG 2.0.4 §8; sweeps by construction, brake 0); braked scenes are not
+byte-identical to 2.0.1 any more (the legacy fixture was re-captured). Read
+CHANGELOG 2.0.4 (§10 is the field-team note) and `docs/physics-contracts.md`
+§7.22 first.
 
 **Upgrading to 2.0.3:** nothing changes unless you opt in — a follower that
 does not pass `mpc_kturn` issues the 2.0.2 commands (measured per step on 51
@@ -495,7 +529,7 @@ the command conversion only (the MPC prediction is unchanged), validated on the
 reference car, flat ground, μ 1.0, 2-12 m/s. Vehicle inputs without a gear,
 `mpc_model="off"`, `FleetFollower` and the OSC server are unchanged. On a slope
 a brake ≤ 0.3 does not bring a vehicle to rest (pre-existing, identical on
-2.0.1). Read CHANGELOG 2.0.2 first.
+2.0.1; fixed in 2.0.4). Read CHANGELOG 2.0.2 first.
 
 **Upgrading to 2.0.1:** a follower can now end on `GOAL-MISSED` (every mode)
 or `MPC-ABORT` (MPC layer) as well as `DONE` — loop on

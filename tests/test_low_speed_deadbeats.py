@@ -300,11 +300,12 @@ def test_n12_car_stops_and_holds_downhill_from_3_mps(car, deg):
 
 def test_n18_a_downhill_stop_is_taken_over_by_the_creep_test(car):
     """A6's creep branch: on 20° the deadbeat-limited brake balances gravity
-    at about g*sin(20°)*dt/s ≈ 0.1 m/s, above ``REST_SPEED`` (0.05). The lock
+    at about g*sin(20°)*dt/s ≈ 0.1 m/s, above the 0.05 m/s rest speed (the
+    ``REST_SPEED`` constant, removed in 2.0.4). The lock
     must take over there (held-wheel deadbeat binding AND speed no longer
     falling) — a fixed 0.05 m/s threshold never fires on this slope and the
     car creeps (0.089 m/s in the design probe). Asserts the takeover happened
-    while a wheel's planar contact speed was still ≥ ``REST_SPEED``, and the
+    while a wheel's planar contact speed was still ≥ 0.05 m/s, and the
     AC-H1 hold."""
     seen = []
 
@@ -315,7 +316,7 @@ def test_n18_a_downhill_stop_is_taken_over_by_the_creep_test(car):
 
     r = car.run(DEG=20.0, V0=3, BRK=1.0, SECS=10, every=watch)
     assert seen, "the lock never took over"
-    assert seen[0] >= car.sfl().REST_SPEED, (
+    assert seen[0] >= 0.05, (   # 0.05 = the REST_SPEED constant removed in 2.0.4
         f"takeover at planar contact speed {seen[0]:.4f} m/s: not the creep branch")
     n5 = int(round(5.0 / DT))
     assert float(np.abs(r["V"][-n5:]).max()) < 0.01

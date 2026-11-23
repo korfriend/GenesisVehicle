@@ -23,6 +23,8 @@ from __future__ import annotations
 from abc import ABC
 from typing import Any
 
+import math
+
 import torch
 
 from .._hotset import derived, row_tensor, square_f64
@@ -84,7 +86,11 @@ class StabilityHook(ABC):
         ``ctx.F_long_bounds`` = ``(lo, hi)`` the interval the clamp will hold
         ``F_long`` to (contains 0); ``ctx.F_long_deadbeat`` the held-wheel
         ``|F_long|`` bound (+inf on wheels the brake does not hold);
-        ``ctx.deadbeat_scale`` the rigid-body scale ``s``. Writable:
+        ``ctx.deadbeat_scale`` the rigid-body scale ``s``; since v2.0.4
+        ``ctx.brake_rem``, the brake torque left on each wheel after the brake
+        projection (> 0 where the brake holds the wheel; ``None`` in
+        :meth:`apply_pre_tire`; a later hook sees another hook's write).
+        Writable:
         ``ctx.hold_applied`` (bool, ``None`` until a hook sets it) — a hook that
         REPLACES a wheel's force with a position-anchored hold ORs that wheel
         into it; those wheels then get the clamp without the held-wheel
@@ -314,31 +320,117 @@ class LowSpeedRegularizer(StabilityHook):
 # ---------------------------------------------------------------------------
 
 
+#: ``id(wheel_meta) -> {"name": str, "reported": set of (k_spring, dt)}`` for
+#: the ``[genesis_vehicle:sfl-cap]`` report (v2.0.4). Module-level, so the
+#: report is printed ONCE PER PROCESS per (wheel_meta identity, k_spring, dt):
+#: a ``DifferentiablePlant``'s deep-copied prediction hooks share the live
+#: driver's wheel_meta and therefore do not print it again. An entry is removed
+#: by a ``weakref.finalize`` on the wheel_meta, before its id can be reused.
+_SFL_CAP_REGISTRY: dict[int, dict] = {}
+
+
+def _sfl_cap_entry(wheel_meta: Any) -> dict:
+    key = id(wheel_meta)
+    ent = _SFL_CAP_REGISTRY.get(key)
+    if ent is None:
+        ent = _SFL_CAP_REGISTRY[key] = {"name": None, "reported": set()}
+        try:
+            import weakref
+            weakref.finalize(wheel_meta, _SFL_CAP_REGISTRY.pop, key, None)
+        except TypeError:
+            pass     # un-referenceable duck-typed meta: entry kept for the process
+    return ent
+
+
+def register_sfl_cap_name(wheel_meta: Any, name: str) -> None:
+    """Name the vehicle a ``wheel_meta`` belongs to, for the
+    ``[genesis_vehicle:sfl-cap]`` report (v2.0.4). Called by the driver when it
+    sets ``wheel_meta.static_mass_share``."""
+    _sfl_cap_entry(wheel_meta)["name"] = str(name)
+
+
 class _OmegaOverride:
-    """Carried on ctx.omega_override when StaticFrictionLock fires. ``active``
-    is a (n_envs, n_wheels) bool mask."""
+    """A ``ctx.omega_override`` carrier: ``active`` is a (n_envs, n_wheels)
+    bool mask of wheels whose spin the pipeline forces to 0. Through 2.0.3
+    ``StaticFrictionLock`` set it; since 2.0.4 no SDK hook does (the pipeline
+    feature stays for user hooks)."""
     __slots__ = ("active",)
 
     def __init__(self, active: torch.Tensor):
         self.active = active
 
 
-class StaticFrictionLock(StabilityHook):
+_BRAKE_THR_REMOVED = (
+    "StaticFrictionLock: brake_thr was removed in 2.0.4 — the lock now engages "
+    "where the brake holds the wheel; drop the argument")
+_REMOVED_MSG = {
+    "brake_thr": _BRAKE_THR_REMOVED,
+    "REST_SPEED": ("StaticFrictionLock.REST_SPEED was removed in 2.0.4 — the "
+                   "lock takes over only through its creep test; there is no "
+                   "rest-speed takeover any more"),
+}
+
+
+def _removed_get(name):
+    def _get(self):
+        raise AttributeError(_REMOVED_MSG[name])
+    return _get
+
+
+def _removed_set(name):
+    def _set(self, *_a):
+        raise AttributeError(_REMOVED_MSG[name])
+    return _set
+
+
+class _StaticFrictionLockMeta(type(StabilityHook)):
+    """Makes CLASS-level reads / writes / deletes of the removed names raise
+    too (``StaticFrictionLock.REST_SPEED``, ``StaticFrictionLock.brake_thr =
+    x``); the instance-level properties live in the class body."""
+    brake_thr = property(_removed_get("brake_thr"), _removed_set("brake_thr"),
+                         _removed_set("brake_thr"))
+    REST_SPEED = property(_removed_get("REST_SPEED"), _removed_set("REST_SPEED"),
+                          _removed_set("REST_SPEED"))
+
+
+class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
     """Position-anchored stick-slip static friction lock (v0.5.7; rest anchor
-    since v1.8.0).
+    since v1.8.0; pedal-free since v2.0.4).
 
-    ENGAGES per env, per wheel when ``brake > brake_thr`` AND planar contact
-    speed ``sqrt(v_long^2 + v_lat^2) < v_thr``. An engaged wheel's spin is
-    forced to 0 (the ω override) from the first engaged step. Since 1.8.0 the
-    lock does NOT replace the tyre force on engagement: it TAKES OVER only once
-    the contact is at REST, which per wheel means either
+    ENGAGES per env, per wheel where the BRAKE physically holds the wheel this
+    step — ``ctx.brake_rem > 0``, the brake torque left after the pipeline's
+    brake projection — AND its planar contact speed
+    ``sqrt(v_long^2 + v_lat^2)`` is below ``min(v_thr, V_ENGAGE_MAX)``
+    (:attr:`V_ENGAGE_MAX` 0.5 m/s), at ANY pedal value. A duck-typed ctx
+    without ``brake_rem`` engages no wheel. The lock never forces a wheel's
+    spin (no ``ctx.omega_override``), and it TAKES OVER only through the
+    creep test: the pipeline's held-wheel deadbeat binds on the raw tyre force
+    (``|ctx.F_long| >= ctx.F_long_deadbeat``) and the planar speed did not
+    fall this step (``v^2 >= CREEP_RATIO * v_prev^2``, :attr:`CREEP_RATIO`
+    0.96) — how a stop is detected, where the deadbeat-limited brake balances
+    the load at a small speed.
 
-    * the planar contact speed is below :attr:`REST_SPEED` (0.05 m/s), or
-    * a creep equilibrium: the pipeline's held-wheel deadbeat binds on the raw
-      tyre force (``|ctx.F_long| >= ctx.F_long_deadbeat``) and the planar speed
-      did not fall this step (``v^2 >= CREEP_RATIO * v_prev^2``,
-      :attr:`CREEP_RATIO` 0.96) — how a downhill stop is detected, where the
-      deadbeat-limited brake balances gravity at a small non-zero speed.
+    Consequences (per wheel; not a guarantee about the vehicle): a wheel whose
+    brake torque exceeds its drive torque is held and can be locked; a wheel
+    whose DRIVE torque exceeds its brake torque turns (B_rem = 0), whatever the
+    pedal — brake does not override drive. ``tank_skid_belt`` (``PerSide``)
+    drives EVERY wheel of a side with the whole side torque
+    ``30000*|0.3*throttle +- steer|`` N*m but brakes each of its n wheels with
+    ``30000*brake/n`` N*m, so a full brake does not hold the tank at standstill
+    against ``|steer| > 1/n`` or ``throttle > 1/(0.3*n)`` — on the 10-wheel
+    reference tank (``tests/data/tank_ref.urdf``, 3000 N*m per wheel)
+    ``|steer| > 0.1`` or ``throttle > 0.33``.
+
+    **Through 2.0.3** the lock engaged only on the PEDAL, ``brake > brake_thr``
+    (0.3), forced every engaged wheel's spin to 0 below ``v_thr``, and also
+    took over below a rest speed of 0.05 m/s. Two defects followed: at a pedal
+    at or below 0.3 it never engaged, so a braked vehicle crept down a slope at
+    the held-wheel deadbeat speed ``g*tan(theta)*dt/s`` (reference car 5°:
+    0.0250 m/s); above 0.3 the forced spin slid a vehicle whose brake could
+    NOT hold it on locked wheels (reference car 10°, brake 0.31: 0.040 m/s
+    with ω 0) and held wheels the drive should have turned. ``brake_thr`` and
+    ``REST_SPEED`` were removed in 2.0.4 (reading or writing either raises
+    ``AttributeError``).
 
     Until then the brake (the pipeline's Coulomb projection and held-wheel
     deadbeat) does the stopping and the anchor FOLLOWS the contact. After the
@@ -402,21 +494,98 @@ class StaticFrictionLock(StabilityHook):
         visible creep before stick. Default ``500_000`` is tuned around the
         explicit-Euler bound at ``dt = 0.02`` for a 5-ton chassis. The spring
         is integrated explicitly (displacement first, then the spring and
-        damper force). A linear single-step analysis (derived, not measured;
-        ``c = k_spring * dt^2 / m_share``, ``b = D * dt / m_share``,
-        ``m_share = N / g`` the wheel's mass share) gives stability iff
-        ``c + 2b < 4`` and ``b < 2``. The deadbeat bound keeps ``b <= s`` (the
-        rigid-body scale, at ``|g| = 9.81``), so ``c < 4 - 2s`` is sufficient,
-        and exact once the damper sits at that bound (it does near the
-        boundary, where the critical floor ``2*sqrt(c)`` exceeds ``s``).
-        ``c < 2`` is therefore exact at ``s = 1`` and sufficient for
-        ``s < 1``: at the defaults and ``dt = 0.025`` it needs ``m_share``
-        above about 156 kg per wheel (about 137 kg at the reference car's
-        ``s`` 0.856, where the limit is ``c < 2.29``). Neither the
-        damper floor nor its deadbeat bound cures a lighter share (the bound
-        caps the damping at the one-step value, it cannot add stiffness
-        margin); the reference car (about 330 kg per wheel) and tank are
-        inside it. Lower ``k_spring`` for a lighter vehicle or a longer ``dt``.
+        damper force). A linear single-step analysis (derived, not measured)
+        of one MODE of the rigid body, with ``c = k * dt^2 / m_mode`` its
+        spring number and ``b = D * dt / m_mode`` its damper number, gives the
+        per-step map ``[[1, 1], [-c, 1 - c - b]]``: stable iff ``c + 2b < 4``
+        and ``0 < b < 2``; at ``b = 1`` its multiplier is ``1 - c`` (stable
+        iff ``c < 2``). The deadbeat bound on the damper force puts each
+        wheel's damper at ``b_i = s`` on its own mass share once it binds; in
+        the planar YAW mode, for loads in moment balance about the centre of
+        mass and ``s < 1``, that is modal ``b = s * sum m_i rho_i^2 / I_cg =
+        1``, so the yaw mode is stable iff its spring number ``c_yaw =
+        lambda_yaw(K) * dt^2`` is below 2 — and ``c_yaw`` is set by the
+        vehicle's mass and yaw inertia, roughly ``c / s`` for a per-wheel
+        ``c``, NOT by the wheel loads. **Through the first 2.0.4 drafts this
+        paragraph said "``c < 4 - 2s`` is sufficient" and that the per-wheel
+        cap made "``c < 2`` hold down to half the static load". Both were
+        wrong**: they treated each wheel as an independent mass share, which
+        misses the yaw branch ``c / s < 2``; a vehicle with a small yaw
+        inertia relative to ``sum m_i rho_i^2`` (``s`` well below 1) cycled in
+        yaw under a held brake with every wheel's ``c`` below 1
+        (``tests/data/low_yaw_inertia_car.urdf``, ``s`` 0.288, per-wheel ``c``
+        0.93-0.95: about 0.23 rad/s at brake 0.3 and 0.27 rad/s at brake 1.0,
+        impl-review measurement, CPU/WSL2, genesis-world 1.4.5, dt 0.025 x 4,
+        plane mu 1.0; the brake-1.0 cycle also on 2.0.3).
+
+        **Spring cap (v2.0.4).** The lock does not use ``k_spring`` as given:
+        every place it reads the spring rate (spring force, anchor
+        re-placement under slip and under the bound, the damper floor) uses
+
+            ``k_eff_i = min(k_spring, f * m_static_i / dt^2)``,
+            ``f = min(SPRING_C_MAX, SPRING_C_RB / beta)``
+
+        with :attr:`SPRING_C_MAX` = 1.0 (per wheel: ``c_i <= 1`` on the
+        STATIC load) and :attr:`SPRING_C_RB` = 1.5, a constant chosen by the
+        user (not derived; see its comment). ``beta`` is
+        ``wheel_meta.static_rigid_factor.beta``
+        (``dynamics.rigid_share_factor``: the largest eigenvalue of ``S v =
+        beta P v``, ``S = sum_i m_static_i J_i^T J_i`` over the planar (x, y,
+        yaw) contact Jacobians, ``P = diag(M, M, I_cg)``; ``beta >= 1``). For
+        ``beta <= 1.5`` ``f`` is ``SPRING_C_MAX`` itself and ``k_eff`` is
+        bit-for-bit the per-wheel cap alone; every reference vehicle is
+        there (reference car beta 1.169, tank 1.069, truck demo 1.446).
+        ``m_static_i`` is ``wheel_meta.static_mass_share``
+        (``dynamics.static_mass_shares``, elastic-support statics) and ``beta``
+        comes from the same link walk; both are computed once by the driver
+        on its first step from the build-time link masses (a batched kind uses
+        its proto's entity, ``entities[0]``; runtime mass changes and per-env
+        mass differences are not reflected; ``wheel_meta.yaw_inertia`` is
+        never read for ``beta``), and ``dt`` is ``ctx.dt``. A write to
+        ``k_spring`` is capped too. ``beta`` is computed only together with
+        the share: a ``static_mass_share`` written by the user after the first
+        step keeps the OLD ``beta`` — set ``wheel_meta.static_rigid_factor``
+        to ``None`` too (per-wheel cap only) or to a
+        ``dynamics.rigid_share_factor`` of the new shares.
+
+        What the cap enforces, where both ``static_mass_share`` and
+        ``static_rigid_factor`` exist (by construction of ``k_eff`` in
+        ``_compute_k_eff``; no eigenvalue is computed there): per
+        wheel ``c_i <= SPRING_C_MAX``, and ``lambda(K_eff, P) * dt^2 <=
+        SPRING_C_RB`` for the PLANAR model, for any subset of grounded wheels
+        and any steer angle. That is a bound on ``lambda(K)`` ONLY. Linear
+        stability additionally needs the modal damper number ``b <= 1``,
+        which the deadbeat scale provides only for planar modes under
+        moment-balanced loads. NOT covered: (i) roll / pitch-coupled modes
+        (the contact force acts below the centre of mass; on a light 10-wheel
+        tank the deadbeat-bounded damper reaches modal ``b`` 1.257 in a
+        roll-coupled mode, linear spectral radius 1.31 before and after this
+        cap — a linear computation, not a measurement); (ii) loads not in
+        moment balance; (iii) a user-preset ``wheel_meta.yaw_inertia =
+        YawInertia(inf, ...)`` (``s = 1``: the damper's yaw ``b`` is then
+        ``sum m_i rho_i^2 / I_cg``, 3.47 on the low-yaw-inertia car, and the
+        cap does not restore stability); (iv) a batched kind of mixed-mass
+        vehicles (``entities[0]``); (v) a vehicle whose ``beta`` could not be
+        computed (one "rigid-body factor unavailable" WARNING; per-wheel cap
+        only) or whose ``static_mass_share`` was preset by the caller
+        (``beta`` None; per-wheel cap only); (vi) a duck-typed meta without
+        ``static_mass_share`` or a driver that could not read its mass
+        (logged): uncapped; (vii) one wheel in contact (the deadbeat scale's
+        own up-to-2x caveat). Where no wheel is capped the lock computes
+        exactly as through 2.0.3. Measured inactive at ``dt = 0.025`` on the
+        reference car (max ``c`` 0.947), the reference tank (0.053) and the
+        tank with ``TankTuning`` (0.107); the reference car is capped above
+        ``dt`` ≈ 0.0257 s. A capped wheel is softer, so its hold deflection
+        ``F / k_eff <= mu*N/k_eff = mu*g*dt^2/f * (N / N_static)`` — vehicle
+        dependent through ``f``: 6.1 mm at ``dt = 0.025`` and ``mu = 1`` per
+        unit of static load where ``f = 1`` (derived), 14.2 mm at 0.025 and
+        36.3 mm at 0.04 on the low-yaw-inertia car (``f`` 0.4324, a formula
+        value: that URDF diverges at ``dt >= 0.03`` with no hooks and no
+        brake on 2.0.3 too — independent of the lock, cause not established);
+        more on a wheel carrying more than its static load. The first time a
+        cap binds, one ``[genesis_vehicle:sfl-cap]`` WARNING per process per
+        (wheel meta, ``k_spring``, ``dt``) names the vehicle, the capped
+        wheels and the binding term.
       - ``k_damp`` (per wheel): since 1.8.0 a FLOOR on the damping
         coefficient: the lock uses ``max(k_damp, 2·sqrt(k_spring·N/g))``, and
         the damper force is then bounded by the one-step deadbeat. So a
@@ -426,11 +595,11 @@ class StaticFrictionLock(StabilityHook):
         car's wheel share, ζ ≈ 0.185 on the reference tank's 5.8 t share
         (``tank_skid_belt``); through 1.7.0 this docstring called it
         "~half-critical for a 5-ton chassis", which matched neither.
-      - ``brake_thr``: brake command above which the lock can engage.
-      - ``v_thr``: planar contact speed below which the lock ENGAGES — since
-        1.8.0 that governs only the ω override (the wheel stops spinning);
-        the force replacement waits for rest (:attr:`REST_SPEED`, creep
-        test). Through 1.7.0 the lock replaced the tyre force from ``v_thr``
+      - ``v_thr``: planar contact speed below which a held wheel ENGAGES,
+        capped at :attr:`V_ENGAGE_MAX` (0.5 m/s): since 2.0.4 values above
+        0.5 m/s no longer widen the engage window (``TankTuning``'s 5.0 acts
+        as 0.5). The force replacement waits for the creep test. Through
+        1.7.0 the lock replaced the tyre force from ``v_thr``
         on and anchored at the engagement point. Combined with the 1.8.0
         full-strength brake, a stop the brake finished after engagement was
         pulled back toward that point (measured in the 1.8.0 design probe,
@@ -445,14 +614,17 @@ class StaticFrictionLock(StabilityHook):
     reset (a documented known gap). Two consequences of the new state: a
     stale ``_v_prev_sq`` can trigger one early creep takeover on a wheel that
     engages on that exact step; and a stale ``_rest = True`` (with
-    ``_was_active`` still True, i.e. the reset vehicle still has the brake
-    above ``brake_thr`` and its contact below ``v_thr``) skips the rest test
-    entirely: no ``just_engaged`` edge clears it, so the lock re-applies the
-    spring hold at once, on the stale ``_d_long`` / ``_d_lat`` anchor (1.7.0
-    had the equivalent through its stale anchor alone). Clear every
-    :attr:`STATE_ATTRS` entry yourself after a reset that teleports a
-    braked vehicle. (The first 1.8.0 implementation named only the
-    ``_v_prev_sq`` consequence here.)
+    ``_was_active`` still True, i.e. the reset vehicle's wheels are still held
+    by the brake and below the engage speed) skips the creep test entirely:
+    no ``just_engaged`` edge clears it, so the lock re-applies the spring hold
+    at once, on the stale ``_d_long`` / ``_d_lat`` anchor (1.7.0 had the
+    equivalent through its stale anchor alone). Since 2.0.4 this is reachable
+    at any pedal (through 2.0.3 only above ``brake_thr``). The anchor is
+    velocity-integrated, so a teleport itself does not displace it; the
+    deflection it can hold is bounded by ``mu*N/k_eff``. Clear every
+    :attr:`STATE_ATTRS` entry yourself after a reset that teleports a braked
+    vehicle if that offset matters. (The first 1.8.0 implementation named
+    only the ``_v_prev_sq`` consequence here.)
 
     BREAKING from v0.5.6:
       The old ``hold_k``, ``hold_k_lat``, ``slip_scale`` constructor kwargs
@@ -464,13 +636,36 @@ class StaticFrictionLock(StabilityHook):
 
     slots = ("POST_TIRE",)
 
-    #: Planar contact speed (m/s) below which an engaged lock counts the
-    #: contact as at REST and takes over (v1.8.0, A6).
-    REST_SPEED = 0.05
+    # (v2.0.4) Removed: reading or writing either name on an instance raises
+    # AttributeError (a plain removal would let a write create an inert
+    # attribute). Class-level access is covered by the metaclass.
+    brake_thr = property(_removed_get("brake_thr"), _removed_set("brake_thr"),
+                         _removed_set("brake_thr"))
+    REST_SPEED = property(_removed_get("REST_SPEED"), _removed_set("REST_SPEED"),
+                          _removed_set("REST_SPEED"))
+
     #: Creep equilibrium test (v1.8.0, A6): the held-wheel deadbeat binds and
     #: ``v_planar^2 >= CREEP_RATIO * v_planar_prev^2`` (the speed did not fall
     #: this step).
     CREEP_RATIO = 0.96
+    #: The spring cap's per-wheel bound on the explicit-spring number
+    #: ``c = k * dt^2 / m_static`` (v2.0.4): ``k_eff <= SPRING_C_MAX *
+    #: m_static / dt^2`` per wheel (see the class docstring for the full
+    #: two-term cap).
+    SPRING_C_MAX = 1.0
+    #: The cap's planar rigid-body constant (v2.0.4 Step D): ``k_eff <=
+    #: SPRING_C_RB * m_static / (beta * dt^2)``, ``beta`` =
+    #: ``wheel_meta.static_rigid_factor.beta``. Chosen by the user, not
+    #: derived: at the damper's one-step bound (modal damper number b = 1) it
+    #: keeps the planar yaw-mode multiplier ``1 - lambda * dt^2 >= -0.5`` per
+    #: step (the oscillating side only; a small ``lambda * dt^2`` leaves the
+    #: multiplier near +1). Any value in about 1.17-2 would leave the reference vehicles
+    #: unchanged. Unifying both terms on one constant (1) is planned for 2.1.0
+    #: (a plan, not a commitment).
+    SPRING_C_RB = 1.5
+    #: Upper bound (m/s) of the engage window (v2.0.4): a wheel with
+    #: ``ctx.brake_rem > 0`` engages below ``min(v_thr, V_ENGAGE_MAX)``.
+    V_ENGAGE_MAX = 0.5
     #: The hook's per-wheel INTEGRATOR state, every attribute
     #: ``control.plant._sync_hooks`` row-slices and every tensor this hook
     #: holds. Code that copies the lock's state between hooks by name must copy
@@ -480,12 +675,27 @@ class StaticFrictionLock(StabilityHook):
 
     def __init__(
         self,
-        brake_thr: float = 0.3,
+        *args: Any,
         v_thr: float = 0.5,
         k_spring: float = 500_000.0,
         k_damp: float = 20_000.0,
+        **kwargs: Any,
     ):
-        self.brake_thr = float(brake_thr)
+        # (v2.0.4) Keyword-only. The explicit checks replace Python's generic
+        # messages: an old positional call (brake_thr, v_thr, k_spring,
+        # k_damp) would otherwise not say why, and brake_thr was the first.
+        if args:
+            raise TypeError(
+                "StaticFrictionLock takes keyword arguments only since 2.0.4 "
+                f"(got {len(args)} positional); its old first parameter "
+                "brake_thr was removed — pass v_thr= / k_spring= / k_damp= "
+                "by name")
+        if "brake_thr" in kwargs:
+            raise TypeError(_BRAKE_THR_REMOVED)
+        if kwargs:
+            raise TypeError(
+                "StaticFrictionLock got unexpected keyword argument(s) "
+                f"{sorted(kwargs)}; it accepts v_thr, k_spring, k_damp")
         self.v_thr = float(v_thr)
         self.k_spring = float(k_spring)
         self.k_damp = float(k_damp)
@@ -511,9 +721,122 @@ class StaticFrictionLock(StabilityHook):
         (``TankTuning.apply_config`` sets ``v_thr = 5.0`` on the constructed
         hook) and before the first step."""
         self._v_thr_squared(torch.zeros((), device=device, dtype=dtype))
+        # (v2.0.4) No dt is known at build (k_eff takes dt only from ctx.dt),
+        # so this derives the uncapped placeholder; the first step's key
+        # (ctx.dt, the static share) differs and re-derives.
+        self._k_eff(wheel_meta, None, device, dtype)
+
+    def _k_eff(self, wheel_meta: Any, dt: Any, device: Any, dtype: Any) -> Any:
+        """The per-wheel lock stiffness ``k_eff`` (v2.0.4, the spring cap).
+
+        ``k_eff_i = min(k_spring, f * m_static_i / dt^2)``, ``f =
+        min(SPRING_C_MAX, SPRING_C_RB / beta)`` (Step D of 2.0.4), with
+        ``m_static`` = ``wheel_meta.static_mass_share`` (set by the driver on
+        its first step from the build-time link masses; never the
+        instantaneous load), ``beta`` = ``wheel_meta.static_rigid_factor.beta``
+        (``f = SPRING_C_MAX`` when the meta has no ``static_rigid_factor`` or
+        it is None) and ``dt`` = ``ctx.dt`` only.
+
+        Returns the python float ``k_spring`` itself — so every use is the
+        2.0.3 expression, bit for bit — when no wheel is capped, when the meta
+        has no static share (``getattr`` fallback: a duck-typed meta, a driver
+        whose mass could not be read) or when ``dt`` is unknown / not
+        positive. Otherwise a ``(1, n_wheels)`` tensor on ``device`` /
+        ``dtype``. Cached with ``_hotset.derived``: ``ref`` the wheel meta
+        (identity), key ``(k_spring, dt, static share tensor, its version
+        counter, static_rigid_factor (by value), device, dtype)``, so a later ``k_spring`` write lands on the
+        next step. The key holds the share TENSOR itself (never its ``id()``):
+        a newly assigned share is compared by value (``torch.equal``), and an
+        in-place edit of the same tensor changes its version counter, so it
+        re-derives too — except for an inference-mode tensor, which has no
+        version counter (an in-place edit of one is not seen). Raises
+        ``AssertionError`` when a static share would give a non-positive or
+        non-finite cap (``dynamics.static_mass_shares`` guards against it) or
+        when ``beta`` is not finite or below 1 (``1 - 1e-6`` allows the
+        rounding of shares that sum to the mass)."""
+        share = getattr(wheel_meta, "static_mass_share", None)
+        # (Step D) beta of the planar rigid-body term, a NamedTuple of python
+        # floats compared by value in the key; None -> per-wheel cap only.
+        rigid = getattr(wheel_meta, "static_rigid_factor", None)
+        # The tensor's version counter (a python int, no device sync) makes an
+        # in-place edit of the share a different key; an inference-mode tensor
+        # has none (None: such an in-place edit is not seen).
+        ver = (None if share is None or not torch.is_tensor(share)
+               or share.is_inference() else share._version)
+        k = self.k_spring
+        return derived(
+            self, "_k_eff", wheel_meta,
+            (k, dt, share, ver, rigid, device, dtype),
+            lambda: self._compute_k_eff(wheel_meta, share, k, dt, device, dtype,
+                                        rigid))
+
+    def _compute_k_eff(self, wheel_meta, share, k_raw, dt, device, dtype,
+                       rigid=None):
+        # Uncapped: the attribute value itself, unconverted (2.0.3 used it so).
+        if share is None or dt is None or not float(dt) > 0.0:
+            return k_raw
+        k = float(k_raw)
+        dt = float(dt)
+        c_max = float(self.SPRING_C_MAX)
+        # (Step D) f = min(C_MAX, C_RB / beta). For beta <= C_RB / C_MAX (1.5)
+        # min() returns c_max itself, so the cap below is the pre-Step-D
+        # expression with the same operands in the same order (bit-exact).
+        beta = None
+        f = c_max
+        if rigid is not None:
+            beta = float(rigid.beta)
+            if not (math.isfinite(beta) and beta >= 1.0 - 1e-6):
+                raise AssertionError(
+                    f"StaticFrictionLock: static_rigid_factor.beta {beta!r} is "
+                    f"not a finite number >= 1")
+            f = min(c_max, float(self.SPRING_C_RB) / beta)
+        cap = f * share.detach().to(dtype=torch.float64).reshape(-1) / (dt * dt)
+        if not bool(torch.isfinite(cap).all()) or not bool((cap > 0.0).all()):
+            raise AssertionError(
+                f"StaticFrictionLock: the spring cap from static mass shares "
+                f"{share.reshape(-1).tolist()} kg at dt {dt} is not positive and "
+                f"finite on every wheel")
+        capped = cap < k
+        if not bool(capped.any()):
+            return k_raw
+        keff64 = torch.clamp(cap, max=k)
+        keff = keff64.to(device=device, dtype=dtype).reshape(1, -1)
+        if not bool((keff > 0.0).all()):
+            raise AssertionError(
+                f"StaticFrictionLock: k_eff {keff.reshape(-1).tolist()} is not "
+                f"positive on every wheel")
+        ent = _sfl_cap_entry(wheel_meta)
+        rkey = (k, dt)
+        if rkey not in ent["reported"]:
+            ent["reported"].add(rkey)
+            import logging
+            idx = [int(i) for i in torch.nonzero(capped).reshape(-1)]
+            ms = share.detach().to(dtype=torch.float64).reshape(-1)
+            # (Step D) Name the binding term: the per-wheel one when f is
+            # C_MAX, else the planar rigid-body one ("yaw mode" only when the
+            # leading eigenvector is yaw-dominated: a labelling rule).
+            if f == c_max:
+                bound = "per-wheel static load (c_max %.1f)" % c_max
+            else:
+                bound = "planar rigid-body term (C_RB %.1f, beta %.3f%s)" % (
+                    float(self.SPRING_C_RB), beta,
+                    ", yaw mode" if float(rigid.yaw_fraction) > 0.5 else "")
+            logging.getLogger("genesis_vehicle").warning(
+                "[genesis_vehicle:sfl-cap] vehicle '%s': StaticFrictionLock "
+                "k_spring %.0f N/m capped on wheel(s) %s to k_eff %s N/m "
+                "by the %s (dt %g s, static share(s) %s kg); hold offset up "
+                "to mu*g*dt^2/f = %.1f mm at mu 1.0 (f %.6g), times "
+                "N/N_static on a wheel carrying more than its static load",
+                ent["name"] or "<unnamed>", k, idx,
+                [round(float(keff64[i]), 1) for i in idx], bound, dt,
+                [round(float(ms[i]), 1) for i in idx],
+                1000.0 * 9.81 * dt * dt / f, f)
+        return keff
 
     def _v_thr_squared(self, ref: torch.Tensor) -> torch.Tensor:
-        """``v_thr ** 2`` as a ``(1, 1)`` tensor on ``ref``'s device/dtype.
+        """The squared engage speed as a ``(1, 1)`` tensor on ``ref``'s
+        device/dtype: ``min(v_thr, V_ENGAGE_MAX) ** 2`` since 2.0.4 (``v_thr
+        ** 2`` through 2.0.3).
 
         Hoisted out of the step path (it was ``self.v_thr * self.v_thr`` on
         every call). Squared in python DOUBLE and only then cast — see
@@ -521,9 +844,17 @@ class StaticFrictionLock(StabilityHook):
         group can carry one threshold per vehicle; a write to ``v_thr`` still
         lands on the next step (the cache key carries it)."""
         return derived(
-            self, "_v_thr_sq", None, (self.v_thr, ref.device, ref.dtype),
-            lambda: row_tensor(square_f64(self.v_thr), ref),
+            self, "_v_thr_sq", None,
+            (self.v_thr, self.V_ENGAGE_MAX, ref.device, ref.dtype),
+            lambda: row_tensor(square_f64(self._engage_speed()), ref),
         )
+
+    def _engage_speed(self) -> Any:
+        """``min(v_thr, V_ENGAGE_MAX)`` (v2.0.4), a python float or, for a
+        per-row tensor ``v_thr``, a tensor."""
+        if torch.is_tensor(self.v_thr):
+            return torch.clamp(self.v_thr, max=float(self.V_ENGAGE_MAX))
+        return min(float(self.v_thr), float(self.V_ENGAGE_MAX))
 
     def _ensure_state(self, ref: torch.Tensor) -> None:
         # Allocated in groups, each on its own shape test, so state copied in by
@@ -542,16 +873,24 @@ class StaticFrictionLock(StabilityHook):
             self._v_prev_sq = torch.full_like(ref, float("inf"))
 
     def apply_post_tire(self, ctx: Any) -> None:
-        # Activation: brake on + low planar speed. We deliberately do NOT
-        # short-circuit with `if not active.any()` — that forces a CPU<->GPU
-        # sync per step.
-        active_brake = (ctx.brake > self.brake_thr).unsqueeze(-1)      # (n_envs, 1)
+        # Activation (v2.0.4, pedal-free): the brake physically holds the
+        # wheel this step (ctx.brake_rem > 0) AND the planar contact speed is
+        # below min(v_thr, V_ENGAGE_MAX). We deliberately do NOT short-circuit
+        # with `if not active.any()` — that forces a CPU<->GPU sync per step.
+        # getattr: a duck-typed ctx without brake_rem -> no wheel held.
         v_planar_sq  = ctx.v_long * ctx.v_long + ctx.v_lat * ctx.v_lat  # (n_envs, n_wheels)
         active_v     = v_planar_sq < self._v_thr_squared(v_planar_sq)
-        active       = active_brake & active_v                          # (n_envs, n_wheels)
+        brake_rem = getattr(ctx, "brake_rem", None)
+        if brake_rem is None:
+            active = torch.zeros_like(active_v)
+        else:
+            active = (brake_rem > 0) & active_v                         # (n_envs, n_wheels)
 
         self._ensure_state(ctx.v_long)
         dt = ctx.dt
+        # (v2.0.4) The per-wheel capped stiffness, used at EVERY place the
+        # lock reads its spring rate (python float k_spring when uncapped).
+        k_eff = self._k_eff(ctx.wheel_meta, dt, ctx.v_long.device, ctx.v_long.dtype)
 
         # On rising edge of active (just-engaged), reset the anchor → d = 0 and
         # record the travel sign (A) and clear the rest flag (A6).
@@ -562,9 +901,9 @@ class StaticFrictionLock(StabilityHook):
         self._rested = torch.where(just_engaged, self._s_eng == 0, self._rested)
         self._rest = torch.where(just_engaged, torch.zeros_like(self._rest), self._rest)
 
-        # [A6] Take over only at REST: planar contact speed below REST_SPEED,
-        # or a creep equilibrium — the held-wheel deadbeat binds on the raw
-        # tyre force and the planar speed did not fall this step.
+        # [A6] Take over only through the creep test (v2.0.4; through 2.0.3
+        # also below a 0.05 m/s rest speed): the held-wheel deadbeat binds on
+        # the raw tyre force and the planar speed did not fall this step.
         rest_before = self._rest
         # getattr: a duck-typed ctx (a test SimpleNamespace, a pre-1.8.0 caller)
         # may lack the v1.8.0 fields; each then means "not available".
@@ -572,8 +911,7 @@ class StaticFrictionLock(StabilityHook):
         bind = (torch.zeros_like(active) if db is None
                 else (torch.abs(ctx.F_long) >= db))
         creep = bind & (v_planar_sq >= self.CREEP_RATIO * self._v_prev_sq)
-        self._rest = self._rest | (
-            active & ((v_planar_sq < self.REST_SPEED * self.REST_SPEED) | creep))
+        self._rest = self._rest | (active & creep)
         self._v_prev_sq = v_planar_sq.detach().clone()
         # Before rest the anchor follows the contact (d = 0), and the takeover
         # step itself anchors at the END of the step (d = 0 after integration):
@@ -600,7 +938,7 @@ class StaticFrictionLock(StabilityHook):
         # [C] Damping at least critical for the wheel's mass share N/g ...
         k_damp = torch.maximum(
             torch.full_like(ctx.N, float(self.k_damp)),
-            2.0 * torch.sqrt(self.k_spring * torch.clamp(ctx.N, min=0.0) / DEADBEAT_G))
+            2.0 * torch.sqrt(k_eff * torch.clamp(ctx.N, min=0.0) / DEADBEAT_G))
         damp_long = k_damp * ctx.v_long
         damp_lat = k_damp * ctx.v_lat
         # ... and never more than what stops the contact in one step on its
@@ -615,8 +953,8 @@ class StaticFrictionLock(StabilityHook):
         damp_lat = torch.maximum(torch.minimum(damp_lat, cap_lat), -cap_lat)
 
         # Spring + damper force (will be projected onto friction ellipse below).
-        hold_long = -self.k_spring * self._d_long - damp_long
-        hold_lat  = -self.k_spring * self._d_lat  - damp_lat
+        hold_long = -k_eff * self._d_long - damp_long
+        hold_lat  = -k_eff * self._d_lat  - damp_lat
 
         # Friction ellipse — same shape as `tire_models/pacejka.py`.
         mu_long_b = ctx.wheel_meta.mu_long.unsqueeze(0)                # (1, n_wheels)
@@ -639,8 +977,8 @@ class StaticFrictionLock(StabilityHook):
         # matches the friction limit at the next step (kinetic-friction
         # behaviour: anchor drifts along with the contact). Not before rest:
         # there the anchor already follows the contact.
-        new_d_long = -hold_long_clamped / self.k_spring
-        new_d_lat  = -hold_lat_clamped  / self.k_spring
+        new_d_long = -hold_long_clamped / k_eff
+        new_d_lat  = -hold_lat_clamped  / k_eff
         advance_mask = slipping & active & ~pre_rest
         self._d_long = torch.where(advance_mask, new_d_long, self._d_long)
         self._d_lat  = torch.where(advance_mask, new_d_lat,  self._d_lat)
@@ -653,7 +991,7 @@ class StaticFrictionLock(StabilityHook):
         if b is not None:
             lim = torch.maximum(torch.minimum(hold_long_clamped, b[1]), b[0])
             limited = active & (lim != hold_long_clamped) & ~pre_rest
-            self._d_long = torch.where(limited, -lim / self.k_spring, self._d_long)
+            self._d_long = torch.where(limited, -lim / k_eff, self._d_long)
             hold_long_clamped = lim
 
         # Replace the tyre force only where the lock has taken over (after
@@ -665,14 +1003,9 @@ class StaticFrictionLock(StabilityHook):
         ctx.F_long = torch.where(apply, hold_long_clamped, ctx.F_long)
         ctx.F_lat  = torch.where(apply, hold_lat_clamped,  ctx.F_lat)
 
-        # Omega override (force ω=0 on locked wheels). This is independent
-        # of the spring-damper math — brake is engaged, wheel does not spin.
-        # Unchanged in 1.8.0: it covers every ACTIVE wheel, before rest too.
-        prev = ctx.omega_override
-        if prev is None:
-            ctx.omega_override = _OmegaOverride(active=active)
-        else:
-            prev.active = prev.active | active
+        # (v2.0.4) No omega override: through 2.0.3 the lock forced the spin
+        # of every engaged wheel to 0; the brake projection holds a wheel the
+        # brake can hold by itself, and a wheel it cannot hold must turn.
 
         # Persist edge-detect state for next step.
         self._was_active = active
