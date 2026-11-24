@@ -111,16 +111,20 @@ VehiclePhysics.step(inputs)
 
 [4] CouplingStrategy.apply(omega, meta)              # post-loop, pre-force-apply
 [5] _gs_compat.apply_links_wrench(solver, F, T) (chassis)
-    → solver.apply_links_external_wrench  (genesis >= 1.4.0)
-    → solver.apply_links_external_force + _torque  (genesis <= 1.3.3)
+    → solver.apply_links_external_wrench  (the one path since v2.0.5,
+      genesis-world 1.5.0; the <= 1.3.3 force + torque fallback was removed)
 [6] wheel visuals (rendered scenes only): VehicleScene streams closed-form
     wheel poses into instanced render nodes AFTER the physics advance — NOT
-    via the rigid solver; with the native viewer the stream happens inside
-    viewer.update()'s render-lock hold, atomic with the camera + node poses
-    (v1.1.25; physics-contracts.md §7.8). WheelJointInternalSync, the legacy
-    solver-joint fallback, runs here instead for n_envs > 1 /
-    wheel_render_mode="internal_sync"; ext. renderers use
-    visual_parts_transforms.
+    via the rigid solver. WheelJointInternalSync, the legacy solver-joint
+    fallback, runs here instead for n_envs > 1 /
+    wheel_render_mode="internal_sync"; it writes solver joints and DOES
+    move the chassis trajectory (physics-contracts.md §7.8, corrected in
+    v2.0.5). ext. renderers use visual_parts_transforms.
+    (Through v2.0.4 this step said that with the native viewer the stream
+    ran inside viewer.update()'s render-lock hold, atomic with the camera +
+    node poses (v1.1.25). That was true on genesis-world <= 1.3.3 only: the
+    patch that did it, patch_viewer_atomic_update, returned False on >= 1.4
+    and was removed in v2.0.5.)
 ```
 
 ## Hook slots

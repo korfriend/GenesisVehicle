@@ -14,11 +14,15 @@ import os
 
 import torch
 import genesis as gs
-from genesis.utils.geom import transform_by_quat
 
-from ._version import __version__
-from .config import ResolvedConfig, VehicleConfig, check_rolling_resistance_cr, resolve
-from ._gs_compat import apply_links_wrench, check_genesis_floor, check_link_inertial_api
+from ._gs_compat import apply_links_wrench, check_link_inertial_api, require_genesis
+
+require_genesis(gs)   # genesis-world >= 1.5.0 required (2.0.5); raises GenesisVersionError
+
+from genesis.utils.geom import transform_by_quat  # noqa: E402
+
+from ._version import __version__  # noqa: E402
+from .config import ResolvedConfig, VehicleConfig, check_rolling_resistance_cr, resolve  # noqa: E402
 from .dynamics import (YawInertia, rigid_share_factor, static_mass_shares,
                        yaw_inertia_from_mass_props)
 from ._hotset import prime_derived
@@ -137,8 +141,8 @@ def _resolve_dt_from_scene(scene: Any, recommended_dt: float) -> float:
     try:
         scene_dt = float(scene.sim.dt)
     except (AttributeError, TypeError):
-        # Fall back to the preset's value — but say so. On every genesis the
-        # SDK supports (1.3.3, 1.4.0) ``scene.sim.dt`` reads fine even BEFORE
+        # Fall back to the preset's value — but say so. On the genesis the
+        # SDK requires (1.5.0) ``scene.sim.dt`` reads fine even BEFORE
         # build(), so on a real Scene this branch is unreachable; reaching it
         # means the caller passed something that is not a Scene, or the engine
         # moved the time axis again. Either way the vehicle would then
@@ -453,7 +457,6 @@ class VehiclePhysics:
         n_envs: int = 1,
         name: Optional[str] = None,
     ):
-        check_genesis_floor()   # warn-only, once per process; not QUIET-gated
         assert n_envs >= 1
         global _BANNER_PRINTED
         if not _BANNER_PRINTED:
@@ -501,8 +504,8 @@ class VehiclePhysics:
         try:
             base_idx = int(entity.base_link_idx)
         except (AttributeError, TypeError, ValueError):
-            # Narrow (v1.6.5): `base_link_idx` exists on genesis 1.3.3 and
-            # 1.4.0, so this is a fallback for an entity shape that lacks it or
+            # Narrow (v1.6.5): `base_link_idx` exists on genesis-world 1.5.0
+            # (and did on 1.3.3 .. 1.4.5), so this is a fallback for an entity shape that lacks it or
             # returns something non-int — not a catch-all. The fallback is a
             # DEFINED behaviour (look the base link up by name), so it stays
             # silent; anything else must propagate.
@@ -813,9 +816,8 @@ class VehiclePhysics:
           ``entity.links``, so a duck-typed non-genesis entity could be
           stepped; it now needs ``links`` or a ``wheel_meta.yaw_inertia`` set
           before the first step);
-        * a root link exposing neither ``desc`` (genesis >= 1.4.0) nor
-          ``inertial_mass`` (<= 1.3.3), or missing one of its branch's four
-          inertial fields, raises ``AttributeError``
+        * a root link exposing no ``desc``, or a ``desc`` missing one of its
+          four inertial fields, raises ``AttributeError``
           (``_gs_compat.check_link_inertial_api``) — an unknown engine, not a
           massless vehicle;
         * a ``ValueError`` from the mass walk (no link carries mass) or from
@@ -1316,9 +1318,11 @@ class VehiclePhysics:
             ``(n_envs, n_wheels)`` (``(n_wheels,)`` accepted for a single env).
             When given, the pipeline uses these instead of reading
             ``self.sensor`` — this is the hook :class:`VehicleScene`
-            ``dual_scene`` mode uses to feed distances measured in a SEPARATE static-terrain
-            raycast scene (whose BVH is built once, never re-fit per step; see
-            ``docs/dual-scene-raycast.md``). When ``None`` (default) the sensor
+            ``dual_scene`` mode uses to feed distances measured in a SEPARATE
+            raycast scene (see ``VehicleScene``'s module docstring for which
+            ray-cast trees genesis-world 1.5.0 refits; through 2.0.4 this said
+            that scene's BVH "is built once, never re-fit per step", a pre-1.5.0
+            description). When ``None`` (default) the sensor
             is read exactly as before — fully backward compatible.
         """
         # (v2.0.2) Gear mode: read the request off the ORIGINAL object, before
@@ -1383,7 +1387,7 @@ class VehiclePhysics:
 
         # [RAYCAST] — distances may be injected by an external raycast source
         # (VehicleScene dual_scene mode reads them from a separate kinematic-terrain
-        # scene whose BVH is static). When omitted, read this vehicle's own
+        # raycast scene). When omitted, read this vehicle's own
         # sensor exactly as before.
         if distances is None:
             if self.sensor is None:

@@ -1,0 +1,15 @@
+# genesis_vehicle 2.0.5 -- required physics engine.
+#
+# genesis-world 1.5.0 is REQUIRED. On an older engine the SDK raises
+# GenesisVersionError at import of core, vehicle_scene, multi_vehicle, raycast,
+# scene_helpers, visual and server (VehicleScene, VehiclePhysics, the server);
+# kinematics, urdf and control.sweep_measure import without the check, and
+# `import genesis_vehicle`, PathFollower and SweepTable are not blocked
+# (see _gs_compat.require_genesis). Its wheel pulls:
+#   quadrants 1.4.0, coacd >= 1.0.14, PyGEL3D >= 0.8.0; it needs Python >= 3.12.
+# The upper bound is the validated range. A 1.5.x patch release (1.5.1, ...) is
+# admitted by "<1.6" and logs nothing, but it is NOT validated: the engine-keyed
+# identity locks (captured on exactly genesis-world 1.5.0, linux-x86_64) skip on it,
+# and it needs its own capture/parity round. 1.6.0 and later log one WARNING and
+# continue. For genesis-world 1.4.5 stay on genesis_vehicle 2.0.4.
+genesis-world>=1.5.0,<1.6

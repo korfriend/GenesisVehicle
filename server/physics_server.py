@@ -24,6 +24,7 @@ if sys.platform == "win32":
     ctypes.CDLL = PatchedCDLL
 
 import time
+import logging
 import torch
 import argparse
 import numpy as np
@@ -365,6 +366,84 @@ def lerp_state(prev, curr, a):
     return interpolated
 
 
+#: The refusal text for --no-target-collision with URDF targets (L2 and L3).
+NTC_URDF_ERROR = ("--no-target-collision is supported only for primitive /Init/Target "
+                  "targets, not for URDF vehicles (/Genesis/Vehicle/Init); restart "
+                  "without the flag.")
+
+_logger = logging.getLogger("genesis_vehicle.server")
+
+
+def _urdf_requested(osc) -> bool:
+    """True iff the client sent a URDF vehicle init (/Genesis/Vehicle/Init)."""
+    req = getattr(osc, "urdf_init_request", None)
+    return bool(req and req.get('path'))
+
+
+def refuse_ntc_with_urdf(osc) -> None:
+    """Stop the L2 server: --no-target-collision cannot be honoured for URDF
+    targets (no public genesis-world 1.5.0 API sets a URDF geom's collision
+    masks; ``gs.morphs.URDF`` has no contype/conaffinity). Prints and logs
+    :data:`NTC_URDF_ERROR` at ERROR, closes the OSC manager and exits with rc 2.
+    The OSC wire has no error message (schema unchanged), so the client sees no
+    ``/Genesis/Init/Pacing`` and no further traffic after its init."""
+    print(f" [Genesis] ERROR: {NTC_URDF_ERROR}", flush=True)
+    _logger.error("[genesis_vehicle:server] %s", NTC_URDF_ERROR)
+    try:
+        osc.close()
+    except Exception:          # a failed close must not mask the refusal
+        _logger.debug("osc.close() failed during the NTC refusal", exc_info=True)
+    raise SystemExit(2)
+
+
+#: Collision masks of a primitive target under --no-target-collision. Target vs
+#: target: (0b10 & 0b01) | (0b10 & 0b01) == 0 -> no contact, for any number of
+#: targets. Target vs the ground / obstacles (default 0xFFFF) and vs terrain or
+#: a URDF chassis (1 / 1): non-zero -> contact kept.
+NTC_TARGET_CONTYPE, NTC_TARGET_CONAFFINITY = 0b10, 0b01
+
+
+def generic_target_morph(target_info, *, no_target_collision: bool = False):
+    """The ``gs.morphs`` primitive for one /Init/Target (types 1 Box, 2 Sphere,
+    3 Cylinder; anything else a flat 0.01 m Box). With ``no_target_collision``
+    the morph carries ``contype=0b10, conaffinity=0b01`` (public ``Primitive``
+    fields; they survive ``VehicleScene.add_dynamic``'s morph copy)."""
+    t_pos = target_info.get('pos', [0, 0, 2])
+    t_quat = target_info.get('quat', [1, 0, 0, 0])
+    obs_type = target_info.get('type', 2)
+    scale = target_info.get('scale', [1.0, 1.0, 1.0])
+    size = (scale[0] * 1.0, scale[1] * 1.0, scale[2] * 1.0)
+    kw = {}
+    if no_target_collision:
+        kw = dict(contype=NTC_TARGET_CONTYPE, conaffinity=NTC_TARGET_CONAFFINITY)
+    if obs_type == 1:
+        size = (max(size[0], 0.01), max(size[1], 0.01), max(size[2], 0.01))
+        return gs.morphs.Box(size=size, pos=t_pos, quat=t_quat, **kw)
+    if obs_type == 2:
+        return gs.morphs.Sphere(radius=max(size[0] / 2.0, 0.01), pos=t_pos, quat=t_quat, **kw)
+    if obs_type == 3:
+        return gs.morphs.Cylinder(radius=max(size[0] / 2.0, 0.01), height=max(size[2], 0.01),
+                                  pos=t_pos, quat=t_quat, **kw)
+    size = (max(size[0], 0.01), max(size[1], 0.01), 0.01)
+    return gs.morphs.Box(size=size, pos=t_pos, quat=t_quat, **kw)
+
+
+def build_generic_target(vs, target_id, target_info, *, ue_friction, ue_restitution,
+                         vis_mode, no_target_collision: bool = False):
+    """Build one generic (non-vehicle) /Init/Target in ``vs`` and return its
+    ``DynamicBody``: a free rigid primitive the OSC layer teleports, routed
+    through ``VehicleScene.add_dynamic`` like any obstacle. Shared by ``main()``
+    and the AC-NTC harness (extracted from ``main()`` in 2.0.5)."""
+    t_color = (1.0, 0.8, 0.1, 0.6)
+    return vs.add_dynamic(
+        generic_target_morph(target_info, no_target_collision=no_target_collision),
+        physics=True,
+        material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution,
+                                    **COARSE_SDF_MATERIAL_KW),
+        surface=gs.surfaces.Rough(color=t_color), vis_mode=vis_mode,
+        mass=target_info.get('mass', 1.0), name=f"target_{target_id}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Genesis Ball Kick Sample with Unreal Engine OSC Bridge")
     parser.add_argument("--send_ip", type=str, default="127.0.0.1", help="Target IP address for Unreal Engine (default: 127.0.0.1)")
@@ -382,7 +461,12 @@ def main():
                              "verified physics-identical to 0.02 (measured at the pre-1.1.25 "
                              "default --substeps 2), +25%% step budget, ~-20%% total CPU; "
                              "see CHANGELOG 1.0.17)")
-    parser.add_argument("--no-target-collision", action="store_true", help="Disable collision between target entities")
+    parser.add_argument("--no-target-collision", action="store_true",
+                        help="Disable collision between primitive /Init/Target targets "
+                             "(Box/Sphere/Cylinder); they still collide with the ground, "
+                             "terrain and obstacles. Not supported for URDF vehicle targets "
+                             "or with --multi-env: the server exits with an error. Before "
+                             "2.0.5 this flag did nothing on genesis-world >= 1.4.0.")
     parser.add_argument("--road-raycast-only", action="store_true",
                         help="Load complex road/terrain meshes ([Complex]) as VISUAL raycast "
                              "targets with no collision geometry. Skips CoACD convex "
@@ -392,8 +476,8 @@ def main():
     parser.add_argument("--single-scene", action="store_true",
                         help="(L2 mode) legacy single-scene raycast: the wheel rays hit "
                              "the rigid collision geoms of the ONE main scene directly (the "
-                             "pre-v1.0.12 default). Cheaper to build, but the raycast BVH re-fits "
-                             "every step and wheels ride convex (CoACD) road colliders instead of "
+                             "pre-v1.0.12 default). Cheaper to build, but wheels ride convex (CoACD) "
+                             "road colliders instead of "
                              "the exact mesh surface. Incompatible with --road-raycast-only "
                              "(rco roads only exist in the dual raycast scene).")
     parser.add_argument("--structures-as-primitive", action="store_true",
@@ -541,6 +625,13 @@ def main():
                      "an rco road is a kinematic raycast surface, which only the "
                      "dual raycast scene can host.")
 
+    if args.multi_env and args.no_target_collision:
+        # L3 always runs URDF vehicles in non-interacting envs; the flag has no
+        # meaning there (through 2.0.4 it was silently ignored). Refused at
+        # parsing, before any OSC wait (rc 2).
+        _logger.error("[genesis_vehicle:server] %s", NTC_URDF_ERROR)
+        parser.error(NTC_URDF_ERROR)
+
     if args.send_hz is not None and args.send_hz <= 0.0:
         parser.error(f"--send-hz must be > 0 (got {args.send_hz}); omit the flag "
                      f"to keep the default of one state send per loop.")
@@ -607,6 +698,13 @@ def main():
     # automatically sending RequestInit every 1 s, so we eliminate at the source the
     # bottleneck of running a second loop here that drains the initial data buffer.
     init_data = osc.wait_for_initialization(timeout=300.0)
+    # --no-target-collision with URDF targets: refused as early as the URDF is
+    # known (it arrives over OSC after start-up), before any scene or target is
+    # built. Only with the flag set (addendum C3); the URDF-mode detection
+    # itself stays below. Checked again at the target-build point in case
+    # /Genesis/Vehicle/Init arrives after /Init/Done.
+    if args.no_target_collision and _urdf_requested(osc):
+        refuse_ntc_with_urdf(osc)
     init_physics = init_data.get('physics', {})
     ue_gravity = init_physics.get('gravity', -9.81)
     ue_dt = args.override_dt if args.override_dt is not None else init_physics.get('dt', 0.025)
@@ -623,7 +721,7 @@ def main():
     # 4. Genesis Scene Setup — VehicleScene for unified vehicle handling.
     # Per-entity mode is interacting vehicles at n_envs=1 on CPU. v1.0.12:
     # dual_scene is the DEFAULT (matching the SDK default and L3) — statics get a
-    # kinematic raycast mirror whose BVH is static (no per-step re-fit), wheels
+    # kinematic raycast mirror (no vehicle geometry in the ray scene), wheels
     # ride the exact mesh surface, and --road-raycast-only composes on top (it
     # additionally drops the main-scene road collider). Dynamic obstacles keep
     # their pre-dual semantics via wheel_raycast mirrors (env_builder). The
@@ -680,6 +778,11 @@ def main():
         urdf_path = osc.urdf_init_request['path']
         is_urdf_active = True
         print(f" [Genesis] [Init] Multi-Target (URDF) Active: {urdf_path}")
+    if is_urdf_active and args.no_target_collision:
+        # Second refusal point (api-review condition 2): the URDF init can
+        # arrive after /Init/Done (or after the init wait timed out), i.e.
+        # after the early check above. Still before any target is built.
+        refuse_ntc_with_urdf(osc)
 
     target_dict = init_data.get('target', {})
     if not isinstance(target_dict, dict) or len(target_dict) == 0:
@@ -705,34 +808,14 @@ def main():
                 # wheel_visual_transforms, so no per-step engine FK is paid.
             )
         else:
-            # Generic target building
-            t_pos = target_info.get('pos', [0, 0, 2])
-            t_quat = target_info.get('quat', [1, 0, 0, 0])
-            obs_type = target_info.get('type', 2)
-            scale = target_info.get('scale', [1.0, 1.0, 1.0])
-            size = (scale[0] * 1.0, scale[1] * 1.0, scale[2] * 1.0)
-            
-            if obs_type == 1:
-                size = (max(size[0], 0.01), max(size[1], 0.01), max(size[2], 0.01))
-                target_morph = gs.morphs.Box(size=size, pos=t_pos, quat=t_quat)
-            elif obs_type == 2:
-                target_morph = gs.morphs.Sphere(radius=max(size[0] / 2.0, 0.01), pos=t_pos, quat=t_quat)
-            elif obs_type == 3:
-                target_morph = gs.morphs.Cylinder(radius=max(size[0] / 2.0, 0.01), height=max(size[2], 0.01), pos=t_pos, quat=t_quat)
-            else:
-                size = (max(size[0], 0.01), max(size[1], 0.01), 0.01)
-                target_morph = gs.morphs.Box(size=size, pos=t_pos, quat=t_quat)
-
-            t_color = (1.0, 0.8, 0.1, 0.6)
-            # Generic (non-vehicle) target — a free rigid body the OSC layer
-            # teleports. Routed through VehicleScene like any obstacle.
-            _obs = vs.add_dynamic(
-                target_morph, physics=True,
-                material=gs.materials.Rigid(friction=ue_friction, coup_restitution=ue_restitution, **COARSE_SDF_MATERIAL_KW),
-                surface=gs.surfaces.Rough(color=t_color), vis_mode=args.vis_mode,
-                mass=target_info.get('mass', 1.0), name=f"target_{target_id}")
+            # Generic (non-vehicle) target: a primitive built by the shared
+            # build_generic_target (also driven by the AC-NTC harness).
+            _obs = build_generic_target(
+                vs, target_id, target_info, ue_friction=ue_friction,
+                ue_restitution=ue_restitution, vis_mode=args.vis_mode,
+                no_target_collision=args.no_target_collision)
             target_entities[target_id] = _obs.entity_main
-            print(f" [Genesis] Created Target {target_id} at {t_pos}")
+            print(f" [Genesis] Created Target {target_id} at {target_info.get('pos', [0, 0, 2])}")
             
     # 5. Sync the Unreal Engine environment (delegated to the helper module)
     obstacles, dynamic_obstacles, initial_dynamic_states, ue_driven_obstacle_ids, extra_mass_entities = genesis_env_builder.build_obstacles(
@@ -747,14 +830,13 @@ def main():
     )
     entities_to_set_mass.extend(extra_mass_entities)
 
-    # 6. Background and simulation settings
+    # 6. --no-target-collision is applied when the targets are built
+    # (build_generic_target: contype/conaffinity on the primitive morph). The
+    # loop that stood here wrote geom._contype / _conaffinity after the
+    # entities existed, which no genesis-world >= 1.4.0 reads (removed in 2.0.5).
     if args.no_target_collision:
-        print(" [Genesis] 옵션에 의해 차량(Target) 상호 간의 충돌을 비활성화합니다.")
-        for idx, (tid, tentity) in enumerate(target_entities.items()):
-            for link in tentity.links:
-                for geom in link.geoms:
-                    geom._contype = (1 << (idx + 1))
-                    geom._conaffinity = 1
+        print(" [Genesis] --no-target-collision: primitive targets do not collide "
+              "with each other (contype=0b10, conaffinity=0b01).")
 
     vs.build()      # builds vs.main_scene + constructs each vehicle's VehiclePhysics
     print(f" [DEBUG] Total rigid geoms after build: {vs.rigid_solver.n_geoms}")
@@ -766,7 +848,12 @@ def main():
     # for part of every frame, and that offset flickers at the draw rate: the
     # vehicle "trembles" on screen even when the physics is steady (the
     # terrain_drive sample documented exactly this). follow_entity updates the
-    # camera inside viewer.update(), atomically with the pose push. (v1.1.25)
+    # camera inside viewer.update() (v1.1.25). It is NOT atomic with the pose
+    # push: through 2.0.4 this comment said it was, relying on the SDK's
+    # patch_viewer_atomic_update, which never applied on genesis-world >= 1.4
+    # and was removed in 2.0.5 -- the viewer still sets the follow camera
+    # outside the render lock, so a followed vehicle may tremble fore/aft at
+    # speed (a draw artefact; physics unaffected).
     # Otherwise: one-shot bird's-eye framing at the spawn centroid instead of
     # Genesis's default near-origin camera (which typically spawns INSIDE a
     # vehicle); the user can still orbit freely afterwards. (v1.1.20)

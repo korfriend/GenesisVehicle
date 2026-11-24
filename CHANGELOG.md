@@ -10,6 +10,846 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [2.0.5] — 2026-11-24
+
+**Changed (engine, required): genesis_vehicle 2.0.5 runs on genesis-world
+1.5.0 only (`>= 1.5.0, < 1.6`) and refuses an older engine at import with
+`GenesisVersionError`; support for 1.4.5 is dropped.** The SDK is written
+directly against 1.5.0 and every engine-version branch (`<= 1.3.3` and 1.4.x)
+is gone; the legacy `RigidOptions.dt` normalisation
+(`vehicle_scene._normalize_rigid_dt`, which strips a user `dt` written for
+`<= 1.3.3` semantics) remains. On 1.5.0 the default headless physics is the 2.0.4 tree's physics bit for
+bit (46 items, §8); across the engine change only tolerances hold (≤ 5.63e-5 m
+in x and ≤ 5.93e-5 m in z on 16 parity scenarios; one forced tank scene 0.126 m apart through a
+round-off-decided touchdown sign that already exists on 2.0.4, §8.3). Also in
+this release, by user decision: the `dual_scene` raycast mirror moves to the
+1.5.0 entity spec (§5.1); the server's `--no-target-collision`, a silent no-op
+since genesis-world 1.4.0 at the latest, now works for primitive targets and is
+REFUSED (rc 2) with URDF vehicles or `--multi-env` (§7); the inert
+`patch_viewer_atomic_update` is removed (§6); and obstacles / raycast surfaces
+accept a list of per-env variants (§4). **Required-engine change and new public
+API in a patch release, by user decision** (§1).
+
+**What this release does NOT give you, stated plainly:** no "no behaviour
+change" beyond the headless default path — the rendered
+`WheelJointInternalSync` path moves the chassis trajectory (on 1.4.5 too: a
+pre-existing defect, documented here, fix planned for 2.0.6, §10.2), and on
+1.5.0 a URDF `effort="0"` makes the `visual_susp_mode="control"` PD live (not
+pinned, §2, §10.3); no identity across engines (§8); no raycast-mode speed
+figure (one published bench run, caveated, §9.6); no GPU, Windows or UE-client
+measurement (§11); a 1.5.x patch release is admitted but NOT validated (§3).
+
+| abbr | meaning |
+|---|---|
+| A / B | engine A = genesis-world 1.4.5 + quadrants 1.3.3 + coacd 1.0.11 + PyGEL3D 0.6.1 (the venv before the upgrade) / engine B = genesis-world 1.5.0 + quadrants 1.4.0 + coacd 1.0.14 + PyGEL3D 0.8.2 |
+| A204 / B204m / B205 | v2.0.4 (`git archive` of `9e5c4d5`) on A / v2.0.4 + the two-line `skip_forward` patch on B, headless — "the 2.0.4 tree's physics on 1.5.0" / the 2.0.5 tree on B |
+| overlay | B installed with `pip install --no-deps --target` and put first on `PYTHONPATH`, the venv untouched; after the upgrade the venv's four packages were checked file-for-file identical to it (§9.10) |
+| AC-x / R-x / ST-x | gate / reported-only item / stop rule of the 2.0.5 release plan, thresholds fixed before measuring (`.pm_r2/gs150/acceptance*.json`, outside the repo) |
+| NTC | the server flag `--no-target-collision` |
+| VJS | `WheelJointInternalSync` (and its batched form `KindVisualBatch`), the solver-joint wheel-visual writer |
+| PD | proportional-derivative joint controller (`control_dofs_position`, the VJS `"control"` suspension path) |
+| SFL / `_s_eng` | `StaticFrictionLock` / its travel sign, recorded once when a wheel's lock engages |
+| FK | forward kinematics; "lazy FK" = 1.5.0 recomputes link poses only when they are read |
+| SDF | signed distance field, the per-geom grid genesis builds at `build()` |
+| BVH / top-level tree | bounding volume hierarchy the rays are cast through / (1.5.0) the per-env tree over a raycast target's meshes |
+| IoU | intersection over union of two pixel masks |
+| RSS | peak resident set size of the process |
+| truth | float64 analytic ray hit computed from the sensor's own ray definition and the pose recorded for that step of that run |
+| CTE | cross-track error (m) |
+| L2 / L3 | the OSC server's per-entity mode / `--multi-env` mode |
+| UE | Unreal Engine, the OSC server's client |
+| WSL2 | Windows Subsystem for Linux 2 (the measurement machine) |
+| μ | friction coefficient |
+
+**Conditions of every number in this entry unless a row says otherwise:**
+CPU/WSL2, one foreground process at a time, separate kernel caches per engine;
+2026-11-24. "Implementation" and "impl-review" name who measured (the
+implementation agent with its harnesses under `.pm_r2/gs150/harness/`;
+impl-review with its own scratch harness); "plan-review" likewise. Parity
+scenarios P1-P14d: P1 = reference car (`samples/urdf/car_4w.urdf`,
+`car_4w_rwd_ackermann`), `dual_scene`, dt 0.025 × 10 substeps, plane μ 1.0,
+spawn z 1.0, 1.5 s brake then 5 s at throttle 0.5; the others vary it (steer,
+wall, rest-then-go, tank straight / skid, truck, `single_scene`, flat
+`Terrain`, 9-ray fan, two cars batched at `n_envs` 3, ramp + kerb, moving
+platform, mesh road).
+
+### 1. Why a patch version, and the user decisions
+
+Every departure from the minor-bump rule is a user decision:
+
+- **genesis-world 1.5.0 REQUIRED, 1.4.5 dropped** — the non-recommended option
+  (the planner recommended a warn-only floor that kept 1.4.5 running). Supported
+  range `>= 1.5.0, < 1.6`: below → `GenesisVersionError`, at or above 1.6 → one
+  WARNING.
+- **Version 2.0.5**, with a field-team note (§12).
+- **Scope added on top of the engine switch**: the Kinematic-spec raycast mirror
+  (§5.1); the two dead features cleaned up — NTC made real (primitives only,
+  URDF / `--multi-env` refused, §7) and `patch_viewer_atomic_update` removed
+  (§6); all pre-1.5.0 compatibility code removed (§6); per-env variants for
+  obstacles and ray surfaces only, as lists in the existing `morph=` parameters
+  (§4).
+- **The plan's 5 cm engine-comparison limit (ST-7) WAIVED** for one locked
+  scenario, `legacy:direct_single_3` / tank, with its cause recorded (§8.3).
+- **Not fixed here, planned for 2.0.6**: the SFL touchdown-sign knife-edge
+  (§10.1), the VJS feedback (§10.2) and the `"control"`-path force range
+  (§10.3). The `effort="0"` effect is documented, not pinned.
+- **Withdrawn**: unifying `StaticFrictionLock`'s spring cap on one constant
+  (planned for 2.1.0 in CHANGELOG 2.0.4 §4.2 / §12) — withdrawn by the user on
+  2026-11-24; corrected in place (§13).
+
+### 2. What genesis-world 1.5.0 changed, and what the SDK does about it
+
+Packages (the complete `pip freeze` diff of the upgrade, 131 → 131 lines):
+genesis-world 1.4.5 → 1.5.0, quadrants 1.3.3 → 1.4.0, coacd 1.0.11 → 1.0.14,
+PyGEL3D 0.6.1 → 0.8.2; nothing added or removed (implementation). The 1.5.0
+wheel requires Python >= 3.12 (< 3.15) and no longer pulls `moviepy`, `vtk` or
+`z3-solver` on a fresh install; the SDK and its demos do not use them
+(api-review).
+
+| 1.5.0 change | what broke on the 2.0.4 tree | what 2.0.5 does |
+|---|---|---|
+| `skip_forward=` removed from `set_base_links_pos` / `_quat` and `set_dofs_velocity`; lazy FK (poses recomputed when read) | `TypeError` in both VJS writers (`visual.py`); the batched `dual_scene` proxy sync raised, was caught, and every `dual_scene` scene fell back to the per-body sync with one `[genesis_vehicle:proxy-sync]` WARNING (that path equals the batched one only to 1e-5 m) | calls without the keyword; no explicit FK call (the raycaster reads ray origins through a refreshing getter); a test asserts the batched path is taken (Tests, below) |
+| render API: `add_external_node` / `external_nodes` removed; `jit.update_buffer(primitives, name, data)` uploads "model" TRANSPOSED | `InstancedWheelRenderer` raised `AttributeError` | `_gs_compat.add_render_node` / `queue_instance_poses` (one transposed array per primitive, `primitive.poses` set so bounds stay current) |
+| a visual geom renders from the private per-env `vgeom.active_envs_mask` | the 2.0.4 URDF wheel-visual hide (`active_envs_idx = []`) is a no-op: wheels drawn twice (api-review; with only that hide, 6368-6500 wheel pixels where the mask gives 0 — implementation, §9.3) | `_gs_compat.hide_vgeoms` writes the mask — an ENGINE-PRIVATE write; raises `AttributeError` before writing if the attribute is missing |
+| convex-width SDF refinement (since 1.4.7) | a THIN convex body with `COARSE_SDF_MATERIAL_KW` refined past 16 nodes along its thin axis | `COARSE_SDF_MATERIAL_KW` gains `"sdf_max_res": 16` (§5.2) |
+| `vis_mode="visual"` and material `use_visual_raycasting` deprecated in favour of the entity spec; the Kinematic spec raises on a non-"visual" `vis_mode` | two deprecation warnings per `dual_scene` mirror | the mirror is built on `gs.entities.Kinematic(use_visual_raycasting=True)` (§5.1) |
+| URDF `effort="0"` read as an UNBOUNDED force range (1.4.5: `[-0, 0]`) | nothing raises; the VJS `"control"` suspension PD (kp 1e7) becomes live and its reaction acts on the chassis | NOT pinned, by user decision; documented (§10.3); settled in 2.0.6 (planned) |
+| raycaster rewritten (1.4.7): per-mesh trees built once from local vertices; a per-env top-level tree refitted — every update for a collision target, after a geometry change for a visual target; no `maybe_static` | nothing raises; the SDK's "single_scene re-fits every face, dual_scene builds once" rationale became false | docs corrected (§13); `dual_scene` stays the default on what still holds (§5.3) |
+| hibernation wake-up changed (1.4.6, upstream #3594 / #3620) | — | re-measured, unchanged in the server harness (§9.4) |
+| a heterogeneous entity (one morph per env) builds through the entity spec (the description classes predate 1.5.0; 1.4.7 added the spec path) | — | exposed for obstacles / ray surfaces (§4) |
+| `RigidOptions` has no `prefer_parallel_linesearch` (also absent on 1.4.5) | — | the L3 key filter and retry loop are removed; an unknown key now RAISES at L3 start-up (§7.4) |
+
+The 2.0.4 tree on 1.5.0 without the patch: 1342 passed, 23 skipped, 7 failed
+(implementation) — the 7 are the `skip_forward` / render-node / mirror cases
+above.
+
+### 3. Added: the required engine — `GenesisVersionError`, `require_genesis`, `requirements.txt`
+
+- `genesis_vehicle.GenesisVersionError` (subclass of `ImportError`) and
+  `genesis_vehicle.require_genesis(gs_module=None)`, both in `__all__`;
+  `_gs_compat.GENESIS_FLOOR = (1, 5, 0)`, `GENESIS_UNVALIDATED_FROM = (1, 6, 0)`.
+- **Where it is enforced**: `require_genesis(gs)` runs at module level right
+  after `import genesis` in `core`, `vehicle_scene`, `multi_vehicle`, `raycast`,
+  `scene_helpers`, `visual` and `server/__init__`. So `VehicleScene`
+  (`init_genesis=False` included), `VehiclePhysics`, `MultiVehiclePhysics`,
+  `scene_helpers` and the server fail at IMPORT, before any scene exists.
+- **Where it is not**: `genesis_vehicle.kinematics` (imports
+  `genesis.utils.geom` at module level), `urdf` (no genesis import) and
+  `control.sweep_measure` (imports genesis lazily; a sweep still hits the check
+  when it builds its `VehicleScene`) import without it; `import
+  genesis_vehicle`, `PathFollower`, `SweepTable`, `DifferentiablePlant` and
+  `control.identify` import on 1.4.5 (impl-review probe on 1.4.5). It is NOT
+  called at module level in `_pipeline`, `_gs_compat`, `dynamics` or
+  `control/*` — pinned by an AST test — so Genesis-free use keeps importing
+  (genesis itself must still be importable).
+- Below 1.5.0, or on a 1.5.0 pre-release (`1.5.0rc1`): raises with "genesis_vehicle
+  2.0.5 requires genesis-world >= 1.5.0, < 1.6 (found X). Upgrade: pip install
+  'genesis-world>=1.5.0,<1.6' (pulls quadrants 1.4.0, coacd >= 1.0.14, PyGEL3D
+  >= 0.8.0; needs Python >= 3.12), or stay on genesis_vehicle 2.0.4 for
+  genesis-world 1.4.5." **The message is logged once per process at ERROR on
+  the `genesis_vehicle` logger before the raise**, because a caller's `try: ...
+  except ImportError:` (the optional-dependency idiom) also catches this error
+  and would otherwise treat an outdated engine as "not installed".
+- >= 1.6.0: one WARNING per process ("not validated"), continues. Unparseable
+  version: one WARNING, continues. `1.5.0-cuda12` / `1.5.0_cpu` parse as 1.5.0.
+- **A 1.5.x patch release (1.5.1, ...) is admitted by `< 1.6`, logs nothing and
+  is NOT validated**: the 20 engine-keyed identity locks (§8.2) skip on it, so the
+  suite stays green there without proving anything. It needs its own capture /
+  parity round.
+- New `genesis_vehicle/requirements.txt`: `genesis-world>=1.5.0,<1.6` plus the
+  comments above. There is no `pyproject` / `setup`.
+- **Replaces** v1.6.9's warn-only `check_genesis_floor` (1.4.5, never raised)
+  and its two call sites (`vehicle_scene._ensure_genesis`,
+  `VehiclePhysics.__init__`).
+
+### 4. Added: per-env variants of obstacles and raycast surfaces
+
+`add_static(morph=[...])` (and `wheel_raycast_morph=` / `collision_morph=`,
+every given one a list of the same length k), `add_raycast_surface([...])` and
+`add_dynamic([...], physics=False)` build one heterogeneous genesis entity; the
+engine gives each env one variant in contiguous blocks of nearly equal size
+(pass exactly `n_envs` morphs for the identity mapping). The same list goes to
+the `dual_scene` mirror; both scenes are built with the same `n_envs`, so the
+mapping is shared. After `build()`, `StaticBody.variant_index` /
+`DynamicBody.variant_index` — a defaulted LAST dataclass field, `None` for a
+single morph — is a `torch.long` tensor `(n_envs,)`, from
+`_gs_compat.variant_index(n_variants, n_envs)`: the engine's own private
+`_balanced_variant_mapping`, imported at call time (ENGINE-PRIVATE read; raises
+`ImportError` naming the symbol if a later engine drops it — the engine has no
+public read-back).
+
+Refused before build: `add_vehicle` with a list `urdf_path` or `morph`
+(`TypeError`: a vehicle's wheel geometry, `WheelMeta`, deadbeat inertia scale,
+self-collision ceiling and `DifferentiablePlant` come from one URDF parse); a
+`Terrain` / `Plane` element, an empty or nested list, lists of different
+lengths or mixed with a single morph, k > `n_envs` (the engine would silently
+leave the extra variants unused), and an `add_dynamic` list with
+`physics=True`, with or without `mass=` (all `ValueError`). k = 1 is a single
+morph. Variants must share their kinematic topology (the engine's rule). Not
+supported: choosing the mapping other than by list order and length,
+`get_verts` on a variant body (the engine refuses), variants in the OSC server.
+
+Measured (implementation, AC-HET, gates fixed before measuring; `n_envs` 6 and
+3, k 3, both raycast modes): `variant_index` equals the placement read back from
+per-env bounding boxes on the main body and on the `dual_scene` mirror;
+per-env wheel-ray distances over a variant box top (1440 rays per mode), across
+its edge (1440) and over a per-env teleported variant platform (2880) match
+truth to ≤ 4.9e-7 m with 0 hit-mask mismatches; a car driving into per-env
+variant walls stops at each env's own face (≤ +0.0118 m past it); AC-E repeated
+on this tree, 46 / 46 bit-identical. impl-review, its own scene (`n_envs` 5, a
+mesh and two boxes): `[0, 0, 1, 1, 2]`, 760 rays ≤ 2.6e-7 m, three refusals
+raise. Not measured: GPU, `n_envs` > 6, a variant Mesh via
+`add_raycast_surface`, variants with `swept_envelope`, and whether vehicle
+CONTACT is bit-identical to a variant-free scene — a variant body switches the
+engine to its heterogeneous collider path for the whole scene and forces SAP
+broadphase, and AC-E has no variant scene (physics-review). Docs:
+`docs/batching.md` "Per-env variants", `docs/api-reference.md` §0.1.
+
+### 5. Changed
+
+#### 5.1 The `dual_scene` raycast mirror is built on the 1.5.0 entity spec
+
+`_gs_compat.kinematic_raycast_entity(scene, morph_or_morphs, surface)` →
+`scene.add_entity(spec=gs.entities.Kinematic(morph=..., surface=...,
+use_visual_raycasting=True))`; the surface is copied with `vis_mode=None` (the
+spec raises on the server's `--vis_mode collision`), no material flag. The two
+1.5.0 deprecation warnings per mirror are gone. Physics-neutral: AC-E (§8.1)
+includes the ray replays and the mesh-road rollout through this mirror. The
+`Terrain` mirror is always the fixed rigid body now (the probe
+`_kinematic_supports_terrain` is removed).
+
+#### 5.2 `COARSE_SDF_MATERIAL_KW` gains `sdf_max_res: 16`
+
+`{"sdf_cell_size": 1e4, "sdf_min_res": 16, "sdf_max_res": 16}`. Through 2.0.4 it
+had two keys and its comment said a convex geom always lands on 16 nodes per
+axis — true through genesis-world 1.4.6 only (corrected in place in
+`_gs_compat.py`). **Behaviour change, stated:** the third key also caps the
+wall-thickness refinement of a watertight NON-convex body carrying the kwargs
+at 16 per axis (through 2.0.4 it refined up to 128). It applies to the SDK-owned
+bodies: server vehicles, `/Init/Target` primitives, `build_obstacles`
+obstacles and both `dual_scene` mirrors; it matters only for a non-convex
+narrowphase pair, which the post-build `[genesis_vehicle:coarse-sdf]` warning
+names (physics-review). `_is_coarse_material` now checks all three keys, so a
+two-key dict copied from an older release is no longer recognised as coarse.
+Measured (implementation, AC-SDF): every SDK coarse geom — a thin convex wall,
+a box, 4 CoACD road pieces, the car — 16³ on 1.5.0, total 61440 nodes, equal to
+A204.
+
+#### 5.3 Raycast modes: same default, a different stated reason
+
+`raycast_mode="dual_scene"` stays the default. What it rests on since 2.0.5,
+as the code does it (`vehicle_scene.py` module docstring): its raycast scene
+holds no vehicle collision geometry, so a wheel ray cannot hit the vehicle
+(`single_scene` caps the high-cast offset at the vehicle's collision ceiling
+instead), and its kinematic surface is exact on non-convex mesh terrain where a
+rigid mesh is convexified. The 2.0.4 reason — "single_scene re-fits the BVH
+every step over every face; dual_scene builds it once and shares it across
+`n_envs`" — is FALSE on 1.5.0 (§2) and is corrected wherever it was written
+(§13). The `[genesis_vehicle:refit-cost]` warning still fires on the same
+condition (a non-primitive `wheel_raycast` mirror) but no longer claims a
+per-face refit; no per-step cost of such a mirror is measured on 1.5.0.
+
+#### 5.4 Other
+
+- `_gs_compat` is now one 1.5.0 code path per engine-private read (module
+  docstring inventory): `require_genesis`, `apply_links_wrench` (one
+  `apply_links_external_wrench` call; kept as a function so the server's
+  per-instance monkey patch resolves per call), `link_inertial` /
+  `check_link_inertial_api` (reads `link.desc` only; still RAISES on a missing
+  field), `sensor_miss_value`, `kinematic_raycast_entity`, `variant_index`,
+  `add_render_node` / `queue_instance_poses` / `hide_vgeoms`, the coarse-SDF
+  policy.
+- `scene.options.sim` is read directly (the `scene_sim_options` shim is gone).
+- `VehiclePhysics.__init__` still prints its version banner; the engine check
+  moved from there (warn-only) to the import of `core` (raising).
+
+### 6. Removed
+
+No stub; api-review found no importer in `samples/`, `server/` or the
+`GeneVehicle_*` demos.
+
+- `_gs_compat.check_genesis_floor` / `_floor_checked` (warn-only 1.4.5 floor),
+  `has_wrench_api`, `scene_sim_options`, every `<= 1.3.3` branch (force +
+  torque fallback, `link.inertial_*` reads, `Scene.sim_options`) and the
+  old-field tuple.
+- `vehicle_scene._kinematic_supports_terrain`; the `inspect.signature(gs.init)`
+  probe for `use_deterministic_algorithms` and its warning (every accepted
+  engine has the option; GPU determinism was not re-measured).
+- `visual.patch_viewer_atomic_update` and its `_viewer_atomic_wheels` /
+  `_gv_pre_draw` plumbing; the `<= 1.2.x` `get_buffer_id` branch.
+- Kept: `vehicle_scene._normalize_rigid_dt` (still called at scene
+  construction), which strips a legacy `RigidOptions.dt` that restates
+  `SimOptions.dt` — user input written for `<= 1.3.3` semantics, not an engine
+  branch. The patch
+  never applied on genesis-world >= 1.4 (it returned False, so the non-atomic
+  ordering ran), and 1.5.0 has no viewer hook that runs before the scene render
+  under the render lock. Behaviour on 1.4.x and 1.5.0 unchanged by construction;
+  the "atomic" claims in `docs/physics-contracts.md` §7.8,
+  `docs/pipeline-and-hooks.md` and the server's `--follow-cam` comment were
+  true on <= 1.3.3 only and are corrected (§13). Native-viewer follow-camera
+  tremble at speed (CHANGELOG 1.1.25) can therefore occur — a draw artefact,
+  physics unaffected, not measured on 1.5.0.
+- Server: the `apply_monkey_patches` force / torque fallback
+  (`vehicle_builder.py`); `prefer_parallel_linesearch`, the `model_fields`
+  filter and the unknown-key retry loop (`l3_runtime.py`); the dead NTC loop
+  that wrote `geom._contype` after build (`physics_server.py`).
+- Tests: the `<= 1.3.3` / warn-only-floor / shim tests (§Tests).
+
+### 7. Fixed: `--no-target-collision` (server, L2)
+
+#### 7.1 What it does now
+
+A primitive `/Init/Target` (type 1 Box, 2 Sphere, 3 Cylinder, otherwise a flat
+Box) is built by the new `physics_server.build_generic_target` (extracted from
+`main()`) with `contype=0b10, conaffinity=0b01` on its morph — public
+`Primitive` fields that survive `add_dynamic`'s morph copy (a test checks the
+BUILT geoms). Genesis pairs geoms when `(ct_a & ca_b) | (ct_b & ca_a) != 0`:
+target vs target 0 (no contact, any number of targets); target vs ground and
+obstacles (0xFFFF) or terrain (1 / 1) non-zero (contact kept). No vehicle or
+ground mask is written. Help text: "Disable collision between primitive
+/Init/Target targets (Box/Sphere/Cylinder); they still collide with the ground,
+terrain and obstacles. Not supported for URDF vehicle targets or with
+--multi-env: the server exits with an error. Before 2.0.5 this flag did nothing
+on genesis-world >= 1.4.0."
+
+#### 7.2 Since when it was broken
+
+The old code wrote `geom._contype` / `_conaffinity` on the built entities; no
+genesis-world >= 1.4.0 reads them (CHANGELOG 1.6.9 §12, a code read). That loop
+dates from v0.7.0 (`51eb137`); the first SDK release on genesis-world >= 1.4.0
+was v1.5.0 (`44b256a`, 2026-09-08). Whether 1.3.3 read the attribute was not
+checked (no 1.3.3 source on the machine). So the flag did nothing from v1.5.0
+at the latest through v2.0.4.
+
+#### 7.3 Refusals (rc 2) — a deployment break
+
+URDF collision geoms carry fixed masks (1 / 1) and `gs.morphs.URDF` has no mask
+field (extra keys forbidden), so no public 1.5.0 API can honour the flag for a
+URDF vehicle (user decision: primitives only, public API only). With the flag
+the server prints and logs at ERROR "--no-target-collision is supported only
+for primitive /Init/Target targets, not for URDF vehicles
+(/Genesis/Vehicle/Init); restart without the flag." and exits 2:
+
+1. `--multi-env --no-target-collision` — at argument parsing, before any OSC
+   wait (through 2.0.4 silently ignored; L3 always runs URDF vehicles in
+   non-interacting envs);
+2. L2, right after the client's init if a `/Genesis/Vehicle/Init` has arrived —
+   before the scene is built (this early read happens only with the flag);
+3. L2, at the target-build point, for a `/Genesis/Vehicle/Init` that arrived
+   after `/Init/Done` or after the init wait timed out — the `VehicleScene`
+   object and ground plane exist, no target is built.
+
+A URDF init that arrives after target building has started is ignored, as in
+2.0.4, with or without the flag. The client sees no `/Genesis/Init/Pacing` and
+no further traffic after its init — the OSC wire has no error message and is
+unchanged; the reason is only in the server console / log. **A launch script
+that passed the flag with a URDF vehicle or `--multi-env` ran through 2.0.4
+(the flag a no-op) and now exits with rc 2.**
+
+#### 7.4 Measured
+
+AC-NTC probe (implementation, B205, the server's own `build_generic_target` /
+`build_obstacles` driven by a harness; ground and target μ 0.1; 40 settle steps,
+then 120 steps at dt 0.025 × 10 substeps with `set_dofs_velocity` [vx ±3 m/s,
+vy 0, ω 0] on each pushed body before every step; validity: tilt ≤ 1° and the
+no-flag control passing):
+
+| run | gate | measured |
+|---|---|---|
+| two 0.5 m cubes driven at each other, flag | x order flips; max \|z − settled z\| ≤ 0.02 m | flipped at push step 40; 0.00233 m; tilt 1.2e-4° |
+| same, no flag (control) | never flips | no flip, centres 0.3652 m apart (0.135 m interpenetration, 0.174 m sideways drift, reported) |
+| flagged target into a fixed 2×2×1 m obstacle | front ≤ 0.05 m past the face | 0.00541 m |
+| 2 / 1 box into a braked URDF car | front ≤ 0.05 m past the chassis' bounding box | 0.0087 m; car pushed 4.77 m |
+| mutant masks 0xFFFF / 0 / 0 / car box 2 / 2 | each must fail | no flip / falls through the ground (73.6 m) / 6.364 m past the chassis — all failed |
+
+impl-review re-ran the flagged and control pairs and a Sphere + Cylinder +
+resting-Box variant of its own: pass-through with the flag, contact without.
+**Not selection-free**: the first probe (μ 1.0, only vx forced) was invalid —
+every target tipped over (μ·h = w) — and μ 0.1 with pinned vy / ω was chosen by
+plan-review after seeing that data and 5 feasibility runs; the mutants are what
+make the probe valid. Not measured: target vs terrain with the flag; a live UE
+client.
+
+#### 7.5 Other server changes
+
+- **An unknown `RigidOptions` key now raises at L3 start-up** (the filter and
+  retry loop are gone, §6); every key the server passes exists on 1.5.0; the
+  `server.benchmark` L2 and L3 runs exit 0 (AC-S S12).
+- The patched wrench / `set_dofs_position` give the same per-step dof position
+  and velocity digests as unpatched (K = 1 and 2, headless and with one
+  offscreen camera, 200 steps; implementation, api-review condition 10). The
+  `control_dofs_position` patch was not exercised (0 calls in that scene).
+- `server/__init__` imports genesis and runs `require_genesis`: on 1.4.5 the
+  process dies at import, before the OSC socket binds.
+- `--vis_mode collision` (the default) makes 1.5.0 log a deprecation warning
+  for `vis_mode="collision"`; the collision geometry is still drawn
+  (implementation, an offscreen camera on a `VehicleScene`, not through the
+  server).
+- **OSC schema unchanged.** The UE-side schema header (`OscSchema.h`) is not in
+  this workspace, so the UE side was not cross-checked. No UE client was
+  attached, and the server was NOT started in the upgraded venv (only on the
+  overlay).
+
+### 8. Physics: what is unchanged, and how far that is shown
+
+#### 8.1 On 1.5.0: bit-identical to the 2.0.4 tree (AC-E)
+
+B204m — the 2.0.4 tree plus the two-line patch that deletes the `skip_forward=`
+keyword at `vehicle_scene.py:1606, :1608` and nothing else — is the 2.0.4 tree's
+physics on 1.5.0 (it removes the silent per-body proxy fallback). First B204m
+ran twice over the full set: 44 / 44 bit-identical (determinism probe). Then
+2.0.5 against B204m, every recorded float (per-step poses, raw ray distances,
+SDK distances, ray-target poses, finals) and every fixture digest:
+
+| tree | items | result | who |
+|---|---|---|---|
+| G4 (before the hide guard, locks, variants) | 16 parity rollouts, 8 ray replays, 20 fixture scenarios, 2 per-env lateral ray replays | 46 / 46 bit-identical | implementation |
+| G4 + `hide_vgeoms` guard; G5 (+ locks, variants) | same | 46 / 46; 46 / 46 | implementation |
+| final tree (G5 + text-only edits, proven AST-identical) | same | 46 / 46 | implementation |
+| final tree in the UPGRADED venv | same | 46 / 46 | implementation |
+| G5 | P13d single, P6, R14 seam, R13-lat dual, `legacy:direct_single_3`, `gear:b_single_3`, plus P12d single and P9 with 1e-6 m spawn shifts | all bit-identical | impl-review |
+
+All 46 are headless; B204m cannot run the VJS path (its `visual.py` still passes
+`skip_forward`). **The VJS path separately** (physics-review M2): B204m with the
+two `visual.py` keywords also deleted equals 2.0.5 bit for bit on 3 pairs —
+kinematic per-entity, control per-entity, kinematic batched (`KindVisualBatch`,
+`n_envs` 2), 10140 / 10140 / 20280 floats (implementation; P1 inputs, dt 0.025 ×
+10, one offscreen camera). **What AC-E does NOT show: identity across engines.**
+
+#### 8.2 Identity locks: replaced 1:1, re-keyed to 1.5.0
+
+The 20 engine-keyed tests (keyed `("1.4.5", "linux-x86_64")`) cannot run: 2.0.5
+refuses 1.4.5 and the 1.4.5 bit patterns are not reproducible on 1.5.0. They
+are replaced 1:1 by new-name locks captured from B204m (fresh process per item,
+cross-checked against the independent AC-E run), keyed `("1.5.0",
+"linux-x86_64")`; the scenario code is token-identical to the 2.0.4 tests
+apart from fixture path and keys (implementation, verified):
+
+| through 2.0.4 | since 2.0.5 |
+|---|---|
+| `test_contact_path_rollout_matches_its_1_8_0_capture` | `test_contact_path_rollout_matches_the_2_0_4_tree_on_1_5_0` |
+| `test_witness_rollout_is_bit_identical_to_the_37b8b79_tree[0.0 / 0.05]` | `test_witness_rollout_matches_the_2_0_4_tree_on_1_5_0[0.0 / 0.05]` |
+| `test_legacy_inputs_are_bit_identical_to_the_capture` [×9] | `test_legacy_inputs_match_the_2_0_4_tree_on_1_5_0` [×9] |
+| `test_a_gear_vehicle_leaves_the_legacy_rows_bit_identical` [×8] | `test_a_gear_vehicle_matches_the_2_0_4_tree_on_1_5_0` [×8] |
+
+New fixture `tests/data/legacy_inputs_2_0_5.json`; `legacy_inputs_2_0_4.json`
+and `_2_0_1.json` stay in the repo, NOT asserted. The 1.4.5 entries in
+`BASELINES` / `WITNESS_BASELINES` are deleted. 2.0.5 passes all 20 (B205 and the
+upgraded venv). **What this gives 2.1.0**: a bit-level lock that 2.0.5 equals
+the 2.0.4 tree's physics on 1.5.0 for the contact path, the no-torque witness
+and the nine legacy scenes (signed + gear, tank, `n_envs` 3, batched, direct
+`VehiclePhysics.step`). **What is lost**: identity across engines, and the
+cross-tree statement back to `37b8b79` / 1.8.0 on the current engine. On a 1.5.x
+patch release the locks skip.
+
+#### 8.3 Across engines: tolerances only
+
+| comparison | result | who |
+|---|---|---|
+| AC-P: A204 vs B205, 16 scenarios × 7 runs (nominal + six 1e-6 m spawn shifts) = 112 processes; gate \|dx\|, \|dy\| ≤ 1 mm + 0.05 % of distance, \|dz\| ≤ 0.5 mm, settle ≤ 1e-4 m | PASS; max \|dx\| 5.63e-5 m (P11, a batched car), max \|dz\| 5.93e-5 m (P12d dual), settle ≤ 6.7e-6 m; every run's ray hit masks equal truth (112 / 112) | implementation; impl-review spot checks ≤ 7.6e-5 m |
+| engine effect alone, A204 vs B204m, nominal | largest final \|Δxy\| 5.05e-5 m (P11), \|Δz\| 5.9e-5 m (P12d dual); per-ray \|ΔA−B\| ≤ 9.6e-5 m, 0 hit-mask mismatches on every scenario | implementation |
+| AC-R ray replay vs truth on B205 (box ramp, moving platform also teleported per env laterally by more than its size, mesh road, seam set on interior vertices / edges, box-top diagonals) | 0 gated mismatches, ≤ 2.83e-7 m; the 240 seam rays all hit, ≤ 1.745e-7 m | implementation; impl-review: seam 240 / 240 |
+| ST-7: the 20 locked scenarios, A204 fixture vs B204m | 19 of 20 within 1.3e-4 m, braked-segment REST / ROLL classes equal on all 20; `legacy:direct_single_3` tank 0.1262 m (env 0; 0.0735 / 0.0681 m envs 1 / 2), cars in that scene 7.0e-4 / 7.6e-4 m | implementation |
+
+**The tank scene, cause established (plan-review, on A204 alone):** the scene
+drops the tank with zero planar speed and injects a 1 cm ray-distance forcing.
+At touchdown `StaticFrictionLock` records `_s_eng = sign(v_long)`
+(`strategies/stability.py`), and v_long is free-fall round-off (−8.0e-10 m/s on
+1.4.5, +2.5e-9 on 1.5.0). The two signs give two outcomes 0.126 m apart through
+the lock's re-anchor rule. A 1e-6 m spawn shift ON 1.4.5 reproduces the 1.5.0
+result to 2e-5 m. Ray distances agree to 1e-7 m; nothing points at the contact
+solver, hibernation, lazy FK or the raycaster. **This is not a 1.5.0 behaviour
+change and not an engine effect amplified by the scene**; the knife-edge exists
+on 2.0.4 (§10.1). The 5 cm limit was waived for this item by the user; the new
+lock's docstring says it encodes the +1 branch and is round-off-branch
+sensitive. Not claimed: "within 5 cm on every locked scenario", or a bound for
+spawn-drop scenes with planar excitation during the hold.
+
+### 9. Measurements
+
+#### 9.1 Closed-loop behaviour (AC-H, AC-F) — PASS, implementation, B205
+
+- AC-H (2.0.4 braking classes): 8 headline rows equal; 84-row subset 58
+  REST / REST, 26 ROLL / ROLL; 0 counter-rotation steps; the flat brake-0.5 stop
+  2.883131 → 2.883132 m, back-travel 0.
+- AC-F (`mpc_follow_demo` courses, the 1.4.5-made sweep table and params): 5 / 5
+  `DONE` at identical times (13.45 / 11.175 / 41.775 / 9.775 / 29.375 s); largest
+  CTE change demo mean 0.06783 → 0.06791 m, max 0.68341 → 0.68407 m.
+
+#### 9.2 Samples (AC-S) — PASS, implementation, B205
+
+Gate (replaced before any B205 sample ran, plan-review): rc 0, every A204
+verdict line equal with numbers masked, no PASS / OK → FAIL; numbers reported.
+12 / 12 pass. Numbers beyond max(1 mm + 0.05 %, one printed digit): only S7
+(`obstacles_and_ramp --mode single_scene`) — box Δx 1.61 → 1.96 m, x_end 8.26 →
+8.23 m, speed 2.54 → 2.47 m/s, peak N 82,706 → 78,857 N, z min 0.059 → 0.068.
+**Cause: contact, not rays** (implementation diagnostic, confirmed by
+impl-review): wheel distances agree to ≤ 1.6e-6 m until the car's tail, launched
+by the ramp lip, clips the knocked box a second time; from that chassis-box
+contact the box and then the car diverge. On A204 the SAME course already gives
+1.61 m in `single_scene` and 1.96 m in `dual_scene` (S6), so the sample comment
+that the two modes "agree to ~1e-3 here" was already false on 1.4.5; B205 gives
+1.96 m in both. Three GeneVehicle demos (outside this repo) are broken on 2.0.4 /
+1.4.5 already and reproduce on 2.0.5: `GeneVehicle_HJW` prints `FAIL z anchored`,
+`GeneVehicle_JMK` ends at z = −289.7 and `GeneVehicle_Truck6w` at z = −16.3
+(the vehicle leaves the world); not investigated, and cited for nothing but
+"runs without crashing".
+
+#### 9.3 Rendering (AC-V) — PASS, implementation, B205
+
+- Offscreen-camera wheel-pixel masks of five scenes (one car, two cars, a
+  mid-run `mark_config_dirty()` rebuild, the batched `KindVisualBatch` path, a
+  GeneVehicle-style `WheelJointInternalSync` path) at steps 60 / 80 / 100 / 140 /
+  180, against A204: 25 / 25 frames IoU ≥ 0.85; frames 80-180 all 1.0000; frame
+  60 (at rest) 0.8796-0.9207. The frame-60 difference is a depth tie at
+  COPLANAR faces in the harness URDF — the wheel's outer face lies in the plane
+  of the body box's side wall — with the same occluding geom on both engines
+  (segmentation + depth check, implementation; geometry confirmed by
+  impl-review). It is not cited as "rendering unchanged".
+- Three mutants each failed as required (transpose lost: IoU 0.0000; no re-bind
+  after a rebuild: 0.7569 at the steer-reversal frame; no batched joint write:
+  ≤ 0.7596). Wheel-visual hide: with the instanced nodes removed, 0 wheel pixels;
+  with the hide skipped, 6368-6500.
+- **AC-V does not verify wheel SPIN** (the mask is rotationally symmetric).
+- Native viewer: `quickstart --native` on both engines prints its summary
+  (`steps 200 / 200`) after about 19.3 s (1.4.5) / 19.5 s (1.5.0) with no traceback and is alive 30 s later
+  (the harness then terminated its own child).
+
+#### 9.4 Hibernation (R-HIB) — implementation
+
+L2 server `RigidOptions`, reference car, z 1.0, substeps 10, 160 braked steps
+then 120 at throttle 0.5, 7 runs per arm: B205 on 46 / 100 zero-velocity steps,
+3.968262 m; off 0, 3.968301 m. A204 on 46 / 100, 3.968315 m; off 0, 3.968387 m.
+Start from rest unchanged in this harness. Not measured: L3 `n_envs > 1`.
+
+#### 9.5 Build cost and memory (R-BUILD, R-PERF) — implementation
+
+R-BUILD: cold asset cache, warm kernel cache, A204 / B205 alternating, n = 3,
+medians [min .. max]:
+
+| scene | build A204 | build B205 | RSS A204 | RSS B205 |
+|---|---|---|---|---|
+| reference car, default material | 5.07 s [4.91 .. 5.34] | 4.43 s [4.42 .. 7.02] | 1654 MB | 1132 MB |
+| reference car, coarse kwargs | 4.09 s [4.09 .. 4.89] | 4.34 s [4.27 .. 5.31] | 1109 MB | 1133 MB |
+| server-shaped scene | 5.08 s [4.98 .. 5.38] | 5.29 s [5.27 .. 5.75] | 1146 MB | 1167 MB |
+
+On 1.5.0 the default material costs the car no more than the coarse kwargs (1132
+vs 1133 MB); the 1.4.5 "+490 .. +508 MB for a default-material car" (CHANGELOG
+1.6.9 §3) is a 1.4.5 fact. Mechanism not instrumented. RSS includes import, so
+cross-engine absolutes partly reflect import differences (impl-review).
+
+R-PERF, alternating A, B, B, A, A, B, n = 3, medians: `perf_vectorization`
+`n_envs` 1 6.81 → 6.68 ms/step, `n_envs` 64 12.29 → 12.12; an offscreen camera
+rendering every step (320×240) 11.64 → 12.13 ms/step; native viewer (paced)
+24.95 → 24.93 ms/step. Single machine; not a speed claim.
+
+#### 9.6 Raycast-mode bench (`samples/bench_raycast_mode.py`) — implementation, caveats from impl-review
+
+On B205 the fail-closed harness PUBLISHED `single/dual = median 0.753 [0.648 ..
+0.788] n=6` (`single_scene` faster; both rules held; dual 7.817 ms/step, single
+5.785; defaults: 640 m plate at hs 4.0, `n_envs` 1, 20 s window, 6 repeats).
+Caveats: the 13 workers ran in resumable foreground slices, not one session;
+the payload reports SDK 2.0.4 (the version was not yet bumped); on A204 the
+same harness DECLINED (rule (i), group separation); its whole result is the
+interval [0.789 .. 0.867] n=6, entirely below 1 — so a faster `single_scene`
+is not shown to be new in 1.5.0. Unalternated absolutes: dual 5.721 (A204) vs 7.817 ms/step,
+single 4.759 vs 5.785. One run, one machine: **no speed advantage is claimed**
+and the default is not chosen on it (§5.3).
+
+#### 9.7 Autodiff (R-GRAD) — implementation, confirmed by impl-review
+
+`SimOptions(dt=0.01, requires_grad=True)`, gravity 0, a free 75 kg box,
+collision and hibernation off, a leaf torch tensor u (1 N in x) applied for 10
+steps through `apply_links_external_wrench`, loss = final x: `grad = 7.3333e-05`
+(1 substep) and `6.8333e-05` (4 substeps), equal to the hand derivation
+`x = (u/m)·dt²·Σk` and to the same probe through `control_dofs_force`. **On
+1.5.0 the wrench API is on the tape for a free body without contact** — through
+2.0.4 the docs said it was not (`grad is None`, measured on 1.3.3 and unchanged
+on 1.4.0). The SDK vehicle step end to end (raycaster, contact, pipeline) was
+NOT tested; whether Genesis autodiff could replace `DifferentiablePlant` is
+open. `DifferentiablePlant` is unchanged.
+
+#### 9.8 Sweep tables and identify — implementation
+
+`sweep_measure --quick` (81 rows): a_measured max |Δ| 5e-6 m/s², ω_z 1e-6 rad/s,
+A204 vs B205 — at the CSV's print resolution. Hand-over records made in the
+upgraded venv with the demo's grid flags (1250 rows) and `identify`, reference
+car, against the 1.4.5 records: a_measured max |Δ| 3.1e-5 m/s², ω_z 2.0e-6
+rad/s; largest relative parameter change `accel_tau` 3.8e-4 (0.015201 →
+0.015196 s); brake gain 5.0152 unchanged; cornering stiffness ±7e-7 relative;
+everything else ≤ 1.4e-4 relative. The five AC-F courses with the new records:
+5 / 5 `DONE` at the same times; vertex CTE max 2.851 → 2.856 m, the rest equal
+to the printed digits.
+
+#### 9.9 Visual-joint path (R-EFFORT and the follow-up) — implementation
+
+Reference car, P1 inputs, dt 0.025 × 10 substeps, one offscreen camera,
+`internal_sync`: final x headless 10.717960 (A) / 10.718006 (B); kinematic VJS
+10.860085 / 10.860147; forced `"control"` VJS 10.724212 / 10.717792. Control
+joints end at −0.1501 on A (at the limit: zero force range) and about −0.0535
+on B (the PD tracks). See §10.2 / §10.3.
+
+#### 9.10 Upgrade of the main venv — implementation
+
+`pip install genesis-world==1.5.0 quadrants==1.4.0 coacd==1.0.14 PyGEL3D==0.8.2`
+(dry run first; `pip check` clean). Freeze diff exactly the four lines; the
+installed files of all four packages match the overlay's RECORD sha256 (paths
+aside). In the upgraded venv: suite 1388 / 3 / 0, ids and outcomes identical to
+the overlay; AC-E 46 / 46; the 20 locks pass; `quickstart` rc 0 (final x +10.72,
+4.17 m/s); the floor checks 14 / 14; the five AC-F courses with the 1.4.5
+records 5 / 5 `DONE`, every non-timing field equal to the overlay. Pre / post
+freeze files: `gen_vesis_freeze_pre_gs150.txt` / `gen_vesis_freeze_post_gs150.txt`
+(outside this repo). quadrants 1.4.0 removed 89 of the 7865 old 1.4.5 files in
+`~/.cache/quadrants` by itself during those runs (cause not established). Not
+run in the upgraded venv: the server, AC-S beyond S1, AC-V / AC-R / AC-H /
+AC-NTC / AC-HET.
+
+### 10. Known limitations
+
+#### 10.1 `StaticFrictionLock` touchdown sign is decided by round-off (exists on 2.0.4)
+
+When a vehicle is dropped with zero planar speed and its lock engages at
+touchdown, `_s_eng = sign(v_long)` takes the sign of free-fall round-off, and
+the lock's re-anchor rule can then send the run down one of two branches (0.126
+m apart on the forced tank scene; a 1e-6 m spawn shift on 1.4.5 flips it;
+plan-review, §8.3). Engine-independent. Every AC-P scenario drops from z 1.0
+with zero planar speed; none diverged beyond the AC-P tolerance between
+engines. **Fix planned for 2.0.6**
+(own plan; locks re-captured there).
+
+#### 10.2 The VJS wheel-visual path moves the chassis trajectory (exists on 2.0.4)
+
+Through 2.0.4 `visual.py`, `docs/physics-contracts.md` §7.8, `docs/api-reference.md`
+and the root `CLAUDE.md` said the visual joint path does not feed back into the
+dynamics (or bounded it to "< 1 cm extra compression on hard landings").
+**That was wrong.** Measured against the same run headless: reference car,
+kinematic suspension write, +0.142 m over 10.7 m (dt 0.025 × 10 substeps, both
+engines; implementation, confirmed by impl-review); truck
+(`truck_6w_partial_ackermann`, demo URDF, dt 0.025 × 4 substeps, spawn z 2.0,
+1.5 s brake then 10 s at throttle 0.3) +0.319 m over about 52 m, both engines
+(implementation). Mechanism NOT established (physics-review lists candidates:
+every `set_dofs_position` resets the constraint solver and collider cache and
+wakes the entity; the wheel-side links carry mass — about 140 of the reference
+car's 1340 kg — so writing suspension positions moves the entity's centre of
+mass, the reference of the chassis wrench torque). It applies where VJS runs:
+rendered `n_envs > 1` scenes, `wheel_render_mode="internal_sync"`, a harvest
+failure fallback, and a direct `VehiclePhysics` with
+`enable_wheel_joint_internal_sync=True`; headless runs and the default
+`n_envs == 1` instanced renderer do not write solver joints.
+`visual_susp_mode="auto"` resolves to the kinematic path for both URDFs above.
+The suspension force N is still applied once, through the chassis wrench.
+**Fix planned for 2.0.6.**
+
+#### 10.3 On 1.5.0, URDF `effort="0"` makes the `"control"` suspension PD live (not pinned)
+
+The VJS `"control"` path drives suspension joints with a PD (kp 1e7, kv 1e5)
+and sets no force range. `effort="0"` (on the suspension joints of
+`tests/data/car_ref.urdf`, `samples/urdf/car_4w.urdf`, `truck_6w.urdf`) was a
+zero force range on 1.4.5 (PD inert) and is unbounded on 1.5.0 (PD live, its
+reaction a real force on the chassis outside N). Measured with
+`visual_susp_mode="control"` forced, 1.5.0 vs 1.5.0 with the suspension dofs'
+force range set to 0 after build (implementation): reference car max |Δx|
+8.17 mm (the deterministic tolerance at that distance is 6.36 mm), max |Δz|
+0.190 m at step 34 (the landing); truck max |Δx| 15.7 mm, max |Δz| 30.4 mm at
+step 43 (≤ 7.5e-6 m after step 100); with the force range 0, 1.5.0 reproduces
+1.4.5 within 6.1e-5 m. Under `"auto"` both URDFs resolve to the kinematic path
+(all suspension `<dynamics>` zero), so they are not affected by default;
+headless runs never are. A URDF with non-zero suspension `<dynamics>` (where
+`"auto"` picks the PD) was not run. Not pinned in 2.0.5 by user decision;
+settled in 2.0.6 (planned).
+
+#### 10.4 Other
+
+- **Wheel spin-inertia fallback is dead** (pre-existing, engine-independent,
+  found by api-review, out of scope): `core._spin_child_link_name` reads
+  `joint.child_link` / `joint.child`, which neither 1.4.5 nor 1.5.0 has (a joint
+  exposes `.link`; checked in the 1.5.0 source), so it returns None and the
+  wheel loop in `VehiclePhysics.__init__` `continue`s before the estimate:
+  `estimate_spin_inertia_from_genesis` is never reached from `VehiclePhysics`.
+  (The `except Exception: pass` around the estimate is not the mechanism; it
+  would also hide a failure if the estimate were reached.) a config whose wheels carry no `i_wheel` runs at
+  `DEFAULT_I_WHEEL`. `parse_urdf`-derived and user-set `i_wheel` are unaffected.
+- The batched proxy sync keeps its `except Exception` fallback to the per-body
+  sync with one WARNING; only the batched path is covered by AC-E, and a later
+  1.5.x raise would switch paths (physics-review).
+- `hide_vgeoms`, `variant_index` and `sensor_miss_value` read or write engine
+  internals; each raises if its attribute or symbol is gone, none is public API.
+- `get_trimesh` (deprecated on both engines) is still used when harvesting
+  wheel meshes.
+- The NTC refusal is server-console-only; a UE client sees silence (§7.3).
+
+### 11. Not measured
+
+GPU (any number); Windows; a UE client; the server started in the upgraded
+venv; a URDF with non-zero suspension `<dynamics>`; differentiating the SDK
+vehicle step; vehicle contact identity in a scene that contains a variant body;
+NTC target vs terrain; L3 hibernation at `n_envs > 1`; variants on GPU or at
+`n_envs` > 6; a 1.5.x patch release; GPU determinism on 1.5.0; native-viewer
+pixels; the truck and the GeneVehicle demos beyond rc / skeleton; a mesh
+`wheel_raycast` mirror's per-step cost on 1.5.0.
+
+### 12. Upgrade note for the field team
+
+1. **Python >= 3.12** (the 1.5.0 wheel requires it).
+2. **Packages, exact versions measured**: `genesis-world==1.5.0`,
+   `quadrants==1.4.0`, `coacd==1.0.14`, `PyGEL3D==0.8.2`. Pin these four to
+   reproduce the measured set: `requirements.txt` pins only
+   `genesis-world>=1.5.0,<1.6`, and the wheel requires `coacd>=1.0.14`,
+   `PyGEL3D>=0.8.0` (open), so `pip install -r requirements.txt` admits newer
+   coacd / PyGEL3D (not measured).
+3. **Pull order**: upgrade the engine, THEN `git pull`. Pulling 2.0.5 onto a
+   1.4.5 venv fails at the first SDK import that needs the engine with
+   `GenesisVersionError` — the GeneVehicle demos and the root-level
+   `samples/perf_camera_bench.py` / `samples/slope_lateral_slip.py` (outside
+   this repo) included. Upgrading the engine under 2.0.4 breaks 2.0.4: a
+   rendered scene with a vehicle raises (`skip_forward`, `add_external_node`),
+   and headless `dual_scene` falls back to the per-body proxy sync (one
+   WARNING; equal to the batched path only to 1e-5 m).
+4. **First run recompiles kernels**: a first build took about 60 s cold on the
+   measured machine (implementation; 4.6 s warm on 1.4.5). quadrants 1.4.0 was
+   seen removing some old cache files by itself; keep a copy of the 1.4.5
+   kernel cache if you may roll back.
+5. **`--no-target-collision`**: works for primitive targets; with a URDF
+   vehicle or `--multi-env` the server now exits with rc 2 (the client sees
+   silence). Remove the flag from such launch scripts.
+6. **Visual suspension**: `visual_susp_mode="control"`, or a URDF with non-zero
+   suspension `<dynamics>`, behaves differently on 1.5.0 (§10.3). The default
+   presets and URDFs resolve to the kinematic path.
+7. **Sweep tables and identify records**: re-measured for the reference car on
+   1.5.0, they differ from the 1.4.5 records by ≤ 3.8e-4 relative (`accel_tau`);
+   the brake gain 5.0152 is unchanged; the five acceptance courses end `DONE` at
+   the same times with the old and the new records. So 1.4.5 records stayed
+   usable for the reference car on those courses — measured there only;
+   re-measure for any other vehicle.
+8. **Rollback** (= SDK 2.0.4 on genesis-world 1.4.5; 2.0.4 is commit `9e5c4d5`,
+   there is no tag):
+
+   ```bash
+   pip install --no-deps --no-index --find-links <dir with the four 1.4.5 wheels> \
+       genesis-world==1.4.5 quadrants==1.3.3 coacd==1.0.11 PyGEL3D==0.6.1
+   pip freeze | diff <your pre-upgrade freeze> -      # expect empty
+   git checkout 9e5c4d5                               # 2.0.5 refuses 1.4.5 at import
+   ```
+
+   `--no-deps` is safe because those four were the only packages the upgrade
+   changed. Wheel sha256 (local = PyPI; implementation):
+
+   | wheel | sha256 |
+   |---|---|
+   | `genesis_world-1.4.5-py3-none-any.whl` | `7ce8fcc8b0af9a87907e550b5f373b27af3f6ca622e843ce12dc51e8a93a03fd` |
+   | `quadrants-1.3.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl` | `bda4869c57818546f3a574318165a423ac2f01c90dda52e9cd948ea14ce1aaf4` |
+   | `coacd-1.0.11-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl` | `a60f700a52e5b40462e508c14bb756cd63ce7e6a95ff72ae0b1592be1dbb0106` |
+   | `PyGEL3D-0.6.1-py3-none-any.whl` | `6403447c1a2d3c592871ad7ec7c30854e299149cd1532b46c78c5f43009d06f2` |
+
+   The rollback was not executed (the upgrade
+   passed). Pointing `XDG_CACHE_HOME` at a copy of the 1.4.5 kernel cache avoids
+   a cold recompile.
+9. OSC schema unchanged; no UE client was attached in this release.
+
+### 13. Earlier documentation corrected in place
+
+Each says in place that it was wrong, or which engine it held on:
+
+- **"single_scene re-fits the BVH every step; dual_scene builds it once and
+  shares it across `n_envs`"** — false on 1.5.0: `docs/dual-scene-raycast.md`
+  (a correction box at the top; terminology, mechanism, proxy, the "structural
+  argument", the L3 section, scope, follow-up), `docs/api-reference.md` (§0,
+  `raycast_mode` row, mesh guard, `add_raycast_surface`, the mirror paragraph,
+  log prefixes), `docs/server.md` §3, `docs/physics-contracts.md` (abbreviation
+  table), `docs/index.md`, `docs/concepts.md`; CHANGELOG 1.5.1 and 1.6.1.
+- **"the visual joint path does not affect physics" / "< 1 cm on landings"** —
+  wrong: `docs/physics-contracts.md` §7.8 (rewritten, with the measurements),
+  `docs/api-reference.md` (`wheel_render_mode` row, the VJS note, the
+  suspension-joint paragraph), `docs/batching.md`, `docs/pipeline-and-hooks.md`,
+  `docs/index.md`; CHANGELOG 0.7.8 (`VisualSync` rename).
+- **The atomic native-viewer update (v1.1.25)** — true on <= 1.3.3 only:
+  `docs/physics-contracts.md` §7.8, `docs/pipeline-and-hooks.md` step 6,
+  `docs/server.md` `--follow-cam`; CHANGELOG 1.1.25.
+- **"the wrench API is not on the autodiff tape"** — false on 1.5.0 for a free
+  body: `docs/path-following.md` "Why not the Genesis differentiable solver",
+  `docs/differentiable-sot.md` (git-ignored, does not ship); CHANGELOG 1.3.0.
+- **Warn-only floor / 1.4.5 as the supported engine / `<= 1.3.3` branches
+  "still run"**: `README.md` installation, `docs/index.md`, `docs/quickstart.md`,
+  `docs/api-reference.md` §1, `docs/testing.md`, `docs/backends.md` (the
+  `gs.init` probe), `docs/physics-contracts.md` §7.14, `docs/pipeline-and-hooks.md`
+  step 5, `docs/batching.md`.
+- **`COARSE_SDF_MATERIAL_KW` "16 on any convex geom"** — true through 1.4.6:
+  `docs/api-reference.md`, `docs/server.md` §2.7, `docs/testing.md`.
+- **NTC**: CHANGELOG 1.6.9 §12 marked fixed; `docs/server.md` §2 and new §2.8.
+- **Identity locks**: `docs/physics-contracts.md` §7.11 and §7.20.1,
+  `docs/testing.md`, `README.md`.
+- **"Unifying the spring cap on one constant is planned for 2.1.0"** — withdrawn
+  by the user on 2026-11-24: CHANGELOG 2.0.4 §4.2 and §12,
+  `docs/physics-contracts.md` §7.22.3, `docs/path-following.md` §5.3.
+- **Instanced renderer "external render-node channel"** (gone on 1.5.0) and
+  "physics bit-identical to headless" (now: by construction, measured at
+  v1.1.17, not re-measured): `docs/physics-contracts.md` §7.8,
+  `docs/api-reference.md`, `docs/index.md`.
+- Source comments the docs stage may not edit and that are still false are
+  listed for a follow-up (server `env_builder.py` / `physics_server.py`
+  `--single-scene` help, `samples/terrain_drive.py`,
+  `samples/dual_scene_terrain.py`, `samples/obstacles_and_ramp.py`,
+  `tests/test_sim_options_and_timing.py` docstrings,
+  `strategies/stability.py` `SPRING_C_RB`). The text-only edits that did ship in
+  SDK source (`visual.py`, `vehicle_scene.py`, `core.py`, `_gs_compat.py`,
+  `control/plant.py`, `__init__.py`, `requirements.txt`) were proven
+  AST-identical apart from strings (implementation), with AC-E and the suite
+  re-run after them.
+
+### 14. Roadmap (planned, not present)
+
+2.0.6: the `StaticFrictionLock` touchdown-sign fix (§10.1), the VJS feedback
+fix (§10.2) and the `"control"`-path force range (§10.3), directly after 2.0.5;
+own plan, locks re-captured there. 2.1.0: opt-in `mpc_model="pacejka"` and
+opt-in `mpc_decel_limit="brake"`. 2.2.0: feedforward from the MPC plan and a PD
+correction on the predicted trajectory (closed-loop K-turn arc tracking is a
+candidate). 2.3.0: a hold-release rule, a KICK redesign and a wider default
+sweep grid. Default-on K-turn: deferred. Unifying the spring cap on one
+constant: withdrawn. Plans, not commitments.
+
+### Documentation
+
+New: `docs/physics-contracts.md` §7.23 (the required engine: what is enforced
+where; what the 2.0.5 identity evidence covers); `docs/server.md` §2.8 (NTC and
+the other server changes); `docs/batching.md` "Per-env variants";
+`docs/api-reference.md` §0.1 variants, §7 "Required engine";
+the bold paragraph "From 2.0.4 to 2.0.5" in `docs/path-following.md` §6;
+`requirements.txt`.
+Corrected in place: §13.
+
+### Tests
+
+**1388 passed, 3 skipped, 1391 node ids** on the final tree — implementation on
+the overlay (13 foreground calls) and again in the upgraded venv (9 calls; ids
+and outcomes identical); impl-review the same on the overlay; CPU/WSL2,
+genesis-world 1.5.0, `requirements-mpc.txt` installed, `test_fusion_probe.py`
+excluded; no timing quoted. The 3 skips are the env-gated live-server tests.
+Ledger against the 2.0.4 suite on 1.4.5 (1372 ids): **66 removed, 85 added**,
+no outcome change on any surviving id. Removed: 44 `test_gs_compat.py` ids
+(the `<= 1.3.3` shapes, `has_wrench_api`, `scene_sim_options`, the server
+patch's legacy squeeze, the old-style spin-MOI parameter, 22 warn-only floor
+tests); 2 `test_rolling_resistance.py` ids whose parametrize id embeds a tree
+path (same test, new id); the 20 identity locks (§8.2). Added: their
+replacements (20), the 1.5.0-only and raising-floor tests in
+`test_gs_compat.py` (including two AST tests pinning where `require_genesis` is
+and is not called, and 3 for `hide_vgeoms`), the 2 renamed
+`test_rolling_resistance.py` ids, `test_server_ntc.py` (10), `test_variants.py`
+(13). Edited, id kept: `test_proxy_sync_batched.py` (the batched sync is
+taken: no `proxy-sync` record, proxy pose = chassis pose),
+`test_server_mesh_obstacles.py` (the mirror is the Kinematic spec with
+`use_visual_raycasting`, surface `vis_mode=None`, the caller's `vis_mode` on the
+main body), `test_fan_default_identity.py::test_baseline_lookup_is_exact_on_version_and_platform`,
+`test_server_import.py` and `test_low_speed_deadbeats.py` (message text),
+`test_sim_options_and_timing.py` (`options.sim`).
+`test_kind_visual_batch.py::test_kind_visual_batch_matches_per_entity_loop`
+failed on the plain 2.0.4 tree on 1.5.0 (`skip_forward`) and passes on 2.0.5,
+id unchanged. Held back, untracked, not part of this release:
+`tests/test_fusion_probe.py` (its line 243 writes `brake_thr` and raises since
+2.0.4) and `tools/`.
+
+---
+
+
 ## [2.0.4] — 2026-11-23
 
 **Changed (physics, no opt-out): `StaticFrictionLock` now engages on every
@@ -342,6 +1182,8 @@ near +1 (the tank's yaw c is about 0.05).
 **`C_RB` = 1.5 is the user's constant, not derived** (a user decision): any value
 in about 1.17-2 would leave the reference vehicles unchanged. Unifying both
 terms on one constant (1) is planned for 2.1.0 — a plan, not a commitment.
+*(Corrected in 2.0.5: that plan was WITHDRAWN by the user on 2026-11-24;
+`C_RB` stays 1.5.)*
 
 #### 4.3 Not covered
 
@@ -728,7 +1570,9 @@ Each says in place that it was wrong or incomplete:
 ### 12. Roadmap (planned, not present)
 
 2.1.0: the Pacejka prediction model and a deceleration bound widened to the
-brake's limit, and unifying the spring cap on one constant (1). 2.2.0:
+brake's limit, and unifying the spring cap on one constant (1) *(corrected in
+2.0.5: the unification was WITHDRAWN by the user on 2026-11-24; 2.0.6 was
+inserted before 2.1.0 — CHANGELOG 2.0.5 §14)*. 2.2.0:
 feedforward from the MPC plan and a PD correction on the predicted trajectory
 (closed-loop K-turn arc tracking is a candidate there). 2.3.0: a hold-release
 rule, a KICK redesign and a wider default sweep speed grid. Default-on K-turn:
@@ -5523,7 +6367,9 @@ the intended test fail.
   `geom._conaffinity` on every target geom; no engine version reads those
   attributes (`RigidGeom.contype` returns `self.desc.contype` on 1.4.5, and no
   reader of `_contype` exists on 1.4.0 either). Code-read, not measured. Ticket
-  only.
+  only. *(Fixed in 2.0.5: primitive targets get public `contype` /
+  `conaffinity` masks and the flag is refused for URDF targets — CHANGELOG
+  2.0.5 §7.)*
 * genesis writes `material.sdf_max_res = 32` IN PLACE on a material passed to a
   Primitive morph, so one `Rigid` object reused for a later Mesh inherits it.
   `env_builder` builds a fresh material per obstacle, so the server is
@@ -7695,6 +8541,10 @@ none of the four numbers above may be quoted on its own. The default stays
 re-fits the collision BVH, terrain faces included, every step because the
 vehicle in that solver is movable, while `dual_scene`'s raycast scene holds
 nothing movable, so its BVH is built once and is shared across `n_envs`.
+*(Corrected in 2.0.5: that argument describes the pre-1.5.0 raycaster and is
+FALSE on genesis-world 1.5.0, where both modes build each mesh's tree once and
+refit a per-env top-level tree; the default now rests on the ray scene holding
+no vehicle collision geometry — CHANGELOG 2.0.5 §2.)*
 
 ### Fixed — three statements that were wrong
 
@@ -8389,6 +9239,7 @@ physics-movable, while `dual_scene`'s raycast scene holds nothing movable, so it
 BVH is built once. Raycast cost therefore stops scaling with face count and with
 `n_envs` under `dual_scene`. `dual_scene` remains the default and remains the
 right mode for heavy terrain and for batched (`n_envs >> 1`) rollouts.
+*(Corrected in 2.0.5: false on genesis-world 1.5.0 — CHANGELOG 2.0.5 §2.)*
 
 A trustworthy replacement needs per-mode **fresh processes**, alternating order,
 and repeated medians — a benchmark harness of the `perf_vectorization.py` kind,
@@ -8793,7 +9644,9 @@ tape, and they are the only way a ray-wheel vehicle touches the solver, which
 has no wheel joints to motor. Verified on genesis-world 1.3.3: a leaf tensor
 passed to `apply_links_external_force` returns from `scene.backward()` with
 `grad is None`, while the same probe through `control_dofs_force` returns a
-finite gradient. Differentiating the SDK's own model gets the same Jacobian
+finite gradient. *(Corrected in 2.0.5: on genesis-world 1.5.0 the wrench API IS
+on the tape for a free body without contact; the vehicle step end to end was
+not tested — CHANGELOG 2.0.5 §9.)* Differentiating the SDK's own model gets the same Jacobian
 without a `requires_grad` scene, so no hibernation ban, no integrator
 restriction, no dense-Hessian cost, and it runs on CPU.
 
@@ -9432,7 +10285,10 @@ committed in ONE render-lock hold; real-time pacing stays outside the lock.
 the visualizer after the wheel stream when the patch is not active (offscreen
 cameras, or unrecognized future viewer internals — the patch verifies the
 expected layout and declines gracefully with a warning). Headless scenes keep
-the old single-call path. Physics is untouched in every mode.
+the old single-call path. Physics is untouched in every mode. *(Corrected in
+2.0.5: the patch applied on genesis-world <= 1.3.3 only; on >= 1.4 it declined
+(returned False), so the non-atomic ordering ran there, and 1.5.0 has no hook
+to rebuild it on. It was removed in 2.0.5 — CHANGELOG 2.0.5 §6.)*
 
 ### Added — OSC server `--substeps` and a `--follow-cam` viewer follow
 
@@ -12459,7 +13315,10 @@ vehicle, no `get_link`, no VisualSync.
 The viewer-side class was renamed to make its scope explicit: it drives the
 **wheel** visual joints (spin/steer/suspension) for the **Genesis viewer**
 only — it never moves the chassis (real dynamics) and does not affect physics.
-External renderers don't need it (use `render_transforms` /
+*(Corrected in 2.0.5: it DOES affect physics — the kinematic joint write moves
+the reference car about +0.142 m over 10.7 m against a headless run, on
+genesis-world 1.4.5 and 1.5.0; mechanism not established — CHANGELOG 2.0.5
+§10.)* External renderers don't need it (use `render_transforms` /
 `wheel_visual_transforms`). `VisualSync` remains as a **deprecated alias**, so
 existing code keeps working. Internal references, `__init__` exports,
 `_check_import`, and docs updated; the class docstring now spells out the

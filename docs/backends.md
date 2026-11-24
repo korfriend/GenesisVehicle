@@ -28,7 +28,7 @@
   ### Reproducible GPU rollouts (`deterministic=True`)
 
   ```python
-  VehicleScene.init_backend("gpu", deterministic=True)   # genesis-world >= 1.4.0
+  VehicleScene.init_backend("gpu", deterministic=True)   # genesis-world 1.5.0 (required since v2.0.5)
   ```
 
   Genesis's rigid constraint solver ships two arms that reach the same answer
@@ -48,14 +48,18 @@
   - **CPU never needed it.** The CPU backend pins the arm unconditionally, in
     every genesis version, multi-threaded included. Since CPU is the SDK
     default everywhere, most users are already reproducible.
-  - **genesis-world 1.4.0 already helps without it** — and so does 1.4.5, the
-    floor since SDK v1.6.9 (`tests/test_gs_compat.py` checks both upstream
-    fixes on whichever engine is installed). Upstream #3187 changed
+  - **genesis-world 1.4.0 already helps without it** — and so did 1.4.5 and
+    does 1.5.0, the required engine since SDK v2.0.5 (`tests/test_gs_compat.py`
+    checks both upstream fixes on whichever engine is installed; it passes on
+    1.5.0). Upstream #3187 changed
     the re-benchmark trigger from a 5-second wall clock to a 300-call count, so
     the arm schedule follows the step number instead of the clock. The flag
     (upstream #3222) is what removes the choice entirely.
 
-  On a genesis without the option the SDK warns and continues unpinned.
+  Through v2.0.4 the SDK probed `gs.init` for the option and warned and
+  continued unpinned on a genesis without it; v2.0.5 removed that probe (every
+  engine it accepts has the option). GPU determinism was not re-measured on
+  1.5.0.
 
 - **Renderer** — independent of the physics backend: the viewer/cameras
   rasterize on the GPU graphics stack regardless of where physics runs

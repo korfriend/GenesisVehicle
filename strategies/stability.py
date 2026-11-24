@@ -660,8 +660,8 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
     #: keeps the planar yaw-mode multiplier ``1 - lambda * dt^2 >= -0.5`` per
     #: step (the oscillating side only; a small ``lambda * dt^2`` leaves the
     #: multiplier near +1). Any value in about 1.17-2 would leave the reference vehicles
-    #: unchanged. Unifying both terms on one constant (1) is planned for 2.1.0
-    #: (a plan, not a commitment).
+    #: unchanged. Unifying both terms on one constant (1) was planned for 2.1.0
+    #: through 2.0.4; WITHDRAWN by the user on 2026-11-24 (CHANGELOG 2.0.5).
     SPRING_C_RB = 1.5
     #: Upper bound (m/s) of the engage window (v2.0.4): a wheel with
     #: ``ctx.brake_rem > 0`` engages below ``min(v_thr, V_ENGAGE_MAX)``.

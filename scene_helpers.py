@@ -19,7 +19,11 @@ from typing import Any, Callable, Optional
 
 import genesis as gs
 
-from .raycast import (
+from ._gs_compat import require_genesis
+
+require_genesis(gs)   # genesis-world >= 1.5.0 required (2.0.5)
+
+from .raycast import (  # noqa: E402
     WheelRayPattern, fan_height_offsets, fan_ray_positions,
     set_sensor_fan, set_sensor_miss_value, set_sensor_up_offset,
     single_scene_up_offset,

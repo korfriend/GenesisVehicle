@@ -166,6 +166,18 @@ the 1.5 kg·m² default spins up unrealistically fast. An explicit
 > wheels) has its largest moment about a *transverse* axis, so `iyy` and
 > `max(ixx, iyy, izz)` are different numbers; only `iyy` is the spin inertia.
 > For a solid cylinder: `iyy = ½·m·r²`, `ixx = izz = ¼·m·r² + 1/12·m·L²`.
+>
+> **Known defect (found in the v2.0.5 api-review, pre-existing, not fixed):**
+> `VehiclePhysics` reaches that Genesis-side fallback through
+> `core._spin_child_link_name`, which reads `joint.child_link` / `joint.child`;
+> neither attribute exists on genesis-world 1.4.5 or 1.5.0 (a joint exposes
+> `.link`), so the lookup returns None and the estimate is never attempted (the
+> `except Exception: pass` around the estimate would also hide a failure if it
+> were reached). A
+> config whose wheels carry no `i_wheel` therefore runs at `DEFAULT_I_WHEEL`
+> (1.5 kg·m²), not at the URDF link inertia. Wheels whose `i_wheel` comes from
+> `parse_urdf` (the preset path) or from the user are unaffected. Set
+> `WheelConfig.i_wheel` explicitly if you build a config by hand.
 
 > **Keep the chassis collision box above the wheel ray origins.** The wheel
 > rays start at the suspension joint's `<origin xyz>` and are HIGH-CAST some

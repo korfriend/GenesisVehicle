@@ -127,7 +127,8 @@ overrides) and runs a single batched compute per kind:
   call returns `(N=1, K_kind, ...)` for all K vehicles. No Python loop.
 - **Force / torque writes**: One `_gs_compat.apply_links_wrench` call with K
   link indices applies force AND torque to all K base links — one solver call
-  on genesis >= 1.4.0 (`apply_links_external_wrench`), two on <= 1.3.3.
+  (`apply_links_external_wrench`; the `<= 1.3.3` two-call fallback was
+  removed in v2.0.5).
 - **Sensor reads**: K small `sensor.read()` calls in a Python loop
   (one raycaster per vehicle — unavoidable per-vehicle I/O).
 - **Visual writes** (only when `enable_wheel_joint_internal_sync=True`): since
@@ -137,7 +138,15 @@ overrides) and runs a single batched compute per kind:
   measured 30 tanks: visual-write cost 12.4 → 3.4 ms/step). The per-entity
   `WheelJointInternalSync.step()` loop (v0.7.16: one call per entity) remains as
   the layout-mismatch fallback. For headless / external rendering leave it
-  off (closed-form `wheel_visual_transforms`, ~µs).
+  off (closed-form `wheel_visual_transforms`, ~µs). These writes are NOT
+  physics-neutral (`physics-contracts.md` §7.8, corrected in v2.0.5): the
+  batched writer moved the reference car +0.142 m over 10.7 m against a
+  headless run (final x 10.7180 → 10.8601 m), the same as the per-entity
+  writer — implementation, `car_4w_rwd_ackermann(stability="control")`,
+  kinematic suspension write, dt 0.025 × 10 substeps, 1.5 s brake then 5 s at
+  throttle 0.5, one offscreen camera, `dual_scene`, plane μ 1.0, CPU/WSL2,
+  genesis-world 1.4.5 and 1.5.0; full conditions and the truck row in
+  `physics-contracts.md` §7.8.
 
 ### When L2 matters
 
@@ -229,6 +238,61 @@ scene.build(n_envs=N, env_spacing=(dx, dy), n_envs_per_row=K)
 
 — Genesis lays the envs out in a grid for rendering only (physics
 unchanged). See [`samples/multi_env_render.py`](../samples/multi_env_render.py).
+
+### Per-env variants of obstacles and ray surfaces (v2.0.5)
+
+By default every env holds the same scene. Since v2.0.5 an obstacle or a
+wheel-raycast surface can differ per env: pass a LIST of k morphs where a
+single morph was accepted — `add_static(morph=[...])` (and
+`wheel_raycast_morph=` / `collision_morph=`, every given one a list of the same
+length), `add_raycast_surface([...])`, `add_dynamic([...], physics=False)`.
+The engine (genesis-world 1.5.0 heterogeneous entities) places one variant per
+env in contiguous blocks of nearly equal size; pass exactly `n_envs` morphs for
+an explicit per-env assignment (the mapping is then the identity). After
+`build()`, `body.variant_index` is the `torch.long` tensor `(n_envs,)` of the
+variant each env holds, read from the engine's own private rule through
+`_gs_compat.variant_index` (it raises if a later engine renames that rule). The
+same list goes to the main-scene body and to its `dual_scene` mirror; both
+scenes are built with the same `n_envs`, so both get the same mapping.
+
+```python
+import genesis as gs
+from genesis_vehicle import VehicleScene
+
+vs = VehicleScene(n_envs=6)                          # CPU by default
+ramps = [gs.morphs.Box(size=(4, 4, h), pos=(6, 0, h / 2), fixed=True)
+         for h in (0.1, 0.2, 0.3)]
+body = vs.add_static(morph=ramps, name="ramp")      # k = 3
+vs.build()
+body.variant_index                                   # tensor([0, 0, 1, 1, 2, 2])
+```
+
+(Run as shown, genesis-world 1.5.0, CPU/WSL2: prints `tensor([0, 0, 1, 1, 2, 2])`;
+docs agent, v2.0.5.)
+
+Refused before build, each with a clear error: a list for a vehicle
+(`add_vehicle`, `TypeError` — a vehicle's wheel geometry, `WheelMeta`, deadbeat
+inertia scale, self-collision ceiling and `DifferentiablePlant` come from ONE
+URDF parse); a `Terrain` or `Plane` in a list (`ValueError`); lists of
+different lengths, or a list mixed with a single morph; k > `n_envs` (the engine
+would silently leave the extra variants unused); `add_dynamic` with a list and
+`physics=True` (free-body variants are not supported). k = 1 is a single morph.
+Not supported: choosing the mapping other than by list order and length,
+`get_verts` on a variant body (the engine refuses), variants in the OSC server.
+
+What was measured (implementation, CPU/WSL2, genesis-world 1.5.0, `n_envs` 3
+and 6, k 3, both raycast modes): `variant_index` equals the placement read back
+from per-env bounding boxes of the main body and of the `dual_scene` mirror;
+per-env wheel-ray distances over a variant box top, its edge and a per-env
+teleported variant platform agree with float64 analytic truth to ≤ 4.9e-7 m
+(0 hit-mask mismatches); a vehicle drives into per-env variant walls and stops
+at each env's own face. impl-review repeated it on its own scene (`n_envs` 5, a
+mesh and two boxes: `variant_index` `[0, 0, 1, 1, 2]`, 760 rays, ≤ 2.6e-7 m).
+**Not measured:** GPU; `n_envs` above 6; variants together with
+`swept_envelope`; whether vehicle CONTACT is bit-identical to a variant-free
+scene — a variant body switches the engine's collider to its heterogeneous
+code path for the whole scene (and forces SAP broadphase), and the 2.0.5
+identity gate has no variant scene (physics-review).
 
 ### See also
 

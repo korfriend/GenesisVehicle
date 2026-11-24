@@ -1,8 +1,11 @@
-"""Unit tests for the genesis-version compatibility shims (`_gs_compat`).
+"""Unit tests for `_gs_compat`, the SDK's inventory of engine-private reads.
 
-Genesis 1.4.0 renamed/moved three APIs the SDK depends on. Each shim is
-exercised here against BOTH engine shapes with stubs, so the compatibility
-branch that this machine's genesis does not take is still covered.
+Since 2.0.5 the SDK requires genesis-world 1.5.0 and every shim has ONE code
+path; the stub tests of the removed `<= 1.3.3` / 1.4.x shapes (two-call force
+API, `link.inertial_*`, `Scene.sim_options`, warn-only floor) were deleted with
+those branches (ledger: CHANGELOG 2.0.5). What stays is exercised here with
+stubs, so the behaviour on an engine shape this machine does not have (a
+renamed field, an old or unvalidated version) is still covered.
 """
 
 import numpy as np
@@ -10,48 +13,20 @@ import pytest
 import torch
 
 from genesis_vehicle._gs_compat import (
-    apply_links_wrench, has_wrench_api, link_inertial, scene_sim_options,
-    sensor_miss_value,
+    apply_links_wrench, link_inertial, sensor_miss_value,
 )
 
 
-# --- apply_links_wrench: two-call (<= 1.3.3) vs one-call (>= 1.4.0) ----------
-
-class _OldSolver:
-    """genesis <= 1.3.3: separate force / torque entry points."""
-    def __init__(self):
-        self.calls = []
-
-    def apply_links_external_force(self, force, links_idx=None, envs_idx=None):
-        self.calls.append(("force", force, links_idx, envs_idx))
-
-    def apply_links_external_torque(self, torque, links_idx=None, envs_idx=None):
-        self.calls.append(("torque", torque, links_idx, envs_idx))
-
+# --- apply_links_wrench: one apply_links_external_wrench call ----------------
 
 class _NewSolver:
-    """genesis >= 1.4.0: one wrench entry point."""
+    """genesis-world 1.5.0: one wrench entry point."""
     def __init__(self):
         self.calls = []
 
     def apply_links_external_wrench(self, force=None, torque=None,
                                     links_idx=None, envs_idx=None, **kw):
         self.calls.append(("wrench", force, torque, links_idx, envs_idx, kw))
-
-
-def test_has_wrench_api_detects_both_shapes():
-    assert has_wrench_api(_NewSolver()) is True
-    assert has_wrench_api(_OldSolver()) is False
-
-
-def test_apply_links_wrench_old_solver_splits_into_two_calls():
-    s = _OldSolver()
-    F = torch.ones(1, 2, 3)
-    T = torch.full((1, 2, 3), 2.0)
-    apply_links_wrench(s, F, T, [0, 1])
-    assert [c[0] for c in s.calls] == ["force", "torque"]
-    assert torch.equal(s.calls[0][1], F) and s.calls[0][2] == [0, 1]
-    assert torch.equal(s.calls[1][1], T) and s.calls[1][2] == [0, 1]
 
 
 def test_apply_links_wrench_new_solver_uses_one_call():
@@ -64,6 +39,16 @@ def test_apply_links_wrench_new_solver_uses_one_call():
     assert kind == "wrench"
     assert torch.equal(force, F) and torch.equal(torque, T)
     assert links_idx == [0, 1] and envs_idx == [0]
+
+
+def test_apply_links_wrench_has_no_two_call_fallback():
+    """2.0.5 removed the <= 1.3.3 force/torque pair: a solver without the
+    wrench API raises instead of being driven through two calls."""
+    class _OldSolver:
+        def apply_links_external_force(self, *a, **k): pass
+        def apply_links_external_torque(self, *a, **k): pass
+    with pytest.raises(AttributeError, match="apply_links_external_wrench"):
+        apply_links_wrench(_OldSolver(), torch.zeros(1, 1, 3), torch.zeros(1, 1, 3), [0])
 
 
 def test_apply_links_wrench_honours_a_rebound_attribute():
@@ -80,17 +65,10 @@ def test_apply_links_wrench_honours_a_rebound_attribute():
     assert seen == ["patched"] and len(s.calls) == 1
 
 
-# --- link_inertial: link.inertial_* (<= 1.3.3) vs link.desc.* (>= 1.4.0) -----
+# --- link_inertial: link.desc.* ---------------------------------------------
 
 _I = np.diag([450.0, 2200.0, 2400.0])
 _IDENT = np.array([1.0, 0.0, 0.0, 0.0])
-
-
-class _OldLink:
-    inertial_mass = 1200.0
-    inertial_pos = np.array([0.0, 0.0, 0.5])
-    inertial_quat = _IDENT
-    inertial_i = _I
 
 
 class _Desc:
@@ -109,9 +87,8 @@ class _MasslessLink:
                               inertial_quat=None, inertia=None))()
 
 
-@pytest.mark.parametrize("link", [_OldLink(), _NewLink()])
-def test_link_inertial_reads_both_engine_shapes(link):
-    p = link_inertial(link)
+def test_link_inertial_reads_link_desc():
+    p = link_inertial(_NewLink())
     assert p is not None
     assert p.mass == pytest.approx(1200.0)
     assert np.allclose(p.pos, [0.0, 0.0, 0.5])
@@ -119,71 +96,56 @@ def test_link_inertial_reads_both_engine_shapes(link):
     assert np.allclose(p.i, _I)
 
 
+def test_link_inertial_no_longer_reads_the_1_3_3_spelling():
+    """2.0.5: `link.inertial_*` (genesis <= 1.3.3) is not read any more; such a
+    link has no `desc` and reads as massless (None), and the API check raises."""
+    class _OldLink:
+        inertial_mass = 1200.0
+        inertial_pos = np.zeros(3)
+        inertial_quat = _IDENT
+        inertial_i = _I
+    assert link_inertial(_OldLink()) is None
+    from genesis_vehicle._gs_compat import check_link_inertial_api
+    with pytest.raises(AttributeError, match=r"no 'desc'"):
+        check_link_inertial_api(_OldLink())
+
+
 def test_link_inertial_returns_none_without_mass():
     assert link_inertial(_MasslessLink()) is None
     assert link_inertial(object()) is None
 
 
-# --- check_link_inertial_api (v1.8.0): either spelling, else AttributeError ---
+# --- check_link_inertial_api (v1.8.0): link.desc fields, else AttributeError ---
 
-@pytest.mark.parametrize("link", [_OldLink(), _NewLink(), _MasslessLink()])
-def test_check_link_inertial_api_accepts_both_engine_shapes(link):
-    """<= 1.3.3 (`inertial_mass`) and >= 1.4.0 (`desc`) both pass — including
-    a massless >= 1.4.0 link: the check is about the API, not the mass."""
+@pytest.mark.parametrize("link", [_NewLink(), _MasslessLink()], ids=["desc", "massless"])
+def test_check_link_inertial_api_accepts_desc_links(link):
+    """A complete `desc` passes — including a massless link: the check is about
+    the API, not the mass."""
     from genesis_vehicle._gs_compat import check_link_inertial_api
     check_link_inertial_api(link)
 
 
-def test_check_link_inertial_api_names_both_spellings_on_an_unknown_engine():
-    """A link with neither spelling is an unknown engine. link_inertial alone
-    would read it as massless (None), indistinguishable from a link that
-    carries no mass; the check raises instead, naming both spellings."""
+def test_check_link_inertial_api_raises_on_a_link_without_desc():
+    """A link with no `desc` is an unknown engine. link_inertial alone would
+    read it as massless (None), indistinguishable from a link that carries no
+    mass; the check raises instead."""
     from genesis_vehicle._gs_compat import check_link_inertial_api
-    with pytest.raises(AttributeError, match=r"'desc'.*'inertial_mass'"):
+    with pytest.raises(AttributeError, match=r"no 'desc'"):
         check_link_inertial_api(object())
 
 
-@pytest.mark.parametrize("branch, drop", [
-    ("new", "inertia"), ("new", "inertial_quat"), ("new", "mass"), ("new", "inertial_pos"),
-    ("old", "inertial_i"), ("old", "inertial_quat"), ("old", "inertial_pos"),
-])
-def test_check_link_inertial_api_names_a_missing_field_per_engine_branch(branch, drop):
-    """C15 (v1.8.0): the container alone is not enough. A >= 1.4.0 ``desc``
-    without ``inertia`` (or a <= 1.3.3 link without ``inertial_i``) would make
-    ``link_inertial`` read zero link inertia -- a silently wrong yaw inertia
-    feeding the deadbeat scale. The check raises and names the missing field."""
+@pytest.mark.parametrize("drop", ["inertia", "inertial_quat", "mass", "inertial_pos"])
+def test_check_link_inertial_api_names_a_missing_desc_field(drop):
+    """C15 (v1.8.0): the container alone is not enough. A ``desc`` without
+    ``inertia`` would make ``link_inertial`` read zero link inertia -- a
+    silently wrong yaw inertia feeding the deadbeat scale. The check raises and
+    names the missing field."""
     from genesis_vehicle._gs_compat import check_link_inertial_api
-    if branch == "new":
-        fields = {k: getattr(_Desc, k) for k in
-                  ("mass", "inertial_pos", "inertial_quat", "inertia") if k != drop}
-        link = type("L", (), dict(desc=type("D", (), fields)()))()
-    else:
-        fields = {k: getattr(_OldLink, k) for k in
-                  ("inertial_mass", "inertial_pos", "inertial_quat", "inertial_i")
-                  if k != drop}
-        link = type("L", (), fields)()
+    fields = {k: getattr(_Desc, k) for k in
+              ("mass", "inertial_pos", "inertial_quat", "inertia") if k != drop}
+    link = type("L", (), dict(desc=type("D", (), fields)()))()
     with pytest.raises(AttributeError, match=rf"lacks \['{drop}'\]"):
         check_link_inertial_api(link)
-
-
-def test_check_link_inertial_api_picks_the_branch_link_inertial_reads():
-    """F2-6 (1.8.0): a link carrying ``inertial_mass = None`` AND a ``desc`` is
-    read by ``link_inertial`` through ``desc``, so the check must validate
-    ``desc`` too (it used to pick the <= 1.3.3 names on ``hasattr`` alone).
-    Without ``desc`` such a link is checked on the <= 1.3.3 names."""
-    from genesis_vehicle._gs_compat import check_link_inertial_api
-    old_none = dict(inertial_mass=None, inertial_pos=None, inertial_quat=None,
-                    inertial_i=None)
-    both = type("L", (), dict(old_none, desc=_Desc()))()
-    check_link_inertial_api(both)                          # desc complete: passes
-    assert link_inertial(both).mass == pytest.approx(1200.0)
-    bad_desc = type("D", (), dict(mass=1.0, inertial_pos=None, inertial_quat=None))()
-    with pytest.raises(AttributeError, match=r"link\.desc.*lacks \['inertia'\]"):
-        check_link_inertial_api(type("L", (), dict(old_none, desc=bad_desc))())
-    check_link_inertial_api(type("L", (), old_none)())     # old names, massless
-    with pytest.raises(AttributeError, match=r"the link .*lacks \['inertial_i'\]"):
-        check_link_inertial_api(type("L", (), {k: v for k, v in old_none.items()
-                                               if k != "inertial_i"})())
 
 
 def test_link_inertial_principal_axis_form_reconstructs_the_link_tensor():
@@ -237,15 +199,10 @@ def test_normalize_rigid_dt_ignores_options_without_dt():
     assert rigid.dt is None
 
 
-# --- server monkey patches over whichever force API the engine exposes -------
+# --- server monkey patch over the wrench API ---------------------------------
 
 class _PatchTargetNew(_NewSolver):
-    """Minimal solver surface `apply_monkey_patches` rebinds on genesis >= 1.4.0."""
-    def set_dofs_position(self, position, dofs_idx=None, envs_idx=None, **kw): pass
-    def control_dofs_position(self, position, dofs_idx=None, envs_idx=None, **kw): pass
-
-
-class _PatchTargetOld(_OldSolver):
+    """Minimal solver surface `apply_monkey_patches` rebinds."""
     def set_dofs_position(self, position, dofs_idx=None, envs_idx=None, **kw): pass
     def control_dofs_position(self, position, dofs_idx=None, envs_idx=None, **kw): pass
 
@@ -259,42 +216,26 @@ def test_server_patch_squeezes_3d_input_on_the_wrench_api():
     assert force.shape == (1, 3) and torque.shape == (1, 3)
 
 
-def test_server_patch_squeezes_3d_input_on_the_legacy_api():
-    from genesis_vehicle.server.vehicle_builder import apply_monkey_patches
-    s = _PatchTargetOld()
-    apply_monkey_patches(s)
-    apply_links_wrench(s, torch.ones(1, 1, 3), torch.zeros(1, 1, 3), [0])
-    assert [c[0] for c in s.calls] == ["force", "torque"]
-    assert s.calls[0][1].shape == (1, 3) and s.calls[1][1].shape == (1, 3)
-
-
 # --- spin-MOI estimate must not read a permuted principal component ---------
 
-def _fake_entity(inertia, quat, old_style=False):
-    """An entity whose one link reports `inertia` in a frame oriented by `quat`,
-    spelled the genesis <= 1.3.3 way (old_style) or the >= 1.4.0 way."""
-    if old_style:
-        link = type("L", (), dict(inertial_mass=20.0, inertial_pos=np.zeros(3),
-                                  inertial_quat=quat, inertial_i=inertia))()
-    else:
-        desc = type("D", (), dict(mass=20.0, inertial_pos=np.zeros(3),
-                                  inertial_quat=quat, inertia=inertia))()
-        link = type("L", (), dict(desc=desc))()
+def _fake_entity(inertia, quat):
+    """An entity whose one link reports `inertia` in a frame oriented by `quat`
+    (`link.desc`)."""
+    desc = type("D", (), dict(mass=20.0, inertial_pos=np.zeros(3),
+                              inertial_quat=quat, inertia=inertia))()
+    link = type("L", (), dict(desc=desc))()
     return type("E", (), dict(get_link=lambda self, name: link))()
 
 
-@pytest.mark.parametrize("old_style", [True, False])
-def test_spin_moi_is_read_in_the_link_frame(old_style):
+def test_spin_moi_is_read_in_the_link_frame():
     """The reference car's wheel is ixx=1, iyy=2, izz=1 and spins about +Y, so
     its spin MOI is 2.0. genesis >= 1.4.0 sorts that onto its principal axes as
     diag(2, 1, 1) plus a 90 deg rotation about +Z; reading the raw diagonal
     (what this did before v1.5.0) returns the transverse 1.0 instead."""
     from genesis_vehicle.urdf import estimate_spin_inertia_from_genesis
     s = np.sqrt(0.5)
-    authored = _fake_entity(np.diag([1.0, 2.0, 1.0]), np.array([1.0, 0, 0, 0]),
-                            old_style)
-    principal = _fake_entity(np.diag([2.0, 1.0, 1.0]), np.array([s, 0.0, 0.0, s]),
-                             old_style)
+    authored = _fake_entity(np.diag([1.0, 2.0, 1.0]), np.array([1.0, 0, 0, 0]))
+    principal = _fake_entity(np.diag([2.0, 1.0, 1.0]), np.array([s, 0.0, 0.0, s]))
     # The two describe the same physical wheel; the raw diagonal does not.
     assert principal.get_link("w") is not authored.get_link("w")
     for e in (authored, principal):
@@ -310,7 +251,7 @@ def test_spin_moi_raises_on_a_link_without_inertia():
         estimate_spin_inertia_from_genesis(e, "w", spin_axis_local=(0.0, 1.0, 0.0))
 
 
-# --- deterministic-solver opt-in (genesis >= 1.4.0) -------------------------
+# --- deterministic-solver opt-in ---------------------------------------------
 
 def test_init_backend_accepts_deterministic():
     """gs.init(use_deterministic_algorithms=True) pins the GPU constraint
@@ -328,8 +269,6 @@ def test_this_genesis_carries_both_upstream_determinism_fixes():
     import inspect
 
     import genesis as gs
-    if tuple(int(p) for p in gs.__version__.split(".")[:2]) < (1, 4):
-        pytest.skip(f"genesis-world {gs.__version__} predates both fixes")
     assert "use_deterministic_algorithms" in inspect.signature(gs.init).parameters
     from genesis.engine.solvers.rigid.constraint import solver as _solver
     src = inspect.getsource(_solver)
@@ -338,8 +277,8 @@ def test_this_genesis_carries_both_upstream_determinism_fixes():
 
 # --- sensor_miss_value: both raycaster option shapes -------------------------
 #
-# Every genesis the SDK supports resolves `no_hit_value` (defaulting to
-# `max_range`) onto the sensor's options at CONSTRUCTION. The shim also has to
+# genesis-world 1.5.0 resolves `no_hit_value` (defaulting to `max_range`) onto
+# the sensor's options at CONSTRUCTION. The shim also has to
 # survive an options object that carries only `max_range`, and a sensor that
 # exposes no options at all — branches this machine's engine never takes.
 
@@ -386,52 +325,58 @@ def test_sensor_miss_value_is_none_when_the_engine_exposes_nothing():
     assert sensor_miss_value(_Sensor(_Options())) is None
 
 
-# --- scene_sim_options: Scene.sim_options (<= 1.3.3) vs options.sim (>= 1.4.0) ---
+# --- hide_vgeoms: an ENGINE-PRIVATE write, guarded ---------------------------
 
-class _SimOptionsStub:
-    """Stands in for ``gs.options.SimOptions``; identity is what we assert."""
-    def __init__(self, dt=0.02, substeps=2):
-        self.dt, self.substeps = dt, substeps
-
-
-class _NewSceneShape:
-    """genesis >= 1.4.0: ``Scene.options.sim``, no ``Scene.sim_options``."""
-    def __init__(self, sim_options):
-        self.options = type("SceneOptions", (), {"sim": sim_options})()
+class _VGeom150:
+    """genesis-world 1.5.0 RigidVisGeom shape: `active_envs_mask` exists (None
+    until the engine or the SDK sets it)."""
+    def __init__(self):
+        self.active_envs_mask = None
+        self.active_envs_idx = None
 
 
-class _OldSceneShape:
-    """genesis <= 1.3.3: ``Scene.sim_options`` assigned in ``Scene.__init__``."""
-    def __init__(self, sim_options):
-        self.sim_options = sim_options
+class _VGeomNoMask:
+    """An engine that renamed / dropped the private mask."""
+    def __init__(self):
+        self.active_envs_idx = None
 
 
-class _AlienSceneShape:
-    """Neither spelling — a future engine that moved the options again."""
+def test_hide_vgeoms_writes_an_all_false_mask_per_env():
+    from genesis_vehicle._gs_compat import hide_vgeoms
+    vgs = [_VGeom150(), _VGeom150()]
+    assert hide_vgeoms(vgs, 3) == 2
+    for vg in vgs:
+        assert vg.active_envs_mask.dtype == torch.bool
+        assert vg.active_envs_mask.shape == (3,) and not bool(vg.active_envs_mask.any())
+        assert len(vg.active_envs_idx) == 0
+    one = _VGeom150()
+    hide_vgeoms([one], 0)                       # n_envs 0 (unbatched) -> length 1
+    assert one.active_envs_mask.shape == (1,)
 
 
-def test_scene_sim_options_reads_the_1_4_0_shape():
-    so = _SimOptionsStub()
-    assert scene_sim_options(_NewSceneShape(so)) is so
+def test_hide_vgeoms_raises_when_the_private_mask_is_missing():
+    """review_gs150_5.md 3(i): without `active_envs_mask` the write would add a
+    new attribute the engine never reads (wheel drawn twice, silently). It must
+    raise, naming the attribute, BEFORE writing anything to that geom."""
+    from genesis_vehicle._gs_compat import hide_vgeoms
+    ok, bad = _VGeom150(), _VGeomNoMask()
+    with pytest.raises(AttributeError, match="active_envs_mask"):
+        hide_vgeoms([ok, bad], 1)
+    assert not hasattr(bad, "active_envs_mask")
+    assert bad.active_envs_idx is None          # nothing written to the bad geom
 
 
-def test_scene_sim_options_reads_the_1_3_3_shape():
-    so = _SimOptionsStub()
-    assert scene_sim_options(_OldSceneShape(so)) is so
+def test_hide_vgeoms_targets_an_attribute_this_engine_has():
+    """The guard is only meaningful if the engine's visual geom really carries
+    the attribute: read it off the installed genesis class."""
+    pytest.importorskip("genesis")
+    import inspect
+    from genesis.engine.entities.rigid_entity import rigid_geom
+    src = inspect.getsource(rigid_geom.RigidVisGeom.__init__)
+    assert "self.active_envs_mask" in src
 
 
-def test_scene_sim_options_raises_naming_both_spellings():
-    """A silent ``None`` would resurface as ``'NoneType' has no attribute 'dt'``
-    somewhere else entirely; the error must name both engine spellings so the
-    reader knows which versions were probed."""
-    with pytest.raises(AttributeError) as ei:
-        scene_sim_options(_AlienSceneShape())
-    msg = str(ei.value)
-    assert "options.sim" in msg
-    assert "sim_options" in msg
-
-
-# --- check_genesis_floor: warn-only supported-floor guard (v1.6.9) -----------
+# --- require_genesis: the REQUIRED engine floor (2.0.5) ----------------------
 #
 # Captured with a handler on the `genesis_vehicle` logger, not caplog: gs.init()
 # replaces the logging configuration and pytest's capture handler does not
@@ -442,14 +387,18 @@ import logging as _logging
 from genesis_vehicle import _gs_compat
 
 
-class _FloorCapture(_logging.Handler):
+class _VersionCapture(_logging.Handler):
     def __init__(self):
         super().__init__(level=_logging.WARNING)
-        self.msgs = []
+        self.recs = []
 
     def emit(self, record):
-        if "genesis-floor" in record.getMessage():
-            self.msgs.append(record.getMessage())
+        if "genesis-version" in record.getMessage():
+            self.recs.append((record.levelname, record.getMessage()))
+
+    @property
+    def msgs(self):
+        return [m for _, m in self.recs]
 
     def __enter__(self):
         _logging.getLogger("genesis_vehicle").addHandler(self)
@@ -468,77 +417,119 @@ class _GsStub:
 
 @pytest.fixture
 def fresh_floor(monkeypatch):
-    """Reset the once-per-process flag for the duration of one test."""
-    monkeypatch.setattr(_gs_compat, "_floor_checked", False)
+    """Reset the once-per-process flags for the duration of one test."""
+    for flag in ("_floor_error_logged", "_unvalidated_warned", "_unparsed_warned"):
+        monkeypatch.setattr(_gs_compat, flag, False)
     return _gs_compat
 
 
-@pytest.mark.parametrize("version", ["1.4.0", "1.3.3", "1.4", "1.4.4", "1.4.5rc1",
-                                     "1.4.5.dev3", "0.4.6"])
-def test_floor_warns_below_1_4_5(fresh_floor, version):
-    with _FloorCapture() as cap:
-        fresh_floor.check_genesis_floor(_GsStub(version))
-    assert len(cap.msgs) == 1, cap.msgs
-    assert version in cap.msgs[0] and "1.4.5" in cap.msgs[0]
+@pytest.mark.parametrize("version", ["1.4.5", "1.4.0", "1.3.3", "1.4", "1.4.7",
+                                     "1.5.0rc1", "1.5.0.dev3", "0.4.6"])
+def test_floor_raises_below_1_5_0(fresh_floor, version):
+    with _VersionCapture() as cap:
+        with pytest.raises(fresh_floor.GenesisVersionError) as ei:
+            fresh_floor.require_genesis(_GsStub(version))
+    msg = str(ei.value)
+    assert f"(found {version})" in msg
+    assert "genesis-world>=1.5.0,<1.6" in msg and "2.0.4" in msg
+    assert isinstance(ei.value, ImportError)
+    assert [lvl for lvl, _ in cap.recs] == ["ERROR"] and msg in cap.recs[0][1]
 
 
-@pytest.mark.parametrize("version", ["1.4.5", "1.4.5.post1", "1.4.5+local",
-                                     "1.4.5-cuda12", "1.4.5_cpu", "1.4.6", "1.5.0.dev0+g1", "2.0.0"])
-def test_floor_is_silent_at_or_above_1_4_5(fresh_floor, version):
-    with _FloorCapture() as cap:
-        fresh_floor.check_genesis_floor(_GsStub(version))
-    assert cap.msgs == []
+@pytest.mark.parametrize("version", ["1.5.0", "1.5.0.post1", "1.5.0+local",
+                                     "1.5.0-cuda12", "1.5.0_cpu", "1.5.3", "1.5"])
+def test_floor_is_silent_in_the_validated_range(fresh_floor, version):
+    with _VersionCapture() as cap:
+        assert fresh_floor.require_genesis(_GsStub(version)) is None
+    assert cap.recs == []
 
 
-def test_floor_warns_once_per_process(fresh_floor):
-    with _FloorCapture() as cap:
-        fresh_floor.check_genesis_floor(_GsStub("1.4.0"))
-        fresh_floor.check_genesis_floor(_GsStub("1.4.0"))
-        fresh_floor.check_genesis_floor(_GsStub("1.3.3"))
-    assert len(cap.msgs) == 1
-
-
-def test_floor_message_for_1_4_0_does_not_call_it_untested(fresh_floor):
-    """1.4.0 IS measured with this release (it is the rollback target), so the
-    warning must not describe it as untested."""
-    with _FloorCapture() as cap:
-        fresh_floor.check_genesis_floor(_GsStub("1.4.0"))
-    assert "untested" not in cap.msgs[0].lower()
+@pytest.mark.parametrize("version", ["1.6.0", "1.6.0rc1", "2.0.0"])
+def test_floor_warns_once_from_1_6_and_continues(fresh_floor, version):
+    with _VersionCapture() as cap:
+        fresh_floor.require_genesis(_GsStub(version))
+        fresh_floor.require_genesis(_GsStub(version))
+    assert [lvl for lvl, _ in cap.recs] == ["WARNING"]
+    assert "not validated" in cap.msgs[0] and version in cap.msgs[0]
 
 
 @pytest.mark.parametrize("version", ["garbage", "", None])
-def test_floor_unparseable_version_warns_and_continues(fresh_floor, version):
-    with _FloorCapture() as cap:
-        assert fresh_floor.check_genesis_floor(_GsStub(version)) is None   # no raise
-    assert len(cap.msgs) == 1 and "could not parse" in cap.msgs[0]
+def test_floor_unparseable_version_warns_once_and_continues(fresh_floor, version):
+    with _VersionCapture() as cap:
+        assert fresh_floor.require_genesis(_GsStub(version)) is None   # no raise
+        assert fresh_floor.require_genesis(_GsStub(version)) is None
+    assert len(cap.recs) == 1 and cap.recs[0][0] == "WARNING"
+    assert "could not parse" in cap.msgs[0]
 
 
-def test_floor_guard_runs_from_ensure_genesis_even_when_quiet(fresh_floor, monkeypatch):
-    """The VehicleScene / server entry point. GENESIS_VEHICLE_QUIET silences the
-    version banner only — the floor warning is not behind it."""
+def test_floor_error_is_logged_once_per_process_but_raised_every_time(fresh_floor):
+    """A caller's `except ImportError` would swallow the error, so it is logged
+    at ERROR -- once per process; every import attempt still raises."""
+    with _VersionCapture() as cap:
+        for _ in range(3):
+            with pytest.raises(fresh_floor.GenesisVersionError):
+                fresh_floor.require_genesis(_GsStub("1.4.5"))
+    assert [lvl for lvl, _ in cap.recs] == ["ERROR"]
+
+
+def test_floor_names_are_exported_from_the_package():
+    import genesis_vehicle
+    assert genesis_vehicle.GenesisVersionError is _gs_compat.GenesisVersionError
+    assert genesis_vehicle.require_genesis is _gs_compat.require_genesis
+    assert {"GenesisVersionError", "require_genesis"} <= set(genesis_vehicle.__all__)
+    assert _gs_compat.GENESIS_FLOOR == (1, 5, 0)
+    assert _gs_compat.GENESIS_UNVALIDATED_FROM == (1, 6, 0)
+
+
+def test_this_engine_passes_the_floor(fresh_floor):
+    """The installed engine (the test run's own) is in the validated range."""
     import genesis
-
-    from genesis_vehicle import vehicle_scene
-    monkeypatch.setenv("GENESIS_VEHICLE_QUIET", "1")
-    monkeypatch.setattr(genesis, "__version__", "1.4.0")
-    with _FloorCapture() as cap:
-        vehicle_scene._ensure_genesis()
-    assert len(cap.msgs) == 1 and "1.4.0" in cap.msgs[0]
+    with _VersionCapture() as cap:
+        fresh_floor.require_genesis(genesis)
+    assert cap.recs == [], cap.recs
 
 
-def test_floor_guard_runs_from_vehicle_physics_init(fresh_floor, monkeypatch):
-    """The direct-driver entry point (GeneVehicle_* demos construct
-    VehiclePhysics themselves). The guard is the first statement, so it fires
-    even though these placeholder arguments make the constructor fail later."""
-    import genesis
+_FLOOR_CALLERS = ["core.py", "vehicle_scene.py", "multi_vehicle.py", "raycast.py",
+                  "scene_helpers.py", "visual.py", "server/__init__.py"]
+_FLOOR_FREE = ["_pipeline.py", "_gs_compat.py", "dynamics.py"]
 
-    from genesis_vehicle import core
-    monkeypatch.setenv("GENESIS_VEHICLE_QUIET", "1")
-    monkeypatch.setattr(genesis, "__version__", "1.4.0")
-    with _FloorCapture() as cap:
-        with pytest.raises((AttributeError, TypeError)):
-            core.VehiclePhysics(None, None, None, None)
-    assert len(cap.msgs) == 1
+
+def _module_level_calls(path, name):
+    import ast
+    tree = ast.parse(open(path).read())
+    out = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for n in ast.walk(node):
+            if isinstance(n, ast.Call) and getattr(n.func, "attr", getattr(n.func, "id", "")).endswith(name):
+                out.append(n.lineno)
+    return out
+
+
+def test_floor_is_called_at_module_level_in_every_genesis_module():
+    import os
+    import genesis_vehicle
+    root = os.path.dirname(genesis_vehicle.__file__)
+    for rel in _FLOOR_CALLERS:
+        assert _module_level_calls(os.path.join(root, rel), "require_genesis"), rel
+
+
+def test_floor_is_never_called_at_module_level_on_the_genesis_free_path():
+    """AC-FL (e): `import genesis_vehicle` reaches _pipeline / dynamics /
+    control/* (control/__init__ -> plant -> _pipeline), so a check there would
+    block Genesis-free use of PathFollower / SweepTable."""
+    import os
+    import genesis_vehicle
+    root = os.path.dirname(genesis_vehicle.__file__)
+    rels = list(_FLOOR_FREE) + [os.path.join("control", f) for f in
+                                sorted(os.listdir(os.path.join(root, "control")))
+                                if f.endswith(".py")]
+    rels += [os.path.join("control", "mpc", f) for f in
+             sorted(os.listdir(os.path.join(root, "control", "mpc"))) if f.endswith(".py")] \
+        if os.path.isdir(os.path.join(root, "control", "mpc")) else []
+    bad = {rel: _module_level_calls(os.path.join(root, rel), "require_genesis") for rel in rels}
+    assert not {k: v for k, v in bad.items() if v}, bad
 
 
 # --- coarse-SDF post-build check: stub solvers (both collider shapes) --------
@@ -547,6 +538,7 @@ class _Mat:
     def __init__(self, **kw):
         self.sdf_cell_size = kw.get("sdf_cell_size", 0.005)
         self.sdf_min_res = kw.get("sdf_min_res", 32)
+        self.sdf_max_res = kw.get("sdf_max_res", 128)
 
 
 class _Ent:
@@ -587,10 +579,13 @@ def _coarse():
 
 
 def test_coarse_sdf_kwargs_are_the_validator_minimum():
-    """16 is the `ge=16` floor of `sdf_min_res` on genesis 1.4.0 and 1.4.5; the
-    cell size is large enough that the upper clip always wins."""
+    """16 is the `ge=16` floor of `sdf_min_res` AND `sdf_max_res` on
+    genesis-world 1.5.0; with both at 16 the two clip bounds coincide, so the
+    grid is 16 nodes per axis whatever the geom's width (2.0.5 added
+    `sdf_max_res`: since 1.4.7 the convex-width refinement pulled a thin convex
+    geom past 16 without it)."""
     kw = _gs_compat.COARSE_SDF_MATERIAL_KW
-    assert kw == {"sdf_cell_size": 1.0e4, "sdf_min_res": 16}
+    assert kw == {"sdf_cell_size": 1.0e4, "sdf_min_res": 16, "sdf_max_res": 16}
 
 
 def test_coarse_sdf_lists_only_nonconvex_nonterrain_coarse_geoms():
@@ -599,7 +594,8 @@ def test_coarse_sdf_lists_only_nonconvex_nonterrain_coarse_geoms():
              _Geom(1, False, _coarse(), link="bad"),                     # the one
              _Geom(2, False, _Mat()),                                    # default material
              _Geom(3, False, _coarse(), gtype=gs.GEOM_TYPE.TERRAIN),     # heightfield
-             _Geom(4, False, _Mat(sdf_cell_size=1.0e4))]                 # old kwargs, not ours
+             _Geom(4, False, _Mat(sdf_cell_size=1.0e4)),                 # old kwargs, not ours
+             _Geom(5, False, _Mat(sdf_cell_size=1.0e4, sdf_min_res=16))]  # 2.0.4 two-key copy: not ours
     got = _gs_compat.coarse_sdf_nonconvex_geoms(_StubRigidSolver(geoms))
     assert len(got) == 1 and "geom 1" in got[0] and "bad" in got[0]
 
@@ -621,21 +617,19 @@ def test_coarse_sdf_warning_fails_open_without_the_collider_flag():
 # --- coarse-SDF kwargs on a REAL engine: node counts + the post-build check ---
 
 def _sdf_nodes(geom):
-    """Per-axis SDF node count of a built geom. genesis 1.4.5 carries it on the
-    geom description (``desc.sdf.n_nodes``); 1.4.0 on ``RigidGeom.sdf_res``.
-    Branched here, in the test, because only the test reads it."""
-    sdf = getattr(getattr(geom, "desc", None), "sdf", None)
-    if sdf is not None:
-        return tuple(int(n) for n in sdf.n_nodes)
-    return tuple(int(n) for n in geom.sdf_res)
+    """Per-axis SDF node count of a built geom (``desc.sdf.n_nodes`` on
+    genesis-world 1.5.0; the 1.4.0 ``RigidGeom.sdf_res`` branch was removed in
+    2.0.5)."""
+    return tuple(int(n) for n in geom.desc.sdf.n_nodes)
 
 
 def test_coarse_sdf_kwargs_give_a_16_node_grid_on_this_engine(tmp_path, monkeypatch):
     """`COARSE_SDF_MATERIAL_KW` must land on 16 nodes per axis for every kind of
-    convex geom the SDK gives it to — a primitive, a convexified mesh, and the
-    two SDK-owned dual_scene raycast mirrors (rigid Terrain mirror, add_dynamic
-    wheel_raycast mirror) — while the DEFAULT material stays finer (so this
-    cannot pass vacuously). Also checks the post-build check runs on BOTH scenes
+    convex geom the SDK gives it to — a primitive, a THIN primitive (a 0.1 m
+    wall, which the 1.4.7+ convex-width refinement refines past 16 without
+    `sdf_max_res`), a convexified mesh, and the two SDK-owned dual_scene raycast
+    mirrors (rigid Terrain mirror, add_dynamic wheel_raycast mirror) — while
+    the DEFAULT material stays finer (so this cannot pass vacuously). Also checks the post-build check runs on BOTH scenes
     and lists a real non-convex coarse geom, but stays quiet while no collision
     pair can read its SDF (every body here is fixed)."""
     trimesh = pytest.importorskip("trimesh")
@@ -662,6 +656,11 @@ def test_coarse_sdf_kwargs_give_a_16_node_grid_on_this_engine(tmp_path, monkeypa
     vs = VehicleScene(dt=0.02, substeps=2, n_envs=1, show_viewer=False)
     prim = vs.add_static(morph=gs.morphs.Box(size=(1, 1, 1), pos=(5, 0, 0.5), fixed=True),
                          material=gs.materials.Rigid(**C), name="prim")
+    thin = vs.add_static(morph=gs.morphs.Box(size=(0.1, 10.0, 3.0), pos=(12, 0, 1.5), fixed=True),
+                         material=gs.materials.Rigid(**C), name="thin")
+    thin_d = vs.add_static(morph=gs.morphs.Box(size=(0.1, 10.0, 3.0), pos=(14, 0, 1.5), fixed=True),
+                           material=gs.materials.Rigid(sdf_cell_size=1.0e4, sdf_min_res=16),
+                           name="thin_two_key")
     cmesh = vs.add_static(morph=gs.morphs.Mesh(file=box, pos=(-5, 0, 1.5), fixed=True,
                                                convexify=True),
                           material=gs.materials.Rigid(**C), name="cmesh")
@@ -684,12 +683,16 @@ def test_coarse_sdf_kwargs_give_a_16_node_grid_on_this_engine(tmp_path, monkeypa
         return [_sdf_nodes(g) for g in entity.geoms]
 
     assert nodes(prim.entity_main) == [(16, 16, 16)]
+    assert nodes(thin.entity_main) == [(16, 16, 16)]
+    # Without sdf_max_res (the 2.0.4 two-key dict) the thin axis refines past 16
+    # on this engine -- the reason the key was added.
+    assert max(nodes(thin_d.entity_main)[0]) > 16, nodes(thin_d.entity_main)
     assert nodes(cmesh.entity_main) == [(16, 16, 16)]
     assert all(min(n) > 16 for n in nodes(dmesh.entity_main)), nodes(dmesh.entity_main)
     # SDK-owned raycast-scene mirrors (vehicle_scene add_static Terrain branch,
     # add_dynamic wheel_raycast mirror): material chosen by the SDK.
-    if type(terr.entity_raycast).__name__ != "KinematicEntity":     # genesis >= 1.4.0
-        assert nodes(terr.entity_raycast) == [(16, 16, 16)]
+    assert type(terr.entity_raycast).__name__ != "KinematicEntity"  # rigid Terrain mirror
+    assert nodes(terr.entity_raycast) == [(16, 16, 16)]
     assert nodes(dyn.entity_raycast) == [(16, 16, 16)]
     assert all(min(n) > 16 for n in nodes(dyn.entity_main))         # user default kept
 

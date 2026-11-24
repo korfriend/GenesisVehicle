@@ -93,6 +93,19 @@ if _os.environ.get("GENESIS_VEHICLE_LOG", "1") != "0":
 
 # --- Eager (no Genesis runtime needed) ---------------------------------------
 
+# Required-engine check (2.0.5): genesis-world >= 1.5.0, < 1.6. Raised at import
+# of the modules that call `require_genesis` at module level -- `core`,
+# `vehicle_scene`, `multi_vehicle`, `raycast`, `scene_helpers`, `visual` and
+# `server` (so VehicleScene, VehiclePhysics, MultiVehiclePhysics, the server) --
+# not here. NOT every module that imports genesis is covered: `kinematics`,
+# `urdf` and `control.sweep_measure` import without the check (`kinematics`
+# imports genesis at module level, `urdf` not at all, `control.sweep_measure`
+# lazily; a sweep still hits the check when it builds its VehicleScene).
+# `import genesis_vehicle` itself, PathFollower and SweepTable are not blocked
+# (genesis must still be importable). See `_gs_compat.require_genesis`.
+# Exported so callers can catch it by name.
+from ._gs_compat import GenesisVersionError, require_genesis
+
 from .config import (
     ChassisConfig,
     ConfigError,
@@ -203,6 +216,8 @@ __all__ = [
     "__version__", "VERSION_INFO", "version", "version_info",
     # Logging
     "configure_logging",
+    # Required engine (2.0.5)
+    "GenesisVersionError", "require_genesis",
     # Driver (lazy)
     "VehiclePhysics", "WheelMeta", "PipelineContext",
     "MultiVehiclePhysics", "MultiVehicleKindPhysics",

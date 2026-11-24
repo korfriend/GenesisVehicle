@@ -36,9 +36,12 @@ from typing import Iterable
 
 import torch
 import genesis as gs
-from genesis.options.sensors.raycaster import RaycastPattern
 
-from ._gs_compat import sensor_miss_value
+from ._gs_compat import require_genesis, sensor_miss_value
+
+require_genesis(gs)   # genesis-world >= 1.5.0 required (2.0.5)
+
+from genesis.options.sensors.raycaster import RaycastPattern  # noqa: E402
 
 _logger = logging.getLogger(__name__)
 

@@ -15,7 +15,7 @@ enforced by `genesis_vehicle.dynamics` (pure-Python, unit-tested in
 | `max_range` | the raycaster's maximum ray length (m); `raycaster_max_range`, default 20.0 |
 | RAW / CORRECTED distance | straight off `sensor.read().distances` / after `read_distances` subtracts the high-cast offset |
 | `n_envs` / L3 | the parallel-scenario batching axis |
-| `dual_scene` / `single_scene` | the two `raycast_mode` values: separate static-BVH raycast scene / one shared scene |
+| `dual_scene` / `single_scene` | the two `raycast_mode` values: separate raycast scene holding no vehicle collision geometry / one shared scene |
 | BVH | Bounding Volume Hierarchy (the acceleration structure rays are cast against) |
 | AABB | Axis-Aligned Bounding Box |
 | VJS | `WheelJointInternalSync` — the legacy wheel-visual writer that drives solver joints |
@@ -427,29 +427,72 @@ subtracts back exactly what the pattern added. Contract points:
 - Keep overhead raycast terrain (tunnel ceilings) more than the vehicle's
   effective offset above the wheel attachment points.
 
-Related: `WheelJointInternalSync` is intended to be cosmetic but is not
-perfectly physics-neutral (the control path's PD applies real joint
-forces; the set path teleports wheel mass). Its suspension targets are
-stroke-clamped and slew-rate-limited (`_SUSP_VIS_MAX_RATE`), bounding
-the measured disturbance to < 1 cm extra compression on hard landings
-(was 2-3 cm unclamped — enough to flip a marginal landing into the
-buried state before the high-cast fix removed that failure mode).
+Related: `WheelJointInternalSync` (VJS) is NOT physics-neutral, and the
+paragraph that stood here through v2.0.4 under-stated it. It said the
+disturbance was bounded "to < 1 cm extra compression on hard landings" by
+the stroke clamp and slew-rate limit (`_SUSP_VIS_MAX_RATE`; 2-3 cm
+unclamped). That bound is real but covers landing compression only; **the
+VJS path moves the whole chassis trajectory** (corrected in v2.0.5):
+
+| measured against the same run with no visual joint path | genesis-world 1.4.5 | 1.5.0 | who |
+|---|---|---|---|
+| reference car (`samples/urdf/car_4w.urdf`, `car_4w_rwd_ackermann(stability="control")`), set (kinematic) suspension write, dt 0.025 × 10 substeps, 1.5 s brake then 5 s at throttle 0.5, final x | 10.7180 → 10.8601 m (+0.142 m) | 10.7180 → 10.8601 m (+0.142 m) | implementation; confirmed by impl-review |
+| truck (`truck_6w.urdf` demo URDF, `truck_6w_partial_ackermann`), set path, dt 0.025 × 4 substeps, 1.5 s brake then 10 s at throttle 0.3, final x | 51.9015 → 52.2209 m (+0.319 m) | 51.9015 → 52.2209 m (+0.319 m) | implementation |
+
+Both with one offscreen camera and `wheel_render_mode="internal_sync"`,
+`dual_scene`, plane μ 1.0, CPU/WSL2. **Which coupling produces it is not
+established.** Candidates visible in code (physics-review, none measured):
+every `set_dofs_position` resets the constraint solver and the collider cache
+and wakes the entity; the URDF wheel links carry mass (carrier + steer + wheel
+links about 140 of the reference car's 1340 kg) and are dofs of the chassis
+articulation, so writing the suspension positions moves the entity's centre
+of mass, the reference point of the SDK's chassis wrench torque. What still
+holds: the suspension force N is applied ONCE, through the chassis wrench;
+VJS adds no second N. `visual_susp_mode="auto"` resolves to the set path on
+both URDFs above (their suspension `<dynamics>` are all zero), so any rendered
+VJS run of them moves physics.
+
+**The `"control"` path depends on the engine.** It drives the suspension
+joints with a PD (`control_dofs_position`, kp 1e7 / kv 1e5) and sets no force
+range. A URDF `effort="0"` (written on the suspension joints of
+`tests/data/car_ref.urdf`, `samples/urdf/car_4w.urdf` and `truck_6w.urdf`) is
+a ZERO force range on genesis-world 1.4.5 — the PD is inert and the joint hangs
+at its limit — and UNBOUNDED on 1.5.0, where the PD tracks its target and its
+reaction is a real force on the chassis outside N. Measured with
+`visual_susp_mode="control"` forced, 1.5.0 against 1.5.0 with the suspension
+dofs' force range set to 0 after build (implementation): reference car max
+|Δx| 8.17 mm (the deterministic tolerance at that distance is 6.36 mm), max
+|Δz| 0.190 m at step 34 (the landing); truck max |Δx| 15.7 mm, max |Δz| 30.4 mm
+at step 43; with the force range 0, 1.5.0 reproduces 1.4.5 within 6.1e-5 m. The
+SDK does not pin it in v2.0.5 (a user decision; settled in 2.0.6, planned). A
+URDF with non-zero suspension `<dynamics>` — the case where `"auto"` picks the
+control path — was not run. Headless runs never drive the visual joints.
 
 Since v1.1.17 `VehicleScene` no longer uses VJS by default: rendered
 scenes with `n_envs == 1` draw wheels via `InstancedWheelRenderer` —
-closed-form poses streamed into instanced render nodes (Genesis's
-external render-node channel — the debug-draw machinery — NOT the rigid
-solver), verified physics-identical to headless to 1e-6 m at a slight
-pose-streaming cost (~2–3 ms/step at 30 vehicles, CPU)
-(`wheel_render_mode="internal_sync"` restores the old behavior; multi-env
-and raw-`VehiclePhysics` use still fall back to VJS).
+closed-form poses streamed into instanced render nodes (NOT the rigid
+solver; since v2.0.5 through `_gs_compat.add_render_node` /
+`queue_instance_poses`, because genesis-world 1.5.0 removed the "external
+render-node channel" this paragraph named), measured physics-identical to
+headless to 1e-6 m at v1.1.17 (not re-measured on 1.5.0; by construction it
+writes no solver state) at a slight pose-streaming cost (~2–3 ms/step at 30
+vehicles, CPU, a pre-1.5.0 figure). The URDF wheel visual geoms it replaces
+are hidden through the ENGINE-PRIVATE per-env mask `vgeom.active_envs_mask`
+(`_gs_compat.hide_vgeoms`, which raises `AttributeError` if the attribute is
+gone); the 2.0.4 `active_envs_idx = []` hide is a no-op on 1.5.0.
+`wheel_render_mode="internal_sync"` restores VJS; multi-env and
+raw-`VehiclePhysics` use still fall back to it — and so move physics as above.
 
-Since v1.1.25 the native viewer additionally commits the wheel buffers, the
-`follow_entity` camera and the rigid node poses in ONE render-lock hold
-(`visual.patch_viewer_atomic_update`, applied automatically at `build()`).
-Before that, the async draw thread could pair state from adjacent steps and
-a followed vehicle appeared to "tremble" fore/aft at speed — a pure draw
-artifact; physics was never affected (see CHANGELOG 1.1.25).
+**Through v2.0.4 this section said** that since v1.1.25 the native viewer
+committed the wheel buffers, the `follow_entity` camera and the rigid node
+poses in ONE render-lock hold (`visual.patch_viewer_atomic_update`, applied
+at `build()`). **That was true on genesis-world <= 1.3.3 only.** On 1.4.x the
+patch returned False and changed nothing, so the non-atomic ordering ran
+there; 1.5.0 has no viewer hook that runs before the scene render under the
+lock. The patch was removed in v2.0.5. So a followed vehicle may "tremble"
+fore/aft in the native viewer at speed — the async draw thread can pair state
+from adjacent steps; a draw artefact, physics unaffected (CHANGELOG 1.1.25);
+not measured on 1.5.0.
 
 
 ## 7.9 URDF contracts for ray-wheels (auto-corrected since v1.1.22)
@@ -528,36 +571,50 @@ vehicle actually on the terrain?", replacing the ad-hoc
 
 `VehicleScene.add_vehicle(wheel_contact=...)` selects the wheel-ground contact
 model. **`"point"` is the default and is the single-ray contact of every
-earlier release.** What the tests prove about it, since v1.8.0, exactly:
+earlier release.** What the tests prove about it, since v2.0.5, exactly:
 
-- `test_witness_rollout_is_bit_identical_to_the_37b8b79_tree`: a 200-step
+- `test_witness_rollout_matches_the_2_0_4_tree_on_1_5_0[0.0|0.05]`: a 200-step
   rollout of the reference car (contact path = `"control"` minus
   `RollingResistance`, per_vehicle, spawned at its settled height with vx
   10 m/s and wheels rolling, steer 0 and 0.05, NO throttle or brake) is
-  bit-identical across `37b8b79` (v1.5.0), 1.7.0 and 1.8.0. It proves the
-  raycast, suspension, rolling-tyre force and force application are unchanged
-  WHERE NO 1.8.0 MECHANISM ACTS (no axle torque, no brake, no friction-ellipse
-  binding, no contact below the lateral-deadbeat binding speed). It proves
-  nothing about driving, braking, low speed, saturation or the fan; at 5 m/s or
-  with a spawn drop the landing load spike makes the lateral deadbeat bind
-  (§7.16) and the rollouts differ.
+  bit-identical to its capture from the v2.0.4 tree plus the two-line
+  `skip_forward` patch on genesis-world 1.5.0 (linux-x86_64). It proves that
+  2.0.5 reproduces the 2.0.4 tree's physics on 1.5.0 for this scenario.
 - `test_point_contact_equals_a_degenerate_fan_bit_for_bit`: point vs
   `swept_envelope` M = 3 at the default span on the SAME tree. A change to
   shared code moves both and passes it.
-- `test_contact_path_rollout_matches_its_1_8_0_capture`: the driving rollout
-  (60 brake + 140 throttle-0.5 steps) against its 1.8.0 capture (final x
-  6.018499851226807). A regression lock for later releases, not evidence that
-  1.8.0 kept the old path — it did NOT: 1.8.0 moved the driving rollout
-  (5.920469284057617 → 6.018499851226807 contact path, 5.224289894104004 →
-  5.349795818328857 full profile; CHANGELOG 1.8.0 §9). It passes unchanged on
-  v2.0.4 (the 2.0.4 suite; the reference car's lock spring is uncapped at dt
-  0.025); that is a regression check of this rollout only, not evidence about
-  the 2.0.4 lock.
+- `test_contact_path_rollout_matches_the_2_0_4_tree_on_1_5_0`: the driving
+  rollout (60 brake + 140 throttle-0.5 steps) against its capture from the same
+  patched 2.0.4 tree on 1.5.0. A regression lock for later releases on exactly
+  that engine version and platform.
+
+All three captured locks are keyed `("1.5.0", "linux-x86_64")` and SKIP on
+any other pair — a 1.5.x patch release included — because the baseline is a
+float32 bit pattern bound to the engine and platform it was captured on.
+
+**What changed in v2.0.5, and what is lost.** Through v2.0.4 these were
+`test_witness_rollout_is_bit_identical_to_the_37b8b79_tree` — the cross-tree
+evidence that the raycast, suspension, rolling-tyre force and force
+application were unchanged across `37b8b79` (v1.5.0), 1.7.0 and 1.8.0 WHERE NO
+1.8.0 MECHANISM ACTS (no axle torque, no brake, no friction-ellipse binding, no
+contact below the lateral-deadbeat binding speed; at 5 m/s or with a spawn drop
+the landing load spike makes the lateral deadbeat bind, §7.16) — and
+`test_contact_path_rollout_matches_its_1_8_0_capture` (final x
+6.018499851226807; 1.8.0 had moved the driving rollout, 5.920469284057617 →
+6.018499851226807 contact path, 5.224289894104004 → 5.349795818328857 full
+profile, CHANGELOG 1.8.0 §9). Both were keyed `("1.4.5", "linux-x86_64")`.
+2.0.5 cannot run on 1.4.5, and the 1.4.5 bit patterns cannot be reproduced on
+1.5.0, so they were replaced 1:1 by the locks above and the 1.4.5 entries
+deleted. **Lost: the bit-level statement back to `37b8b79` / 1.8.0 on the
+current engine, and any identity across engines.** Across engines only
+tolerances speak (CHANGELOG 2.0.5 §8: the 2.0.4 tree on 1.4.5 vs 2.0.5 on
+1.5.0 over 16 parity scenarios, max |Δx| 5.63e-5 m, max |Δz| 5.93e-5 m).
 
 **What this paragraph said through v1.7.0:** "`point` … is the single-ray
 behaviour of every earlier release, bit-for-bit" on the driving rollout. That
-held through 1.7.0 for the contact path; since 1.8.0 it holds only for the
-witness above. Nothing below applies unless a caller opts in.
+held through 1.7.0 for the contact path; from 1.8.0 through 2.0.4 it held only
+for the `37b8b79` witness described above. Nothing below applies unless a
+caller opts in.
 
 **The defect `"swept_envelope"` addresses.** A single zero-radius downward ray
 reads ground height as a STEP FUNCTION. A wheel at road level on one step and
@@ -1016,12 +1073,12 @@ invariant: `WheelMeta` fields are per-wheel-only until every site uses them.
 
 `VehicleScene.sim_options` is the **authored** `SimOptions` object — the one the
 scene was constructed with. **Writing to it after `build()` changes nothing**,
-on genesis 1.4.5 — the supported backend since SDK v1.6.9, where
+on genesis-world 1.5.0 — the required engine since SDK v2.0.5, where
 `test_sim_options_and_timing.py::test_post_build_sim_options_writes_are_inert`
-passes on a real CPU scene — on 1.4.0, the supported backend for SDK
-v1.6.6-v1.6.8 and the engine the measurement below was taken on, and on 1.3.3,
-which is no longer supported but whose compatibility branches still run if
-installed.
+passes on a real CPU scene — and on 1.4.5 (SDK v1.6.9-v2.0.4) and 1.4.0 (SDK
+v1.6.6-v1.6.8, the engine the measurement below was taken on). (Through v2.0.4
+this sentence also named 1.3.3, "whose compatibility branches still run if
+installed"; those branches were removed in v2.0.5.)
 
 Why: `Simulator.__init__` snapshots `_dt` / `_substep_dt` / `_substeps` at
 construction and copies them into each solver at build; `Simulator.dt` is a
@@ -1050,7 +1107,8 @@ conditions, which an earlier draft of this section omitted.**
 `substeps=` explicitly (`_scene_kw`), and genesis 1.4.0 RAISES rather than
 re-derives when an authored `substeps` conflicts with the solver `dt`
 (`GenesisException: RigidSolver dt=... implies N substep(s) per step,
-conflicting with the requested substeps=...`). The divergence is reachable
+conflicting with the requested substeps=...`; the 1.5.0 source keeps that
+raise, `engine/simulator.py`, read by the implementation in v2.0.5). The divergence is reachable
 only when a caller supplies its **own** `sim_options` WITHOUT `substeps`
 alongside a `rigid_options(dt=)` — then 1.4.0 derives
 `substeps = round(SimOptions.dt / RigidOptions.dt)` and never tells the
@@ -1074,7 +1132,8 @@ the L2 server on the first client connection**, for eight releases
 (v1.5.0, 1.5.1, 1.5.2, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4). Both the
 write and the claim are gone as of v1.6.5; the line now reports
 `effective_dt` / `substeps` and says the values are fixed at build. The
-accessor itself is branched once, in `_gs_compat.scene_sim_options`.
+accessor was branched once, in `_gs_compat.scene_sim_options`, through v2.0.4;
+since v2.0.5 callers read `scene.options.sim` directly (1.5.0 only).
 
 `server/l3_runtime.py` prints a near-identical line, but it performs **no
 write** and says `고정` ("fixed") — that wording was, and is, true. The
@@ -1665,7 +1724,7 @@ through them `MultiVehiclePhysics.step` and `VehicleScene.step`.
 
 | guarantee | enforced by | scope |
 |---|---|---|
-| no input of a step carries a gear → the 2.0.1 gear-free code path | `encode_requests` returns `None`; the drivers then run their 2.0.1 lines in the 2.0.1 order | the four paths above. **Through 2.0.3 this row said "the 2.0.1 numbers"**, byte-identity measured on nine scenes against `tests/data/legacy_inputs_2_0_1.json`. Since v2.0.4 the physics of a braked wheel changed for every input (§7.22): the gear-free path is still the 2.0.1 path, but a scene with a brake no longer reproduces the 2.0.1 numbers; `tests/test_legacy_inputs_bit_identity.py` (platform-gated) now asserts the 2.0.4 capture `legacy_inputs_2_0_4.json`, and the 2.0.1 file is kept but no longer asserted |
+| no input of a step carries a gear → the 2.0.1 gear-free code path | `encode_requests` returns `None`; the drivers then run their 2.0.1 lines in the 2.0.1 order | the four paths above. **Through 2.0.3 this row said "the 2.0.1 numbers"**, byte-identity measured on nine scenes against `tests/data/legacy_inputs_2_0_1.json`. Since v2.0.4 the physics of a braked wheel changed for every input (§7.22): the gear-free path is still the 2.0.1 path, but a scene with a brake no longer reproduces the 2.0.1 numbers; `tests/test_legacy_inputs_bit_identity.py` (platform-gated) asserted the 2.0.4 capture `legacy_inputs_2_0_4.json` (genesis-world 1.4.5) through v2.0.4; since v2.0.5 it asserts `legacy_inputs_2_0_5.json`, captured from the v2.0.4 tree plus the two-line `skip_forward` patch on genesis-world 1.5.0 (linux-x86_64), which 2.0.5 reproduces bit for bit; the 2.0.1 and 2.0.4 files are kept but no longer asserted |
 | the gear is read off the caller's ORIGINAL input object, before `from_unified` | `getattr(inputs, "gear", None)` at the head of `VehiclePhysics.step`; the batched kind reads the input list directly | a custom `InputType.from_unified` that drops the field does not switch gear mode off |
 | on a gear row the drivetrain sees `thr_eff`; hooks see it as `ctx.throttle`; `ctx.gear` holds the post-shift gear | `effective_throttle`, `with_throttle` (`dataclasses.replace`, the caller's object untouched) | `ctx.gear` is `None` on a step with no gear; set before the `PRE_LOOP` hooks |
 | every wheel's `last_T_drive · g >= 0` on a gear row, g = the gear engaged AFTER this step's shift decision | `clamp_drive_to_gear`, after `update_gear`, before `compute_wheel_step` | custom drivetrains included — so a custom non-`PerSide` drivetrain's deliberate opposite-sign wheel torque is ZEROED in gear mode; driving in the gear's direction while rolling the other way (hill start) is allowed. `DifferentiablePlant`'s unroll is signed and not covered |
@@ -1937,8 +1996,10 @@ brake-dominated wheels and excludes exact ties, where the wheel is free.
   b = 1 only for planar modes under moment-balanced loads, and then
   `C_RB` = 1.5 means `1 − λ·DT² ≥ −0.5` (oscillation amplitude per step ≤ 0.5
   on the oscillating side). `C_RB` = 1.5 is the user's constant, not derived
-  (any value in about 1.17-2 leaves the reference vehicles unchanged; one
-  constant, 1, is planned for 2.1.0 — a plan, not a commitment). NOT covered:
+  (any value in about 1.17-2 leaves the reference vehicles unchanged). Through
+  v2.0.4 this item said unifying both terms on one constant, 1, was planned for
+  2.1.0; **that plan was WITHDRAWN by the user on 2026-11-24** (corrected in
+  2.0.5) — `C_RB` stays 1.5. NOT covered:
   roll / pitch-coupled modes (a light 10-wheel tank's roll-coupled damper mode
   has modal b 1.257 and a linear 6-DOF spectral radius 1.31 before and after
   v2.0.4 — a linear computation, not a measurement; measured holds on that
@@ -1991,3 +2052,44 @@ CPU/WSL2, genesis-world 1.4.5, `per_vehicle`, `dual_scene`, plane μ 1.0, DT
 - reference car at DT 1/30 / 0.04: capped (301 501 / 297 001 and 209 375 /
   206 250 N/m), the 6 REST rows rest (implementation; DT 0.04 re-run by
   impl-review).
+
+## 7.23 Required engine: genesis-world 1.5.0 (v2.0.5)
+
+| abbr | meaning |
+|---|---|
+| B204m | the v2.0.4 tree plus the two-line `skip_forward` patch, run on genesis-world 1.5.0 — "the 2.0.4 tree's physics on 1.5.0" |
+| AST | abstract syntax tree (the test inspects source code statically, without importing it) |
+| AC-V-hide | the 2.0.5 release-plan pixel check of the URDF wheel-visual hide (wheel pixels counted with the hide applied and skipped) |
+
+### 7.23.1 Enforced (code path named)
+
+| guarantee | enforced by | scope |
+|---|---|---|
+| genesis-world < 1.5.0 (a 1.5.0 pre-release included) raises `GenesisVersionError` (an `ImportError`) before any scene exists | `_gs_compat.require_genesis`, called at module level right after `import genesis` in `core`, `vehicle_scene`, `multi_vehicle`, `raycast`, `scene_helpers`, `visual`, `server/__init__` | NOT `kinematics`, `urdf`, `control.sweep_measure` (import without the check; a sweep hits it when it builds its `VehicleScene`), and not `import genesis_vehicle`, `PathFollower`, `SweepTable`, `DifferentiablePlant`, `control.identify` (impl-review probe on 1.4.5). Never "every Genesis-dependent module" |
+| the message is visible even if a caller swallows `ImportError` | logged ONCE per process at ERROR on the `genesis_vehicle` logger before the raise | a logger configured to drop ERROR hides it |
+| genesis-world >= 1.6.0 is flagged | one WARNING per process, then continues | a 1.5.x patch release (1.5.1, ...) is admitted silently and is NOT validated; the 20 engine-keyed identity locks SKIP on it |
+| `require_genesis` is never called at module level on the Genesis-free path | AST test `test_floor_is_never_called_at_module_level_on_the_genesis_free_path` (`_pipeline`, `_gs_compat`, `dynamics`, `control/*`) | — |
+| the URDF wheel visual is hidden where the instanced renderer draws its own copy | `_gs_compat.hide_vgeoms` writes the engine-private `vgeom.active_envs_mask`; raises `AttributeError` before writing if the attribute is missing | 1.5.0's attribute only; measured 0 wheel pixels with the hide, 6368-6500 with it skipped (implementation, AC-V-hide) |
+
+### 7.23.2 What the 2.0.5 identity evidence covers, and what it does not
+
+- **Covered, bit for bit:** 2.0.5 on 1.5.0 equals B204m on 46 headless items —
+  16 parity rollouts (reference car straight / steered / into a wall / starting
+  after a 4 s rest, tank straight / skid-turning, truck, `single_scene`, flat
+  `Terrain`, a 9-ray `swept_envelope` fan, two cars batched at `n_envs` 3, the
+  `obstacles_and_ramp` ramp and kerb in both raycast modes, a teleported moving
+  platform in both modes, a mesh road via `add_raycast_surface`), 8 ray replays, 20
+  fixture scenarios, 2 per-env lateral ray replays (implementation, on the
+  overlay and again in the upgraded venv; impl-review re-ran 6 of them, plus
+  two 1e-6 m spawn-shifted variants). The
+  `WheelJointInternalSync` / `KindVisualBatch` joint path, which B204m cannot run,
+  was checked separately: B204m with the two `visual.py` `skip_forward` keywords
+  also deleted equals 2.0.5 on three pairs (kinematic per-entity, control
+  per-entity, kinematic batched; implementation).
+- **Not covered:** identity ACROSS engines. 1.4.5 → 1.5.0 is bounded by
+  tolerances only (CHANGELOG 2.0.5 §8). A scene that contains a per-env variant
+  body (the engine then runs its heterogeneous collider path for the whole
+  scene). GPU. A URDF with non-zero suspension `<dynamics>`.
+- **Engine behaviour changes the SDK passes through unpinned** (v2.0.5, a user
+  decision): URDF `effort="0"` is an unbounded force range on 1.5.0, which
+  makes the `visual_susp_mode="control"` PD live (§7.8).

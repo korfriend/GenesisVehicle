@@ -23,35 +23,45 @@ logs a warning.
 
 Two raycast modes (``raycast_mode=``):
 
-- ``"dual_scene"`` (default) — the ray-wheel-dedicated raycast optimization. The
-  terrain is raycast in a SEPARATE scene where it lives as a *kinematic* body,
-  so its BVH is built **once** and never re-fit (``maybe_static``), and the cast
-  is shared across batch envs. Physics/collision (incl. rollover) run in the
-  main scene with the terrain as a *rigid* body. Each step the vehicle's chassis
-  pose is mirrored onto a lightweight rigid, fixed, collision-free proxy in the
-  raycast scene; ``raycast_scene.step()`` refreshes the ray origins and re-casts
-  against the static BVH; the distances are fed into the main-scene physics via
+- ``"dual_scene"`` (default) — the wheel rays are cast in a SEPARATE scene
+  where the terrain lives as a *kinematic* visual-raycast body (no collision).
+  Physics/collision (incl. rollover) run in the main scene with the terrain as
+  a *rigid* body. Each step the vehicle's chassis pose is mirrored onto a
+  lightweight rigid, fixed, collision-free proxy in the raycast scene;
+  ``raycast_scene.step()`` refreshes the ray origins and re-casts; the
+  distances are fed into the main-scene physics via
   :meth:`VehiclePhysics.step(distances=...) <genesis_vehicle.core.VehiclePhysics.step>`.
   The raycast scene is **sensors-only**: it is never shown (``show_viewer=False``
   always) or rendered (stepped with ``update_visualizer=False``, no camera) —
-  only the main scene takes a viewer / ``viewer_options``.
+  only the main scene takes a viewer / ``viewer_options``. Its raycast scene
+  holds no vehicle collision geometry, so a wheel ray cannot hit the vehicle.
 
 - ``"single_scene"`` — classic: one scene, each vehicle owns a wheel raycaster that
-  casts against everything (terrain + vehicle). The raycast BVH is **re-fit
-  every step** because the vehicle moves, so the per-step cost scales with
-  terrain face count.
+  casts against everything (terrain + vehicle) as collision geometry.
 
-Why ``"dual_scene"`` is the default (see ``docs/dual-scene-raycast.md``): complex
-terrain is the common case, and keeping the terrain BVH static stops the wheel
-raycast from re-fitting it each step. The win is small at ``n_envs=1`` on GPU
-(~1–1.3x; ~1.5–5.5x on CPU) but **grows strongly with L3 batch size** because the
-static BVH is shared across envs (dual_scene is ~flat in ``n_envs``, single_scene
-re-fits per env): GPU full-step **1.03x @1, 1.57x @64, 3.40x @256 envs** on a 51k-face
-terrain. ``"dual_scene"`` is also more *accurate* on non-convex mesh terrain (a
-rigid mesh is convexified for collision, so a single_scene rigid-mesh raycast hits the
-convex bulge while the kinematic raycast hits the true surface). It costs ~2x
-terrain memory and is marginally slower than ``"single_scene"`` only on small/flat
-terrain at ``n_envs=1`` — use ``raycast_mode="single_scene"`` there.
+What the engine does with the ray-cast trees, as read in the genesis-world
+1.5.0 source (``genesis/engine/bvh.py`` ``get_meshes_trees``,
+``genesis/utils/raycast_qd.py`` ``RaycastTarget``,
+``genesis/engine/sensors/raycaster.py`` ``RaycastContext.update``): in BOTH
+modes each mesh's own tree is built ONCE, from its local vertices, and what is
+refitted is a per-env top-level tree over the meshes. The collision geometry of
+a scene (the single_scene terrain and vehicle; the dual_scene ``add_dynamic``
+raycast mirrors) forms one target whose top-level tree is refitted on every
+sensor update, in both modes; a visual-raycast target (the dual_scene kinematic
+terrain) is refitted only after its geometry changed. Through 2.0.4 this
+docstring said single_scene re-fits a BVH over every face each step while
+dual_scene builds it once (``maybe_static``) and quoted speed-ups resting on
+that (GPU 1.03x @1, 1.57x @64, 3.40x @256 envs on a 51k-face terrain; ~1.5–5.5x
+on CPU). That described the pre-1.5.0 raycaster; it is FALSE on 1.5.0 (there
+is no per-face refit in either mode and no ``maybe_static``), and those figures
+are withdrawn. No raycast-mode speed figure is claimed for 1.5.0.
+
+Why ``"dual_scene"`` is the default (see ``docs/dual-scene-raycast.md``): its
+wheel rays cannot hit the vehicle itself (see ``single_scene``'s self-collision
+ceiling), and it is more *accurate* on non-convex mesh terrain (a rigid mesh is
+convexified for collision, so a single_scene rigid-mesh raycast hits the convex
+bulge while the kinematic raycast hits the true surface). It holds the terrain
+twice (main scene + raycast scene).
 
 The legacy names ``"raywheel"`` / ``"inline"`` and ``"split"`` / ``"single"`` are
 accepted as aliases for ``"dual_scene"`` / ``"single_scene"``.
@@ -59,9 +69,10 @@ accepted as aliases for ``"dual_scene"`` / ``"single_scene"``.
 Scope: one or more vehicles (L2 — each gets its own proxy + sensor in the
 raycast scene; they still collide in the main scene), L3 (``n_envs >= 1``)
 batching, static *terrain/mesh* raycast targets (``add_static``, always a
-raycast target), and moving bodies (``add_dynamic``; ``raycast=True`` opt-in adds
-a synced rigid mirror in the raycast scene's rigid solver, so only its small BVH
-re-fits while the terrain stays static).
+raycast target), and moving bodies (``add_dynamic``; ``wheel_raycast=True`` opt-in
+adds a synced rigid mirror in the raycast scene's rigid solver). Through 2.0.4
+this paragraph ended "so only its small BVH re-fits while the terrain stays
+static" — a pre-1.5.0 description; see above for what 1.5.0 refits.
 """
 
 from __future__ import annotations
@@ -73,30 +84,35 @@ from typing import Any, Callable, Optional
 
 import genesis as gs
 
-from ._gs_compat import (COARSE_SDF_MATERIAL_KW, check_genesis_floor,
-                         scene_sim_options, warn_coarse_sdf_on_nonconvex)
-from .core import VehiclePhysics
-from .inputs import VehicleInputs
-from .gear import check_vehicle_request
-from .raycast import (
+from ._gs_compat import (COARSE_SDF_MATERIAL_KW, hide_vgeoms, kinematic_raycast_entity,
+                         require_genesis, variant_index, warn_coarse_sdf_on_nonconvex)
+
+require_genesis(gs)   # genesis-world >= 1.5.0 required (2.0.5); raises GenesisVersionError
+
+from .core import VehiclePhysics  # noqa: E402  (after the engine check)
+from .inputs import VehicleInputs  # noqa: E402
+from .gear import check_vehicle_request  # noqa: E402
+from .raycast import (  # noqa: E402
     WheelRayPattern, fan_height_offsets, fan_ray_positions, ray_miss_value,
     read_distances, set_sensor_fan, set_sensor_miss_value, set_sensor_up_offset,
     single_scene_up_offset,
 )
-from .urdf import parse_urdf
+from .urdf import parse_urdf  # noqa: E402
 
 _logger = logging.getLogger("genesis_vehicle.vehicle_scene")
 
-# Genesis primitive morph types (closed-form colliders) whose raycast BVH is
-# trivially cheap — anything outside this set is a mesh/heightfield whose BVH
-# re-fit cost scales with face count (see add_dynamic's guard).
+# Genesis primitive morph types (closed-form colliders). Anything outside this
+# set is a mesh/heightfield, which add_dynamic's refit-cost warning names.
+# (Through 2.0.4 this said such a body's raycast BVH re-fit cost scales with its
+# face count; on genesis-world 1.5.0 a mesh's own tree is built once and only a
+# top-level tree over the meshes is refitted — see the module docstring.)
 _PRIMITIVE_MORPHS = frozenset({"Box", "Sphere", "Cylinder", "Capsule", "Plane"})
 
 # Above this face count, a NON-CONVEX mesh used as a rigid collider/raycast
-# target is refused (see _guard_collision_mesh): the cost — the SDF/collision
-# build AND, in single_scene, the per-step wheel-raycaster BVH re-fit over every
-# face — spikes memory/compute and can crash the process; under WSL it takes the
-# whole VM down.
+# target is refused (see _guard_collision_mesh): its SDF/collision build spikes
+# memory/compute and can crash the process; under WSL it takes the whole VM
+# down. (Through 2.0.4 this also blamed a per-step wheel-raycaster BVH re-fit
+# over every face in single_scene; genesis-world 1.5.0 does no per-face refit.)
 _MAX_NONCONVEX_COLLISION_FACES = 1000
 
 #: ``add_vehicle(wheel_contact=...)`` values. "point" is the default and the
@@ -162,27 +178,29 @@ def _guard_collision_mesh(morph: Any, where: str) -> None:
     """Refuse to build a large NON-CONVEX mesh as a rigid collision/raycast body.
 
     A ``gs.morphs.Mesh`` with ``convexify=False`` keeps its full concave
-    geometry. As a *rigid* body that is expensive two ways: Genesis builds an
-    SDF / collision structure over every face, AND — in ``single_scene`` — the
-    wheel raycaster re-fits a BVH over every face *each step* (the vehicle moves,
-    so the BVH is never static). Past ``_MAX_NONCONVEX_COLLISION_FACES`` either
-    cost can spike memory/compute and hard-crash the process (under WSL, the
-    whole VM). It fires even with a large ``sdf_cell_size``: that does not bound
-    the SDF grid of a watertight non-convex mesh (genesis refines its cells to
-    the wall thickness, up to ``sdf_max_res``; an earlier revision of this
-    docstring said it "only caps the SDF grid", which was wrong for such a
-    mesh), and the per-step raycaster re-fit is unaffected by it either way. Raising
+    geometry. As a *rigid* body Genesis builds an SDF / collision structure
+    over it; past ``_MAX_NONCONVEX_COLLISION_FACES`` that cost can spike
+    memory/compute and hard-crash the process (under WSL, the whole VM). It
+    fires even with a large ``sdf_cell_size``: that does not bound the SDF grid
+    of a watertight non-convex mesh (genesis refines its cells to the wall
+    thickness, up to ``sdf_max_res``; an earlier revision of this docstring
+    said it "only caps the SDF grid", which was wrong for such a mesh). Raising
     here — before the entity is added/built — turns that silent crash into a
     clear, actionable error and asks for the mesh to be reviewed.
 
+    Through 2.0.4 this docstring (and the error text) gave a second cost: "in
+    ``single_scene`` the wheel raycaster re-fits a BVH over every face each
+    step". That is FALSE on genesis-world 1.5.0: a mesh's own ray-cast tree is
+    built once from its local vertices in both raycast modes, and only a
+    per-env top-level tree over the meshes is refitted (see the module
+    docstring). The guard's trigger is unchanged.
+
     Exempt:
     - primitives (Box/Sphere/…), heightfields — not a ``Mesh``;
-    - ``convexify=True`` — convex decomposition keeps both the collider and the
-      raycast BVH cheap;
+    - ``convexify=True`` — convex decomposition keeps the collider cheap;
     - ``collision=False`` — visual-only / kinematic wheel-raycast surfaces
-      (``add_static(collision=False)`` in dual_scene): no SDF, and the kinematic
-      raycast BVH is built once (static) — the recommended home for a high-poly
-      surface."""
+      (``add_static(collision=False)`` in dual_scene): no SDF — the recommended
+      home for a high-poly surface."""
     if type(morph).__name__ != "Mesh":
         return
     if getattr(morph, "convexify", True):
@@ -202,24 +220,22 @@ def _guard_collision_mesh(morph: Any, where: str) -> None:
     _logger.error(
         "[genesis_vehicle:mesh-guard] %s: %d-face non-convex mesh requested as a "
         "RIGID collision/raycast body with convexify=False (limit %d). >>> REVIEW "
-        "THIS MESH <<< — as a rigid body it pays both an SDF/collision build and "
-        "(single_scene) a per-step wheel-raycaster BVH re-fit over every face, "
-        "either of which can crash the process (sdf_cell_size does not prevent "
-        "either: a watertight non-convex mesh's SDF is refined to its wall "
-        "thickness up to sdf_max_res). Fix: decimate it, enable convexify=True "
-        "(convex decomposition), or register it as a KINEMATIC wheel-raycast "
-        "target (add_static(collision=False) in dual_scene), which needs no SDF "
-        "and whose BVH is built once. File: %s",
+        "THIS MESH <<< — as a rigid body it pays an SDF/collision build, which "
+        "can crash the process (sdf_cell_size does not prevent it: a watertight "
+        "non-convex mesh's SDF is refined to its wall thickness up to "
+        "sdf_max_res). Fix: decimate it, enable convexify=True (convex "
+        "decomposition), or register it as a KINEMATIC wheel-raycast target "
+        "(add_static(collision=False) in dual_scene), which needs no SDF. "
+        "File: %s",
         where, n_faces, _MAX_NONCONVEX_COLLISION_FACES, f)
     raise ValueError(
         f"[genesis_vehicle:mesh-guard] {where}: refusing to build a {n_faces}-face "
         f"non-convex mesh as a rigid collision/raycast body with convexify=False "
         f"(limit {_MAX_NONCONVEX_COLLISION_FACES}). As a rigid body it forces a "
-        f"large SDF/collision build AND, in single_scene, a per-step "
-        f"wheel-raycaster BVH re-fit over every face — either can exhaust "
-        f"memory/compute and crash the process/WSL (sdf_cell_size does not prevent "
-        f"either: a watertight non-convex mesh's SDF is refined to its wall "
-        f"thickness up to sdf_max_res). Decimate the mesh, set convexify=True, or "
+        f"large SDF/collision build, which can exhaust memory/compute and crash "
+        f"the process/WSL (sdf_cell_size does not prevent it: a watertight "
+        f"non-convex mesh's SDF is refined to its wall thickness up to "
+        f"sdf_max_res). Decimate the mesh, set convexify=True, or "
         f"use a kinematic wheel-raycast target (add_static(collision=False)) "
         f"instead. File: {f}")
 
@@ -240,17 +256,14 @@ def _ensure_genesis(backend: Optional[str] = None,
     swallowed exception) so a REAL init failure (e.g. missing libcuda on GPU) still
     propagates.
 
-    ``deterministic`` forwards ``gs.init(use_deterministic_algorithms=True)``
-    (genesis >= 1.4.0), which pins the rigid constraint solver's arm instead of
-    letting the runtime autotuner pick it — see
-    :meth:`VehicleScene.init_backend`. Ignored with a warning on a genesis that
-    does not have the option.
+    ``deterministic`` forwards ``gs.init(use_deterministic_algorithms=True)``,
+    which pins the rigid constraint solver's arm instead of letting the runtime
+    autotuner pick it — see :meth:`VehicleScene.init_backend`.
 
-    Also runs the warn-only supported-floor check
-    (:func:`genesis_vehicle._gs_compat.check_genesis_floor`, once per process)
-    on both branches — first init and already-initialized."""
+    (The engine version is checked when this module is imported —
+    :func:`genesis_vehicle._gs_compat.require_genesis`; through 2.0.4 a
+    warn-only floor check ran here.)"""
     global _GENESIS_BACKEND
-    check_genesis_floor()
     if getattr(gs, "_initialized", False) or _GENESIS_BACKEND is not None:
         if (backend is not None and _GENESIS_BACKEND is not None
                 and backend != _GENESIS_BACKEND):
@@ -271,16 +284,7 @@ def _ensure_genesis(backend: Optional[str] = None,
     kw = dict(backend=(gs.gpu if be_str == "gpu" else gs.cpu),
               logging_level="warning")
     if deterministic:
-        import inspect
-        if "use_deterministic_algorithms" in inspect.signature(gs.init).parameters:
-            kw["use_deterministic_algorithms"] = True
-        else:
-            _logger.warning(
-                "deterministic=True needs genesis-world >= 1.4.0 "
-                "(gs.init(use_deterministic_algorithms=...)); this build has no "
-                "such option, so the GPU constraint solver keeps autotuning its "
-                "arm and a rollout is not bit-reproducible. Upgrade genesis-world "
-                "or run on the CPU backend, which pins the arm anyway.")
+        kw["use_deterministic_algorithms"] = True
     gs.init(**kw)
     _GENESIS_BACKEND = be_str
 
@@ -292,20 +296,23 @@ _wheel_vgeom_link_warned = False
 
 
 def _normalize_rigid_dt(rigid_options, sim_options) -> None:
-    """Strip the legacy ``RigidOptions.dt`` that genesis >= 1.4.0 reinterprets.
+    """Strip a legacy ``RigidOptions.dt`` written for genesis <= 1.3.3.
 
     Up to genesis 1.3.3 ``RigidOptions.dt`` was the solver's *step* duration
     (``substep_dt = RigidOptions.dt / SimOptions.substeps``), so the ubiquitous
     ``RigidOptions(dt=DT)`` alongside ``SimOptions(dt=DT, substeps=N)`` was a
     no-op restating of the step rate. Genesis 1.4.0 redefined it as the solver's
-    *substep* interval (``substeps = round(SimOptions.dt / RigidOptions.dt)``),
-    so that same pair now derives 1 substep, contradicts the requested ``N`` and
-    ``Scene.build`` raises ``GenesisException``.
+    *substep* interval, and 1.5.0 (the only engine this SDK runs on since 2.0.5)
+    keeps that meaning (``engine/simulator.py`` derives the substep count from
+    it), so that same pair now asks for 1 substep and contradicts the requested
+    ``N`` (``Scene.build`` raises when ``substeps`` was passed explicitly).
 
     We therefore unset ``dt`` when it merely restates ``SimOptions.dt`` — which
-    reproduces the pre-1.4.0 behaviour exactly on both old and new genesis. A
-    ``dt`` that says something *else* (e.g. a deliberate ``SimOptions.dt / N``
-    written for 1.4.0 semantics) is left untouched."""
+    gives the step rate and the ``N`` substeps the caller wrote. (Through 2.0.4
+    this said it reproduced the pre-1.4.0 behaviour "on both old and new
+    genesis"; 2.0.5 no longer runs on old genesis.) A ``dt`` that says something
+    *else* (e.g. a deliberate ``SimOptions.dt / N`` written for 1.4.0
+    semantics) is left untouched."""
     global _rigid_dt_warned
     try:
         step_dt = float(sim_options.dt)
@@ -340,27 +347,6 @@ def _normalize_rigid_dt(rigid_options, sim_options) -> None:
                 "If RigidOptions(dt=) was set, genesis >= 1.4.0 reads it as the "
                 "solver SUBSTEP interval; prefer VehicleScene(substeps=...).",
                 exc_info=True)
-
-
-def _kinematic_supports_terrain() -> bool:
-    """Can the KinematicSolver host a ``gs.morphs.Terrain``?
-
-    Genesis <= 1.3.3: yes — every morph resolved through one kinematic entity
-    class, so a terrain could be mirrored into the raycast scene as a visual-
-    raycasting kinematic body. Genesis 1.4.0 moved terrain onto a rigid-only
-    ``TerrainEntity`` and the kinematic description now rejects the morph with
-    ``GenesisException: Unsupported morph``. Probed off the solver's entity-class
-    table rather than a version string, so a future genesis that re-adds it is
-    picked up automatically."""
-    try:
-        from genesis.engine.solvers.kinematic_solver import KinematicSolver
-    except Exception:                                   # pragma: no cover
-        return True
-    classes = getattr(KinematicSolver, "_entity_classes", None)
-    if classes is None:                                 # genesis <= 1.3.3
-        return True
-    return any(issubclass(gs.morphs.Terrain, morph_cls) and "Terrain" in cls.__name__
-               for morph_cls, cls in classes)
 
 
 def _render_gpu_available() -> bool:
@@ -416,6 +402,33 @@ def _add_kwargs(material=None, surface=None, vis_mode=None):
     return kw
 
 
+#: Morph types refused in a per-env variant list (2.0.5): Terrain variants are
+#: untested and a Plane is infinite (nothing to vary).
+_VARIANT_REFUSED_MORPHS = ("Terrain", "Plane")
+
+
+def _variant_list(value: Any, what: str) -> Optional[list]:
+    """``value`` as a list of variant morphs if the caller passed a list/tuple
+    (per-env heterogeneous variants, 2.0.5), else None. Refuses an empty list, a
+    nested list and a Terrain / Plane element (``ValueError``)."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    morphs = list(value)
+    if not morphs:
+        raise ValueError(f"{what}: an empty variant list; pass one morph or a "
+                         f"list of at least one.")
+    for i, m in enumerate(morphs):
+        if isinstance(m, (list, tuple)):
+            raise ValueError(f"{what}: variant {i} is itself a list; a variant "
+                             f"list holds morphs.")
+        if type(m).__name__ in _VARIANT_REFUSED_MORPHS:
+            raise ValueError(
+                f"{what}: a {type(m).__name__} is not supported in a per-env "
+                f"variant list (Terrain variants are untested in 2.0.5; a Plane "
+                f"has nothing to vary). Pass it as a single morph.")
+    return morphs
+
+
 @dataclass
 class StaticBody:
     """Handle for a registered static body. ``is_static``/``has_collision``/
@@ -429,6 +442,11 @@ class StaticBody:
     is_static: bool = True
     entity_main: Any = None       # rigid collision entity (main scene)
     entity_raycast: Any = None    # kinematic raycast entity (raycast scene, dual_scene)
+    #: Per-env variants (2.0.5): after ``build()``, for a body registered with a
+    #: list of k >= 2 morphs, the variant each env holds as a ``torch.long``
+    #: tensor ``(max(n_envs, 1),)`` — the engine's own balanced-block rule
+    #: (``_gs_compat.variant_index``). None for a single-morph body.
+    variant_index: Any = None
 
 
 @dataclass
@@ -439,15 +457,22 @@ class DynamicBody:
     tracks the body as it moves.
 
     In dual_scene mode ``entity_raycast`` is a rigid, fixed, collision-enabled
-    body in the raycast scene's RIGID solver — a separate BVH context from the
-    kinematic terrain, so re-fitting it each step does NOT disturb the static
-    terrain BVH. In single_scene mode it is None (the main entity is the target).
+    body in the raycast scene's RIGID solver. On genesis-world 1.5.0 it belongs
+    to the raycast scene's collision target, whose top-level tree is refitted on
+    every sensor update; the kinematic terrain is a separate visual-raycast
+    target, refitted only after its geometry changed. (Through 2.0.4 this said
+    re-fitting the mirror "does NOT disturb the static terrain BVH" — a
+    pre-1.5.0 description; see the module docstring.) In single_scene mode it
+    is None (the main entity is the target).
     """
     name: str
     is_dynamic: bool
     has_raycast: bool
     entity_main: Any = None       # rigid body in the main scene (physics)
     entity_raycast: Any = None    # synced raycast target in the raycast scene
+    #: Per-env variants (2.0.5), as on :class:`StaticBody`: the variant each env
+    #: holds after ``build()`` (``physics=False`` bodies only); None otherwise.
+    variant_index: Any = None
 
     def set_pose(self, pos=None, quat=None, *, zero_velocity=True):
         """Move a user-controlled body in the main scene (the raycast mirror
@@ -714,7 +739,9 @@ class VehicleScene:
         >>> vs = VehicleScene(n_envs=4096)
 
         ``deterministic=True`` forwards ``use_deterministic_algorithms`` to
-        ``gs.init`` (genesis-world >= 1.4.0). **Only the GPU backend needs it.**
+        ``gs.init`` (a ``gs.init`` option since genesis-world 1.4.0, still
+        present on 1.5.0, the only engine 2.0.5 runs on; the GPU behaviour below
+        was not re-measured on 1.5.0). **Only the GPU backend needs it.**
         Genesis's rigid constraint solver ships two arms that reach the same
         answer down different floating-point paths, and on GPU it picks between
         them by timing them as the simulation runs — so which arm runs at a
@@ -802,7 +829,6 @@ class VehicleScene:
                              f"or 'internal_sync', got {wheel_render_mode!r}")
         self.wheel_render_mode = wheel_render_mode
         self._wheel_renderer = None      # InstancedWheelRenderer when active
-        self._viewer_atomic_wheels = False   # wheel buffers stream inside viewer.update (set at build)
         self._mvp = None        # MultiVehiclePhysics, in batched mode
         # Kind grouping is lazy + dirty-tracked: add_vehicle / mark_config_dirty
         # bump _config_version; _ensure_grouped re-groups only when it differs from
@@ -855,6 +881,7 @@ class VehicleScene:
         self._statics: list[StaticBody] = []
         self._dynamics: list[DynamicBody] = []
         self._pending_mass: list = []   # (entity, mass) applied after build()
+        self._variant_bodies: list = []  # (StaticBody | DynamicBody, k) — 2.0.5 variants
 
     # -----------------------------------------------------------------
     # Registration (before build)
@@ -894,13 +921,32 @@ class VehicleScene:
         single_scene it raises ``ValueError`` (since v1.0.7 — previously it
         warned and built a rigid the wheel rays could not hit when the morph
         itself carried ``collision=False``, i.e. a fall-through surface).
+
+        Per-env variants (2.0.5, genesis-world 1.5.0 heterogeneous entities):
+        pass a LIST of k morphs in ``morph`` / ``wheel_raycast_morph`` /
+        ``collision_morph`` (every one given must be a list of the same length k)
+        and each env holds one variant — the engine assigns envs in contiguous
+        blocks of nearly equal size; pass exactly ``n_envs`` morphs for an
+        explicit per-env assignment (the mapping is then the identity). The same
+        list goes to the main body and to its dual_scene mirror, and after
+        ``build()`` ``body.variant_index`` says which variant each env holds.
+        The variants must share their kinematic topology (the engine's rule).
+        Refused with ``ValueError`` before build: a Terrain or Plane in a list,
+        lists of different lengths or a list mixed with a single morph, and
+        k > ``n_envs`` (the engine would silently leave the extra variants
+        unused). k == 1 is the single morph. Not supported: ``get_verts`` on a
+        variant body (the engine refuses), choosing the mapping other than by
+        list order and length, and variants in the OSC server.
         """
         self._require_not_built()
         if morph is None and wheel_raycast_morph is None and collision_morph is None:
             raise ValueError("add_static: provide morph (or wheel_raycast_morph/collision_morph).")
-        rc_morph = wheel_raycast_morph or morph
-        col_morph = collision_morph or morph
         name = name or f"static_{len(self._statics)}"
+        morph, wheel_raycast_morph, collision_morph, k = self._normalize_variants(
+            f"add_static({name!r})", morph=morph, wheel_raycast_morph=wheel_raycast_morph,
+            collision_morph=collision_morph)
+        rc_morph = wheel_raycast_morph if wheel_raycast_morph is not None else morph
+        col_morph = collision_morph if collision_morph is not None else morph
 
         if (not self._dual_scene and wheel_raycast_morph is not None
                 and collision and col_morph is not None):
@@ -937,51 +983,97 @@ class VehicleScene:
         body = StaticBody(name=name, has_collision=bool(collision), has_raycast=True)
 
         if collision and col_morph is not None:
-            _guard_collision_mesh(col_morph, f"add_static({name!r})")
+            for m in (col_morph if isinstance(col_morph, tuple) else (col_morph,)):
+                _guard_collision_mesh(m, f"add_static({name!r})")
             mat = material if material is not None else gs.materials.Rigid()
             body.entity_main = self._main_scene.add_entity(
                 col_morph, **_add_kwargs(mat, surface, vis_mode))
 
         if rc_morph is not None:
             if self._dual_scene:
-                # Kinematic visual-raycast body in the raycast scene → static BVH.
-                # Force vis_mode="visual": a KinematicEntity is visual-only (it has
-                # vgeoms, not collision geoms), so the renderer's on_rigid must take
-                # the vgeoms path. A non-"visual" vis_mode (e.g. the server's
-                # --vis-mode=collision leaking through, or a changed Genesis default)
-                # makes on_rigid touch entity.geoms → AttributeError at build. This
-                # scene is sensors-only and never user-rendered, so "visual" is right.
-                if (isinstance(rc_morph, gs.morphs.Terrain)
-                        and not _kinematic_supports_terrain()):
-                    # genesis >= 1.4.0: terrain is a rigid-only entity, so the
-                    # raycast mirror is a FIXED RIGID body there instead. The rays
-                    # then hit it through the rigid solver's collision BVH rather
-                    # than the visual one — same hit distances, and the BVH is still
-                    # static (the raycast scene holds nothing that moves), so the
-                    # dual_scene "build the BVH once" property is preserved.
+                # Kinematic visual-raycast body in the raycast scene. The caller's
+                # vis_mode is never applied to it: a KinematicEntity is
+                # visual-only (vgeoms, no collision geoms), and this scene is
+                # sensors-only and never user-rendered.
+                if isinstance(rc_morph, gs.morphs.Terrain):
+                    # Terrain is a rigid-only entity (genesis >= 1.4.0; through
+                    # 2.0.4 this was probed by _kinematic_supports_terrain), so
+                    # the raycast mirror is a FIXED RIGID body there instead. The rays
+                    # then hit it through the raycast scene's collision target
+                    # rather than a visual one. On genesis-world 1.5.0 that
+                    # target's top-level tree is refitted on every sensor update
+                    # (the terrain mesh's own tree is built once either way).
+                    # Through 2.0.4 this comment said the BVH stays static and
+                    # the dual_scene "build the BVH once" property is preserved
+                    # — false on 1.5.0; see the module docstring.
                     # The mirror's SDF is never read (terrain collides through
                     # its heightfield, and nothing in the raycast scene moves),
-                    # but genesis >= 1.4.5 computes every geom's SDF at build —
+                    # but genesis computes every geom's SDF at build (since 1.4.5) —
                     # so ask for the smallest grid (_gs_compat.COARSE_SDF_MATERIAL_KW).
                     body.entity_raycast = self._raycast_scene.add_entity(
                         rc_morph, **_add_kwargs(gs.materials.Rigid(**COARSE_SDF_MATERIAL_KW),
                                                 surface, None))
                 else:
-                    body.entity_raycast = self._raycast_scene.add_entity(
-                        rc_morph, **_add_kwargs(
-                            gs.materials.Kinematic(use_visual_raycasting=True),
-                            surface, "visual"))
+                    # genesis-world 1.5.0 entity spec (2.0.5): a
+                    # gs.entities.Kinematic(use_visual_raycasting=True) body; the
+                    # caller's surface is copied with vis_mode=None (the spec
+                    # raises on a non-"visual" vis_mode). Through 2.0.4:
+                    # material=Kinematic(use_visual_raycasting=True) +
+                    # vis_mode="visual", deprecated on 1.5.0.
+                    body.entity_raycast = kinematic_raycast_entity(
+                        self._raycast_scene, rc_morph, surface)
             else:
                 # single_scene mode: the rigid collision body IS the raycast target.
                 if body.entity_main is None:
-                    _guard_collision_mesh(rc_morph, f"add_static({name!r})")
+                    for m in (rc_morph if isinstance(rc_morph, tuple) else (rc_morph,)):
+                        _guard_collision_mesh(m, f"add_static({name!r})")
                     mat = material if material is not None else gs.materials.Rigid()
                     body.entity_main = self._main_scene.add_entity(
                         rc_morph, **_add_kwargs(mat, surface, vis_mode))
                 body.entity_raycast = body.entity_main
 
         self._statics.append(body)
+        if k > 1:
+            self._variant_bodies.append((body, k))
         return body
+
+    def _normalize_variants(self, where: str, **given: Any):
+        """Per-env variants (2.0.5): ``given`` maps parameter name -> a morph, a
+        list/tuple of morphs, or None. Every given list must have the same length
+        k, and a list may not be mixed with a single morph; k == 1 is unwrapped to
+        a single morph; k > max(n_envs, 1) is refused (the engine would silently
+        leave the extra variants unused). Returns the values in ``given``'s order
+        (lists as tuples) followed by k (1 when no list was given)."""
+        lists = {nm: _variant_list(v, f"{where} {nm}=") for nm, v in given.items()}
+        if not any(v is not None for v in lists.values()):
+            return (*given.values(), 1)
+        present = {nm: v for nm, v in given.items() if v is not None}
+        single = [nm for nm in present if lists[nm] is None]
+        if single:
+            raise ValueError(
+                f"{where}: {', '.join(n for n in present if lists[n] is not None)} "
+                f"is a variant list but {', '.join(single)} is a single morph; "
+                f"every given morph parameter must be a list of the same length.")
+        lengths = {nm: len(lists[nm]) for nm in present}
+        if len(set(lengths.values())) != 1:
+            raise ValueError(f"{where}: variant list lengths differ {lengths}; every "
+                             f"given morph parameter must have the same length.")
+        k = next(iter(lengths.values()))
+        n_slots = max(int(self.n_envs), 1)
+        if k > n_slots:
+            raise ValueError(
+                f"{where}: {k} variants for n_envs={self.n_envs}; at most one "
+                f"variant per env (the engine would silently leave "
+                f"{k - n_slots} of them unused).")
+        out = []
+        for nm, v in given.items():
+            if v is None:
+                out.append(None)
+            elif k == 1:
+                out.append(lists[nm][0])
+            else:
+                out.append(tuple(lists[nm]))
+        return (*out, k)
 
     def add_ground_plane(self, *, friction: float = 0.85) -> StaticBody:
         """Convenience: an infinite flat ground (raycast + collision)."""
@@ -996,7 +1088,10 @@ class VehicleScene:
         The body exists solely for the wheel rays: a Kinematic
         ``use_visual_raycasting`` entity in the raycast scene — it has **zero
         rigid-solver presence** (no collision geoms, no FK/dynamics, no
-        broadphase pairs, its BVH is built once). This is the first-class name
+        broadphase pairs). On genesis-world 1.5.0 it is a visual-raycast target:
+        its mesh trees are built once and its top-level tree is refitted only
+        after its geometry changed (through 2.0.4 this said "its BVH is built
+        once", a pre-1.5.0 description). This is the first-class name
         for what ``add_static(collision=False, wheel_raycast_morph=...)`` did —
         the negative-flag spelling hid the intent (and its single_scene
         fall-through was a real bug pre-1.0.7), so express it directly:
@@ -1006,10 +1101,12 @@ class VehicleScene:
 
         Ideal for high-poly roads/terrain the vehicles drive on but whose
         chassis-collision response you don't need (``--road-raycast-only``).
-        The mesh-guard face limit does not apply (kinematic, no SDF, static
-        BVH). ``dual_scene`` only — in ``single_scene`` the wheel rays only hit
+        The mesh-guard face limit does not apply (kinematic, no SDF).
+        ``dual_scene`` only — in ``single_scene`` the wheel rays only hit
         rigid collision geoms, so this raises ``ValueError`` (same fail-fast
         as ``add_static(collision=False)``).
+
+        ``morph`` may be a list of per-env variants (2.0.5, see :meth:`add_static`).
         """
         return self.add_static(wheel_raycast_morph=morph, collision=False,
                                surface=surface, name=name)
@@ -1055,17 +1152,39 @@ class VehicleScene:
         ``handle.set_pose(...)`` (e.g. an externally / UE-driven body).
 
         With ``wheel_raycast=True`` in dual_scene mode a synced rigid raycast
-        mirror is added to the raycast scene (re-synced every ``step``; re-fits
-        only its own small BVH, leaving the terrain static). In single_scene mode
-        the one main-scene rigid body is already the raycast target. VehicleScene
-        owns the routing — the caller never touches a scene.
+        mirror is added to the raycast scene (re-synced every ``step``). On
+        genesis-world 1.5.0 it belongs to that scene's collision target, whose
+        top-level tree is refitted on every sensor update; its mesh trees are
+        built once. In single_scene mode the one main-scene rigid body is
+        already the raycast target. VehicleScene owns the routing — the caller
+        never touches a scene.
 
-        Guard: a wheel-raycast dynamic body re-fits its BVH every step, so a
-        non-primitive (mesh) morph logs a warning — prefer a primitive collider.
+        A non-primitive (mesh) morph with ``wheel_raycast=True`` logs a
+        ``[genesis_vehicle:refit-cost]`` warning. Through 2.0.4 this docstring
+        and that warning said such a body "re-fits its BVH every step" at a cost
+        growing with face count, while the mirror "re-fits only its own small
+        BVH, leaving the terrain static" — a pre-1.5.0 description, false on
+        1.5.0 (see the module docstring). The warning still fires on the same
+        condition.
+
+        Per-env variants (2.0.5): ``morph`` may be a LIST of k morphs with
+        ``physics=False`` only (a fixed body you teleport per env with
+        ``set_pose``; ``wheel_raycast`` either way); see :meth:`add_static` for
+        the env -> variant rule, ``variant_index`` and the refusals. A list with
+        ``physics=True`` raises ``ValueError`` (free-body variants, with or without
+        ``mass=``, are not supported in 2.0.5).
         """
         self._require_not_built()
         name = name or f"dynamic_{len(self._dynamics)}"
         mat = material if material is not None else gs.materials.Rigid()
+        if isinstance(morph, (list, tuple)) and physics:
+            raise ValueError(
+                f"add_dynamic({name!r}): a per-env variant list needs "
+                f"physics=False (a fixed / teleported body); free-body variants "
+                f"(physics=True, with or without mass=) are not supported in "
+                f"2.0.5.")
+        morph, k = self._normalize_variants(f"add_dynamic({name!r})", morph=morph)
+        morphs = morph if isinstance(morph, tuple) else (morph,)
 
         if wheel_raycast and not self._dual_scene:
             # wheel_raycast adds a dedicated raycast-scene mirror, which only
@@ -1078,38 +1197,51 @@ class VehicleScene:
                 "mode — there is no raycast scene to mirror into, and the rigid body "
                 "is already a wheel-raycast target via the main scene. The flag only "
                 "adds a dedicated mirror in dual_scene.", name)
-        elif wheel_raycast and type(morph).__name__ not in _PRIMITIVE_MORPHS:
+        elif wheel_raycast and any(type(m).__name__ not in _PRIMITIVE_MORPHS
+                                   for m in morphs):
             _logger.warning(
                 "[genesis_vehicle:refit-cost] add_dynamic(%r): wheel_raycast=True on "
-                "a non-primitive (%s) morph — "
-                "the dual_scene mirror's BVH re-fits every step (cost grows with face "
-                "count). Prefer a primitive collider (Box/Sphere/Cylinder) for a "
-                "wheel_raycast dynamic body.", name, type(morph).__name__)
+                "a non-primitive (%s) morph gets a mesh mirror in the dual_scene "
+                "raycast scene. Through 2.0.4 this warned that the mirror's BVH "
+                "re-fits over every face each step; that is not what genesis-world "
+                "1.5.0 does (the mesh's own tree is built once; only a top-level "
+                "tree over the meshes is refitted each step). No per-step cost of "
+                "this mirror has been measured on 1.5.0. A primitive collider "
+                "(Box/Sphere/Cylinder) remains the simplest wheel_raycast dynamic "
+                "body.", name,
+                ", ".join(sorted({type(m).__name__ for m in morphs
+                                  if type(m).__name__ not in _PRIMITIVE_MORPHS})))
 
         obs = DynamicBody(name=name, is_dynamic=bool(physics),
                           has_raycast=bool(wheel_raycast))
-        main_morph = _clone_morph(morph, fixed=not physics)
-        _guard_collision_mesh(main_morph, f"add_dynamic({name!r})")
+        main_morphs = tuple(_clone_morph(m, fixed=not physics) for m in morphs)
+        for m in main_morphs:
+            _guard_collision_mesh(m, f"add_dynamic({name!r})")
         obs.entity_main = self._main_scene.add_entity(
-            main_morph, **_add_kwargs(mat, surface, vis_mode))
+            main_morphs if k > 1 else main_morphs[0], **_add_kwargs(mat, surface, vis_mode))
         if mass is not None:
             self._pending_mass.append((obs.entity_main, float(mass)))
 
         if wheel_raycast and self._dual_scene:
             # Rigid + fixed + collision mirror in the raycast scene's RIGID
-            # solver (a separate BVH context from the kinematic terrain), so
-            # re-syncing it each step re-fits only this small body.
-            mirror_morph = _clone_morph(morph, fixed=True, collision=True)
-            _guard_collision_mesh(mirror_morph,
-                                  f"add_dynamic({name!r}) wheel_raycast mirror")
+            # solver: part of that scene's collision target (top-level tree
+            # refitted every sensor update on genesis-world 1.5.0; its mesh tree
+            # built once). Through 2.0.4 this said re-syncing it "re-fits only
+            # this small body" — a pre-1.5.0 description.
+            mirror_morphs = tuple(_clone_morph(m, fixed=True, collision=True)
+                                  for m in morphs)
+            for m in mirror_morphs:
+                _guard_collision_mesh(m, f"add_dynamic({name!r}) wheel_raycast mirror")
             # Every raycast-scene rigid body is fixed, so the mirror is in no
             # collision pair and its SDF is never read; genesis >= 1.4.5 still
             # computes it at build, hence the minimum grid.
             obs.entity_raycast = self._raycast_scene.add_entity(
-                mirror_morph, **_add_kwargs(gs.materials.Rigid(**COARSE_SDF_MATERIAL_KW),
-                                            surface, vis_mode))
+                mirror_morphs if k > 1 else mirror_morphs[0],
+                **_add_kwargs(gs.materials.Rigid(**COARSE_SDF_MATERIAL_KW), surface, vis_mode))
 
         self._dynamics.append(obs)
+        if k > 1:
+            self._variant_bodies.append((obs, k))
         return obs
 
     def add_vehicle(
@@ -1184,8 +1316,19 @@ class VehicleScene:
         offset is capped against EVERY fan ray, not just the wheel centres, so
         an outer sample under a low overhang cannot start inside the vehicle's
         own body.
+
+        Per-env vehicle variants are NOT supported (2.0.5): a list/tuple
+        ``urdf_path`` or ``morph`` raises ``TypeError``. A vehicle's SDK state
+        (wheel geometry, ``WheelMeta``, the deadbeat inertia scale, the
+        self-collision ceiling, ``DifferentiablePlant``) comes from ONE URDF parse.
         """
         self._require_not_built()
+        if isinstance(urdf_path, (list, tuple)) or isinstance(morph, (list, tuple)):
+            raise TypeError(
+                "add_vehicle: per-env vehicle variants are not supported in 2.0.5 "
+                "(pass one urdf_path / one morph); variants are available for "
+                "obstacles and raycast surfaces only (add_static, add_dynamic with "
+                "physics=False, add_raycast_surface).")
         if cfg is None and preset is None:
             raise ValueError("add_vehicle: pass preset=<fn> or cfg=<VehicleConfig>.")
         name = name or f"vehicle_{len(self._vehicles)}"
@@ -1250,12 +1393,14 @@ class VehicleScene:
             # The proxy MUST be a RIGID, fixed-base, collision-free body, NOT a
             # kinematic one. Why: (a) collision=False → no collision faces → not
             # a raycast target → no self-hit; (b) it lives in the rigid solver,
-            # SEPARATE from the kinematic terrain — so teleporting it via set_pos
-            # fires a GEOMETRY change on the rigid solver only, leaving the
-            # kinematic-terrain raycast BVH untouched (it stays `maybe_static` →
-            # built once, never re-fit). A kinematic proxy shares the terrain's
-            # solver and its set_pos would invalidate the terrain BVH every step
-            # (measured ~6x slower). The ray origins still track the vehicle
+            # SEPARATE from the kinematic terrain. On genesis-world 1.5.0 the
+            # kinematic terrain is a visual-raycast target whose top-level tree
+            # is refitted only after its render context reports a geometry
+            # change; whether a kinematic proxy's set_pos would trigger that was
+            # not checked on 1.5.0. Through 2.0.4 this comment said the terrain
+            # BVH stays `maybe_static` (built once, never re-fit) and that a
+            # kinematic proxy measured ~6x slower — pre-1.5.0 statements
+            # (`maybe_static` does not exist on 1.5.0). The ray origins still track the vehicle
             # because raycast_scene.step() refreshes them each frame from the
             # proxy's link pose. See docs/dual-scene-raycast.md.
             veh.proxy = self._raycast_scene.add_entity(
@@ -1342,9 +1487,9 @@ class VehicleScene:
         if center_envs_at_origin is not None:
             _kw["center_envs_at_origin"] = center_envs_at_origin
         # ---- wheel visual mode decision (v1.1.17) — BEFORE the main build:
-        # the instanced path hides the URDF wheel vgeoms (renderer skips
-        # geoms with an empty active_envs_idx), which must be set before the
-        # visualizer creates its nodes at build.
+        # the instanced path hides the URDF wheel vgeoms
+        # (_gs_compat.hide_vgeoms: an all-False per-env mask), which must be
+        # set before the solver builds its render data at build.
         renders_pre = self.show_viewer or bool(self._cameras)
         self._use_instanced_wheels = False
         self._instanced_wheel_meshes = {}       # vehicle -> per-wheel trimeshes
@@ -1376,8 +1521,6 @@ class VehicleScene:
                         "wheel_render_mode='auto': wheel visual meshes not "
                         "harvestable — falling back to WheelJointInternalSync.")
         if self._use_instanced_wheels:
-            import numpy as _np
-            none_active = _np.array([], dtype=_np.int64)
             for veh in self._vehicles:
                 for w in veh.cfg.wheels:
                     try:
@@ -1395,15 +1538,18 @@ class VehicleScene:
                                 "drawn twice (URDF mesh + instanced copy).",
                                 w.name, exc_info=True)
                         continue
-                    for vg in getattr(link, "vgeoms", None) or []:
-                        vg.active_envs_idx = none_active   # renderer skips it
+                    # genesis-world 1.5.0 renders a vgeom per env from its
+                    # active_envs_mask; through 2.0.4 this set active_envs_idx
+                    # = [], a no-op on 1.5.0 (wheels drawn twice).
+                    hide_vgeoms(getattr(link, "vgeoms", None) or [], self.n_envs)
 
         if self._dual_scene:
             self._raycast_scene.build(n_envs=self.n_envs, **_kw)
-            # Populate the raycast sensors once so the static BVH is built and
-            # the first read() returns valid data (Genesis sensors are empty
-            # before the first step). The kinematic terrain/proxy don't move, so
-            # this single step is cheap and never repeated.
+            # Populate the raycast sensors once so the first read() returns
+            # valid data (Genesis sensors are empty before the first step).
+            # This build-time step is not repeated. (Through 2.0.4 this also
+            # said it builds "the static BVH" — a pre-1.5.0 description; see
+            # the module docstring.)
             # update_visualizer=False: this scene is sensors-only and never
             # user-rendered, so skip the per-step visualizer/render update.
             self._raycast_scene.step(update_visualizer=False)
@@ -1489,33 +1635,30 @@ class VehicleScene:
             print("[genesis_vehicle] wheel visuals: internal_sync "
                   "(WheelJointInternalSync fallback)")
 
-        # Native viewer: make the per-frame render state atomic. Stock Genesis
-        # sets the follow camera OUTSIDE the render lock and the node poses
-        # inside it, so the async draw thread can pair a fresh camera with last
-        # step's body pose — the followed vehicle "trembles" fore/aft at speed.
-        # The patched viewer.update commits wheel buffers (_gv_pre_draw), the
-        # follow camera and the node poses in ONE lock hold. (v1.1.25)
-        self._viewer_atomic_wheels = False
-        if self.viewer is not None:
-            from .visual import patch_viewer_atomic_update
-            if patch_viewer_atomic_update(self.viewer):
-                if self._wheel_renderer is not None:
-                    self.viewer._gv_pre_draw = self._wheel_renderer.update
-                    self._viewer_atomic_wheels = True
-            else:
-                print("[genesis_vehicle] WARN: viewer internals unrecognized - "
-                      "atomic camera/pose update patch skipped (a followed "
-                      "vehicle may show slight draw-lag tremble)")
+        # Native viewer: there is NO atomic camera/pose update. Genesis sets the
+        # follow camera OUTSIDE the render lock and the node poses inside it, so
+        # the async draw thread can pair a fresh camera with last step's body
+        # pose — a followed vehicle may "tremble" fore/aft at speed (a draw
+        # artefact; physics is unaffected; not measured on 1.5.0). The v1.1.25
+        # patch_viewer_atomic_update that was meant to fix this was removed in
+        # 2.0.5: it never applied on genesis-world >= 1.4 (it returned False
+        # there, so the non-atomic ordering in step() is what ran), and 1.5.0
+        # has no viewer hook that runs before the scene render under the lock.
 
         # Apply any per-obstacle mass overrides now that entities are built.
         for entity, mass in self._pending_mass:
             entity.set_mass(mass)
+        # Per-env variants (2.0.5): the env -> variant mapping, from the engine's
+        # own rule (both scenes are built with the same n_envs, so the main body
+        # and its dual_scene mirror share it).
+        for body, k in self._variant_bodies:
+            body.variant_index = variant_index(k, self.n_envs)
         self._built = True
         # Resolved timing, logged on every run (v1.0.19) — dt is the one value
         # perf reports keep needing; make it impossible to miss.
         #
         # Read the ENGINE (effective_dt / substeps), not the authored ctor args:
-        # genesis 1.4.0 can re-derive substeps, and only the engine's numbers
+        # genesis (1.4.0 and later, 1.5.0 included) can re-derive substeps, and only the engine's numbers
         # describe what is about to be integrated.
         #
         # NO try/except here, deliberately. Through v1.6.4 this block sat under
@@ -1535,7 +1678,8 @@ class VehicleScene:
         """Internal: return ``{vehicle: wheel-ground distances}`` for the step.
 
         Raywheel: mirror each chassis pose onto its proxy + sync obstacle
-        mirrors, step the raycast scene ONCE (re-cast against the static BVH),
+        mirrors, step the raycast scene ONCE (re-cast; see the module docstring
+        for which ray-cast trees the engine refits),
         read each sensor → ``(n_envs, n_wheels)``. Inline: ``{vehicle: None}``.
 
         NOT a getter — it re-syncs poses and CASTS (advances the raycast scene),
@@ -1572,17 +1716,21 @@ class VehicleScene:
 
     def _sync_proxies_batched(self) -> None:
         """Mirror ALL raycast-scene followers — the K vehicle proxies AND every
-        dynamic obstacle's raycast mirror — in one batched solver write + a
-        SINGLE forward-kinematics pass (proxies v1.0.11; mirrors joined
-        v1.0.13; both live in the raycast scene's rigid solver).
+        dynamic obstacle's raycast mirror — in one batched solver write
+        (proxies v1.0.11; mirrors joined v1.0.13; both live in the raycast
+        scene's rigid solver).
 
         The per-body loops (``Vehicle._sync_proxy`` / ``_sync_dynamic``) pay a
-        fixed engine-entry overhead per call AND a whole-raycast-scene FK per
-        ``set_pos``/``set_quat`` — 2 FK passes PER BODY (~1 ms/body: measured
-        29.8 ms for 30 proxies alone). This method reads every followed base
-        pose from the main solver in one batched ``get_links_pos/quat`` and
-        writes them all via ``set_base_links_pos(skip_forward=True)`` +
-        ``set_base_links_quat`` (which runs FK once for the whole batch).
+        fixed engine-entry overhead per call (~1 ms/body was measured on an
+        earlier engine: 29.8 ms for 30 proxies alone). This method reads every
+        followed base pose from the main solver in one batched
+        ``get_links_pos/quat`` and writes them all with one
+        ``set_base_links_pos`` + one ``set_base_links_quat``. genesis-world
+        1.5.0 refreshes link/geom poses lazily, when the raycaster next reads
+        them; there is no explicit FK pass. (Through 2.0.4 the writes passed
+        ``skip_forward=True`` / ``False`` to run ONE FK pass for the batch; 1.5.0
+        removed the keyword, and a 2.0.4 tree on 1.5.0 therefore raised here and
+        silently took the per-body fallback below.)
 
         Pose semantics are identical to the loops: read the USER-frame base
         pose (what ``entity.get_pos()`` returns), write it WORLD-frame onto
@@ -1602,10 +1750,8 @@ class VehicleScene:
         solver = self.rigid_solver
         pos = solver.get_links_pos(main_idx, relative=True)     # (n_envs, B, 3)
         quat = solver.get_links_quat(main_idx, relative=True)   # (n_envs, B, 4)
-        rc_solver.set_base_links_pos(pos, rc_idx, relative=False,
-                                     skip_forward=True)
-        rc_solver.set_base_links_quat(quat, rc_idx, relative=False,
-                                      skip_forward=False)       # ONE FK pass
+        rc_solver.set_base_links_pos(pos, rc_idx, relative=False)
+        rc_solver.set_base_links_quat(quat, rc_idx, relative=False)
 
     def step(self) -> None:
         """One simulation step.
@@ -1647,16 +1793,11 @@ class VehicleScene:
         if self._wheel_renderer is not None:
             # Solver-free wheel visuals (v1.1.17): the closed-form wheel poses
             # must reach the renderer in the SAME frame as the chassis pose,
-            # or the async viewer thread draws a mixed state and the vehicle
-            # appears to tremble (v1.1.25). With the atomic viewer patch the
-            # buffers stream inside viewer.update()'s render-lock hold
-            # (_gv_pre_draw, together with the follow camera and node poses);
-            # without a viewer (offscreen cameras render synchronously) or if
-            # the patch declined, stream them between the physics step and the
-            # visualizer update — the best non-atomic ordering.
+            # so they are streamed between the physics step and the visualizer
+            # update — the best non-atomic ordering (the native viewer's draw
+            # thread can still interleave; see build()).
             self._main_scene.step(update_visualizer=False)
-            if not self._viewer_atomic_wheels:
-                self._wheel_renderer.update()
+            self._wheel_renderer.update()
             self._main_scene.visualizer.update(force=False, auto=True)
         else:
             self._main_scene.step()
@@ -1943,21 +2084,25 @@ class VehicleScene:
     def substeps(self) -> int:
         """The solver's EFFECTIVE substep count, read from the engine
         (``scene.sim.substeps``) — not the authored ``VehicleScene(substeps=)``
-        argument. Genesis 1.4.0 may RE-DERIVE substeps from the solver options,
-        so the two can disagree; the engine's value is the one physics runs at.
+        argument. Genesis 1.4.0 and 1.5.0 may RE-DERIVE substeps from the
+        solver options (1.5.0: the rate reconciliation in
+        ``engine/simulator.py``, read for 2.0.5), so the two can disagree; the
+        engine's value is the one physics runs at.
 
         ``VehicleScene`` itself cannot reach that disagreement: it always passes
-        ``substeps=`` explicitly (see ``_scene_kw``), and 1.4.0 RAISES rather
+        ``substeps=`` explicitly (see ``_scene_kw``), and the engine RAISES rather
         than re-derives when an authored ``substeps`` conflicts with the solver
         ``dt`` (``GenesisException: RigidSolver dt=... implies N substep(s) per
         step, conflicting with the requested substeps=...``). The divergence is
         reachable only when a caller supplies its own ``sim_options`` WITHOUT
         ``substeps`` alongside a ``rigid_options(dt=)``; measured that way on a
         raw ``gs.Scene`` (``SimOptions(dt=0.02)`` + ``RigidOptions(dt=0.005)``
-        + Plane + Box, genesis-world 1.4.0, CPU/WSL2): authored 1, effective 4.
+        + Plane + Box, genesis-world 1.4.0, CPU/WSL2): authored 1, effective 4
+        (not re-measured on 1.5.0, whose source derives the count the same way).
         This property is why that case reads back honestly rather than echoing
-        the argument. Public API on both genesis 1.3.3 and 1.4.0. Valid after
-        ``build()``."""
+        the argument. Reads the public ``scene.sim.substeps``; through 2.0.4 this
+        docstring named genesis 1.3.3 and 1.4.0, which 2.0.5 no longer runs on.
+        Valid after ``build()``."""
         return int(self._main_scene.sim.substeps)
 
     @property
@@ -1965,15 +2110,21 @@ class VehicleScene:
         """The step duration the engine actually integrates with, read from the
         engine (``scene.sim.dt``). ``VehicleScene.dt`` is the value the CALLER
         authored and is never reconciled with the engine after ``build()``;
-        this one is the engine's. Public API on both genesis 1.3.3 and 1.4.0."""
+        this one is the engine's. Reads the public ``scene.sim.dt`` (through
+        2.0.4 this docstring named genesis 1.3.3 and 1.4.0, which 2.0.5 no
+        longer runs on)."""
         return float(self._main_scene.sim.dt)
 
     def set_gravity(self, gravity, envs_idx=None) -> None:
         """Set gravity on the built simulation — the ONE live knob.
 
-        Writing ``sim_options.gravity`` after ``build()`` is inert on both
-        genesis 1.3.3 and 1.4.0 (see :attr:`sim_options`); ``sim.set_gravity``
-        is not. Measured on 1.4.0: after ``set_gravity((0, 0, 0))`` a falling
+        Writing ``sim_options.gravity`` after ``build()`` is inert (see
+        :attr:`sim_options`); ``sim.set_gravity`` is not. On genesis-world 1.5.0
+        both are exercised by ``tests/test_sim_options_and_timing.py``
+        (``test_post_build_sim_options_writes_are_inert``,
+        ``test_set_gravity_is_the_live_knob``); through 2.0.4 this docstring
+        named genesis 1.3.3 and 1.4.0. Measured on 1.4.0 (not re-measured on
+        1.5.0): after ``set_gravity((0, 0, 0))`` a falling
         box's Δz over 10 steps went to −0.392398834 m (constant velocity, i.e.
         no acceleration), whereas assigning ``options.sim.gravity = (0, 0, 0)``
         left it falling 5.0 → 4.793989658 m. ``envs_idx`` is passed straight
@@ -1991,10 +2142,12 @@ class VehicleScene:
 
         **Post-build writes to this object are INERT** — assigning ``dt`` /
         ``substeps`` / ``gravity`` here after ``build()`` changes nothing about
-        the running simulation on either supported engine version, because
-        ``Simulator.__init__`` snapshots ``_dt`` / ``_substep_dt`` /
-        ``_substeps`` at construction and ``Simulator.dt`` is read-only
-        (genesis 1.3.3 ``simulator.py`` and 1.4.0 ``simulator.py`` alike).
+        the running simulation, because ``Simulator.__init__`` snapshots
+        ``_dt`` / ``_substep_dt`` / ``_substeps`` at construction and
+        ``Simulator.dt`` is read-only (read in genesis 1.3.3 and 1.4.0
+        ``simulator.py``; not re-read or re-measured on 1.5.0, where the
+        ``dt`` and ``gravity`` writes are checked inert by
+        ``tests/test_sim_options_and_timing.py::test_post_build_sim_options_writes_are_inert``).
         Measured on 1.4.0: after ``options.sim.dt = 0.2``, ten steps still
         advanced ``sim.cur_t`` to 0.2 (= 10 × 0.02), and after
         ``options.sim.gravity = (0, 0, 0)`` a box still fell 5.0 →
@@ -2007,11 +2160,10 @@ class VehicleScene:
         what the engine is running at, :meth:`set_gravity` to change gravity
         for real, and a fresh ``VehicleScene`` to change ``dt``.
 
-        Accessor is version-branched in ``_gs_compat.scene_sim_options``
-        (``Scene.options.sim`` on genesis >= 1.4.0, ``Scene.sim_options`` on
-        <= 1.3.3).
+        Reads ``Scene.options.sim`` (through 2.0.4 version-branched in the
+        removed ``_gs_compat.scene_sim_options``).
         """
-        return scene_sim_options(self._main_scene)
+        return self._main_scene.options.sim
 
     # ---- internals ----
     def _sync_dynamic(self, obs: "DynamicBody") -> None:

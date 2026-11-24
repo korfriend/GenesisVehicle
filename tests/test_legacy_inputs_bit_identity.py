@@ -1,5 +1,6 @@
-"""AC-1b / AC-1c (v2.0.2): signed (``gear=None``) inputs are bit-identical to the
-capture — the 2.0.4 capture since v2.0.4 (the 2.0.1 one through 2.0.3).
+"""AC-1b / AC-1c (v2.0.2): signed (``gear=None``) inputs match the capture bit
+for bit — since v2.0.5 the capture from the v2.0.4 tree on genesis-world 1.5.0
+(the 2.0.4 capture on 1.4.5 through v2.0.4, the 2.0.1 one through 2.0.3).
 
 What it proves: on the platform and genesis-world version the fixture was
 captured on, 300 scripted steps of LEGACY inputs (negative throttle, brake,
@@ -19,13 +20,37 @@ What it does NOT prove: anything on another platform / genesis version (the
 fixture is a float32 bit pattern; an uncaptured pair SKIPS, like
 ``test_fan_default_identity.py``), or anything about gear mode itself.
 
-Fixture: ``tests/data/legacy_inputs_2_0_4.json``, captured 2026-11-23 from the
-2.0.4 working tree (pedal-free ``StaticFrictionLock``) with this file's scenario
-code (``run_scene``), genesis-world 1.4.5, CPU, linux-x86_64 (WSL2). Each vehicle
-entry holds a SHA-256 over all 300 steps and the raw values at
-``CHECKPOINTS`` (the values only make a failure readable).
+Fixture (v2.0.5): ``tests/data/legacy_inputs_2_0_5.json``. Captured from the
+v2.0.4 tree + the two-line ``skip_forward`` patch on genesis-world 1.5.0
+(linux-x86_64); 2.0.5 reproduces it bit for bit. A regression lock for later
+releases on exactly this engine version and platform. (2026-11-24: ``git
+archive 9e5c4d5`` with ``skip_forward=`` deleted from the two
+``set_base_links_pos`` / ``_quat`` calls in ``vehicle_scene.py``; this file's own
+``run_scene`` from that tree, signed inputs; CPU, WSL2. The gear rows were
+checked at capture time: with car "b" in gear, "a" and the tank gave the signed
+capture's digests on all 8 gear scenes.) Each vehicle entry holds a SHA-256
+over all 300 steps and the raw values at ``CHECKPOINTS`` (the values only make
+a failure readable). On another engine version, a 1.5.x patch release included,
+or another platform, the tests SKIP.
 
-Why it was re-captured (2.0.4): the lock change moves all three vehicles
+``direct_single_3`` — the tank: this entry encodes the +1 branch of
+``StaticFrictionLock``'s travel sign and is round-off-branch sensitive. At
+touchdown the lock records ``_s_eng = sign(v_long)`` while ``v_long`` is
+free-fall round-off (instrumented by plan-review: -8.0e-10 m/s on 1.4.5, which
+took the -1 branch, +2.5e-9 m/s on 1.5.0, which takes +1); the two branches end
+0.126 m apart, and a 1e-6 m spawn shift on 1.4.5 already reproduces the 1.5.0
+outcome to 2e-5 m. So a change that only moves that round-off can flip this
+entry; that is the knife-edge (present on 2.0.4, engine-independent, a known
+limitation until it is fixed), not a physics change, and not an engine change.
+Measured against the 1.4.5 capture (final position, same scenario): the two
+cars of ``direct_single_3`` within 7.7e-4 m, every vehicle of the other 8
+scenes within 1.3e-4 m (CPU, WSL2; a comparison, not a bound for other scenes).
+
+Fixture history: ``legacy_inputs_2_0_4.json`` (genesis-world 1.4.5, asserted
+v2.0.4) and ``legacy_inputs_2_0_1.json`` (asserted through v2.0.3) stay in the
+repository, no longer asserted.
+
+Why it was re-captured in 2.0.4 (on 1.4.5): the lock change moves all three vehicles
 (first at checkpoint 179 for both cars, 239 / 299 for the tank). It was written
 only after a PHYSICAL acceptance proof on all 9 scenes and all three vehicles
 (plan r204 §6.1, harness ``.pm_r2/r204/fixture_proof204.py`` outside the repo):
@@ -40,8 +65,7 @@ ray-distance forcing, so its base link cannot be at rest on any tree; for that
 scene (amended rule) the full proof ran with the forcing off, the hold / turning
 checks with it on, and the net base-link movement over 4 whole forcing periods
 was bounded (<= 1 mm, and <= the 2.0.3 value + 0.1 mm where 2.0.3 had its lock
-engaged). This scene is not a rest measurement. ``legacy_inputs_2_0_1.json``
-stays in the repository and is no longer asserted.
+engaged). This scene is not a rest measurement.
 """
 import hashlib
 import os
@@ -167,7 +191,7 @@ def run_scene(name, solver, raycast_mode, n_envs, direct, *, gear_b=False):
     return {w: {"sha": hs[w].hexdigest(), "cp": cps[w]} for w in vehs}
 
 
-FIXTURE = os.path.join(HERE, "data", "legacy_inputs_2_0_4.json")
+FIXTURE = os.path.join(HERE, "data", "legacy_inputs_2_0_5.json")
 
 
 def _platform_key():
@@ -201,7 +225,7 @@ def _compare(name, who, got, want):
 
 
 @pytest.mark.parametrize("scene", SCENES, ids=[s[0] for s in SCENES])
-def test_legacy_inputs_are_bit_identical_to_the_capture(scene):
+def test_legacy_inputs_match_the_2_0_4_tree_on_1_5_0(scene):
     fx = _fixture()
     got = run_scene(*scene)
     want = fx["scenes"][scene[0]]
@@ -213,7 +237,7 @@ GEAR_SCENES = [s for s in SCENES if not s[4]]
 
 
 @pytest.mark.parametrize("scene", GEAR_SCENES, ids=[s[0] for s in GEAR_SCENES])
-def test_a_gear_vehicle_leaves_the_legacy_rows_bit_identical(scene):
+def test_a_gear_vehicle_matches_the_2_0_4_tree_on_1_5_0(scene):
     fx = _fixture()
     got = run_scene(*scene, gear_b=True)
     want = fx["scenes"][scene[0]]

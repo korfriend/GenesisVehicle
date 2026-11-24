@@ -8,12 +8,12 @@ Unlike the flat-`Plane` samples this generates a real wavy ground mesh and, in
 the default ``raycast_mode="dual_scene"``, registers it with
 ``add_static(collision=False)`` so it lives ONLY in the raycast scene as a
 **`Kinematic` raycast target**: the wheel raycaster follows every bump (the
-chassis pitches/heaves), but that scene's BVH is *static* → the raycaster
-**skips rebuilding it every step**. A high-poly mesh as a `Rigid` collider would
-instead be re-fit into the wheel-raycaster BVH on every step (the dominant cost
-on big maps — see ``docs/dual-scene-raycast.md`` / CHANGELOG v0.7.17). Pass
-``--rigid-terrain`` to run that slow path (``raycast_mode="single_scene"`` with a
-rigid mesh) for an A/B comparison.
+chassis pitches/heaves), and the kinematic surface is exact. (Through SDK 2.0.4
+this said that scene's BVH is static and never rebuilt while a rigid mesh is
+re-fit every step — the pre-1.5.0 raycaster; on genesis-world 1.5.0 both modes
+build mesh trees once, see ``docs/dual-scene-raycast.md``.) Pass
+``--rigid-terrain`` to run the rigid-mesh path (``raycast_mode="single_scene"``)
+for an A/B comparison.
 
 What this demonstrates
 ----------------------
@@ -124,7 +124,7 @@ def main():
     ap.add_argument("--rigid-terrain", action="store_true",
                     help="Load the terrain as a Rigid mesh in single_scene mode "
                          "instead of dual_scene Kinematic raycast (A/B: the rigid "
-                         "mesh is re-fit in the raycaster BVH every step → slower). "
+                         "mesh is itself the wheel-raycast target). "
                          "HEAVY: a full-resolution non-convex mesh as a rigid "
                          "collider is the pathological case the dual_scene path "
                          "exists to avoid; the SDK now REFUSES it (mesh-guard) "
@@ -183,8 +183,8 @@ def main():
     terrain_surface = gs.surfaces.Rough(color=(0.52, 0.46, 0.34))
 
     if rigid:
-        # single_scene: the rigid mesh is itself the wheel-raycast target, so it
-        # is re-fit into the raycaster BVH every step (the slow A/B path). A
+        # single_scene: the rigid mesh is itself the wheel-raycast target (the
+        # A/B path). A
         # full-resolution non-convex mesh as a rigid collider is exactly the
         # OOM-risk case the SDK's mesh-guard refuses — catch it and exit cleanly
         # instead of crashing (decimate the terrain to actually run this path).
@@ -208,7 +208,7 @@ def main():
             return
     else:
         # dual_scene: bumpy ground as a Kinematic raycast target (exact surface,
-        # BVH static-skipped). collision=False → it lives ONLY in the raycast
+        # a visual-raycast target). collision=False → it lives ONLY in the raycast
         # scene, so the wheels sense it but nothing collides with it.
         vs.add_static(
             morph=gs.morphs.Mesh(file=terrain_obj, fixed=True, align=False,

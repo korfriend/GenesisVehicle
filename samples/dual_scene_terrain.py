@@ -10,10 +10,10 @@ What this demonstrates
 - ``VehicleScene`` as the single entry point: ``add_static`` +
   ``add_vehicle`` + ``build`` + a loop of ``veh.set_inputs(...) / vs.step()``.
 - ``raycast_mode="dual_scene"`` (default): the terrain is raycast in a separate
-  scene as a *static* body (BVH built once, never re-fit, shared across batch
-  envs) while collision/rollover run in the main scene with the terrain as a
-  *rigid* body. The wheel distances are identical to ``"single_scene"`` mode; only the
-  per-step raycast cost differs.
+  scene that holds no vehicle collision geometry, while collision/rollover run in
+  the main scene with the terrain as a *rigid* body. The wheel distances are
+  identical to ``"single_scene"`` mode. (Through SDK 2.0.4: "BVH built once,
+  never re-fit, shared across batch envs" — the pre-1.5.0 raycaster.)
 - That the car is actually ON the terrain: the FINAL block asserts every wheel
   ray hits (``veh.all_wheels_grounded``) and that the chassis stays at
   ride height. This sample shipped for several releases silently "passing"
@@ -33,18 +33,22 @@ What this does NOT demonstrate
   is of the same size as the difference between the modes. A ms/step from this
   sample describes this machine at this moment; a comparison between the two
   numbers is not a reproducible speedup and must not be quoted as one.
-- It does not demonstrate the batched (``--n-envs``) or GPU win, which is where
-  the static shared BVH is supposed to pay off; that needs a machine with a GPU
-  and is not measurable here.
+- It does not measure the batched (``--n-envs``) or GPU case, where SDK <= 2.0.4
+  argued a static shared BVH would pay off; on genesis-world 1.5.0 both modes
+  build their mesh trees once, so that argument no longer separates them. A
+  measurement there needs a machine with a GPU and is not possible here.
 
 Why dual_scene helps (and when it does not)
 -----------------------------------------
-The ``"single_scene"`` (one-scene) wheel raycaster re-fits a BVH over every face each
-step (the vehicle moves → the solver is non-static). ``"dual_scene"`` keeps the
-terrain BVH static, so the *raycast* cost stops scaling with terrain face count
-AND with ``n_envs`` (the static BVH is shared across envs) — that is a structural
-argument, not a measured one, and this sample does not upgrade it to a measured
-one; see ``docs/dual-scene-raycast.md`` for that explanation. Producing a
+Through SDK 2.0.4 this said the ``"single_scene"`` raycaster re-fits a BVH over
+every face each step while ``"dual_scene"`` keeps it static and shared across
+``n_envs``. That is FALSE on genesis-world 1.5.0 (both modes build each mesh's
+tree once and refit only a per-env top-level tree). ``"dual_scene"`` is the
+default because its ray scene holds no vehicle geometry (a wheel ray cannot hit
+the vehicle), and on non-convex MESH terrain its kinematic surface is exact where
+a rigid mesh is convexified — not the case for this sample's heightfield, whose
+``dual_scene`` mirror is a fixed rigid body. No speed claim is made, and this
+sample does not measure one; see ``docs/dual-scene-raycast.md``. Producing a
 figure worth quoting needs a dedicated harness: a fresh process per mode,
 repeats, and an alternating order (cf. ``perf_vectorization.py``, which
 subprocesses every measurement). That is deliberately not this sample's job —
@@ -366,12 +370,13 @@ def main():
     ap.add_argument("--compare", action="store_true",
                     help="Run single_scene AND dual_scene, print pose match + timing.")
     ap.add_argument("--horizontal-scale", type=float, default=0.25,
-                    help="Terrain cell size; smaller = more faces (which is what "
-                         "dual_scene's static BVH stops paying per step).")
+                    help="Terrain cell size; smaller = more faces (on genesis-world "
+                         "1.5.0 neither raycast mode re-fits per face each step).")
     ap.add_argument("--n-envs", type=int, default=1,
-                    help="L3 batch size. dual_scene shares ONE static terrain BVH "
-                         "across envs, so its raycast cost does not scale with n_envs "
-                         "(structural; not benchmarked here).")
+                    help="L3 batch size. How raycast cost scales with n_envs in "
+                         "either mode is not benchmarked here (the pre-2.0.5 text "
+                         "claimed one terrain BVH shared across envs; on genesis-world "
+                         "1.5.0 the top-level trees are per env).")
     ap.add_argument("--drive-s", type=float, default=4.0,
                     help="Seconds of open-loop throttle after settling (default 4). "
                          "Measured on this 40x40 m terrain (CPU, horizontal_scale "

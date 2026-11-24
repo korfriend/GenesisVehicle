@@ -381,23 +381,34 @@ interpolation between grid nodes measured from a clean flat-ground start.
 
 Genesis does ship a differentiable rigid solver
 (`SimOptions(requires_grad=True)`), and the obvious plan is to backpropagate
-through `scene.step()`. **It cannot work for this SDK.** The solver's taped
-input set is exactly `set_pos` / `set_quat` / `set_dofs_velocity` /
-`control_dofs_force` (see `RigidEntity.process_input_grad`); the external
-wrench API is not on the tape (`apply_links_external_wrench` on genesis
->= 1.4.0, `apply_links_external_force` / `_torque` on <= 1.3.3) — and it is
-the *only* way a ray-wheel vehicle touches the solver, because the SDK
-deliberately has no wheel joints to motor.
+through `scene.step()`. The external wrench API is the *only* way a ray-wheel
+vehicle touches the solver, because the SDK deliberately has no wheel joints
+to motor.
 
-Measured on genesis-world 1.3.3, and unchanged on 1.4.0, which only renamed
-the call: a leaf tensor passed to the external-wrench API comes back from
-`scene.backward()` with `grad is None`, while the same probe through
-`control_dofs_force` returns a finite gradient. So Genesis autodiff can differentiate a joint-motor
-vehicle, not a ray-wheel one.
+**What this section said through v2.0.4 — "It cannot work for this SDK" —
+rested on a measurement that does not hold on genesis-world 1.5.0.** It said
+the solver's taped input set is exactly `set_pos` / `set_quat` /
+`set_dofs_velocity` / `control_dofs_force`, that the external wrench API is
+not on the tape, and that a leaf tensor passed to it came back from
+`scene.backward()` with `grad is None` (measured on genesis-world 1.3.3,
+unchanged on 1.4.0). **On 1.5.0 the wrench API IS on the tape for a free body
+without contact** (corrected in v2.0.5): a 75 kg box, `requires_grad=True`,
+gravity 0, collision and hibernation off, a leaf torch tensor u (1 N in x)
+applied through `apply_links_external_wrench` for 10 steps at dt 0.01, loss =
+final x — `grad = 7.3333e-05` with 1 substep and `6.8333e-05` with 4, both
+equal to the hand derivation `x = (u/m)·dt²·Σk`, and equal to the same probe
+through `control_dofs_force` (implementation; re-run and hand-derived by
+impl-review; CPU). **Not tested: differentiating the SDK vehicle step end to
+end** (raycaster, contact, the ray-wheel pipeline feeding the wrench). So
+whether Genesis autodiff can replace `DifferentiablePlant` for a ray-wheel
+vehicle on 1.5.0 is OPEN, not shown either way. `DifferentiablePlant` is
+unchanged.
 
-Differentiating the SDK's own force model instead gets the same Jacobian and
-costs less: no `requires_grad` scene, so no hibernation ban, no integrator
-restriction, no dense-Hessian solve, and it runs on CPU.
+Differentiating the SDK's own force model is what `DifferentiablePlant` does:
+no `requires_grad` scene, so no hibernation ban, no integrator restriction, no
+dense-Hessian solve, and it runs on CPU. (Through v2.0.4 this sentence also said
+it "gets the same Jacobian and costs less" than a Genesis-autodiff route — a
+comparison never measured, because that route was believed impossible.)
 
 ### Accuracy
 
@@ -1276,12 +1287,16 @@ m/s² on the reference car) in 2.0.2: gear mode's brake model is in stage 2 only
 K-turn (§5.10, opt-in) is a separate state machine outside the MPC. The
 light-brake slope hold, listed here as planned through 2.0.3, shipped in 2.0.4
 (a vehicle-side change, `physics-contracts.md` §7.22). Planned, not present:
-2.1.0 the Pacejka prediction model with a deceleration bound widened to the
-brake's limit (and, vehicle-side, unifying the lock's spring cap on one
-constant), 2.2.0 feedforward
+2.0.6 the `StaticFrictionLock` touchdown-sign fix, the visual-joint
+feedback fix and the `"control"`-path force range of the visual suspension PD
+(vehicle-side, CHANGELOG 2.0.5 §10.1-§10.3, roadmap §14); 2.1.0 the Pacejka prediction
+model (opt-in `mpc_model="pacejka"`) with a deceleration bound widened to the
+brake's limit (opt-in `mpc_decel_limit="brake"`), 2.2.0 feedforward
 from the MPC plan and the PD correction (closed-loop tracking of the K-turn's
 planned arcs is a candidate there), 2.3.0 a hold-release rule, a KICK redesign
-and a wider default sweep grid. (Through 2.0.0 this paragraph named 2.1.0 /
+and a wider default sweep grid. (Through 2.0.4 the 2.1.0 item also listed
+"unifying the lock's spring cap on one constant" — that plan was WITHDRAWN by
+the user on 2026-11-24, corrected in 2.0.5. Through 2.0.0 this paragraph named 2.1.0 /
 2.2.0 as the next releases; 2.0.1 listed "2.0.2 braking and stopping by the
 brake channel with a forward/reverse gear state" — that shipped in 2.0.2, and
 2.0.2 and 2.0.3 did not merge; 2.0.2 listed "2.0.3 controller-initiated
@@ -2380,6 +2395,22 @@ vehicle's braking did):
 - a `DifferentiablePlant` built before the vehicle's first step predicts with
   the same capped lock spring as the live vehicle (it computes the lock's
   inputs at bind).
+
+**From 2.0.4 to 2.0.5** (CHANGELOG 2.0.5; no follower code changed — the
+engine did): genesis-world 1.5.0 is required. Sweep tables and identify
+records re-measured on 1.5.0 for the reference car (`sweep_measure` with the
+demo's grid flags, 1250 rows, and `identify`; implementation) differ from the
+1.4.5 records by at most 3.1e-5 m/s² in the measured acceleration and
+2.0e-6 rad/s in yaw rate; among the MPC parameters the largest relative change
+is `accel_tau` 3.8e-4 (0.015201 → 0.015196 s); the brake gain 5.0152 is
+unchanged. The five `mpc_follow_demo` acceptance courses (demo, cusp,
+misaligned, vertex, behind + K-turn) end `DONE` on 1.5.0 at the times they took
+on 1.4.5 (13.45 / 11.175 / 41.775 / 9.775 / 29.375 s), both with the 1.4.5
+records and with the 1.5.0 records (largest change: vertex max cross-track error
+2.851 → 2.856 m with the 1.5.0 records; implementation). So 1.4.5 records remained usable for
+the reference car on these five courses — measured there, not shown for other
+vehicles; re-measure for anything else. `samples/data/mpc_cache/` (git-ignored)
+was regenerated on the release machine.
 
 ## See also
 

@@ -1,10 +1,10 @@
 # Quickstart
 
 The shortest working program. Drop a car, drive 10 seconds, print the final
-position. Requires Genesis (`genesis-world` **1.4.5** with `quadrants` 1.3.3,
-`trimesh` >= 5.0 and `zstandard` — the supported floor since SDK v1.6.9; older
-versions are not supported, and the SDK logs one
-`[genesis_vehicle:genesis-floor]` warning for them but does not refuse them)
+position. Requires Genesis (`genesis-world` **1.5.0** with `quadrants` 1.4.0,
+`coacd` >= 1.0.14, `PyGEL3D` >= 0.8.0 and Python >= 3.12 — REQUIRED since SDK
+v2.0.5: on an older engine `VehicleScene` raises `GenesisVersionError` at
+import; `pip install -r requirements.txt` from the repo root)
 installed and a 4-wheel-car URDF whose
 suspension joints follow the SDK's naming convention (see
 [`api-reference.md`](api-reference.md#4-urdf-utilities)).

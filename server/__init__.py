@@ -11,8 +11,18 @@ Run:
 Extra dependencies: ``pythonosc`` (server-only — the SDK core does not need
 it), ``psutil``, and ``trimesh`` for obstacle mesh preprocessing.
 
-This ``__init__`` intentionally imports nothing — the SDK core
-(``import genesis_vehicle``) must work in environments without pythonosc.
-Import server modules explicitly, e.g.
-``from genesis_vehicle.server import physics_server``.
+This ``__init__`` imports only ``genesis`` and runs the SDK's required-engine
+check (``genesis_vehicle._gs_compat.require_genesis``: genesis-world >= 1.5.0,
+< 1.6 since 2.0.5), so ``python -m genesis_vehicle.server`` on an older engine
+stops with ``GenesisVersionError`` before any socket is bound. It does NOT import
+pythonosc — the SDK core (``import genesis_vehicle``) does not import this
+package and must work in environments without pythonosc. Import server modules
+explicitly, e.g. ``from genesis_vehicle.server import physics_server``.
+(Through 2.0.4 this ``__init__`` imported nothing.)
 """
+
+import genesis as _gs
+
+from .._gs_compat import require_genesis as _require_genesis
+
+_require_genesis(_gs)

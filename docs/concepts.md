@@ -9,7 +9,9 @@ The SDK has two layers. **Reach for the high-level one first.**
 
 - **High-level — `VehicleScene`** (the recommended entry point). It owns the
   Genesis scene(s), `gs.init` / `build` / `step` / the wheel raycast (including
-  the dual-scene optimization), and the registered vehicles / static / dynamic
+  the default `dual_scene` mode, whose ray scene holds no vehicle collision
+  geometry; through v2.0.4 this called it an "optimization" — its speed
+  rationale is a pre-1.5.0 one, see `dual-scene-raycast.md`), and the registered vehicles / static / dynamic
   bodies. You write `add_vehicle` / `add_static` / `add_dynamic` → `build` → a
   loop of `veh.set_inputs(...) + vs.step()`, with no manual Genesis boilerplate.
 

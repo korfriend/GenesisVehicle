@@ -1,16 +1,28 @@
 """Wheel visual-joint sync layer (for the Genesis viewer).
 
 `WheelJointInternalSync` drives the URDF **wheel** spin / steer / suspension joints
-(via ``set_dofs_position`` — kinematic, no force) so that the **Genesis
+(via ``set_dofs_position`` — a kinematic write; control-path suspension
+joints via ``control_dofs_position``, see below) so that the **Genesis
 viewer** shows wheels rotating, steered, and ground-following. Scope and
 non-scope, important:
 
 - It only touches the WHEEL visual joints. It does NOT move the chassis —
   the chassis (base link) is driven by real dynamics
-  (``apply_links_external_force``) and is read with ``entity.get_pos/get_quat``
+  (``apply_links_external_wrench``) and is read with ``entity.get_pos/get_quat``
   regardless of whether this runs.
-- It is purely cosmetic: it does NOT feed back into the dynamics (no
-  double-apply of suspension force).
+- It is NOT physics-neutral. (Through 2.0.4 this line said "purely cosmetic:
+  it does NOT feed back into the dynamics" -- that was wrong.) Writing the
+  visual joints changes the chassis trajectory (measured below). The joints
+  are dofs of the chassis articulation and the wheel-side links carry mass;
+  that is one candidate coupling, not an established cause. Measured: the
+  kinematic suspension write moves the reference car (``car_4w.urdf``) about
+  +0.142 m over a 10.7 m run against the same run with no visual joint path,
+  on genesis-world 1.4.5 and 1.5.0 alike (impl-review, CPU/WSL2, dt 0.025 x 10
+  substeps, brake 1.5 s then throttle 0.5 for 5 s, ``internal_sync`` + one
+  offscreen camera); which coupling produces it is not established. What
+  does hold: the suspension force N is applied once, through the chassis
+  wrench -- this layer adds no second N. The control path's PD is a separate
+  effect, see ``WheelJointInternalSync``.
 - It exists for the Genesis-native viewer. An **external renderer (UE /
   Unity) does NOT need it** — use ``VehiclePhysics.wheel_visual_transforms``
   (closed-form, viewer-independent) instead; that is also cleaner (no
@@ -28,8 +40,14 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 import torch
+import genesis as gs
 
-from .raycast import is_ray_hit_corrected
+from ._gs_compat import (add_render_node, queue_instance_poses,
+                         require_genesis)
+
+require_genesis(gs)
+
+from .raycast import is_ray_hit_corrected  # noqa: E402  (after the engine check)
 
 
 # Defaults used when the control_dofs_position path is taken.
@@ -110,13 +128,39 @@ class WheelJointInternalSync:
 
     Drives a vehicle's URDF WHEEL visual joints (spin, steer, suspension) to
     match physics state, for the Genesis viewer. Wheels only — never the
-    chassis. INTENDED to be cosmetic, but not perfectly physics-neutral:
-    the set path teleports wheel-link mass and the control path's PD
-    (kp=_SUSP_VIS_KP) applies real joint forces — both targets are therefore
-    stroke-clamped and slew-rate-limited (_SUSP_VIS_MAX_RATE) so the residual
-    disturbance stays negligible (measured < 1 cm extra compression on hard
-    drop landings; was ~2-3 cm unclamped). External renderers should use
-    ``VehiclePhysics.wheel_visual_transforms`` instead (viewer-independent).
+    chassis. INTENDED to be cosmetic, but NOT physics-neutral: the set path
+    teleports wheel-link mass and the control path's PD (kp=_SUSP_VIS_KP)
+    applies real joint forces. Both targets are stroke-clamped and
+    slew-rate-limited (_SUSP_VIS_MAX_RATE); that bound was measured only as
+    extra compression on hard drop landings (< 1 cm; ~2-3 cm unclamped). This
+    docstring called the residual disturbance "negligible" through 2.0.4 --
+    wrong as a general statement. Measured on a full drive (CPU/WSL2, dt 0.025,
+    ``internal_sync`` + one offscreen camera, brake 1.5 s then throttle):
+
+    - set (kinematic) path: the reference car (``car_4w.urdf``, 10 substeps,
+      throttle 0.5 for 5 s) ends about +0.142 m ahead of the same run with no
+      visual joint path, over 10.7 m, on genesis-world 1.4.5 and 1.5.0 alike
+      (impl-review); mechanism not established.
+    - control path: whether its PD acts depends on the engine. A URDF
+      ``effort="0"`` (``tests/data/car_ref.urdf``, ``car_4w.urdf``,
+      ``truck_6w.urdf`` all write it on the suspension joints) is a ZERO force
+      range on 1.4.5 -- the PD is inert and the joint hangs at its limit --
+      and an UNBOUNDED one on 1.5.0, where the PD is live. Measured with
+      ``visual_susp_mode="control"`` forced (implement agent, 2.0.5 tree): on
+      1.5.0, against the same run with the suspension dofs' force range set
+      to 0 after build, chassis z differed by up to 0.190 m during the landing
+      (reference car, 10 substeps) and 0.030 m (``truck_6w_partial_ackermann``,
+      4 substeps, throttle 0.3 for 10 s), final x by 6.5 mm and 15.7 mm; with
+      the force range 0, 1.5.0 reproduced 1.4.5 to within 6e-5 m. This layer
+      sets no force range. Under ``visual_susp_mode="auto"`` both of those
+      URDFs resolve to the set path (their suspension ``<dynamics>`` are all
+      zero), so the PD is used only with ``"control"`` or a URDF declaring
+      non-zero suspension dynamics.
+
+    The suspension force N is still applied once (chassis wrench); neither path
+    adds a second N, but neither is free of feedback. External renderers
+    should use ``VehiclePhysics.wheel_visual_transforms`` instead
+    (viewer-independent).
 
     Emits a one-time-per-process performance advisory on construction (it is the
     dominant SDK cost at scale, and is unnecessary for external/headless use)."""
@@ -327,13 +371,13 @@ class WheelJointInternalSync:
                 combined, self._batch_set_dofs, zero_velocity=False,
             )
 
-        # Suspension drift suppression: zero the susp joint velocity. skip_forward
-        # avoids an extra velocity FK pass (the position write above already ran
-        # forward kinematics; the joint is cosmetic).
+        # Suspension drift suppression: zero the susp joint velocity. (Through
+        # 2.0.4 this passed skip_forward=True; genesis-world 1.5.0 removed the
+        # keyword and refreshes link/geom poses lazily when they are next read,
+        # so no explicit FK pass is issued here either way.)
         if susp_joint_pos is not None:
             self.entity.set_dofs_velocity(
                 torch.zeros_like(susp_joint_pos), self._susp_set_dofs,
-                skip_forward=True,
             )
 
         # Suspension joints. control_dofs_position path (heavy wheels):
@@ -484,10 +528,12 @@ class KindVisualBatch:
                 combined.reshape(N, -1), self._set_dofs_g)
 
         if susp_written:
+            # No skip_forward (removed in genesis-world 1.5.0; poses refresh
+            # lazily on the next read) -- see WheelJointInternalSync.step.
             self.solver.set_dofs_velocity(
                 torch.zeros(N, len(self._susp_set_g),
                             device=v0.device, dtype=v0.dtype),
-                self._susp_set_g, skip_forward=True)
+                self._susp_set_g)
 
         if self._susp_ctrl_g is not None:
             d = dist_NK[:, :, v0._susp_ctrl_idx]
@@ -536,18 +582,19 @@ class InstancedWheelRenderer:
     remains available via ``wheel_render_mode="internal_sync"`` and is still
     used automatically for ``n_envs > 1``).
 
-    The URDF wheel-link visual geoms are hidden by the caller (their
-    ``active_envs_idx`` set empty) and re-baked here into per-wheel
+    The URDF wheel-link visual geoms are hidden by the caller
+    (``_gs_compat.hide_vgeoms``, before build) and re-baked here into per-wheel
     trimeshes (vgeom local offsets applied), so the instanced copies look
     identical to what the URDF wheels would have shown. Nodes are plain
-    external nodes (``is_marker=False``): every camera renders them without
-    needing ``debug=True``. Node creation is lazy (first ``update()``);
-    pose writes hold the viewer lock."""
+    render-context nodes (``is_marker=False``, ``_gs_compat.add_render_node``):
+    every camera renders them without needing ``debug=True``. Node creation is
+    lazy (first ``update()``); pose writes hold the viewer lock."""
 
     def __init__(self, gs_scene: Any, node_swap: bool = False):
         # (node_swap is accepted for call-site compatibility but no longer
         # used: v1.1.20 final streams poses through the engine's own
-        # per-frame buffer-update queue — context.jit.update_buffer — the
+        # per-frame buffer-update queue — context.jit.update_buffer, reached
+        # through _gs_compat.queue_instance_poses since 2.0.5 — the
         # SAME mechanism Genesis uses to stream link-frame instance poses,
         # consumed by BOTH the native viewer and offscreen cameras on the
         # render thread. Earlier attempts: in-place poses writes froze in
@@ -657,12 +704,12 @@ class InstancedWheelRenderer:
         """Stream the current closed-form wheel poses into the render nodes.
 
         Uses the engine's OWN per-frame instance-buffer update queue
-        (``context.jit.update_buffer`` — the mechanism Genesis streams
-        link-frame instance poses with): set ``primitive.poses`` for
-        anything that (re)binds, and queue a model-buffer refresh that the
-        render thread flushes on its next pass. Works identically for the
-        native viewer and offscreen cameras; no node churn, no marker
-        semantics, normal opaque depth-tested rendering."""
+        (``context.jit.update_buffer``, through
+        ``_gs_compat.queue_instance_poses``): set ``primitive.poses`` on every
+        primitive and queue a model-buffer refresh that the render thread
+        flushes on its next pass. Works identically for the native viewer and
+        offscreen cameras; no node churn, no marker semantics, normal opaque
+        depth-tested rendering."""
         if not self._units:
             return
         vis = getattr(self._gs_scene, "_visualizer", None)
@@ -684,103 +731,9 @@ class InstancedWheelRenderer:
                             mesh, name=name,
                             poses=_pose_mats(pos[:, i], quat[:, i]),
                             smooth=False, is_marker=False)
-                        ctx.add_external_node(obj)
-                        nodes.append(ctx.external_nodes[name])   # pyrender Node
+                        nodes.append(add_render_node(ctx, obj))   # pyrender Node
                     u["nodes"] = nodes
-                elif hasattr(ctx._scene, "get_buffer_id"):
-                    # genesis <= 1.2.x: update_buffer takes a raw GL buffer
-                    # id, so resolve the ids ourselves. Buffers bind lazily
-                    # at the first render; re-lookup until every node has a
-                    # valid id, then cache.
-                    buf_ids = u.get("buf_ids")
-                    if buf_ids is None or any(b < 0 for b in buf_ids):
-                        buf_ids = [ctx._scene.get_buffer_id(nd, "model")
-                                   for nd in u["nodes"]]
-                        u["buf_ids"] = buf_ids
-                    for i, node in enumerate(u["nodes"]):
-                        T = _pose_mats(pos[:, i], quat[:, i])
-                        node.mesh.primitives[0].poses = T
-                        if buf_ids[i] >= 0:
-                            ctx.jit.update_buffer(
-                                buf_ids[i], T.transpose((0, 2, 1)))
                 else:
-                    # genesis >= 1.3: Scene.get_buffer_id is gone —
-                    # update_buffer now takes the NODE and queues the data;
-                    # the GL buffer id is resolved at flush time, so the
-                    # lazy-bind bookkeeping above is the engine's problem.
                     for i, node in enumerate(u["nodes"]):
-                        T = _pose_mats(pos[:, i], quat[:, i])
-                        node.mesh.primitives[0].poses = T
-                        ctx.jit.update_buffer(
-                            node, "model", T.transpose((0, 2, 1)))
-
-
-def patch_viewer_atomic_update(viewer) -> bool:
-    """Rebind viewer.update so the follow camera, any queued wheel-instance
-    buffers (viewer._gv_pre_draw) and the rigid node poses reach the
-    renderer inside ONE render-lock hold.
-
-    Genesis (verified against 1.2.0, 1.3.1 and 1.3.3) updates the follow camera OUTSIDE the
-    render lock and the node poses INSIDE it. The interactive viewer draws on
-    its own thread under that same (re-entrant) lock, so it can slip a frame
-    between the two updates and pair a fresh camera with LAST steps body
-    pose. At speed that one-step offset flickers at the draw rate: the
-    followed vehicle "trembles" fore/aft on screen while the wheels and the
-    terrain look steady (each is self-consistent) and the physics is clean.
-    The same window let the wheel-instance buffers (streamed by
-    VehicleScene.step) race the body pose in the opposite direction.
-
-    Returns False (and changes nothing) if the viewer internals do not match
-    the expected layout, e.g. a future Genesis restructuring — callers fall
-    back to the non-atomic ordering, which only ever produces the cosmetic
-    flicker this patch removes.
-    """
-    import threading as _threading
-    import time as _time
-    import types as _types
-
-    import genesis as _gs
-
-    for attr in ("_pyrender_viewer", "lock", "context", "update_following",
-                 "_followed_entity", "_last_refresh_time", "_refresh_rate",
-                 "_realtime_pacer", "is_alive"):
-        if not hasattr(viewer, attr):
-            return False
-    if not hasattr(viewer._pyrender_viewer, "update_on_sim_step"):
-        return False
-
-    def _update(self, auto_refresh=None, force=False):
-        if not self.is_alive():
-            _gs.raise_exception("Viewer closed.")
-
-        self._pyrender_viewer.update_on_sim_step()
-
-        with self.lock:
-            # Everything the next drawn frame reads is committed in ONE hold:
-            # wheel-instance buffers, the follow camera, then the node poses.
-            pre_draw = getattr(self, "_gv_pre_draw", None)
-            if pre_draw is not None:
-                pre_draw()
-            if self._followed_entity is not None:
-                self.update_following()      # re-enters the RLock via set_camera_pose
-            self.context.update(force)
-
-            if auto_refresh is None:
-                viewer_thread = (self._pyrender_viewer._thread
-                                 or _threading.main_thread())
-                auto_refresh = viewer_thread == _threading.current_thread()
-            if auto_refresh and not self._pyrender_viewer.run_in_thread:
-                now = _time.perf_counter()
-                if (self._last_refresh_time is None
-                        or now - self._last_refresh_time >= 1.0 / self._refresh_rate):
-                    self._last_refresh_time = now
-                    self._pyrender_viewer.refresh()
-
-        # Real-time pacing stays OUTSIDE the lock (it can sleep most of the
-        # frame; holding the render lock through it would starve the drawer).
-        realtime_pacer = self._realtime_pacer
-        if realtime_pacer is not None:
-            realtime_pacer.sleep()
-
-    viewer.update = _types.MethodType(_update, viewer)
-    return True
+                        queue_instance_poses(
+                            ctx, node, _pose_mats(pos[:, i], quat[:, i]))

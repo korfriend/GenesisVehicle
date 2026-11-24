@@ -19,7 +19,7 @@ What is batched
 - Pacejka tire model: one call over (K, n_wheels) instead of K calls
 - Stability hooks: one call per hook over (K, n_wheels) instead of K calls
 - Slip / suspension / omega update: one batched op set
-- Force + torque application: one `apply_links_external_force` call with K
+- Force + torque application: one `apply_links_external_wrench` call with K
   link indices instead of K separate calls
 
 What is NOT batched
@@ -50,7 +50,12 @@ from typing import Any, Optional, Sequence
 
 import torch
 import genesis as gs
-from genesis.utils.geom import transform_by_quat
+
+from ._gs_compat import require_genesis
+
+require_genesis(gs)   # genesis-world >= 1.5.0 required (2.0.5)
+
+from genesis.utils.geom import transform_by_quat  # noqa: E402
 
 from .config import VehicleConfig
 from .core import (
@@ -464,7 +469,7 @@ class MultiVehicleKindPhysics:
         """Apply per-vehicle base-link force + torque in ONE batched solver call.
 
         Compute outputs are flat ``(NK, 3)``. We reshape to ``(N, K, 3)`` to
-        match what ``apply_links_external_force`` expects when the scene is
+        match what ``apply_links_external_wrench`` expects when the scene is
         built with n_envs=N and we target K different links per env."""
         F_NK3 = total_F.reshape(self.n_envs, self.K, 3)
         T_NK3 = total_T.reshape(self.n_envs, self.K, 3)

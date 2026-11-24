@@ -11,7 +11,8 @@ moved to ``Scene.options.sim``:
   ``except Exception: pass``, so it printed zero times and hid the same drift.
 
 The second fact is what makes this more than an accessor fix: post-build writes
-to the sim options are INERT on both supported engine versions.
+to the sim options are INERT (pinned on genesis-world 1.4.0 when written, and
+on 1.5.0, the required engine since 2.0.5).
 ``Simulator.__init__`` snapshots ``_dt`` / ``_substep_dt`` / ``_substeps`` and
 ``Simulator.dt`` is read-only, so the server's
 ``[Determinism] … 설정되었습니다`` line was false on L2 even on genesis 1.3.3
@@ -23,7 +24,8 @@ a future genesis makes those writes live, it fails and sends the reader back to
 ``docs/physics-contracts.md`` §7.14 rather than letting the SDK quietly
 contradict its own docs.
 
-Harness: real CPU ``VehicleScene``, genesis-world 1.4.0, WSL2. The gravity /
+Harness: real CPU ``VehicleScene``; written on genesis-world 1.4.0, runs on
+1.5.0 since SDK 2.0.5. WSL2. The gravity /
 inertness tests build their OWN scene (they deliberately corrupt dt/gravity, so
 they must not share one).
 
@@ -113,16 +115,17 @@ def test_sim_options_is_the_engines_authored_object(cpu_genesis):
     so = vs.sim_options
     assert so is not None
     assert float(so.dt) == pytest.approx(0.02)
-    # Same object the engine holds, by identity, through whichever spelling
-    # this genesis uses.
-    from genesis_vehicle._gs_compat import scene_sim_options
-    assert so is scene_sim_options(vs._main_scene)
+    # Same object the engine holds, by identity (``Scene.options.sim``; the
+    # version-branched ``_gs_compat.scene_sim_options`` was removed in 2.0.5).
+    assert so is vs._main_scene.options.sim
 
 
 def test_substeps_and_effective_dt_come_from_the_engine(cpu_genesis):
     """``substeps`` must read ``sim.substeps``, NOT the authored argument:
-    genesis 1.4.0 re-derives it (measured authored 1 → effective 4 on the
-    reference scene), and only the engine's value describes the integration."""
+    genesis can re-derive it when a caller's own sim options omit ``substeps``
+    next to a ``rigid_options(dt=)`` (measured on 1.4.0: authored 1 → effective
+    4 on a raw ``gs.Scene``; the 1.5.0 source keeps the same reconciliation, not
+    re-measured), and only the engine's value describes the integration."""
     vs = _plain_scene(dt=0.02, substeps=1)
     vs.build()
     assert vs.substeps == int(vs._main_scene.sim.substeps)
@@ -132,7 +135,7 @@ def test_substeps_and_effective_dt_come_from_the_engine(cpu_genesis):
 
 def test_post_build_sim_options_writes_are_inert(cpu_genesis):
     """ENGINE tripwire. Writing ``dt`` / ``gravity`` on the authored options
-    after ``build()`` changes nothing, on genesis 1.3.3 and 1.4.0 alike. If a
+    after ``build()`` changes nothing (genesis 1.3.3, 1.4.0, 1.4.5 and 1.5.0). If a
     future genesis makes them live, this test fails — go re-read
     ``docs/physics-contracts.md`` §7.14 and the server's ``[Determinism]``
     line before "fixing" it.

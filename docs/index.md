@@ -8,11 +8,11 @@ Landing page. Pick the document that matches what you're doing.
 | See all 22 runnable samples (+ which have `--viewer`) | [`../samples/README.md`](../samples/README.md) |
 | Build a mental model before reading code | [`concepts.md`](concepts.md) |
 | Choose the high-level (`VehicleScene`) vs low-level (`VehiclePhysics`) API | [`concepts.md`](concepts.md#start-here-the-two-api-layers) |
-| Pick the right batching axis (L1 / L2 / L3) for your workflow | [`batching.md`](batching.md) |
+| Pick the right batching axis (L1 / L2 / L3) for your workflow; give obstacles / ray surfaces a different variant per env (v2.0.5) | [`batching.md`](batching.md) |
 | Decide CPU vs GPU physics (measured crossover, `init_backend`, `--gpu`) | [`backends.md`](backends.md) |
 | Choose a tire model (Pacejka vs Coulomb) and understand the ground-contact mechanism | [`tire-and-contact.md`](tire-and-contact.md) |
 | Stop a wheel taking a whole kerb in one step (`wheel_contact="swept_envelope"`, v1.6.0) | [`tire-and-contact.md`](tire-and-contact.md#axis-a-upgrade--the-swept-envelope-wheel_contactswept_envelope-v160) |
-| Drive from one unified `VehicleScene` object, and cut the wheel-raycast cost on heavy static terrain | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
+| Drive from one unified `VehicleScene` object, and keep wheel rays off the vehicle itself (`dual_scene`; through v2.0.4 this row promised to "cut the wheel-raycast cost on heavy static terrain" — a pre-1.5.0 mechanism, false on genesis-world 1.5.0) | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
 | Make a vehicle follow a waypoint path (path → Steer/Throttle) | [`path-following.md`](path-following.md) — **2.0.0: `PathFollower(path, plant)` raises unless you pass `mpc_model="off"` (the 1.x follower) or `mpc_params=` (the MPC layer); see "Which follower" and §6 "Migrating from 1.x". 2.0.2: the MPC follower returns a `GearCommand` by default (§5.9; `command_mode="signed"` for the 2.0.1 3-tuple). 2.0.3: opt-in K-turn, `mpc_kturn=KTurnParams()` (§5.10; off by default — the default follower issues the 2.0.2 commands)** |
 | Drive a vehicle with a forward/reverse gear and brake-only deceleration (opt-in gear mode, v2.0.2) | [`physics-contracts.md` §7.20](physics-contracts.md), [`path-following.md` §5.9](path-following.md) |
 | Let the path follower reverse by itself when a forward-only turn will not fit (opt-in K-turn, v2.0.3; one documented acceptance FAIL) | [`path-following.md` §5.10](path-following.md), [`physics-contracts.md` §7.21](physics-contracts.md) |
@@ -87,12 +87,12 @@ The right-hand column is where the full story lives.
 | Stability profiles | maps a use-case profile (`"control"` / `"raw"` / `"research"`) to the right stability-hook stack | `stability_hooks_for_profile` | [`stability-profiles.md`](stability-profiles.md) |
 | Rolling resistance | an axle resisting torque `cr*N*r*tanh(ω r / tanh_scale)` (cr = rolling-resistance coefficient, N = wheel load, r = wheel radius) applied to wheel spin ω before the tyre, through a hook's `apply_pre_tire` and `PipelineContext.T_resist`; part of the default `"control"` profile, and in effect only since v1.7.0 (the overshoot clamp erased it before) | `RollingResistance`, `StabilityHook.apply_pre_tire` | [`physics-contracts.md` §7.15](physics-contracts.md) |
 | Brake, axle-torque order, low-speed bounds | since v1.8.0 the drive and brake torques act on the wheel spin before the tyre; the brake is a Coulomb projection that holds a stopped WHEEL; downhill and both-pedal stops hold the VEHICLE where `StaticFrictionLock` takes over — **since v2.0.4 on every brake-held wheel at any pedal** (reference car, 5°, brake 0.3: rests at 4e-6 m/s; 2.0.3 crept at 0.02497 m/s), with its spring capped per wheel; a wheel whose drive torque exceeds its brake torque turns (brake does not override drive). Through 2.0.3 the lock engaged only at brake > `brake_thr` (0.3); this row then said the chassis "slides on tyre slip" below it — wrong mechanism (the held-wheel deadbeat is a damper, so the vehicle crept at `g·tan θ·dt/s` — g gravity, θ slope angle, s the deadbeat's rigid-body scale, `physics-contracts.md` §7.16); and through v2.0.1 it said "(downhill and both-pedal stops hold)" without the condition — incomplete. `F_lat` is taken at the transmitted `F_long`; held-wheel and lateral one-step deadbeats, scaled by the vehicle's yaw inertia, remove the low-speed lateral 2-cycle; `StaticFrictionLock` holds the point where the contact came to rest | `dynamics.brake_projection`, `dynamics.deadbeat_scale`, `TireModel.at_long_force`, `StaticFrictionLock.STATE_ATTRS`, `PipelineContext.brake_rem`, `dynamics.static_mass_shares` / `rigid_share_factor` | [`physics-contracts.md`](physics-contracts.md) §7.1, §7.16, §7.17, §7.22 |
-| OSC physics server | runs the SDK as a standalone physics process for an external engine (UE / Unity), L2 and L3 modes | `python -m genesis_vehicle.server` | [`server.md`](server.md) |
+| OSC physics server | runs the SDK as a standalone physics process for an external engine (UE / Unity), L2 and L3 modes. `--no-target-collision` works for primitive targets and is refused (rc 2) with URDF vehicles or `--multi-env` since v2.0.5 (§2.8) | `python -m genesis_vehicle.server` | [`server.md`](server.md) |
 | Server benchmark | official server perf matrix (mock UE client, tanks × terrain × mode × backend) | `python -m genesis_vehicle.server.benchmark` | [`server.md`](server.md) §2.1 |
 | Server serving counters | per-window `[SERVE]` line: L2 carries `recv_loops` / `nonskip_loops` / `skipped_captures` / `post_step_captures` / `post_step_captures_ref` (v1.6.6) + `sends` / `send_skips` / `send_flushes` (v1.6.7) + `loops` / `steps` / `zero_step_loops` / `serve_ms` / `phys_ms_sum` (v1.6.8), and `window_ms`; **L3 gained a bare `[SERVE] [L3]` line with the six window-shape keys in v1.6.8** (the L2-only counters are ABSENT from it, not zero). Plus the post-override `capture_state` skip gate and its `--legacy-override-capture` rollback. No speed figure is published for the skip (v1.6.6) | `python -m genesis_vehicle.server --serve-timers`, `python -m genesis_vehicle.server.benchmark --kinds N --input-hz H` | [`server.md`](server.md) §2.5 |
 | Server state-send downsampling | `--send-hz H` gates the L2 state send to H Hz on a wall clock while physics keeps running at `dt`; default OFF and bit-identical when off. A reset is flushed with the exact reset pose, a teleport is not (delayed ≤ `1/H` + one loop interval, ≤ 75 ms at H=20 / dt=25 ms). The cost is LAG, quoted by regime; the measured arrival rate drops 136.4 → 20.0 Hz, and NO speed figure is published (v1.6.7). L2 only — `--multi-env` WARNs | `python -m genesis_vehicle.server --send-hz 20`, `python -m genesis_vehicle.server.benchmark --send-hz 20` | [`server.md`](server.md) §2.6 |
 | Server reporting window | the `[STATS]`/`[SERVE]` window is `--stats-interval` seconds of WALL CLOCK in both modes (default 1.0; a fixed 50 LOOPS through v1.6.7, which collapsed to a median 0.0–0.1 ms on a server with headroom). The publishable metric is the duty cycle `D = Σserve_ms / Σwindow_ms`, plus `S' = Σserve_ms / Σsteps`; `Loop Avg` / `steps/loop` are still diluted by the busy-wait loops and that is NOT fixed. The benchmark's headline columns are now pooled over `loops`, so pre-v1.6.8 tables are not directly comparable (v1.6.8) | `python -m genesis_vehicle.server --stats-interval 1.0`, `python -m genesis_vehicle.server.benchmark --stats-interval 2.0` | [`server.md`](server.md) §2.5 |
-| Raycast-mode benchmark | order-independent, paired, fail-closed comparison of `dual_scene` vs `single_scene` (fresh process per measurement; prints NO ratio when the machine's noise cannot carry one) | `python -m genesis_vehicle.samples.bench_raycast_mode` | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
+| Raycast-mode benchmark | order-independent, paired, fail-closed comparison of `dual_scene` vs `single_scene` (fresh process per measurement; prints NO ratio when the machine's noise cannot carry one). On genesis-world 1.5.0 one run published single/dual 0.753 [0.648 .. 0.788] n=6 (`single_scene` faster) with caveats; no speed advantage is claimed, and the `dual_scene` default rests on its ray scene holding no vehicle geometry, not on speed (v2.0.5) | `python -m genesis_vehicle.samples.bench_raycast_mode` | [`dual-scene-raycast.md`](dual-scene-raycast.md) |
 | Samples | 22 runnable, self-contained example programs with bundled assets (every `samples/*.py` with a `__main__` entry, minus the `_hud.py` / `tank_tuning.py` helpers and the deprecated `two_scene_terrain` alias) | `python -m genesis_vehicle.samples.<name>` | [`../samples/README.md`](../samples/README.md) |
 
 **Model preparation & scene assembly**
@@ -106,7 +106,7 @@ The right-hand column is where the full story lives.
 | Wheel contact model | `wheel_contact="point"` (DEFAULT, one ray per wheel) or `"swept_envelope"` (M rays reduced by the swept-circle lower envelope, so a wheel climbs an edge instead of teleporting onto it). Opt-in; the default's contact is bit-identical to earlier releases only where no axle torque, brake or low-speed bound acts (a v1.8.0 witness rollout against the v1.5.0 tree); v1.7.0 moved the default vehicle (rolling resistance) and v1.8.0 the driving rollout itself | `VehicleScene.add_vehicle(wheel_contact=, contact_samples=)`, `WheelRayPattern(fan_samples=)` | [`tire-and-contact.md`](tire-and-contact.md), [`physics-contracts.md` §7.11](physics-contracts.md) |
 | Ray-MISS / grounded | "did this wheel's ray find ground?", against the raycaster's OWN miss sentinel rather than a fixed threshold | `Vehicle.wheels_grounded`, `all_wheels_grounded`, `MultiVehiclePhysics.grounded_list`, `is_ray_hit`, `is_ray_hit_corrected` | [`physics-contracts.md`](physics-contracts.md) §7.8, §7.10 |
 | Live vs derived config | which post-`build()` config writes take effect on the next step (steering geometry, driven axles, brake bias, AWD weights, the drive-omega cap, `eps_v`, a hook's `v_thr`, and since v2.0.4 `StaticFrictionLock`'s capped `k_spring`) and which need a rebuild (anything per-wheel, read off `WheelMeta`). Derived once at build, re-derived when a source moves (v1.6.4) | `_hotset.HOT_DEPENDENTS`, `VehicleScene.mark_config_dirty` | [`physics-contracts.md` §7.13](physics-contracts.md) |
-| Simulation time / gravity | `dt` and `substeps` are FIXED at `build()` on genesis 1.4.0 (the supported backend when this was measured, v1.6.5) and on 1.3.3 alike — post-build `sim_options` writes are inert (and raise on genesis 1.4.0, where `Scene.sim_options` is gone). READ the engine, do not echo the ctor args; `set_gravity` is the one live knob (v1.6.5) | `VehicleScene.effective_dt`, `VehicleScene.substeps`, `VehicleScene.set_gravity` | [`physics-contracts.md` §7.14](physics-contracts.md) |
+| Simulation time / gravity | `dt` and `substeps` are FIXED at `build()` (measured on genesis 1.4.0 at v1.6.5; the test pinning it passes on 1.5.0) — post-build `sim_options` writes are inert (and `Scene.sim_options` is gone since genesis 1.4.0). READ the engine, do not echo the ctor args; `set_gravity` is the one live knob (v1.6.5) | `VehicleScene.effective_dt`, `VehicleScene.substeps`, `VehicleScene.set_gravity` | [`physics-contracts.md` §7.14](physics-contracts.md) |
 | Config rebuild / reset | re-resolve a cfg after `build()` while the vehicle keeps its runtime state, and reset per vehicle rather than per flat row. A wheel-count or wheel-order change raises; a failed rebuild keeps the previous driver and re-raises on the next step (v1.6.2) | `VehicleScene.mark_config_dirty`, `VehicleScene.reset`, `MultiVehiclePhysics.reset(vehicle_ids=)`, `MultiVehicleKindPhysics.reset(rows=)` | [`physics-contracts.md` §7.12](physics-contracts.md) |
 
 **Telemetry & rendering feed**
@@ -115,7 +115,7 @@ The right-hand column is where the full story lives.
 |---|---|---|---|
 | Per-link transforms | batched world pose of every link (telemetry, attachments, external animation) | `get_link_transforms`, `LinkTransforms` | [`api-reference.md`](api-reference.md) §7 |
 | Render feed | closed-form wheel / visual-part poses (~µs, no engine FK) for an external renderer; what the OSC server streams | `wheel_visual_transforms()`, `VisualPartsTransforms` | [`api-reference.md`](api-reference.md) §7, [`server.md`](server.md) |
-| Viewer wheel visuals | instanced wheel rendering in the Genesis viewer/cameras — auto-managed by `VehicleScene` at `build()`; always on when rendering. Wheels are NOT driven through the rigid solver (external render nodes, closed-form poses) — physics-identical to headless, slight pose-streaming cost (~2–3 ms @ 30 vehicles) | `VehicleScene(wheel_render_mode=...)` | [`../samples/README.md`](../samples/README.md) |
+| Viewer wheel visuals | instanced wheel rendering in the Genesis viewer/cameras — auto-managed by `VehicleScene` at `build()`; always on when rendering. Wheels are NOT driven through the rigid solver (instanced render nodes, closed-form poses) — no solver write by construction, measured physics-identical to headless at v1.1.17 (not re-measured on 1.5.0), slight pose-streaming cost (~2–3 ms @ 30 vehicles). The `n_envs > 1` / `internal_sync` fallback (`WheelJointInternalSync`) DOES move the chassis trajectory (+0.142 m over 10.7 m on the reference car, genesis-world 1.4.5 and 1.5.0; implementation, dt 0.025 × 10 substeps, CPU/WSL2 — full conditions in `physics-contracts.md` §7.8, corrected in v2.0.5) | `VehicleScene(wheel_render_mode=...)` | [`../samples/README.md`](../samples/README.md) |
 
 ## Version
 
@@ -129,33 +129,40 @@ prints a one-line banner with the version on first construction in a process:
 Release history lives in
 [`../CHANGELOG.md`](../CHANGELOG.md).
 
-**Backend compatibility:** the supported Genesis physics backend is
-`genesis-world` **1.4.5**, with `quadrants` 1.3.3, `trimesh` >= 5.0 and
-`zstandard` (v1.6.9; the floor was 1.4.0 from v1.6.6 to v1.6.8; the `≥ 1.0.0`
-claim printed here through v1.6.4 was never enforced). The v1.6.9 tests run on
-1.4.5; **measurements published before v1.6.9 were taken on 1.4.0 and keep that
-label** — they were not re-run.
-**The floor is enforced by a warning, not a refusal.** Through v1.6.8 this page
-said "there is no version check"; since v1.6.9 there is one:
-`_gs_compat.check_genesis_floor` logs one `[genesis_vehicle:genesis-floor]`
-WARNING per process below 1.4.5 (or on a 1.4.5 pre-release) and continues. It
-runs from `vehicle_scene._ensure_genesis` (`VehicleScene.init_backend`, every
-`VehicleScene(init_genesis=True)`) and `VehiclePhysics.__init__` (also reached by
-the batched driver); a `VehicleScene(init_genesis=False)` that never builds a
-vehicle is not covered, and `GENESIS_VEHICLE_QUIET` does not silence it. The
-`<= 1.3.3` branches in `genesis_vehicle/_gs_compat.py` (force/torque -> wrench,
-link inertial accessors) and in `vehicle_scene.py` (`RigidOptions.dt`, terrain
-raycast mirror) still run if 1.3.3 is installed. They are dead weight slated
-for removal, not a compatibility promise — untested, unmeasured, and closed to
-additions. The instanced-wheel renderer likewise branches on the 1.3.x buffer
-API — see the 1.2.7 CHANGELOG entry. Per-release backend notes are in
-[`../CHANGELOG.md`](../CHANGELOG.md) (1.6.9 records the 1.4.0 → 1.4.5 bump — the
-eager signed-distance-field (SDF) build, the coarse-SDF material on SDK-owned bodies, the measured
-hibernation delay (also [`server.md`](server.md) §2.7), a parity table and the rollback recipe; 1.5.0 the 1.3.3 →
-1.4.0 bump; 0.5.33 the 0.4.6 → 1.0.0 one). Each parity table was measured ONCE
-at its bump — a historical record, not a standing guarantee.
+**Backend compatibility:** since v2.0.5 the SDK REQUIRES `genesis-world`
+**1.5.0** (`requirements.txt`: `>=1.5.0,<1.6`), with `quadrants` 1.4.0,
+`coacd` >= 1.0.14, `PyGEL3D` >= 0.8.0 and Python >= 3.12; for 1.4.5 stay on
+v2.0.4. The v2.0.5 tests run on 1.5.0; **measurements published before v2.0.5
+were taken on 1.4.5 (v1.6.9-v2.0.4) or 1.4.0 (earlier) and keep those
+labels** — they were not re-run unless the 2.0.5 CHANGELOG says so.
+**The floor is a refusal at import** (through v2.0.4 this paragraph described
+the warn-only `check_genesis_floor`, 1.4.5, removed in v2.0.5):
+`_gs_compat.require_genesis` runs right after `import genesis` in `core`,
+`vehicle_scene`, `multi_vehicle`, `raycast`, `scene_helpers`, `visual` and
+`server`, and raises `GenesisVersionError` (an `ImportError`) below 1.5.0,
+logging the message once at ERROR first. Both names are exported from the
+package root since v2.0.5 (`from genesis_vehicle import GenesisVersionError,
+require_genesis`; signatures in [`api-reference.md`](api-reference.md) §7,
+"Required engine"). `kinematics`, `urdf` and
+`control.sweep_measure` import without it, and `import genesis_vehicle`,
+`PathFollower` / `SweepTable` do not need it — so it is not "every module that
+touches genesis". >= 1.6 warns once and continues; a 1.5.x patch release is
+silent and NOT validated (the 20 engine-keyed identity locks skip on it). Every
+`<= 1.3.3` and 1.4.x compatibility branch (force/torque -> wrench, link
+inertial accessors, `Scene.sim_options`, the terrain-mirror probe, the
+renderer buffer API) was removed in v2.0.5; the legacy `RigidOptions.dt`
+normalisation (`vehicle_scene._normalize_rigid_dt`) remains. `_gs_compat.py`
+keeps one 1.5.0 code path per engine-private read. Per-release backend notes are in
+[`../CHANGELOG.md`](../CHANGELOG.md) (SDK v2.0.5 records the engine 1.4.5 → 1.5.0 bump —
+what the engine changed, the parity evidence and its limits, the field-team
+upgrade order and the rollback; SDK v1.6.9 the engine 1.4.0 → 1.4.5 bump — the eager
+signed-distance-field (SDF) build, the coarse-SDF material on SDK-owned bodies,
+the measured hibernation delay, also [`server.md`](server.md) §2.7; SDK v1.5.0
+for the engine 1.3.3 → 1.4.0 bump; SDK v0.5.33 for the engine 0.4.6 → 1.0.0
+one). Each parity table was
+measured ONCE at its bump — a historical record, not a standing guarantee.
 
-**On `genesis-world >= 1.4.0`, never pass `dt=` to `RigidOptions`** — that
+**Never pass `dt=` to `RigidOptions`** (since genesis-world 1.4.0) — that
 field became the solver SUBSTEP interval, so restating `SimOptions.dt` there
 now contradicts `substeps` and `Scene.build` raises. Ask for the rate with
 `VehicleScene(substeps=...)` instead; `VehicleScene` strips the legacy

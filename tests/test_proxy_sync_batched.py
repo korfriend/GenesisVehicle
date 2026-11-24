@@ -5,7 +5,8 @@ its raycast-scene proxy (the wheel-ray origin). Pre-1.0.11 this was a python
 loop of per-vehicle ``set_pos``/``set_quat`` — each triggering a whole-scene
 FK in the raycast scene (2·K FK passes; measured 29.8 ms at K=30, 80 % of
 the L2-vs-L3 dual gap). ``VehicleScene._sync_proxies_batched`` replaces it
-with one batched solver write + a single FK. This test pins the batched
+with one batched solver write (a single FK pass through 2.0.4; genesis-world
+1.5.0 refreshes poses lazily, on read). This test pins the batched
 path to the loop path: identical proxy poses for every vehicle.
 """
 
@@ -66,7 +67,7 @@ def test_batched_proxy_sync_matches_per_vehicle_loop(cpu_genesis):
 
 def test_batched_sync_includes_dynamic_obstacle_mirrors(cpu_genesis):
     """1.0.13: dynamic obstacles' raycast mirrors join the SAME batched write
-    (+ the single FK) as the vehicle proxies — the per-obstacle _sync_dynamic
+    as the vehicle proxies — the per-obstacle _sync_dynamic
     loop cost ~1 ms/obstacle just like the proxies did."""
     vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
     vs.add_ground_plane()
@@ -125,10 +126,43 @@ def test_batch_pose_reader_matches_entity_get_pos(cpu_genesis):
 
 def test_measure_distances_uses_batched_sync_without_fallback(cpu_genesis):
     """The step path must take the batched branch (health flag True) and not
-    silently fall back to the per-vehicle loop."""
+    silently fall back to the per-vehicle loop.
+
+    2.0.5: the v2.0.4 tree on genesis-world 1.5.0 raised inside
+    ``_sync_proxies_batched`` (``skip_forward`` removed from the engine) and
+    silently took the per-body fallback. Pinned here three ways: the health
+    flag, NO ``[genesis_vehicle:proxy-sync]`` warning, and the proxy pose equal
+    to the chassis pose after the sync."""
+    import logging
+
+    class _Cap(logging.Handler):
+        def __init__(self):
+            super().__init__(level=logging.DEBUG)
+            self.msgs = []
+
+        def emit(self, record):
+            self.msgs.append(record.getMessage())
+
     vs = VehicleScene(n_envs=1, raycast_mode="dual_scene", init_genesis=False)
     vs.add_ground_plane()
-    vs.add_vehicle(URDF, car_4w_rwd_ackermann, pos=(0.0, 0.0, 1.0))
+    veh = vs.add_vehicle(URDF, car_4w_rwd_ackermann, pos=(0.0, 0.0, 1.0))
     vs.build()
-    vs.step()
+    cap = _Cap()
+    log = logging.getLogger("genesis_vehicle")
+    log.addHandler(cap)
+    try:
+        for _ in range(3):
+            vs.step()
+        # Move the chassis, then run exactly the sync the next step would run.
+        veh.entity_main.set_pos(torch.tensor([1.5, -0.4, 0.8]), relative=False)
+        q = torch.tensor([0.98, 0.0, 0.0, 0.2])
+        veh.entity_main.set_quat(q / torch.linalg.norm(q), relative=False)
+        vs._measure_distances()
+    finally:
+        log.removeHandler(cap)
     assert vs._proxy_sync_ok is True
+    assert not [m for m in cap.msgs if "proxy-sync" in m], cap.msgs
+    mp, mq = veh.entity_main.get_pos().reshape(-1), veh.entity_main.get_quat().reshape(-1)
+    pp, pq = veh.proxy.get_pos().reshape(-1), veh.proxy.get_quat().reshape(-1)
+    assert torch.allclose(mp, pp, atol=1e-6), (mp, pp)
+    assert torch.allclose(mq, pq, atol=1e-6) or torch.allclose(mq, -pq, atol=1e-6), (mq, pq)

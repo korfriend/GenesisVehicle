@@ -160,7 +160,12 @@ installed. Full contract:
 [`physics-contracts.md` §7.12](physics-contracts.md).
 
 `raycast_mode="dual_scene"` (default) raycasts static terrain in a separate scene
-(BVH built once, shared across envs); `"single_scene"` is the classic one scene.
+that holds no vehicle collision geometry, so a wheel ray cannot hit the vehicle
+itself; `"single_scene"` is the classic one scene. (Through v2.0.4 this said
+"BVH built once, shared across envs" — a description of the pre-1.5.0 raycaster.
+On genesis-world 1.5.0 each mesh's own tree is built once in BOTH modes and a
+per-env top-level tree is refitted — every update for a collision target, after
+a geometry change for a visual target; see [`dual-scene-raycast.md`](dual-scene-raycast.md).)
 The legacy names `"raywheel"`/`"inline"` and `"split"`/`"single"` are accepted as
 aliases for `"dual_scene"`/`"single_scene"`. Use `collision_morph` to give a
 coarse/convex collider while raycasting a detailed surface (non-convex meshes are
@@ -170,8 +175,10 @@ wheel-raycast target; use `wheel_raycast_morph` to raycast a detailed surface
 while colliding against `collision_morph`. `add_dynamic` adds a moving body that
 is collide-only by default — pass `wheel_raycast=True` only for a moving surface
 the wheels must sense/drive onto (ramp, moving platform); on a non-primitive
-(mesh) morph that logs a warning, since its mirror BVH re-fits every step
-(prefer a primitive Box/Sphere/Cylinder collider). Scope: one or more vehicles
+(mesh) morph that logs a `refit-cost` warning (through v2.0.4 it said the
+mirror's BVH re-fits over every face each step — not what 1.5.0 does; no
+per-step cost of a mesh mirror is measured on 1.5.0; a primitive
+Box/Sphere/Cylinder collider remains the simplest choice). Scope: one or more vehicles
 (L2), L3 (`n_envs >= 1`), static terrain/mesh targets, and dynamic raycast
 targets (`add_dynamic`).
 
@@ -183,15 +190,15 @@ targets (`add_dynamic`).
 |---|---|---|
 | `n_envs` | `1` | L3 batch size (parallel envs) |
 | `dt` | `1/200` | sim step time (s) |
-| `raycast_mode` | `"dual_scene"` | `"dual_scene"` (separate static-BVH raycast scene) / `"single_scene"` (one scene). Aliases: `raywheel`/`split`, `inline`/`single` |
+| `raycast_mode` | `"dual_scene"` | `"dual_scene"` (separate raycast scene with no vehicle collision geometry) / `"single_scene"` (one scene). Aliases: `raywheel`/`split`, `inline`/`single`. (Through v2.0.4: "separate static-BVH raycast scene" — pre-1.5.0 wording) |
 | `solver` | `"batched"` | `"batched"` (one `MultiVehiclePhysics`, same-kind vehicles grouped) / `"per_vehicle"` (one `VehiclePhysics` each) |
 | `gravity` | `(0,0,-9.81)` | world gravity |
 | `substeps` | `4` | engine solver substeps per `step()` (internal step = `dt/substeps`). Refines the CHASSIS rigid-body/contact integration only: the SDK's wheel wrench is applied once per step and held constant across substeps, so the ray-wheel spring/damper always integrate at `dt`. Not trajectory-neutral — see [`server.md`](server.md) §2.3 |
-| `sim_options` / `rigid_options` / `vis_options` | `None` | inject Genesis option objects (else built from the args above). Injecting a `sim_options` that omits `substeps` alongside a `rigid_options(dt=)` is the ONE way to make the authored and effective substep counts disagree — genesis 1.4.0 then derives the count silently (measured authored 1, effective 4 on a raw `gs.Scene`: `SimOptions(dt=0.02)` + `RigidOptions(dt=0.005)` + Plane + Box, genesis-world 1.4.0, CPU/WSL2). Read `VehicleScene.substeps`, not your argument; see [`physics-contracts.md`](physics-contracts.md) §7.14 |
+| `sim_options` / `rigid_options` / `vis_options` | `None` | inject Genesis option objects (else built from the args above). Injecting a `sim_options` that omits `substeps` alongside a `rigid_options(dt=)` is the ONE way to make the authored and effective substep counts disagree — genesis 1.4.0 then derives the count silently (measured authored 1, effective 4 on a raw `gs.Scene`: `SimOptions(dt=0.02)` + `RigidOptions(dt=0.005)` + Plane + Box, genesis-world 1.4.0, CPU/WSL2; the 1.5.0 source keeps the same reconciliation, `engine/simulator.py`, not re-measured). Read `VehicleScene.substeps`, not your argument; see [`physics-contracts.md`](physics-contracts.md) §7.14 |
 | `viewer_options` | `None` | native-viewer config — `gs.options.ViewerOptions(camera_pos, camera_lookat, camera_fov, res, max_FPS, refresh_rate, …)`. Main scene only (the raycast scene is never shown). Needs `view="native"` to actually open a window |
 | `view` | `None` | `None` headless / `"native"` (Genesis viewer) / `"cv2"` (render cameras for a cv2 HUD) |
 | `show_viewer` | `False` | back-compat alias for `view="native"` |
-| `wheel_render_mode` | `"auto"` | how wheel visuals reach the Genesis renderer when the scene renders. Whenever a viewer/camera is present, wheel visuals are ALWAYS active (there is no off switch — headless runs simply have nothing to render). `"auto"` (default) uses the **instanced renderer** (v1.1.17) when supported (`n_envs == 1`): wheel poses are computed closed-form and drawn through Genesis's external render-node channel (the same machinery as the debug-draw overlays) — **the wheels are NOT updated through the Genesis rigid solver**, so physics is bit-identical to a headless run; expect only a slight per-step cost for the pose streaming (~2–3 ms at 30 vehicles, CPU). `"instanced"` forces that path (raises when unsupported); `"internal_sync"` forces the legacy `WheelJointInternalSync` fallback (drives solver joints — small physical side effects, clamped since v1.1.16), which is also what `n_envs > 1` rendered scenes fall back to automatically |
+| `wheel_render_mode` | `"auto"` | how wheel visuals reach the Genesis renderer when the scene renders. Whenever a viewer/camera is present, wheel visuals are ALWAYS active (there is no off switch — headless runs simply have nothing to render). `"auto"` (default) uses the **instanced renderer** (v1.1.17) when supported (`n_envs == 1`): wheel poses are computed closed-form and drawn as instanced render nodes added to the rasterizer context (`_gs_compat.add_render_node` / `queue_instance_poses`; genesis-world 1.5.0 removed the external render-node channel this row named through v2.0.4) — **the wheels are NOT updated through the Genesis rigid solver**, so by construction no solver state is written (measured physics-identical to headless to 1e-6 m at v1.1.17; not re-measured on 1.5.0); the URDF wheel visuals are hidden through an engine-private per-env mask (`_gs_compat.hide_vgeoms`, raises if the engine drops it). Expect a slight per-step cost for the pose streaming (~2–3 ms at 30 vehicles, CPU, a pre-1.5.0 figure). `"instanced"` forces that path (raises when unsupported); `"internal_sync"` forces the legacy `WheelJointInternalSync` fallback, which is also what `n_envs > 1` rendered scenes fall back to automatically. It drives solver joints and MOVES THE CHASSIS TRAJECTORY: the reference car ends about +0.142 m ahead of a headless run over 10.7 m (genesis-world 1.4.5 and 1.5.0; mechanism not established). Through v2.0.4 this row said "small physical side effects, clamped since v1.1.16" — the clamp bounds landing compression only; see [`physics-contracts.md`](physics-contracts.md) §7.8 |
 | `init_genesis` | `True` | auto-init the (cpu-default) physics backend if not already up; set `False` to manage `gs.init` yourself. **The backend itself is chosen by `VehicleScene.init_backend()`, not here** |
 
 > **Physics backend** is set by the classmethod `VehicleScene.init_backend("cpu" \| "gpu")` (process-global, once, default **cpu**) BEFORE any scene — not a constructor arg. The renderer is separate (always GPU). See "Backends" above.
@@ -203,7 +210,7 @@ targets (`add_dynamic`).
 | `urdf_path` | — | URDF; always parsed for wheel positions |
 | `preset` | `None` | preset fn → cfg. Pass this **or** `cfg=`. Called as `preset(urdf_path, stability=stability)`, so a custom preset must accept a `stability` keyword (a wrapper without one raises `TypeError`) |
 | `cfg` | `None` | pre-built `VehicleConfig` (e.g. server `build_cfg`) |
-| `morph` | `None` | entity morph built internally (custom collider/visual); else built from `urdf_path` |
+| `morph` | `None` | entity morph built internally (custom collider/visual); else built from `urdf_path`. A list/tuple here or in `urdf_path` raises `TypeError` (per-env vehicle variants are not supported, v2.0.5) |
 | `pos` / `quat` | `(0,0,1)` / `None` | spawn pose when `morph` is not given |
 | `material` / `surface` / `vis_mode` | `None` | passed to the main-scene `add_entity` |
 | `stability` | `"control"` | stability profile passed to `preset` |
@@ -216,9 +223,9 @@ targets (`add_dynamic`).
 
 | param | default | meaning |
 |---|---|---|
-| `morph` | `None` | one morph for both collision + raycast |
-| `collision_morph` | `None` | coarse/convex collider (overrides `morph` for collision) |
-| `wheel_raycast_morph` | `None` | detailed surface the wheel rays hit (overrides `morph` for raycast) |
+| `morph` | `None` | one morph for both collision + raycast; **v2.0.5:** or a LIST of k morphs, one variant per env (see "Per-env variants" below) |
+| `collision_morph` | `None` | coarse/convex collider (overrides `morph` for collision); a list of the same length k when `morph` / `wheel_raycast_morph` is a list |
+| `wheel_raycast_morph` | `None` | detailed surface the wheel rays hit (overrides `morph` for raycast); a list of the same length k when any given morph is a list |
 | `collision` | `True` | build a main-scene rigid collider (a `convexify=False` mesh > 1000 faces is **refused** — see the mesh guard below; see matrix for the `False` + single_scene caveat) |
 | `material` / `surface` / `vis_mode` | `None` | passed to `add_entity` |
 | `name` | `None` | handle label |
@@ -238,14 +245,32 @@ targets (`add_dynamic`).
 
 | param | default | meaning |
 |---|---|---|
-| `morph` | — | the body geometry |
+| `morph` | — | the body geometry; **v2.0.5:** or a LIST of k morphs (per-env variants), accepted only with `physics=False` |
 | `physics` | `True` | `True`: free rigid (moves under physics). `False`: fixed base you teleport via `handle.set_pose` (e.g. UE-driven) |
-| `wheel_raycast` | `False` | `True`: wheels can sense / drive onto it (adds a synced raycast mirror in dual_scene). On a non-primitive morph this logs a re-fit-cost warning |
+| `wheel_raycast` | `False` | `True`: wheels can sense / drive onto it (adds a synced raycast mirror in dual_scene). On a non-primitive morph this logs a `refit-cost` warning (its 2.0.4 per-face re-fit rationale is not what 1.5.0 does; see §0.2) |
 | `mass` | `None` | override mass (applied after build; only meaningful for `physics=True`) |
 | `material` / `surface` / `vis_mode` | `None` | passed to `add_entity` |
 | `name` | `None` | handle label |
 
 **`add_ground_plane(*, friction=0.85)`** — convenience for `add_static(morph=Plane(...))`.
+
+**Per-env variants (v2.0.5).** `add_static`, `add_raycast_surface` and
+`add_dynamic(physics=False)` accept a list of k morphs; genesis-world 1.5.0
+builds one heterogeneous entity and places one variant per env in contiguous
+blocks of nearly equal size (pass exactly `n_envs` morphs for the identity
+mapping). After `build()`, `StaticBody.variant_index` / `DynamicBody.variant_index`
+(a defaulted last dataclass field, `None` for a single-morph body) is a
+`torch.long` tensor `(n_envs,)` naming each env's variant, from
+`_gs_compat.variant_index(n_variants, n_envs)` — an ENGINE-PRIVATE read of the
+engine's own `_balanced_variant_mapping`, imported at call time, raising
+`ImportError` naming the symbol if it is gone. The `dual_scene` mirror gets the
+same list and the same mapping. Refused before build: a list in `add_vehicle`
+(`TypeError`); a `Terrain` / `Plane` in a list, an empty or nested list, lists of
+different lengths or mixed with a single morph, k > `n_envs`, and an
+`add_dynamic` list with `physics=True` (all `ValueError`). k = 1 is a single
+morph. Variants must share their kinematic topology (the engine's rule).
+What was measured and what was not: [`batching.md`](batching.md) "Per-env
+variants".
 
 ### 0.2 Parameter → behavior matrix
 
@@ -265,8 +290,9 @@ with it in the main scene; **Wheels sense** = the wheel rays detect it as ground
 **`add_raycast_surface(morph, *, surface=None, name=None)`** (v1.0.10) is the
 first-class spelling of the `collision=False` row: a wheel-raycast-ONLY
 surface — kinematic `use_visual_raycasting` body in the raycast scene, zero
-rigid-solver presence (no collision geoms / FK / broadphase pairs, build-once
-BVH, mesh-guard exempt). Prefer it over `add_static(collision=False, ...)`
+rigid-solver presence (no collision geoms / FK / broadphase pairs; a
+visual-raycast target whose tree is refitted only after its geometry changed
+on genesis-world 1.5.0 — "build-once BVH" through v2.0.4; mesh-guard exempt). Prefer it over `add_static(collision=False, ...)`
 for roads/terrain the wheels drive on but the chassis need not collide with
 (the server's `--road-raycast-only` path uses it). dual_scene only — raises
 the same single_scene `ValueError`.
@@ -287,12 +313,15 @@ raycast target (the wheels ride its convex bulge, not the true surface).
 built from a `gs.morphs.Mesh` with `convexify=False` and **> 1000 faces**
 (`_MAX_NONCONVEX_COLLISION_FACES`) is *refused* — `_guard_collision_mesh` raises
 a `ValueError` and logs a `[genesis_vehicle:mesh-guard] >>> REVIEW THIS MESH <<<`
-error. As a *rigid* body it is expensive **two** ways, either of which can crash
-the process (under WSL, the whole VM): (1) an SDF/collision build over every
-face, and (2) in `single_scene`, a **per-step wheel-raycaster BVH re-fit** over
-every face (the vehicle moves → the BVH is never static). The guard fires **even
-with a large `sdf_cell_size`**, because that bounds neither cost: (2) is
-untouched by it, and for (1) a large `sdf_cell_size` does NOT cap the SDF grid
+error. As a *rigid* body its SDF/collision build over every face can crash the
+process (under WSL, the whole VM). (Through v2.0.4 this paragraph named a
+second cost — in `single_scene`, a per-step wheel-raycaster BVH re-fit over
+every face. That described the pre-1.5.0 raycaster; genesis-world 1.5.0 builds
+a mesh's own tree once and refits only a per-env top-level tree (every update
+for a collision target such as the `single_scene` terrain), and the
+guard's error text no longer names it. When the guard fires is unchanged.) The
+guard fires **even with a large `sdf_cell_size`**, because a large
+`sdf_cell_size` does NOT cap the SDF grid
 of a watertight non-convex mesh — genesis first refines the cell to half the
 wall thickness, up to `sdf_max_res` (128 per axis by default). This paragraph
 said through v1.6.8 that `sdf_cell_size` "only caps the SDF grid"; that was
@@ -302,39 +331,52 @@ same correction in the `vehicle_scene.py` guard text). A terrain that set
 **every rigid path**: `add_static` (main collider, and the
 single_scene raycast target) and `add_dynamic` (main body, and the dual_scene
 `wheel_raycast` mirror). **Exempt:** primitives & heightfields (not a `Mesh`),
-`convexify=True` (convex decomposition keeps both the collider and the raycast
-BVH cheap), and `collision=False` kinematic wheel-raycast surfaces (no SDF, and
-the BVH is built once — the recommended home for a high-poly mesh). Fix: decimate
+`convexify=True` (convex decomposition keeps the collider cheap), and
+`collision=False` kinematic wheel-raycast surfaces (no SDF — the recommended
+home for a high-poly mesh). Fix: decimate
 the mesh, set `convexify=True`, or register it as `add_static(collision=False)`
 (kinematic) in dual_scene.
 
 **Log prefixes.** All `VehicleScene` warnings/errors carry a greppable
 `[genesis_vehicle:<slug>]` prefix so an issue class is easy to spot/filter:
 `mesh-guard` (mesh refused), `single-scene` (a dual_scene-only option used in
-single_scene), `refit-cost` (a non-primitive `wheel_raycast` mirror that re-fits
-each step), `genesis-floor` (installed genesis-world below the supported 1.4.5,
-once per process, v1.6.9), `coarse-sdf` (a NON-convex geom carrying the SDK's
+single_scene), `refit-cost` (a non-primitive `wheel_raycast` mirror; the per-face re-fit it
+warned about through v2.0.4 is not what 1.5.0 does, the condition is unchanged),
+`genesis-version` (v2.0.5: ERROR before `GenesisVersionError` below 1.5.0,
+WARNING on >= 1.6 or an unparseable version, each once per process; it replaced
+v1.6.9's warn-only `genesis-floor`), `coarse-sdf` (a NON-convex geom carrying the SDK's
 coarse SDF kwargs in a scene where a contact can read its SDF, once per scene
 at `build()`, v1.6.9). Grep `\[genesis_vehicle:` for all, or a slug for one class.
 
-**SDF cost of materials (genesis-world 1.4.5, v1.6.9).** 1.4.5 computes the
-signed distance field (SDF) of EVERY collision geom at `build()` (1.4.0 computed
-it only when a non-convex, non-terrain geom was in a collision pair). Per axis
-the grid is `cell = clip(target, grid/(sdf_max_res-1), grid/max(sdf_min_res-1, 2))`,
-so:
+**SDF cost of materials (written for genesis-world 1.4.5 in v1.6.9; updated
+for 1.5.0 in v2.0.5).** Since 1.4.5 the engine computes the signed distance
+field (SDF) of EVERY collision geom at `build()` (1.4.0 computed it only when a
+non-convex, non-terrain geom was in a collision pair). Per axis the grid is
+`cell = clip(target, grid/(sdf_max_res-1), grid/max(sdf_min_res-1, 2))`, where
+since 1.4.7 `target` is `sdf_cell_size` refined to half the convex WIDTH of a
+convex geom (half the wall thickness of a watertight non-convex one), so:
 
 | material | convex geom grid (nodes per axis) |
 |---|---|
-| `material=None` / `gs.materials.Rigid()` (default `sdf_cell_size=0.005`) | 128 for a mesh or URDF geom; 32 for a primitive (genesis resets a Primitive's `sdf_max_res` to 32) |
-| `Rigid(sdf_cell_size=1e4)` | 32 — a large cell size does NOT switch the SDF off; it lands on the default `sdf_min_res` |
-| `Rigid(sdf_cell_size=1e4, sdf_min_res=16)` (= `_gs_compat.COARSE_SDF_MATERIAL_KW`) | 16, the validator minimum |
+| `material=None` / `gs.materials.Rigid()` (default `sdf_cell_size=0.005`) | up to 128 for a mesh or URDF geom; up to 32 for a primitive (genesis resets a Primitive's `sdf_max_res` to 32) |
+| `Rigid(sdf_cell_size=1e4)` | 32 on a geom that is not thin — a large cell size does NOT switch the SDF off; since 1.4.7 a THIN convex geom refines past it along its thin axis |
+| `Rigid(sdf_cell_size=1e4, sdf_min_res=16, sdf_max_res=16)` (= `_gs_compat.COARSE_SDF_MATERIAL_KW` since v2.0.5) | 16 on every geom, the validator minimum |
+
+`COARSE_SDF_MATERIAL_KW` gained `"sdf_max_res": 16` in v2.0.5. Through v2.0.4 it
+had two keys and this table said they give 16 on any convex geom — true through
+genesis-world 1.4.6 only; 1.4.7's convex-width refinement pulls a thin convex
+geom (a 0.1 m wall) up toward the default `sdf_max_res`. The third key also caps
+a watertight NON-convex coarse body at 16 per axis (through v2.0.4 it still
+refined up to 128). A two-key dict copied from an older release is no longer
+recognised as coarse by the post-build check (`_gs_compat._is_coarse_material`
+tests all three keys).
 
 `VehicleScene` does **not** change a material you pass or leave as `None`
 (`add_vehicle`, `add_static`, `add_dynamic`). It uses the coarse kwargs only on
 the collision bodies it owns: the `dual_scene` rigid raycast mirror of a
 `Terrain` and the `add_dynamic(wheel_raycast=...)` raycast mirror — both fixed
 bodies in the raycast scene, whose SDF nothing reads. Measured cost of a default
-material on 1.4.5: a default-material car took +0.8 .. +1.2 s of build and +490 .. +508 MB of peak resident memory (two default-material cars, CHANGELOG 1.6.9 §3) versus 1.4.0. For a body
+material on 1.4.5: a default-material car took +0.8 .. +1.2 s of build and +490 .. +508 MB of peak resident memory (two default-material cars, CHANGELOG 1.6.9 §3) versus 1.4.0 — a 1.4.5 fact. On 1.5.0 that penalty was not seen: reference car, default material 4.43 s / 1132 MB vs coarse kwargs 4.34 s / 1133 MB build / peak resident memory (implementation, CPU/WSL2, cold asset cache, warm kernel cache, n=3 medians, CHANGELOG 2.0.5 §9; mechanism not instrumented). For a body
 whose geoms are all convex, in a scene with no non-convex, non-terrain
 collision geom (so no contact reads any SDF), pass the coarse kwargs yourself.
 Whether a convex geom's coarse SDF is read when it touches a non-convex geom
@@ -369,9 +411,14 @@ building the mirror). For "collide but the wheels ignore it" you need
 single_scene therefore has no effect and **logs a warning**.
 
 The dual_scene mirror for a `wheel_raycast=True` dynamic body is a *rigid* body in
-the raycast scene's rigid solver (re-synced every `step`), so only its own small
-BVH re-fits — the heavy static terrain BVH stays untouched. That re-fit cost
-scales with the morph's face count, which is why a non-primitive morph warns.
+the raycast scene's rigid solver (re-synced every `step`). On genesis-world
+1.5.0 it belongs to that scene's collision target, whose per-env top-level tree
+is refitted on every sensor update (its mesh trees are built once); the
+kinematic terrain is a separate visual-raycast target. Through v2.0.4 this
+paragraph said only the mirror's own small BVH re-fits, at a cost scaling with
+its face count, "the heavy static terrain BVH" untouched — a description of the
+pre-1.5.0 raycaster. A non-primitive morph still warns (`refit-cost`); no
+per-step cost of it is measured on 1.5.0.
 
 **`add_vehicle`** — always collides (main-scene rigid) and the wheels always
 raycast (a proxy + wheel sensor in the raycast scene in dual_scene; the sensor
@@ -595,10 +642,12 @@ angle accumulators. Pass a `(K,)` long tensor or a `(n_envs,)` bool mask to
 reset only specific environments (RL / MPPI partial reset).
 
 `VehiclePhysics.__init__` prints a one-line version banner the first time
-it's called per process. Suppress with `GENESIS_VEHICLE_QUIET=1`. Since v1.6.9
-it also runs the supported-floor check (`_gs_compat.check_genesis_floor`: one
-`[genesis_vehicle:genesis-floor]` WARNING per process if genesis-world is below
-1.4.5, never raises), which `GENESIS_VEHICLE_QUIET` does NOT silence.
+it's called per process. Suppress with `GENESIS_VEHICLE_QUIET=1`. From v1.6.9
+through v2.0.4 it also ran a warn-only floor check (`check_genesis_floor`,
+1.4.5); that check and its two call sites were removed in v2.0.5. The required
+engine is now checked at IMPORT: `genesis_vehicle.core` (where `VehiclePhysics`
+lives) calls `_gs_compat.require_genesis` right after `import genesis` and raises
+`GenesisVersionError` below genesis-world 1.5.0 — see "Required engine" in §7.
 
 ## 2. Inputs
 
@@ -732,8 +781,12 @@ when it declares a non-zero stiffness**, and only then reads `damping` /
 Note this is about *sourcing the number*. The ray-wheel pipeline never applies
 suspension force through the URDF joint — `N` goes onto the chassis with the
 rest of the wrench (`_gs_compat.apply_links_wrench`), and the prismatic joint
-is visual
-(`visual_susp_mode`). See `docs/physics-contracts.md`.
+is driven only for the Genesis viewer (`visual_susp_mode`). That joint path is
+NOT physics-neutral (`physics-contracts.md` §7.8, corrected in v2.0.5): the set
+(kinematic) write moves the chassis trajectory, and on genesis-world 1.5.0 a
+URDF `effort="0"` is an UNBOUNDED force range, so the `"control"` path's PD is
+live there (it was inert on 1.4.5). Through v2.0.4 this paragraph called the
+prismatic joint "visual".
 
 `ConfigError` — raised on bad config (missing required fields, wheel count
 mismatch, sides missing for skid-steer, etc.). It subclasses `ValueError`.
@@ -799,8 +852,10 @@ authoritative.**
 > authored inertia onto its principal axes and PERMUTES the components, so
 > projecting the raw stored diagonal read the wrong one — the reference wheel
 > (`ixx=1, iyy=2, izz=1`) returned 1.0 instead of 2.0. The read also moved:
-> `link.inertial_*` on genesis <= 1.3.3, `link.desc.*` on >= 1.4.0, branched in
-> `genesis_vehicle/_gs_compat.py`.
+> `link.inertial_*` on genesis <= 1.3.3, `link.desc.*` on >= 1.4.0. Since
+> v2.0.5 only `link.desc.*` is read (`_gs_compat.link_inertial`; the `<= 1.3.3`
+> branch was removed, and `check_link_inertial_api` raises if a field is
+> missing).
 
 ## 5. Strategies
 
@@ -1246,6 +1301,36 @@ genesis_vehicle.__version__               # str, e.g. "0.6.0"
 genesis_vehicle.VERSION_INFO              # tuple, e.g. (0, 6, 0)
 genesis_vehicle.version() -> str          # same as __version__
 genesis_vehicle.version_info() -> tuple   # same as VERSION_INFO
+
+# --- Required engine (v2.0.5) ---
+genesis_vehicle.GenesisVersionError       # class, subclass of ImportError
+genesis_vehicle.require_genesis(gs_module=None) -> None
+    # Raises GenesisVersionError if genesis-world < 1.5.0 (a 1.5.0 pre-release
+    # such as 1.5.0rc1 counts as older); logs the message ONCE per process at
+    # ERROR on the `genesis_vehicle` logger first, because a caller's
+    # `except ImportError:` would otherwise swallow it. >= 1.6.0: one WARNING
+    # ("not validated") and continues; an unparseable version: one WARNING and
+    # continues; a 1.5.x patch release: silent, NOT validated. Build suffixes
+    # (`1.5.0-cuda12`, `1.5.0_cpu`) parse as 1.5.0.
+    # Called at module level right after `import genesis` in core,
+    # vehicle_scene, multi_vehicle, raycast, scene_helpers, visual and
+    # server/__init__ -- so VehicleScene, VehiclePhysics, MultiVehiclePhysics,
+    # scene_helpers and the server fail at import on an older engine.
+    # NOT covered: genesis_vehicle.kinematics (imports genesis.utils.geom at
+    # module level), genesis_vehicle.urdf (no genesis import) and
+    # genesis_vehicle.control.sweep_measure (imports genesis lazily; a sweep
+    # still hits the check when it builds its VehicleScene) import without it
+    # (impl-review probe on 1.4.5). `import genesis_vehicle`, PathFollower,
+    # SweepTable, DifferentiablePlant and control.identify import on an older
+    # engine too (genesis itself must still be importable). Constants:
+    # _gs_compat.GENESIS_FLOOR = (1, 5, 0), GENESIS_UNVALIDATED_FROM = (1, 6, 0).
+# Removed in v2.0.5 (no stub; no importer existed in samples/, server/ or the
+# GeneVehicle demos): _gs_compat.check_genesis_floor, has_wrench_api,
+# scene_sim_options (read scene.options.sim), vehicle_scene._kinematic_supports_terrain,
+# visual.patch_viewer_atomic_update.
+# New engine-private helpers in _gs_compat (v2.0.5): variant_index,
+# kinematic_raycast_entity, add_render_node, queue_instance_poses, hide_vgeoms
+# (writes the private vgeom.active_envs_mask; raises AttributeError if absent).
 ```
 
 ### 7.5 Per-link transforms (telemetry / animation / attach, v0.6.0)
@@ -1359,9 +1444,13 @@ single `VehiclePhysics` at K=1 (Δ = 0).
 > **Naming:** the legacy viewer-side wheel-joint driver (internal since v1.1.18) is **`WheelJointInternalSync`** (formerly `VisualJointSync`, renamed v1.1.19)
 > (renamed from `VisualSync` in v0.7.8; the old alias was removed in v0.7.9).
 > The name is explicit on purpose — it drives the **wheel** visual joints
-> (spin/steer/suspension) for the **Genesis viewer** only; it never moves the
-> chassis and does not affect physics. External renderers don't need it at
-> all — use `visual_parts_transforms` / `wheel_visual_transforms`.
+> (spin/steer/suspension) for the **Genesis viewer** only; it never writes the
+> chassis pose. It DOES affect physics (corrected in v2.0.5; through v2.0.4 this
+> note said it "does not affect physics" — wrong): the reference car ends about
+> +0.142 m ahead of a headless run over 10.7 m, on genesis-world 1.4.5 and 1.5.0,
+> mechanism not established ([`physics-contracts.md`](physics-contracts.md) §7.8).
+> External renderers don't need it at all — use `visual_parts_transforms` /
+> `wheel_visual_transforms`.
 
 > **Auto-managed by `VehicleScene` (v0.9.18):** `enable_wheel_joint_internal_sync` is
 > **not a user-facing knob**. `VehicleScene.build()` sets it automatically — ON iff

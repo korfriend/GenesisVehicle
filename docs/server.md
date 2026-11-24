@@ -64,6 +64,8 @@ python -m genesis_vehicle.server --override_dt 0.025
 # CPU drops ~20 % (40 loops/s instead of 50).
 python -m genesis_vehicle.server --override_dt 0.01  # 100 Hz physics (finer)
 python -m genesis_vehicle.server --no-floor --vis_mode visual -v
+# (the default --vis_mode collision makes genesis-world 1.5.0 log a deprecation
+#  warning for vis_mode="collision"; the collision geometry is still drawn)
 
 # internal substeps (v1.1.25; default 4, both modes): internal step = dt/substeps.
 # It refines the CHASSIS rigid-body/contact integration, NOT the ray-wheel
@@ -73,10 +75,22 @@ python -m genesis_vehicle.server --substeps 1        # coarser chassis contact i
 python -m genesis_vehicle.server --substeps 10       # extra-fine internal step
 
 # viewer follow camera (v1.1.25): track one target with the viewer's own
-# follow_entity (jitter-free, smoothed; world-fixed offset) instead of the
-# one-shot bird's-eye framing. 'side' views from -Y (wheel watching),
-# 'chase' from behind (-X). Ignored when --headless.
+# follow_entity (smoothed; world-fixed offset) instead of the one-shot
+# bird's-eye framing. 'side' views from -Y (wheel watching), 'chase' from
+# behind (-X). Ignored when --headless. Through v2.0.4 this comment said
+# "jitter-free" because the camera was committed atomically with the pose
+# push; that patch never applied on genesis-world >= 1.4 and was removed in
+# v2.0.5, so a followed vehicle may tremble fore/aft at speed (a draw
+# artefact; physics unaffected; not measured on 1.5.0).
 python -m genesis_vehicle.server --follow-cam side --follow-target 0
+
+# target-target collision off (L2, PRIMITIVE /Init/Target targets only; v2.0.5):
+# Box/Sphere/Cylinder targets get contype=0b10, conaffinity=0b01, so they pass
+# through EACH OTHER but still collide with the ground, terrain and
+# obstacles. Refused (rc 2, see §2.8): with --multi-env (at argument parsing),
+# and in L2 when the client sends a URDF vehicle (/Genesis/Vehicle/Init).
+# Through v2.0.4 this flag did nothing on genesis-world >= 1.4.0.
+python -m genesis_vehicle.server --no-target-collision
 
 # pacing: ADAPTIVE catch-up is the default (v1.0.20). The server monitors
 # steps/loop: sustained overload (window avg ≥ 1.5) drops the cap to 1 —
@@ -1111,7 +1125,7 @@ It is used only as the denominator in rule 1.
 
 ---
 
-## 2.7 Rigid-body hibernation and SDF material on genesis-world 1.4.5 (v1.6.9)
+## 2.7 Rigid-body hibernation and SDF material on genesis-world 1.4.5 (v1.6.9; 1.5.0 rows added in v2.0.5)
 
 | abbr | meaning |
 |---|---|
@@ -1185,8 +1199,20 @@ on, brake 1.0 — 49 steps, 4.0393 m (2.0.4, with the lock) vs 4.0394 m (2.0.3
 builder, no lock). The 2.0.4 lock does not change the start from rest in this
 harness.
 
-`docs/differentiable-sot.md` §7 notes that a `requires_grad` scene bans
-hibernation; that is unrelated to the delay above.
+**Re-measured on genesis-world 1.5.0 for v2.0.5** (implementation, harness
+`hib.py` of the 2.0.5 release work, outside this repo: the L2 server's
+`RigidOptions`, reference car, z 1.0, substeps 10, 160 braked steps then 120 at
+throttle 0.5, CPU/WSL2, 7 runs per arm): hibernation on — 46 / 100 zero-velocity
+steps, 3.968262 m; off — 0, 3.968301 m (all 7 runs identical per arm). The 2.0.4
+tree on 1.4.5 in the same harness: 46 / 100, 3.968315 m on; 0, 3.968387 m off.
+Upstream changed hibernation wake-up in 1.4.6 (#3594 / #3620, named in the
+2.0.5 plan, not read further); in this harness the start from rest is unchanged
+between the two engines. The cause of
+the sleep / wake cycling is still not established, L3 with `n_envs > 1` is
+still not measured, and hibernation stays ON.
+
+(A `requires_grad` scene bans hibernation — an upstream constraint, not
+measured here; it is unrelated to the delay above.)
 
 ### The `n_cells` monkey-patch is gone; server collision bodies use `COARSE_SDF_MATERIAL_KW`
 
@@ -1208,7 +1234,17 @@ The patch is removed. The L2 vehicle (`vehicle_builder.build_vehicle`), the L3
 shared vehicle, the generic `/Init/Target` primitive and every
 `env_builder.build_obstacles` obstacle now use
 `gs.materials.Rigid(..., **COARSE_SDF_MATERIAL_KW)` = `sdf_cell_size=1e4,
-sdf_min_res=16` (16 nodes per axis on a convex geom). That is safe only because
+sdf_min_res=16, sdf_max_res=16` since v2.0.5 (16 nodes per axis on every geom).
+Through v2.0.4 the dict had only the first two keys and this paragraph said
+they give "16 nodes per axis on a convex geom" — true through genesis-world
+1.4.6 only: 1.4.7 refines a THIN convex geom (a 0.1 m wall) by its convex width,
+up toward the default `sdf_max_res`; the third key restores 16. It also caps a
+watertight NON-convex body carrying the kwargs at 16 per axis (through v2.0.4 it
+refined up to 128); that matters only for a non-convex narrowphase pair, which
+the `coarse-sdf` warning below names (physics-review). Measured on the 2.0.5
+tree on 1.5.0 (implementation, AC-SDF scene: a thin convex wall, a box, 4 CoACD
+road pieces and the car through the server's `build_obstacles`): every coarse
+geom 16³, total nodes 61440, equal to the 2.0.4 tree on 1.4.5. That is safe only because
 the server's collision geoms are convex — checked by
 `tests/test_server_mesh_obstacles.py::test_build_obstacles_creates_only_convex_collision_geoms`
 over the `build_obstacles` branches listed in CHANGELOG 1.6.9 §2 (not the
@@ -1225,7 +1261,97 @@ obstacles through `build_obstacles`: 30 convex hulls, a CoACD (convex decomposit
 mesh, types 1-4; CPU/WSL2, cold asset cache, medians of 3): on 1.4.5, peak RSS
 1538.9 MB with the patch and old kwargs vs 1201.5 MB without the patch and with
 the coarse kwargs; on 1.4.0, 1306.4 vs 1308.8 MB. Not a speed claim; the
-benchmark in §2.1 was not re-run for publication on 1.4.5.
+benchmark in §2.1 was not re-run for publication on 1.4.5. On 1.5.0 (v2.0.5,
+implementation, a server-shaped scene, cold asset cache, warm kernel cache, n=3
+alternating with the 2.0.4 tree on 1.4.5): build 5.29 s vs 5.08 s, peak RSS
+1167 vs 1146 MB (medians; RSS includes import, so the cross-engine difference
+partly reflects import — impl-review).
+
+## 2.8 `--no-target-collision` (made real in v2.0.5) and other v2.0.5 server changes
+
+| abbr | meaning |
+|---|---|
+| NTC | the `--no-target-collision` flag |
+| rc | process exit code |
+
+**What it does.** In L2, a primitive `/Init/Target` (type 1 Box, 2 Sphere, 3
+Cylinder, anything else a flat Box) is built by `physics_server.build_generic_target`
+with `contype=0b10, conaffinity=0b01` on its morph (public `Primitive` fields;
+they survive `add_dynamic`'s morph copy). Genesis pairs two geoms when
+`(contype_a & conaffinity_b) | (contype_b & conaffinity_a)` is non-zero, so
+target vs target is 0 (no contact, for any number of targets), while target vs
+the ground plane and obstacles (default 0xFFFF) and vs terrain or a URDF chassis
+(1 / 1) is non-zero (contact kept). No vehicle or ground mask is written.
+
+**Since when it was broken.** The flag's old implementation wrote
+`geom._contype` / `_conaffinity` on the built entities; no genesis-world
+>= 1.4.0 reads those (CHANGELOG 1.6.9 §12 found this by reading the code). The
+loop dates from SDK v0.7.0 (`51eb137`); the first SDK release on genesis-world
+>= 1.4.0 is v1.5.0 (`44b256a`, 2026-09-08). Whether 1.3.3 read the attribute was
+not checked (its source is not on the measurement machine), so the flag did
+nothing from v1.5.0 at the latest through v2.0.4.
+
+**Where it is refused** (rc 2, server console + ERROR log: "--no-target-collision
+is supported only for primitive /Init/Target targets, not for URDF vehicles
+(/Genesis/Vehicle/Init); restart without the flag."):
+
+1. `--multi-env --no-target-collision`: at argument parsing, before any OSC wait
+   (L3 always runs URDF vehicles in non-interacting envs; through v2.0.4 the flag
+   was silently ignored there).
+2. L2, right after the client's init when a `/Genesis/Vehicle/Init` has already
+   arrived — before the scene is built. This early read happens ONLY with the
+   flag set.
+3. L2, at the target-build point, for a `/Genesis/Vehicle/Init` that arrived
+   after `/Init/Done` or after the init wait timed out — after the
+   `VehicleScene` object and the ground plane exist, before any target is built.
+
+A URDF init that arrives after the server has started building targets is
+ignored, as in 2.0.4, with or without the flag. **What the client sees** when
+the server refuses: no `/Genesis/Init/Pacing` and no further traffic after its
+init — a server that stopped answering. The OSC wire has no error message and
+was not changed; the reason is only in the server console / log. **Deployment
+break:** a launch script that passed the flag with a URDF vehicle or with
+`--multi-env` ran (the flag a silent no-op) through v2.0.4 and now exits with
+rc 2.
+
+**Measured** (implementation, on the 2.0.5 tree on 1.5.0, the server's own
+`build_generic_target` / `build_obstacles` driven by a harness, ground and target
+μ 0.1, 40 settle steps then 120 steps at dt 0.025 × 10 substeps pushing each body
+with `set_dofs_velocity` [vx ±3 m/s, vy 0, ω 0] before every step): two 0.5 m
+cubes driven at each other pass through each other with the flag (order flips
+at push step 40; max |z − settled z| 0.00233 m) and stop face to face without it
+(no flip; centres 0.3652 m apart); a flagged target stops at a fixed 2×2×1 m
+obstacle (0.00541 m past its face); a box with masks 2 / 1 pushes a braked URDF
+car 4.77 m (0.0087 m past the chassis' bounding box). Three mutants each failed
+the probe as required (masks 0xFFFF: no flip; masks 0 / 0: falls through the
+ground; the car box built 2 / 2: passes through the car). impl-review re-ran the
+pass-through and no-flag runs and a Sphere + Cylinder + resting-Box variant of
+its own. **Not selection-free:** μ 0.1 and the velocity pinning were chosen by
+plan-review after seeing the first (invalid — the targets tipped over on μ 1.0)
+probe run; the mutants are what make the probe valid. Not measured: target vs
+terrain with the flag; a live UE client.
+
+**Other v2.0.5 server changes.**
+
+- An unknown `RigidOptions` key now RAISES at L3 start-up: the `model_fields`
+  filter and the unknown-key retry loop in `l3_runtime.py` (which dropped keys a
+  given engine did not know, e.g. `prefer_parallel_linesearch`) were removed;
+  every key the server passes exists on 1.5.0.
+- The `apply_monkey_patches` force / torque fallback for `<= 1.3.3` was removed
+  (`vehicle_builder.py`); the patched wrench and `set_dofs_position` give the
+  same per-step solver state as unpatched (K = 1 and 2, headless and with a
+  camera, 200 steps; implementation). The `control_dofs_position` patch was not
+  exercised by that scene.
+- `server/__init__` now imports genesis and runs `require_genesis`: on an older
+  engine the process dies at import with `GenesisVersionError`, before the OSC
+  socket binds.
+- SDK-owned server bodies carry `sdf_max_res` 16 (above).
+- **OSC schema unchanged** (no address, type tag, port, mapping key or
+  `/Genesis/Config/*` handling changed). The UE-side schema header
+  (`OscSchema.h`) is not in this workspace, so the UE side was not
+  cross-checked. No UE client was attached, and the server was NOT re-started
+  in the upgraded main venv (it was run on the 1.5.0 overlay: the
+  `server.benchmark` L2 and L3 runs exit 0).
 
 ---
 
@@ -1263,8 +1389,9 @@ impulse/torque relative commands are not supported (logged at runtime).
 
 **Raycast scene**: since v1.0.12 BOTH modes default to the SDK's
 `dual_scene` raycast (matching `VehicleScene`'s own default) — statics get
-a kinematic mirror in a separate raycast scene (static BVH, wheels ride
-the exact mesh surface), and dynamic obstacles get a per-step-synced
+a kinematic mirror in a separate raycast scene (wheels ride the exact mesh
+surface; through v2.0.4 this said "static BVH", a pre-1.5.0 description, see
+`dual-scene-raycast.md`), and dynamic obstacles get a per-step-synced
 mirror so wheels can still drive onto moving ramps/platforms.
 `--road-raycast-only` composes on top: it additionally drops the
 main-scene road collider (no CoACD / chassis-vs-road narrow-phase). The
@@ -1278,8 +1405,8 @@ incompatible with `--road-raycast-only`, ignored by `--multi-env`).
 >
 > - as a rigid collider with `convexify=False`, any mesh over 1000 faces is
 >   refused outright by the mesh guard
->   (`vehicle_scene.py:158-217`, limit `_MAX_NONCONVEX_COLLISION_FACES` at
->   `:97`): `[genesis_vehicle:mesh-guard] add_static('road_mesh'): refusing to
+>   (`vehicle_scene._guard_collision_mesh`, limit
+>   `_MAX_NONCONVEX_COLLISION_FACES`): `[genesis_vehicle:mesh-guard] add_static('road_mesh'): refusing to
 >   build a 5120-face non-convex mesh as a rigid collision/raycast body with
 >   convexify=False (limit 1000)…` (verified on a 5,120-face mesh, SDK 1.6.2);
 > - the documented workaround, a kinematic raycast surface, is
@@ -1294,7 +1421,8 @@ incompatible with `--road-raycast-only`, ignored by `--multi-env`).
 >
 > What is left is `convexify=True`: the road builds, but CoACD replaces the
 > surface with convex hulls and the wheels ride the convex bulge (no kerb
-> lips, no dips), and its BVH re-fits every step. **For any client driving on
+> lips, no dips). (Through v2.0.4 this added "and its BVH re-fits every step" —
+the pre-1.5.0 raycaster.) **For any client driving on
 > a real road mesh, `--single-scene` is not an option — use the default
 > `dual_scene` (optionally with `--road-raycast-only`).**
 
@@ -1603,6 +1731,12 @@ already sending them keep working unchanged.
 - **`--multi-env`**: same-URDF only; no inter-vehicle collision (separate
   envs); dynamic obstacles per-env (env-0 state sent); no per-vehicle
   forces/impulses; no lockstep.
+- **`--no-target-collision`** works for primitive `/Init/Target` targets only;
+  with a URDF vehicle or `--multi-env` the server exits with rc 2 and the
+  client sees it stop answering after its init — there is no OSC error
+  message (§2.8, v2.0.5).
+- **Per-env obstacle variants** (SDK v2.0.5, `batching.md`) are not reachable
+  through the server; that would need a schema decision.
 - **L2 × L3 through the server** is not wired (by design) — drive
   `MultiVehiclePhysics(n_envs=N)` from Python instead.
 - **UDP datagram size**: ~16 KB at 100 vehicles. Fine on localhost; over a

@@ -187,7 +187,7 @@ def estimate_spin_inertia_from_genesis(
         diagonalizes an authored tensor onto its principal axes, permuting the
         components in the process. The tensor is therefore rotated into the BODY
         frame with the link's ``inertial_quat`` before anything is read off it,
-        which makes the result identical on every genesis version. (Projecting
+        which makes the result independent of that diagonalization. (Projecting
         the raw stored diagonal, as this did before v1.5.0, silently read the
         wrong component on >= 1.4.0: the reference car's wheel is
         ``ixx=1, iyy=2, izz=1`` and its spin MOI about +Y came back as 1.0
@@ -200,8 +200,7 @@ def estimate_spin_inertia_from_genesis(
         general shapes — pass ``spin_axis_local``.
 
     Reads the tensor through :func:`genesis_vehicle._gs_compat.link_inertial`
-    (genesis <= 1.3.3 spells it ``link.inertial_i``, >= 1.4.0
-    ``link.desc.inertia``). Raises ``ValueError`` for a link with no inertia,
+    (``link.desc.inertia``). Raises ``ValueError`` for a link with no inertia,
     which the caller in ``core.py`` treats like any other failure — keep the
     authored ``i_wheel``.
     """

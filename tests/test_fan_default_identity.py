@@ -1,19 +1,22 @@
 """A regression lock on the default CONTACT PATH, plus the cross-tree witnesses.
 
-What each test here proves (v1.8.0):
+What each test here proves (v2.0.5):
 
-* ``test_contact_path_rollout_matches_its_1_8_0_capture``: the 200-step
-  brake-then-throttle rollout below gives, bit for bit, what the 1.8.0 tree
-  gave when ``BASELINES`` was captured. It is a REGRESSION LOCK FOR RELEASES
-  AFTER 1.8.0: a failure means a later change moved the default contact path.
-  It is NOT evidence that 1.8.0 is right, nor about how 1.8.0 relates to any
-  earlier release -- the baseline was captured from the very tree it guards.
-* ``test_witness_rollout_is_bit_identical_to_the_37b8b79_tree`` (N24): the
-  CROSS-TREE claim. A rollout on which no 1.8.0 mechanism acts (10 m/s, wheels
-  rolling, no throttle / brake, no landing) is bit-identical to the PRE-FAN
-  tree ``BASELINE_COMMIT``. Proves the raycast, suspension, rolling-tyre force
-  and force-application path are unchanged where no 1.8.0 mechanism acts;
-  proves nothing about driving, braking, low speed, saturation or the fan.
+* ``test_contact_path_rollout_matches_the_2_0_4_tree_on_1_5_0``: the 200-step
+  brake-then-throttle rollout below gives, bit for bit, what the v2.0.4 tree +
+  the two-line ``skip_forward`` patch gave on genesis-world 1.5.0 when
+  ``BASELINES`` was captured. So 2.0.5 reproduces the 2.0.4 tree's physics on
+  1.5.0 on this rollout, and later releases are locked to it on exactly this
+  engine version and platform. It is NOT evidence that 2.0.4 is right, and it
+  says nothing across engines (1.4.5 <-> 1.5.0).
+* ``test_witness_rollout_matches_the_2_0_4_tree_on_1_5_0`` (N24): a rollout on
+  which no 1.8.0 mechanism acts (10 m/s, wheels rolling, no throttle / brake,
+  no landing), captured the same way. Through v2.0.4 this test was the
+  CROSS-TREE witness against the pre-fan tree ``BASELINE_COMMIT`` (37b8b79) on
+  genesis-world 1.4.5; that statement cannot be re-checked on 1.5.0 (the old
+  trees do not run their batched/rendering paths there), so since v2.0.5 it is
+  a lock on the 2.0.4 tree's no-mechanism rollout on 1.5.0. Proves nothing
+  about driving, braking, low speed, saturation or the fan.
 * ``test_point_contact_equals_a_degenerate_fan_bit_for_bit`` (N6'): point
   contact == ``swept_envelope`` at M = 3 on the SAME tree. Proves the fan
   degenerates to the point contact; proves nothing across trees.
@@ -25,16 +28,26 @@ What each test here proves (v1.8.0):
 ``car_4w_rwd_ackermann(stability="control")``, with ``RollingResistance``
 removed from its hook list (``_contact_path_cfg``; the v1.7.0 re-anchor below).
 
-Baseline capture (v1.8.0)
+Baseline capture (v2.0.5)
 -------------------------
-* captured from the 1.8.0 working tree (SDK 1.8.0 before its version bump,
-  HEAD af879d3 + the 1.8.0 changes), by running this file's own rollout
-  (``_drive``) -- not from ``BASELINE_COMMIT``;
-* genesis-world 1.4.5 / quadrants 1.3.3 / trimesh 5.2.0, torch 2.11.0, CPU
-  backend, linux-x86_64 (WSL2);
+* Captured from the v2.0.4 tree + the two-line ``skip_forward`` patch on
+  genesis-world 1.5.0 (linux-x86_64); 2.0.5 reproduces it bit for bit. A
+  regression lock for later releases on exactly this engine version and
+  platform. (2026-11-24: ``git archive 9e5c4d5`` with ``skip_forward=``
+  deleted from the two ``set_base_links_pos`` / ``_quat`` calls in
+  ``vehicle_scene.py``, nothing else; this file's own ``_contact_path_cfg`` /
+  ``_drive`` / ``_witness`` from that tree; genesis-world 1.5.0 / quadrants
+  1.4.0, torch 2.11.0, CPU backend, WSL2.)
 * ``n_envs=1``, dual_scene (the default), the default ``solver="batched"``,
   ``dt=0.025``, ``substeps=10``, car spawned at ``z=1.0`` on a friction-1.0
   ground plane, 60 steps of ``brake=1`` then 140 of ``throttle=0.5``.
+* Why not the 2.0.4 tree as is: on 1.5.0 its proxy sync silently takes a
+  per-body fallback (equal to the batched path only to 1e-5), and its
+  rendering paths do not run; the patch removes exactly that and nothing else.
+* The 1.4.5 entries (``BASELINES``, captured from the 1.8.0 tree; and
+  ``WITNESS_BASELINES``, captured from ``BASELINE_COMMIT``) were DELETED in
+  v2.0.5: 1.4.5 is below the required floor 1.5.0. On 1.4.5 the contact path
+  rollout ended at x 6.018499851226807 m; on 1.5.0 at x 6.018531322479248 m.
 
 History of this rollout's baseline
 ----------------------------------
@@ -58,8 +71,10 @@ History of this rollout's baseline
   -- a name that would now claim a cross-tree identity it no longer checks.
   The cross-tree claim moved to N24.
 
-The 1.4.0 entry was DELETED in v1.7.0 (1.4.0 is below the supported floor
-1.4.5); on 1.4.0 the lock test skips.
+The 1.4.0 entry was DELETED in v1.7.0 (1.4.0 was then below the supported
+floor 1.4.5); the 1.4.5 entries were deleted in v2.0.5 (above). A 1.5.x patch
+release (1.5.1, ...) has no entry: the lock tests skip there until a capture
+is made on it.
 
 Platform scope (v1.6.10)
 ------------------------
@@ -110,24 +125,24 @@ BASELINE_COMMIT = "37b8b7943f7000245e462e53090d2ce3b303dd70"
 #: (genesis-world version, platform key) -> {step index -> the four wheel
 #: distances of the reference car (float32), "final_pos" -> the chassis position
 #: after step 199}, for the CONTACT-PATH rollout ("control" minus
-#: RollingResistance), captured from the 1.8.0 tree (module docstring,
-#: "Baseline capture"). Platform key: see ``platform_key()``.
+#: RollingResistance), captured from the v2.0.4 tree + the two-line
+#: ``skip_forward`` patch on genesis-world 1.5.0 (module docstring, "Baseline
+#: capture"). Platform key: see ``platform_key()``.
 BASELINES = {
-    # Captured 2026-11-21 from the 1.8.0 tree (a standalone script that
-    # runs this file's _contact_path_cfg / _drive); equal bit for bit to the
-    # contact-path rollout the 1.8.0 release verification captured
-    # independently (final x 6.018499851226807, CHANGELOG 1.8.0 §9).
-    # The 37b8b79 entry it replaces (final x 5.920469284057617) is history.
-    ("1.4.5", "linux-x86_64"): {
-        49:  [0.41484034061431885, 0.4148404598236084,
-              0.41722309589385986, 0.41722333431243896],
-        99:  [0.41163313388824463, 0.41163313388824463,
-              0.41118693351745605, 0.4111870527267456],
-        149: [0.4116171598434448,  0.4116171598434448,
-              0.41119229793548584, 0.41119229793548584],
-        199: [0.41160106658935547, 0.4116014242172241,
-              0.41120827198028564, 0.41120851039886475],
-        "final_pos": (6.018499851226807, -1.9554846630853717e-07, 0.11140478402376175),
+    # Captured 2026-11-24 (gs150 step 8, harness capture_locks.py outside the
+    # repo, which imports this file's _contact_path_cfg / _drive from the
+    # patched 2.0.4 tree); equal bit for bit to an independent run of the same
+    # tree in the 2.0.5 AC-E determinism probe.
+    ("1.5.0", "linux-x86_64"): {
+        49:  [0.41484057903289795, 0.4148404598236084,
+              0.4172234535217285, 0.4172234535217285],
+        99:  [0.4116325378417969, 0.4116325378417969,
+              0.4111868143081665, 0.41118693351745605],
+        149: [0.41161608695983887, 0.4116159677505493,
+              0.4111919403076172, 0.4111919403076172],
+        199: [0.4116004705429077, 0.4116004705429077,
+              0.411207914352417, 0.411207914352417],
+        "final_pos": (6.018531322479248, -5.587245865967816e-08, 0.11140414327383041),
     },
 }
 
@@ -169,11 +184,13 @@ def _drive(vs, vehicles, record=None):
 
 
 def test_baseline_lookup_is_exact_on_version_and_platform():
-    assert baseline_for("1.4.5", "linux-x86_64") is BASELINES[("1.4.5", "linux-x86_64")]
-    assert baseline_for("1.4.5", "win32-AMD64") is None       # the field report's platform
-    assert baseline_for("1.4.4", "linux-x86_64") is None
+    assert baseline_for("1.5.0", "linux-x86_64") is BASELINES[("1.5.0", "linux-x86_64")]
+    assert baseline_for("1.5.0", "win32-AMD64") is None       # another platform
+    assert baseline_for("1.5.1", "linux-x86_64") is None      # an uncaptured 1.5.x patch
+    assert baseline_for("1.4.5", "linux-x86_64") is None      # deleted in v2.0.5 (below the floor)
     assert baseline_for("1.4.0", "linux-x86_64") is None      # deleted in v1.7.0
     assert all(isinstance(k, tuple) and len(k) == 2 for k in BASELINES)
+    assert sorted(BASELINES) == sorted(WITNESS_BASELINES) == [("1.5.0", "linux-x86_64")]
 
 
 def test_contact_path_cfg_drops_only_rolling_resistance():
@@ -185,10 +202,12 @@ def test_contact_path_cfg_drops_only_rolling_resistance():
     assert contact == [n for n in full if n != "RollingResistance"]
 
 
-def test_contact_path_rollout_matches_its_1_8_0_capture():
+def test_contact_path_rollout_matches_the_2_0_4_tree_on_1_5_0():
     """Regression lock (see the module docstring): the contact-path rollout
-    equals, bit for bit, its capture from the 1.8.0 tree. Evidence about
-    LATER releases only; not about 1.8.0 itself."""
+    equals, bit for bit, its capture from the v2.0.4 tree + the two-line
+    ``skip_forward`` patch on genesis-world 1.5.0 (linux-x86_64). 2.0.5
+    reproduces it bit for bit; later releases are locked to it on exactly
+    this engine version and platform."""
     genesis = pytest.importorskip("genesis")
     from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 
@@ -221,9 +240,9 @@ def test_contact_path_rollout_matches_its_1_8_0_capture():
         got = veh.distances[0].cpu()
         expect = torch.tensor(want, dtype=got.dtype)
         assert torch.equal(got, expect), (
-            f"step {i}: the default contact path changed since its 1.8.0 "
-            f"capture.\n"
-            f"  baseline (1.8.0 tree, genesis {version}, {plat}): {want}\n"
+            f"step {i}: the default contact path changed since its capture "
+            f"from the 2.0.4 tree on genesis-world 1.5.0.\n"
+            f"  baseline (2.0.4 tree, genesis {version}, {plat}): {want}\n"
             f"  now:                                   {got.tolist()}")
 
     _drive(vs, [veh], record=check)
@@ -273,32 +292,33 @@ def test_default_control_profile_rolling_resistance_is_live(solver):
 # --- N24: the cross-tree witness (v1.8.0) --------------------------------------
 
 #: (genesis-world version, platform key) -> steer -> {step -> the four wheel
-#: distances, "final_pos"} of the WITNESS rollout (``_witness`` below),
-#: captured from a ``git archive`` of ``BASELINE_COMMIT`` (37b8b79, v1.5.0
-#: lineage) on genesis-world 1.4.5 / quadrants 1.3.3, torch 2.11.0, CPU,
-#: linux-x86_64 WSL2, by the same rollout as ``_witness`` (reference car,
+#: distances, "final_pos"} of the WITNESS rollout (``_witness`` below).
+#: Captured from the v2.0.4 tree + the two-line ``skip_forward`` patch on
+#: genesis-world 1.5.0 (linux-x86_64); 2.0.5 reproduces it bit for bit. A
+#: regression lock for later releases on exactly this engine version and
+#: platform (2026-11-24, same capture as ``BASELINES``; reference car,
 #: "control" minus ``RollingResistance``, per_vehicle, dt 0.025 x 10, spawned
-#: at z 0.1114 at 10 m/s with the wheels rolling). The 1.8.0 tree reproduces it
-#: bit for bit (this test); the 1.7.0 tree (af879d3) gave the identical bit
-#: pattern on the same machine (this rollout run against a ``git archive`` of
-#: af879d3, which is in this repo's history).
+#: at z 0.1114 at 10 m/s with the wheels rolling). Through v2.0.4 the entry was
+#: ("1.4.5", "linux-x86_64"), captured from a ``git archive`` of
+#: ``BASELINE_COMMIT`` (37b8b79) and reproduced bit for bit by the 1.7.0 and
+#: 1.8.0 .. 2.0.4 trees; deleted in v2.0.5 (below the floor).
 WITNESS_BASELINES = {
-    ("1.4.5", "linux-x86_64"): {
+    ("1.5.0", "linux-x86_64"): {
         0.0: {
-            9: [0.4093635082244873, 0.40936362743377686, 0.4105030298233032, 0.4105031490325928],
-            49: [0.4110441207885742, 0.4110441207885742, 0.41184067726135254, 0.41184067726135254],
-            99: [0.4110013246536255, 0.4110013246536255, 0.41180384159088135, 0.41180384159088135],
-            149: [0.41100192070007324, 0.4110018014907837, 0.41180336475372314, 0.41180312633514404],
-            199: [0.41100335121154785, 0.41100335121154785, 0.41180217266082764, 0.41180217266082764],
-            "final_pos": (49.64009475708008, 3.690676351197908e-07, 0.11140270531177521),
+            9: [0.4093639850616455, 0.4093637466430664, 0.4105031490325928, 0.4105030298233032],
+            49: [0.41104423999786377, 0.41104400157928467, 0.4118410348892212, 0.41184091567993164],
+            99: [0.41100239753723145, 0.41100239753723145, 0.4118032455444336, 0.4118032455444336],
+            149: [0.411002516746521, 0.41100239753723145, 0.41180288791656494, 0.4118027687072754],
+            199: [0.4110032320022583, 0.41100335121154785, 0.4118025302886963, 0.41180264949798584],
+            "final_pos": (49.64012908935547, -4.90921721052473e-08, 0.11140291392803192),
         },
         0.05: {
-            9: [0.40827786922454834, 0.41092777252197266, 0.4094219207763672, 0.4120718240737915],
-            49: [0.4096795320510864, 0.41239917278289795, 0.4105018377304077, 0.41322124004364014],
-            99: [0.4096473455429077, 0.41235601902008057, 0.41047239303588867, 0.4131810665130615],
-            149: [0.40966224670410156, 0.4123424291610718, 0.41048598289489746, 0.4131660461425781],
-            199: [0.409676194190979, 0.4123286008834839, 0.41049909591674805, 0.4131513833999634],
-            "final_pos": (46.260868072509766, -14.972623825073242, 0.11141368746757507),
+            9: [0.4082777500152588, 0.41092801094055176, 0.40942180156707764, 0.4120720624923706],
+            49: [0.4096797704696655, 0.41239941120147705, 0.41050171852111816, 0.41322147846221924],
+            99: [0.4096475839614868, 0.41235601902008057, 0.4104726314544678, 0.4131814241409302],
+            149: [0.4096618890762329, 0.4123421907424927, 0.4104856252670288, 0.4131661653518677],
+            199: [0.40967607498168945, 0.41232848167419434, 0.41049885749816895, 0.4131511449813843],
+            "final_pos": (46.26096725463867, -14.972697257995605, 0.11141368001699448),
         },
     },
 }
@@ -334,25 +354,25 @@ def _witness(steer, record):
 
 
 @pytest.mark.parametrize("steer", [0.0, 0.05])
-def test_witness_rollout_is_bit_identical_to_the_37b8b79_tree(steer):
-    """N24 — the cross-tree witness. A rollout on which NO 1.8.0 mechanism
+def test_witness_rollout_matches_the_2_0_4_tree_on_1_5_0(steer):
+    """N24 — the no-mechanism witness. A rollout on which NO 1.8.0 mechanism
     acts: no axle torque (no throttle, no brake; rolling resistance removed),
     the chassis at 10 m/s with the wheels rolling from the first step (so the
     friction ellipse never binds on the raw slip), and no low-speed contact
     (the lateral / held-wheel deadbeats only bind below a few m/s or under
     wheel-load spikes; the car is spawned at its settled height, so there is
     no landing). Compared with ``torch.equal`` against the capture from the
-    PRE-FAN tree (``BASELINE_COMMIT``).
+    v2.0.4 tree + the two-line ``skip_forward`` patch on genesis-world 1.5.0.
 
-    What it proves: the raycast, the suspension normal force, the rolling
-    tyre force and the force-application path are unchanged, bit for bit,
-    where no 1.8.0 mechanism acts — on both the straight and a gentle turn.
-    What it does NOT prove: anything about driving, braking, low speed, the
-    friction ellipse at saturation, or the swept-envelope fan. Passes on the
-    1.7.0 tree too, BY DESIGN (it witnesses that the contact path did not
-    move). At 5 m/s or with a spawn drop the 1.8.0 tree differs from this
-    capture: a landing load spike makes the lateral deadbeat bind (design
-    probe), which is the deadbeat doing its job, not a regression."""
+    What it proves: on genesis-world 1.5.0 / linux-x86_64, the raycast, the
+    suspension normal force, the rolling tyre force and the force-application
+    path give the 2.0.4 tree's bits where no 1.8.0 mechanism acts — on both
+    the straight and a gentle turn. What it does NOT prove: anything about
+    driving, braking, low speed, the friction ellipse at saturation, or the
+    swept-envelope fan, nor anything across engines. Through v2.0.4 (on
+    genesis-world 1.4.5) this compared against the PRE-FAN tree
+    ``BASELINE_COMMIT`` and passed on the 1.7.0 tree too; that cross-tree
+    statement is not re-checked on 1.5.0."""
     import genesis
     version = getattr(genesis, "__version__", None)
     plat = platform_key()

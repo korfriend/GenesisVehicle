@@ -54,19 +54,18 @@ these tensor sizes, not by arithmetic: a batch of 128 costs 1.25x a batch of
 
 Why not the Genesis differentiable solver
 -----------------------------------------
-Genesis does ship a differentiable rigid solver (``SimOptions(requires_grad=True)``),
-but its taped input set is exactly ``set_pos`` / ``set_quat`` /
-``set_dofs_velocity`` / ``control_dofs_force`` — see
-``RigidEntity.process_input_grad``. **``apply_links_external_force`` and
-``apply_links_external_torque`` are not on the tape**, and they are the only
-way a ray-wheel vehicle touches the solver: this SDK has no wheel joints to
-motor. Verified empirically on genesis-world 1.3.3 — a leaf tensor passed to
-``apply_links_external_force`` comes back from ``scene.backward()`` with
-``grad is None``, while the same test through ``control_dofs_force`` returns a
-finite gradient. So autodiff through Genesis can only differentiate a
-joint-motor vehicle, not this one; differentiating the SDK's own force model
-gets the same Jacobian, needs no ``requires_grad`` scene (no hibernation ban,
-no integrator restriction, no dense-Hessian cost) and runs on CPU.
+Genesis ships a differentiable rigid solver (``SimOptions(requires_grad=True)``).
+A ray-wheel vehicle touches the solver only through the external-wrench API:
+this SDK has no wheel joints to motor. Through SDK 2.0.4 this section said that
+API is not on the autodiff tape (a leaf tensor passed to
+``apply_links_external_force`` came back from ``scene.backward()`` with
+``grad is None``, measured on genesis-world 1.3.3, unchanged on 1.4.0). On 1.5.0
+``apply_links_external_wrench`` IS on the tape for a free body without contact
+(CHANGELOG 2.0.5 §9.7); differentiating the SDK vehicle step end to end
+(raycaster, contact, pipeline) through Genesis was not tested. This plant
+differentiates the SDK's own force model instead: no ``requires_grad`` scene
+(no hibernation ban, no integrator restriction, no dense-Hessian cost), runs on
+CPU.
 
 Accuracy envelope
 -----------------
@@ -174,9 +173,12 @@ def _quat_to_R(q) -> np.ndarray:
 def plant_mass_properties(entity: Any) -> PlantMassProperties:
     """Composite planar mass properties of a built Genesis entity, body frame.
 
-    Walks every link's ``inertial_mass`` / ``inertial_pos`` / ``inertial_quat``
-    / ``inertial_i``, transforms each into the BASE-LINK frame and accumulates
-    mass, first moment and the yaw inertia about the base-link origin.
+    Walks every link's resolved description (``link.desc.mass`` /
+    ``.inertial_pos`` / ``.inertial_quat`` / ``.inertia``, read through
+    ``genesis_vehicle._gs_compat.link_inertial``), transforms each into the
+    BASE-LINK frame and accumulates mass, first moment and the yaw inertia
+    about the base-link origin. (Through 2.0.4 this docstring named the
+    ``RigidLink.inertial_*`` attributes, which genesis-world 1.4.0 removed.)
 
     Reading the entity's 6x6 mass matrix would give the same numbers but in
     WORLD axes at the current attitude, so it would only be usable while the
@@ -194,8 +196,7 @@ def plant_mass_properties(entity: Any) -> PlantMassProperties:
     mc = np.zeros(3)
     i_o = np.zeros((3, 3))
     for i, link in enumerate(entity.links):
-        # Version-independent read: genesis >= 1.4.0 moved link.inertial_* onto
-        # link.desc (see genesis_vehicle._gs_compat.link_inertial).
+        # Reads link.desc (see genesis_vehicle._gs_compat.link_inertial).
         props = link_inertial(link)
         if props is None:
             continue

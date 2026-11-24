@@ -51,26 +51,15 @@ def apply_monkey_patches(rigid_solver):
             return t.squeeze(1) if t.shape[1] == 1 else t.reshape(-1, t.shape[-1])
         return t
 
-    # genesis >= 1.4.0 folded apply_links_external_force/_torque into a single
-    # apply_links_external_wrench; patch whichever this build exposes (the SDK
-    # reaches both through genesis_vehicle._gs_compat.apply_links_wrench).
-    if hasattr(rigid_solver, "apply_links_external_wrench"):
-        orig_apply_wrench = rigid_solver.apply_links_external_wrench
-        def patched_apply_wrench(force=None, torque=None, links_idx=None,
-                                 envs_idx=None, **kwargs):
-            return orig_apply_wrench(_squeeze_3d(force), _squeeze_3d(torque),
-                                     links_idx, envs_idx, **kwargs)
-        rigid_solver.apply_links_external_wrench = patched_apply_wrench
-    else:
-        orig_apply_force = rigid_solver.apply_links_external_force
-        def patched_apply_force(force, links_idx=None, envs_idx=None, **kwargs):
-            return orig_apply_force(_squeeze_3d(force), links_idx, envs_idx, **kwargs)
-        rigid_solver.apply_links_external_force = patched_apply_force
-
-        orig_apply_torque = rigid_solver.apply_links_external_torque
-        def patched_apply_torque(torque, links_idx=None, envs_idx=None, **kwargs):
-            return orig_apply_torque(_squeeze_3d(torque), links_idx, envs_idx, **kwargs)
-        rigid_solver.apply_links_external_torque = patched_apply_torque
+    # The SDK reaches the solver through genesis_vehicle._gs_compat.
+    # apply_links_wrench, i.e. one apply_links_external_wrench call (the
+    # force/torque pair fallback for genesis <= 1.3.3 was removed in 2.0.5).
+    orig_apply_wrench = rigid_solver.apply_links_external_wrench
+    def patched_apply_wrench(force=None, torque=None, links_idx=None,
+                             envs_idx=None, **kwargs):
+        return orig_apply_wrench(_squeeze_3d(force), _squeeze_3d(torque),
+                                 links_idx, envs_idx, **kwargs)
+    rigid_solver.apply_links_external_wrench = patched_apply_wrench
 
     orig_set_dofs_pos = rigid_solver.set_dofs_position
     def patched_set_dofs_pos(position, dofs_idx=None, envs_idx=None, **kwargs):

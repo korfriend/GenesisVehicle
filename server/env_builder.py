@@ -98,10 +98,13 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
     model the chassis floats on suspension forces and the wheels follow the
     ground via raycasts, so the road only needs to "be hit by rays" and does
     not need to be a rigid collision body. Placing it in the Kinematic solver
-    makes its raycast BVH maybe_static=True, so the **per-step rebuild is
-    skipped** (even while vehicles move in the rigid solver). This path
-    removes not only CoACD/narrow-phase but also the **raycaster's per-frame
-    BVH rebuild**, saving tens to hundreds of ms per step on large maps.
+    makes it a visual-raycast target with no rigid-solver presence. This path
+    removes CoACD and the chassis-vs-road narrow-phase. (Through 2.0.4 this
+    also claimed a skipped per-step BVH rebuild — ``maybe_static`` — saving
+    tens to hundreds of ms per step; that described the pre-1.5.0 raycaster.
+    On genesis-world 1.5.0 per-mesh trees are built once in both raycast modes
+    and a visual target's top-level tree is refitted only after its geometry
+    changed; no per-step saving is measured on 1.5.0.)
 
     With structures_as_primitive=True, **all mesh colliders** (obs_type==5 /
     convex / complex) are replaced by their bounding box (``gs.morphs.Box``
@@ -242,12 +245,13 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
                     # [Raycast-Only Road] No collision geometry → no CoACD, no
                     # chassis-vs-road narrow-phase. The mesh is added with a
                     # Kinematic + use_visual_raycasting material (set below) so the
-                    # wheel raycaster hits it AND its BVH is static-skipped each
-                    # step. Downward wheel rays hit the up-facing road surface;
+                    # wheel raycaster hits it (a visual-raycast target; its top-level
+                    # tree is refitted only after a geometry change on genesis-world
+                    # 1.5.0). Downward wheel rays hit the up-facing road surface;
                     # Surface(double_sided=...) handles rendering, so we skip the
                     # geometry-doubling preprocessing too (keeps the visual BVH small).
                     print(f"    -> [Raycast-Only] Road loaded as KINEMATIC visual mesh "
-                          f"(no collision/CoACD, static-skipped BVH): {os.path.basename(mesh_path)}")
+                          f"(no collision/CoACD): {os.path.basename(mesh_path)}")
                     morph = gs.morphs.Mesh(
                         file=mesh_path,
                         scale=size,
@@ -356,8 +360,8 @@ def build_obstacles(vs, init_data, ue_friction, ue_restitution, vis_mode,
                 if road_raycast_only:
                     # rco road: raycast surface ONLY — no chassis collision, no CoACD,
                     # no rigid-solver presence at all (v1.0.10 first-class API; the
-                    # kinematic use_visual_raycasting body lives in the raycast scene
-                    # with a build-once BVH). material/vis_mode are irrelevant for a
+                    # kinematic use_visual_raycasting body lives in the raycast scene).
+                    # material/vis_mode are irrelevant for a
                     # kinematic surface, so they are not passed.
                     handle = vs.add_raycast_surface(rc_morph, surface=surface,
                                                     name=f"obs_{obs_id}")

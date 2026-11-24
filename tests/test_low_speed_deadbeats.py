@@ -562,8 +562,10 @@ def test_n23_a_mass_read_failure_means_s_1_and_one_warning(monkeypatch):
     """A ``ValueError`` from the mass walk (no link carries mass) sets s = 1
     for that driver (``YawInertia(inf, ...)``) and logs ONE
     ``[genesis_vehicle:deadbeat-scale]`` warning naming the vehicle; nothing
-    else is caught. A root link with neither inertial spelling raises
-    ``AttributeError`` (an unknown engine, not a massless vehicle)."""
+    else is caught. A root link with no ``desc`` raises ``AttributeError``
+    (an unknown engine, not a massless vehicle). (Through 2.0.4 the message
+    named both spellings, ``desc`` and the genesis <= 1.3.3 ``inertial_mass``;
+    2.0.5 removed the latter.)"""
     import logging
     import genesis_vehicle.control.plant as PL
     vs, veh = _scene("per_vehicle")
@@ -602,7 +604,7 @@ def test_n23_a_mass_read_failure_means_s_1_and_one_warning(monkeypatch):
 
     phys.entity, real = FakeEnt(), phys.entity
     try:
-        with pytest.raises(AttributeError, match="inertial_mass"):
+        with pytest.raises(AttributeError, match="no 'desc'"):
             phys._ensure_yaw_inertia()
     finally:
         phys.entity = real

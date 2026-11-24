@@ -117,8 +117,9 @@ def test_server_never_writes_to_sim_options():
         for lineno, text in _sim_options_writes_in(py):
             offenders.append(f"{py.name}:{lineno}: {text}")
     assert not offenders, (
-        "server writes to sim_options (inert on genesis <= 1.3.3, "
-        "AttributeError on >= 1.4.0):\n  " + "\n  ".join(offenders))
+        "server writes to sim_options (a post-build write is inert: dt / "
+        "substeps / gravity are fixed at build(), docs/physics-contracts.md "
+        "§7.14):\n  " + "\n  ".join(offenders))
 
 
 def test_sim_options_write_guard_catches_the_shapes_it_claims(tmp_path):

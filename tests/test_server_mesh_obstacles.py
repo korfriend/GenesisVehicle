@@ -155,19 +155,34 @@ def test_rco_road_dual_scene_has_no_redundant_main_rigid(cpu_genesis, cube_obj):
 
 def test_kinematic_mirror_builds_with_collision_vis_mode(cpu_genesis):
     """A dual_scene kinematic raycast mirror must build even when the caller passes
-    a non-'visual' vis_mode (e.g. the server's --vis-mode=collision). A
-    KinematicEntity is visual-only (vgeoms, no collision geoms), so the renderer's
-    on_rigid must take the vgeoms path; a 'collision' vis_mode made it touch the
-    missing KinematicEntity.geoms and AttributeError at build. The mirror's
-    vis_mode is forced to 'visual'; the caller's vis_mode is kept for the main
-    (rendered) entity only."""
+    a non-'visual' vis_mode (e.g. the server's --vis-mode=collision), as a
+    keyword or on its surface. Since 2.0.5 the mirror is built on the
+    genesis-world 1.5.0 entity spec (``gs.entities.Kinematic(
+    use_visual_raycasting=True)``, ``_gs_compat.kinematic_raycast_entity``): the
+    spec carries the raycasting flag, the caller's surface is copied with
+    ``vis_mode=None`` (the Kinematic spec raises on a non-"visual" vis_mode),
+    and the caller's vis_mode is kept for the main (rendered) entity only.
+    Through 2.0.4 this test asserted the mirror's surface was forced to
+    ``vis_mode == "visual"`` (material-level ``use_visual_raycasting``), which
+    genesis-world 1.5.0 deprecates."""
     vs = VehicleScene(n_envs=1, raycast_mode="dual_scene",
                       init_genesis=False)
     sb = vs.add_static(morph=gs.morphs.Plane(),
                        material=gs.materials.Rigid(friction=1.0), vis_mode="collision")
-    vs.build()   # must NOT raise AttributeError('KinematicEntity' ... 'geoms')
-    assert sb.entity_raycast.surface.vis_mode == "visual"   # mirror forced visual
-    assert sb.entity_main.surface.vis_mode == "collision"   # caller honored for main
+    sb2 = vs.add_static(morph=gs.morphs.Box(size=(1.0, 1.0, 1.0), pos=(5.0, 0.0, 0.5), fixed=True),
+                        material=gs.materials.Rigid(friction=1.0),
+                        surface=gs.surfaces.Rough(color=(0.5, 0.5, 0.5), vis_mode="collision"),
+                        name="surf_collision")
+    vs.build()   # must NOT raise
+    for body in (sb, sb2):
+        mirror = body.entity_raycast
+        assert type(mirror).__name__ == "KinematicEntity"
+        assert type(mirror.spec).__name__ == "Kinematic"
+        assert mirror.spec.use_visual_raycasting is True
+        assert mirror.spec.surface is None or mirror.spec.surface.vis_mode is None
+    # The caller's vis_mode reaches the main (rendered) entity, as before.
+    assert sb.entity_main.surface.vis_mode == "collision"
+    assert sb2.entity_main.surface.vis_mode == "collision"
 
 
 def test_add_raycast_surface_dual_scene(cpu_genesis, cube_obj):

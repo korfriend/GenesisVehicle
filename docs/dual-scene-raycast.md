@@ -2,8 +2,44 @@
 
 > **Official terminology (v1.1.0).** The subsystem is the **wheel-raycast**
 > (ray-cast wheels sensing the ground); its `raycast_mode` has two modes —
-> **`dual_scene`** (default: a separate, static-BVH raycast scene) and
-> **`single_scene`**. "two-scene" in older notes/commits ≡ `dual_scene`.
+> **`dual_scene`** (default: a separate raycast scene holding no vehicle
+> collision geometry) and **`single_scene`**. "two-scene" in older
+> notes/commits ≡ `dual_scene`. (Through v2.0.4 this box said "a separate,
+> static-BVH raycast scene"; see the correction below.)
+
+> **Correction (v2.0.5): the mechanism this document describes is the
+> pre-1.5.0 raycaster, and on genesis-world 1.5.0 its central claim is false.**
+> Through v2.0.4 this document said that `single_scene` re-fits the collision
+> BVH — terrain faces included — every step, while `dual_scene`'s raycast scene
+> is `maybe_static`, so its BVH is built once, never re-fit, and shared across
+> `n_envs`; it called that the "structural argument" the default rests on. On
+> genesis-world 1.5.0 (the only engine SDK 2.0.5 runs on), read in the engine
+> source (`genesis/engine/bvh.py` `get_meshes_trees`,
+> `genesis/utils/raycast_qd.py` `RaycastTarget`,
+> `genesis/engine/sensors/raycaster.py`; api-review, impl-review, implementation):
+>
+> - in BOTH modes each mesh's own tree is built ONCE, from its local vertices,
+>   and cached; what is refitted is a per-env TOP-LEVEL tree over the meshes;
+> - a scene's collision geometry (the `single_scene` terrain and vehicle; the
+>   `dual_scene` `add_dynamic(wheel_raycast=True)` mirrors) forms one target
+>   whose top-level tree is refitted on EVERY sensor update, in both modes;
+> - a visual-raycast target (the `dual_scene` kinematic terrain) is refitted
+>   only after its geometry changed;
+> - there is no `maybe_static` and no per-face refit in either mode.
+>
+> So "single_scene re-fits over every face each step, dual_scene builds once"
+> does not describe 1.5.0, and nothing in it is a reason to prefer either mode
+> on speed. **What the `dual_scene` default rests on since v2.0.5** (the code,
+> `vehicle_scene.py` module docstring): its raycast scene holds no vehicle
+> collision geometry, so a wheel ray cannot hit the vehicle itself (in
+> `single_scene` the high-cast offset has to be capped at the vehicle's own
+> collision ceiling, below), and its kinematic surface is exact on non-convex
+> mesh terrain where a rigid mesh is convexified. It holds the terrain twice.
+> The order-free bench published a ratio on 1.5.0 — `single_scene` FASTER —
+> under caveats ("What the harness measured", below); that is not established
+> as a speed advantage and not shown to be new in 1.5.0. The default is
+> unchanged. Sections below that state the 1.4.x mechanism are kept as history
+> and marked.
 
 | abbr | meaning |
 |---|---|
@@ -11,9 +47,10 @@
 | CoACD | Collision-Aware Convex Decomposition (genesis' convexify path for rigid meshes) |
 | SDF | Signed Distance Field (the volumetric collision structure a rigid mesh builds) |
 | FK | Forward Kinematics (link world transforms from joint/base state) |
-| `maybe_static` | a raycast BVH whose solver has no physics-movable link → built once, never re-fit |
+| `maybe_static` | (genesis-world <= 1.4.x only) a raycast BVH whose solver has no physics-movable link → built once, never re-fit; absent on 1.5.0 |
 | re-cast | shooting the rays through an existing BVH (cheap, ~flat in face count) |
-| rebuild | re-fitting the BVH from all faces (radix sort + bounds) — scales with face count |
+| rebuild | (<= 1.4.x) re-fitting the BVH from all faces (radix sort + bounds) — scales with face count; 1.5.0 refits only a per-env top-level tree over the meshes (every update for a collision target, after a geometry change for a visual target) |
+| top-level tree | (1.5.0) the per-env tree over a target's meshes, whose leaves are the per-mesh trees built once |
 | proxy | a pose-carrier entity in the raycast scene that the wheel sensor is attached to |
 | L3 / `n_envs` | the parallel-scenario batching axis (one `n_envs` slot = one independent scenario) |
 | `d0` | the wheel ray distances on the first settled step, in metres (one per wheel) |
@@ -38,9 +75,9 @@ RIGID COLLISION geometry, which leaves three doors and closes all of them:
 
 | route | `single_scene` | `dual_scene` |
 |---|---|---|
-| rigid mesh, `convexify=False` | **refused above 1000 faces** by the mesh guard (`vehicle_scene.py:158-217`; limit `_MAX_NONCONVEX_COLLISION_FACES` at `:97`) | same guard — but you would not use this route |
-| kinematic raycast surface (`add_static(collision=False)` / `add_raycast_surface`) | **raises** (`vehicle_scene.py:817-833`) | the recommended route: exact surface, BVH built once |
-| rigid mesh, `convexify=True` | builds, but the wheels ride the CoACD convex hulls (bulge instead of kerbs/dips) and the BVH re-fits every step | not needed — pair a coarse `collision_morph` with an exact `wheel_raycast_morph` |
+| rigid mesh, `convexify=False` | **refused above 1000 faces** by the mesh guard (`vehicle_scene._guard_collision_mesh`; limit `_MAX_NONCONVEX_COLLISION_FACES`) | same guard — but you would not use this route |
+| kinematic raycast surface (`add_static(collision=False)` / `add_raycast_surface`) | **raises** | the recommended route: exact surface (through v2.0.4 this cell added "BVH built once" — a pre-1.5.0 description) |
+| rigid mesh, `convexify=True` | builds, but the wheels ride the CoACD convex hulls (bulge instead of kerbs/dips) | not needed — pair a coarse `collision_morph` with an exact `wheel_raycast_morph` |
 
 Verified against SDK 1.6.2 on a 5,120-face mesh, with the actual errors:
 
@@ -64,7 +101,11 @@ So `single_scene` is for primitives, small meshes and heightfields — plane,
 box ramps, a `gs.morphs.Terrain`, a decimated patch. A detailed road mesh
 requires `dual_scene` (the default). See [`server.md`](server.md) §3.
 
-## The problem it solves
+## The problem it solved on genesis-world <= 1.4.x (history; false on 1.5.0)
+
+> This section and "The mechanism" below describe the pre-1.5.0 raycaster
+> (see the correction at the top). They are kept, unedited apart from this
+> note and the marked labels, as the record of why `dual_scene` was introduced.
 
 The wheel raycaster casts rays down from each wheel to measure the ground
 distance `d` that drives suspension. Genesis builds one collision-face BVH per
@@ -91,8 +132,11 @@ face count; the expensive part is the **rebuild**, which is not.
 ## The mechanism (`raycast_mode="dual_scene"`, the default)
 
 Put the terrain in a **separate raycast scene** as a *kinematic* body (raycast
-target, no physics) so its BVH is `maybe_static` → **built once, never re-fit**.
-Keep the terrain as a *rigid* body in the **main scene** for collision/rollover.
+target, no physics) — on <= 1.4.x so that its BVH was `maybe_static`, built
+once, never re-fit (on 1.5.0: a visual-raycast target, refitted only after its
+geometry changed). Keep the terrain as a *rigid* body in the **main scene** for
+collision/rollover. The raycast scene holds no vehicle collision geometry, so
+a wheel ray cannot hit the vehicle.
 
 ```mermaid
 flowchart TB
@@ -101,7 +145,7 @@ flowchart TB
     T1["terrain (rigid) — collision / rollover"]
   end
   subgraph rc["raycast scene (sensors only)"]
-    T2["terrain (kinematic, use_visual_raycasting)<br/>BVH built ONCE (maybe_static)"]
+    T2["terrain (Kinematic spec, use_visual_raycasting)<br/>visual-raycast target (1.5.0)"]
     P["proxy (rigid, fixed, collision=False)<br/>carries the wheel sensor"]
   end
   V -- "chassis pose (set_pos, FK)" --> P
@@ -116,8 +160,10 @@ Per `vs.step()` in dual_scene mode:
    call): `VehicleScene._sync_proxies_batched`. The per-vehicle
    `proxy.set_pos`/`set_quat` loop (2 whole-scene FK passes PER body,
    ~1 ms/body) remains only as the automatic fallback and the `reset()` path.
-2. `raycast_scene.step()` — refreshes the ray origins and re-casts against the
-   **static** terrain BVH. No rebuild.
+2. `raycast_scene.step()` — refreshes the ray origins and re-casts. (Through
+   v2.0.4: "against the **static** terrain BVH. No rebuild" — true on <= 1.4.x;
+   on 1.5.0 a collision target's top-level tree is refitted every update, the
+   kinematic terrain's only after a geometry change, as above.)
 3. Read the wheel distances and feed them to the main-scene physics via
    `VehiclePhysics.step(distances=...)`.
 4. `main_scene.step()` advances the real vehicle physics / collision.
@@ -125,7 +171,10 @@ Per `vs.step()` in dual_scene mode:
 ### Why the proxy must be rigid, fixed, collision-free
 
 The proxy carries the wheel sensor and must move with the chassis, but it must
-**not** invalidate the static terrain BVH. Three properties matter:
+**not** invalidate the static terrain BVH. Three properties matter (the
+`GEOMETRY`-change / `maybe_static` reasoning in the second bullet, and its
+"~6x slower" measurement, are from genesis-world <= 1.4.x and were not
+re-examined on 1.5.0; the first and third bullets hold there):
 
 - **`collision=False`** → it contributes no collision faces, so it is never a
   raycast target (no self-hit) and its presence adds nothing to rebuild.
@@ -203,14 +252,17 @@ because no trustworthy replacement exists yet.
 > cache-warmed" story is left open, exactly as before: the established fact is
 > only that run order changes the result.
 >
-> **What still stands** is the structural argument, which does not depend on any
-> timing: `single_scene` re-fits the collision BVH — terrain faces included —
-> every step, because the vehicle in that solver is physics-movable;
-> `dual_scene`'s raycast scene holds nothing movable, so its BVH is built once
-> and is additionally shared across `n_envs`. Raycast cost therefore stops
-> scaling with face count and with batch size under `dual_scene`. **`dual_scene`
-> remains the default and remains the right mode for heavy terrain and for
-> batched rollouts** — on the mechanism, not on a number.
+> **What stood here through v2.0.4 as "the structural argument" is FALSE on
+> genesis-world 1.5.0** (correction at the top): it said `single_scene` re-fits
+> the collision BVH — terrain faces included — every step, while `dual_scene`'s
+> raycast scene holds nothing movable, so its BVH is built once and shared
+> across `n_envs`, and concluded that `dual_scene` was the right mode for heavy
+> terrain and batched rollouts "on the mechanism, not on a number". On 1.5.0
+> neither mode refits per face; collision targets refit their top-level tree
+> every update, a visual target only after a geometry change, so that argument
+> no longer exists. `dual_scene` remains the default for the reasons
+> given at the top (no vehicle geometry in the ray scene; exact non-convex
+> surfaces), not for speed.
 >
 > A trustworthy replacement needs per-mode **fresh processes**, alternating
 > order, and repeated medians — a benchmark harness of the
@@ -238,7 +290,9 @@ faces, `run()` called directly, 3 repeats per order.
 | 51 k  | ~17 ms | ~2.5 ms | 4.7x  | ~20 ms | ~7.1 ms | 2.79x |
 | 205 k | ~44 ms | ~2.5 ms | 17.7x | ~49 ms | ~8.9 ms | **5.49x** |
 
-What survives the retraction, as reasoning rather than measurement:
+What survived the retraction through v2.0.4, as reasoning rather than
+measurement (the first bullet is the <= 1.4.x mechanism and does not hold on
+1.5.0):
 
 - The **raycast cost** under `single_scene` grows with face count (rebuild);
   under `dual_scene` it does not (re-cast only). The gap therefore widens with
@@ -257,7 +311,7 @@ What survives the retraction, as reasoning rather than measurement:
 
 ⚠️ Same retraction as above; the table is kept for the record only.
 
-Structurally, the CPU story does **not** carry over to GPU: the BVH rebuild
+Structurally (<= 1.4.x mechanism), the CPU story does **not** carry over to GPU: the BVH rebuild
 parallelizes, so `single_scene` grows far more gently with face count, while
 `dual_scene`'s fixed two-scene / kernel-launch overhead is paid in full at
 `n_envs=1`. Expect the two modes to be close at `n_envs=1` on GPU; do not
@@ -277,11 +331,13 @@ keep elsewhere — and the biggest case is L3 batching.
 
 ⚠️ Same retraction as above; the table is kept for the record only.
 
-The static terrain BVH is built **once and shared across envs**, so
-`dual_scene`'s per-step raycast cost is nearly **flat** in `n_envs`, while
-`single_scene` re-fits per env and scales ~linearly. This is the strongest
-structural case for the default, and it is the one whose *magnitude* is least
-certain, since the retracted table below is the only measurement of it.
+On <= 1.4.x the static terrain BVH was built **once and shared across envs**,
+so `dual_scene`'s per-step raycast cost was expected to be nearly **flat** in
+`n_envs`, while `single_scene` re-fit per env and scaled ~linearly. This
+section called that "the strongest structural case for the default". On
+1.5.0 neither mode refits per face; collision targets refit their top-level
+tree every update, a visual target only after a geometry change, so this case
+does not carry over; nothing about `n_envs` scaling of the two modes was measured on 1.5.0.
 
 | n_envs | single_scene ms — RETRACTED | dual_scene ms — RETRACTED | ratio — RETRACTED | single_scene env-steps/s | dual_scene env-steps/s |
 |---|---|---|---|---|---|
@@ -290,15 +346,16 @@ certain, since the retracted table below is the only measurement of it.
 | 64  | 47.7  | 30.3 | 1.57x | 1343 | 2111 |
 | 256 | 101.6 | 29.9 | **3.40x** | 2521 | **8576** |
 
-The direction is structural: `dual_scene` throughput should scale close to
-linearly in `n_envs` (the BVH is amortized), `single_scene` sublinearly (each env
-adds rebuild cost). **For batched RL / MPPI / Real2Sim rollouts (high `n_envs`),
-`dual_scene` (the default) is the right mode.** A flat-ground `n_envs=1` sim is
+Through v2.0.4: "The direction is structural: `dual_scene` throughput should
+scale close to linearly in `n_envs` (the BVH is amortized), `single_scene`
+sublinearly (each env adds rebuild cost). **For batched RL / MPPI / Real2Sim
+rollouts (high `n_envs`), `dual_scene` (the default) is the right mode.**" —
+a <= 1.4.x argument, not established on 1.5.0. A flat-ground `n_envs=1` sim is
 the one case where `single_scene` may come out marginally ahead — an optional
 micro-optimization, not the recommended configuration, and not one this doc can
 currently put a number on.
 
-Caveat: dual_scene replicates the terrain BVH per env, so at very high `n_envs` it
+Caveat (<= 1.4.x, not re-examined on 1.5.0): dual_scene replicates the terrain BVH per env, so at very high `n_envs` it
 hits a memory ceiling (observed near 512 envs for a 51 k-face terrain on the same
 retracted run — treat the exact number as indicative only). Genesis #2914
 ("share static raycast BVH across envs") lifts that ceiling once merged.
@@ -338,7 +395,23 @@ dual_scene median 9.062 [8.414 .. 10.994] and 9.025 [8.748 .. 10.034] ms/step
 (runs 1 and 2, n=6 each); single_scene 10.710 [10.503 .. 11.026] and 10.669
 [10.350 .. 12.442].
 
-**Two of four runs declined to publish, so this doc publishes nothing.** The
+**On genesis-world 1.5.0 (v2.0.5) the harness PUBLISHED a ratio below 1 —
+`single_scene` faster.** Implementation, 13 workers run in resumable foreground
+slices through the harness's own `main(argv, runner=)`, genesis-world 1.5.0,
+CPU/WSL2, the defaults above (640 m plate at hs 4.0, `n_envs=1`, 20 s window, 6
+repeats): `single/dual = median 0.753 [0.648 .. 0.788] n=6`, both rules held;
+dual_scene 7.817 ms/step, single_scene 5.785. Caveats, all stated by
+impl-review: the workers ran across resumable slices, not one uninterrupted
+session; the payload reports SDK 2.0.4 (the version was not yet bumped); on
+genesis-world 1.4.5 the same harness on this machine DECLINED (rule (i), group
+separation); its whole result is the interval [0.789 .. 0.867] n=6, entirely
+below 1, so a faster `single_scene` is not shown to be new in 1.5.0. Unalternated
+absolute observation, not a comparison: dual_scene 5.721 (1.4.5) vs 7.817
+ms/step (1.5.0), single_scene 4.759 vs 5.785. One published run on one machine
+is not an established speed advantage, and the default is not chosen on it.
+
+**On genesis-world 1.4.0, two of four runs declined to publish, so through
+v2.0.4 this doc published nothing.** The
 flip is a result about this machine's noise, not about the modes: plan-review
 simulated the rule against the measured run-to-run spread of 5 fresh dual_scene
 processes (9.438, 8.620, 8.597, 10.065, 7.799 ms/step — a range of 26% of the
@@ -350,7 +423,7 @@ printed NO RATIO.
 
 Two limits of the harness bear on how far these numbers go. It times the **full
 step** — raycast + the 5-step wheel pipeline + `scene.step` — because
-`single_scene`'s BVH refit happens inside the engine step and there is no
+`single_scene`'s raycast update happens inside the engine step and there is no
 symmetric hook to time the raycast alone; a raycast-only effect is diluted here,
 and `r_k` near 1.0 does not mean the two raycasters cost the same. And it is
 **CPU-only**: `--gpu` runs the same code path but every default and number in it
@@ -366,7 +439,7 @@ import genesis as gs
 VehicleScene.init_backend("cpu")   # physics backend (default cpu; "gpu" only for large-n_envs L3)
 vs = VehicleScene(raycast_mode="dual_scene", dt=0.025, substeps=10)  # dual_scene is the default
 
-# Static body: rigid in main (collision) + kinematic in raycast (static BVH).
+# Static body: rigid in main (collision) + kinematic in raycast.
 # Provide collision_morph for a coarse/convex collider while raycasting a
 # detailed surface (recommended for high-poly / non-convex meshes — a rigid
 # mesh is auto-convexified for collision, so a rigid-mesh raycast would hit the
@@ -393,9 +466,9 @@ for t in range(N):
 `raycast_mode="single_scene"` uses one scene with the classic per-vehicle wheel
 raycaster and reproduces the prior SDK behavior. It is an optional
 micro-optimization for a flat ground at `n_envs=1` that you know will stay that
-way — the SDK publishes no speedup figure for it (see the retraction above, and
-"What the harness measured (v1.6.1)" for why the order-free harness has not
-produced one either), and `dual_scene` is the default.
+way — the SDK claims no speedup for either mode (see the retraction above, and
+"What the harness measured (v1.6.1)": one published 1.5.0 run, `single_scene`
+faster, with caveats), and `dual_scene` is the default.
 
 > **Single-scene rays see the vehicle itself.** The one scene's collision BVH
 > contains the chassis box, so the high-cast ray origin
@@ -426,12 +499,14 @@ produced one either), and `dual_scene` is the default.
 > `d0 = [0.411, 0.411, 0.412, 0.412]` and settles at `z = 0.112`.
 
 > **A large `Terrain` costs an SDF pass at build on genesis-world 1.4.5
-> (v1.6.9).** 1.4.5 computes every collision geom's SDF at `build()`; 1.4.0
-> did it only when a non-convex contact needed it. On genesis >= 1.4.0 the
-> `dual_scene` raycast mirror of a `Terrain` is a fixed RIGID body (above), so
+> (v1.6.9).** 1.4.5 computes every collision geom's SDF at `build()` (1.5.0
+> too); 1.4.0 did it only when a non-convex contact needed it. On genesis >=
+> 1.4.0 the `dual_scene` raycast mirror of a `Terrain` is a fixed RIGID body
+> (since v2.0.5 always, without the probe `_kinematic_supports_terrain`), so
 > it has an SDF too. Since v1.6.9 that mirror is built with the minimum grid
 > (`_gs_compat.COARSE_SDF_MATERIAL_KW`, 16 nodes per axis — its SDF is never
-> read), but this does **not** make the build cheap: for the sample's
+> read; since v2.0.5 the dict also carries `sdf_max_res: 16`), but on 1.4.5
+> this did **not** make the build cheap (not re-measured on 1.5.0): for the sample's
 > 51,212-face terrain, 1.4.5 still prints genesis' "SDF pre-processing of mesh
 > having more than 50000 faces" warning, and on a cold asset cache it prints it
 > **twice** (v1.6.8: once), because the mirror's grid no longer matches the main
@@ -465,8 +540,13 @@ Supported:
 - **One or more vehicles (L2)** — each gets its own proxy + sensor in the
   raycast scene and they still collide in the main scene (verified: dual_scene
   matches single_scene pose-for-pose with two cars).
-- **L3 (`n_envs >= 1`) batching** — one proxy per env; the static terrain BVH is
-  shared across envs.
+- **L3 (`n_envs >= 1`) batching** — one proxy per env. (Through v2.0.4: "the
+  static terrain BVH is shared across envs" — <= 1.4.x; on 1.5.0 the mesh trees
+  are built once and a per-env top-level tree is refitted — every update for a
+  collision target, after a geometry change for a visual target.)
+- **Per-env variants (v2.0.5)** — a list of morphs in `add_static` /
+  `add_raycast_surface` / `add_dynamic(physics=False)` gives one variant per env;
+  the mirror gets the same list and mapping ([`batching.md`](batching.md)).
 - **Static terrain/mesh raycast targets** — `add_static` (always a wheel-raycast
   target; use `wheel_raycast_morph` for a detailed raycast surface vs a coarse
   `collision_morph`).
@@ -474,12 +554,16 @@ Supported:
   adds a moving body the wheels must *sense* (ramp, curb, moving platform). A
   dynamic body is collide-only by default (`wheel_raycast=False`); set
   `wheel_raycast=True` only for a surface the wheels drive onto, and prefer a
-  primitive Box/Sphere/Cylinder collider (a non-primitive mesh logs a warning,
-  since its mirror BVH re-fits every step). In dual_scene mode it gets a rigid
-  mirror in the raycast scene's *rigid* solver — a separate BVH context from the
-  kinematic terrain — re-synced each step, so only that small body's BVH re-fits
-  while the heavy terrain stays static. Verified: the wheel distance tracks the
-  body (and matches single_scene) as it is moved via `handle.set_pose(...)`.
+  primitive Box/Sphere/Cylinder collider (a non-primitive mesh logs a
+  `refit-cost` warning). In dual_scene mode it gets a rigid mirror in the
+  raycast scene's *rigid* solver — on 1.5.0 part of that scene's collision
+  target, refitted every sensor update, separate from the kinematic terrain's
+  visual-raycast target — re-synced each step. (Through v2.0.4: "so only that
+  small body's BVH re-fits while the heavy terrain stays static" — <= 1.4.x.)
+  Verified: the wheel distance tracks the body (and matches single_scene) as it
+  is moved via `handle.set_pose(...)`; on 1.5.0 the ray replay over a moving
+  platform, also teleported per env laterally by more than its size, matched
+  float64 truth to ≤ 2.8e-7 m (implementation).
 
 Follow-up:
 
@@ -490,6 +574,8 @@ Follow-up:
   (`add_raycast_surface`). The legacy one-scene behavior remains as the
   L2-mode `--single-scene` flag — see `server.md` §3.
 
-The upstream-correct fix (no second scene) is Genesis splitting the rigid
-collision/raycast BVH into static + dynamic subsets so the static terrain is not
-re-fit while the vehicle moves — see Genesis issue **#2878** (open).
+Through v2.0.4 this ended: "The upstream-correct fix (no second scene) is
+Genesis splitting the rigid collision/raycast BVH into static + dynamic subsets
+so the static terrain is not re-fit while the vehicle moves — see Genesis issue
+**#2878** (open)." On 1.5.0 per-mesh trees are built once in both modes; the
+issue's status was not re-checked.

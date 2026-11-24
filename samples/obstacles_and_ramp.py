@@ -53,11 +53,10 @@ What this does NOT demonstrate
   characteristic number (``samples/dual_scene_terrain.py`` carries the same
   warning about its two timings). Run both and read both.
 - ``--bench`` reports each raycast mode's ms/step and NOTHING else: no ratio,
-  no verdict. Both modes run back to back in one process in a fixed order, and
-  these obstacles are primitives (cheap BVH), so the number that mode ordering
-  and cache state produce here is not a speedup. dual_scene's win needs a heavy
-  static MESH terrain and/or large ``n_envs``; see ``dual_scene_terrain.py``
-  and ``docs/dual-scene-raycast.md``.
+  no verdict. Both modes run back to back in one process in a fixed order, so
+  the number that mode ordering and cache state produce here is not a speedup.
+  No raycast-mode speed claim is made; see ``dual_scene_terrain.py`` and
+  ``docs/dual-scene-raycast.md``.
 
 Run
 ---
@@ -235,7 +234,10 @@ def run(mode, backend, cfg, wheel_contact="point", contact_samples=9,
 # ---- pass criteria ----------------------------------------------------------
 # Every band below was measured on this course, CPU backend, genesis-world 1.4.0,
 # n_envs=1, throttle 0.45, 1 s settle + 5 s drive, and holds for BOTH raycast
-# modes (dual_scene and single_scene agree to ~1e-3 here).
+# modes. (Through 2.0.4 this said the modes "agree to ~1e-3 here"; on
+# genesis-world 1.4.5 the knocked box ended at Δx 1.61 m in single_scene vs
+# 1.96 m in dual_scene, on 1.5.0 at 1.96 m in both — a divergence that starts at
+# a chassis-vs-box contact, not in the rays; CHANGELOG 2.0.5 §9.2.)
 #
 #   wheel_contact     lift (m)   peak N (N)   Δc at lip (m)   x_end (m)   box Δx (m)
 #   point               0.836        82_010          0.120         9.06        1.82
@@ -431,9 +433,9 @@ def main():
         for mode in ("single_scene", "dual_scene"):
             print(f"  {mode:12s} {ms[mode]:9.3f} {ms[mode] / args.n_envs:12.4f}")
         print("\n  Per-mode cost on THIS machine only. No ratio is printed: both "
-              "modes run\n  back to back in one process in a fixed order, and these "
-              "obstacles are\n  primitives (cheap BVH re-fit), so nothing here is a "
-              "speedup. --bench checks\n  no criteria and always exits 0.")
+              "modes run\n  back to back in one process in a fixed order, so "
+              "nothing here is a\n  speedup. --bench checks "
+              "no criteria and always exits 0.")
         return 0
 
     print(f"genesis_vehicle v{sdk_version}  |  obstacles_and_ramp  "

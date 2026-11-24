@@ -24,7 +24,6 @@ Intentional differences / limitations vs the L2 (per-entity) mode:
 """
 
 import os
-import re
 import sys
 import time
 import argparse
@@ -262,7 +261,6 @@ def run_l3(args):
         enable_adjacent_collision=False,
         enable_neutral_collision=False,
         enable_collision=True,
-        prefer_parallel_linesearch=False,
         tolerance=0.001,
         use_gjk_collision=False,
         box_box_detection=True,
@@ -270,30 +268,11 @@ def run_l3(args):
         broadphase_traversal=gs.broadphase_traversal.SAP,
         max_collision_pairs=2048,
     )
-    # Some options exist only in certain genesis builds (no PyPI release up to
-    # 1.3.3 carries prefer_parallel_linesearch). Filter against the options
-    # class UP FRONT so an absent key is a silent non-event rather than a
-    # scary per-startup [WARN] for something that is already the default
-    # (v1.2.8; v1.0.20 first stopped this from hard-crashing).
-    _known = set(getattr(gs.options.RigidOptions, "model_fields", None) or _rigid_kwargs)
-    _dropped = [k for k in _rigid_kwargs if k not in _known]
-    for k in _dropped:
-        _rigid_kwargs.pop(k)
-    if _dropped and args.verbose:
-        print(f" [Genesis] [L3] RigidOptions not present in this genesis build, "
-              f"skipped: {', '.join(_dropped)}")
-    # Belt-and-braces: a build that validates lazily still reports the bad key
-    # by name, so keep the drop-and-retry loop for anything the filter missed.
-    while True:
-        try:
-            _rigid_opts = gs.options.RigidOptions(**_rigid_kwargs)
-            break
-        except Exception as e:
-            m = re.search(r"Unrecognized attribute '([^']+)'", str(e))
-            if m and m.group(1) in _rigid_kwargs:
-                _rigid_kwargs.pop(m.group(1))
-                continue
-            raise
+    # Every key exists on genesis-world 1.5.0 (the required engine since
+    # 2.0.5). Through 2.0.4 this also passed prefer_parallel_linesearch=False
+    # (present in no PyPI release, so it was always filtered out) and silently
+    # dropped any key the installed build did not know; both were removed.
+    _rigid_opts = gs.options.RigidOptions(**_rigid_kwargs)
     # Unified dual-scene wheel-raycast (VehicleScene raycast_mode=dual_scene): the road is RIGID in the
     # main scene (collision / rollover) and a KINEMATIC mirror is raycast in a
     # SEPARATE scene whose BVH is static and shared across envs — same trick as

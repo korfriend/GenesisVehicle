@@ -84,53 +84,68 @@ Visual demos (with `--viewer`):
 ## Installation
 
 Requires Python 3.12+ and
-[Genesis](https://genesis-embodied-ai.github.io/) — **`genesis-world` 1.4.5 is
-the supported floor** (v1.6.9; it was 1.4.0 from v1.6.6 to v1.6.8), together
-with the dependency set the 1.4.5 wheel requires: **`quadrants` 1.3.3,
-`trimesh` >= 5.0 and `zstandard`**. A clone that updates by `git pull` (the UE
-deployment) or a frozen field build must upgrade those packages separately.
-The v1.6.9 test suite runs on 1.4.5. **Measurements published before v1.6.9
-were taken on 1.4.0 and stay labelled 1.4.0** — they were not re-run on 1.4.5;
-a figure in these docs without an engine label is not a 1.4.5 figure. The
-`≥ 1.0.0` claim printed here through v1.6.4 was never enforced, and v1.6.5's
-"1.3.3 or 1.4.0" was narrowed to 1.4.0 in v1.6.6.
+[Genesis](https://genesis-embodied-ai.github.io/) — **`genesis-world` 1.5.0 is
+REQUIRED since v2.0.5** ([`requirements.txt`](requirements.txt): `genesis-world>=1.5.0,<1.6`),
+together with the dependency set the 1.5.0 wheel pulls: **`quadrants` 1.4.0,
+`coacd` >= 1.0.14, `PyGEL3D` >= 0.8.0** (the measured install: coacd 1.0.14,
+PyGEL3D 0.8.2). A clone that updates by `git pull` (the UE deployment) or a
+frozen field build must upgrade those packages itself, BEFORE pulling 2.0.5 —
+see the field note in CHANGELOG 2.0.5 §12. For genesis-world 1.4.5 stay on SDK
+v2.0.4 (commit `9e5c4d5`; there is no tag). 1.5.0 no longer pulls `moviepy`,
+`vtk` or `z3-solver` on a fresh install; the SDK and its demos do not use them.
 
-**What enforces the floor — a warning, not a refusal.** Through v1.6.8 this
-section said "there is no version check"; that was true then and is not any
-more. Since v1.6.9 `_gs_compat.check_genesis_floor` logs ONE
-`[genesis_vehicle:genesis-floor]` WARNING per process when the installed
-genesis-world is below 1.4.5 (or a 1.4.5 pre-release), and continues. It runs
-from `VehicleScene.init_backend` / every `VehicleScene(init_genesis=True)` and
-from `VehiclePhysics.__init__` (which the batched driver also reaches), and
-`GENESIS_VEHICLE_QUIET` does not silence it; a `VehicleScene(init_genesis=False)`
-that never builds a vehicle is not covered. 1.4.0 still runs and still passes the
-suite (the final v1.6.9 tree: 633 passed / 3 skipped, CHANGELOG 1.6.9 §1.2);
-v1.7.0 was not run on 1.4.0, and its contact-path identity test has no 1.4.0
-baseline any more, so it skips there. The
-`<= 1.3.3` branches in `_gs_compat.py` (the force API, the link inertial reads,
-the `Scene.sim_options` name) and in `vehicle_scene.py` are still there and
-still taken on 1.3.3 — **dead weight to be removed in a later release, not a
-compatibility promise**: untested, unmeasured, and closed to additions. See the
-1.6.9 CHANGELOG entry for what 1.4.5 changed (every collision geom's signed
-distance field (SDF) is computed at build; under `use_hibernation=True` a car measured pulling away
-from rest later) and how to roll back; 1.5.0 (and 1.2.7 for the renderer API
-split) for the 1.3.3 → 1.4.0 bump. Both cross-version parity tables are records
-of a measurement taken once at the bump, not ongoing guarantees.
+```bash
+pip install -r requirements.txt     # from the repo root: genesis-world>=1.5.0,<1.6
+```
 
-On `genesis-world >= 1.4.0`, ask for the solver rate with
-`VehicleScene(substeps=...)` and do **not** pass `dt=` to `RigidOptions` —
-that field now means the substep interval. See
-[`CHANGELOG.md`](CHANGELOG.md) for the per-release backend-compatibility
-notes.
+**What enforces it — a refusal at import.** Through v2.0.4 this section
+described a warn-only floor (`_gs_compat.check_genesis_floor`, 1.4.5, never
+raised); it was removed in v2.0.5. Now `_gs_compat.require_genesis` runs right
+after `import genesis` in `core`, `vehicle_scene`, `multi_vehicle`, `raycast`,
+`scene_helpers`, `visual` and `server`, and raises `GenesisVersionError` (an
+`ImportError`, exported from the package) below 1.5.0 or on a 1.5.0
+pre-release — so `VehicleScene`, `VehiclePhysics`, `MultiVehiclePhysics` and
+the server fail at import, before any scene exists, `VehicleScene(init_genesis=False)`
+included. The message is also logged once at ERROR on the `genesis_vehicle`
+logger, because an `except ImportError:` in caller code would otherwise hide
+it. It does NOT cover every module that touches genesis: `kinematics`, `urdf`
+and `control.sweep_measure` import without it, and `import genesis_vehicle`,
+`PathFollower`, `SweepTable`, `DifferentiablePlant` and `control.identify`
+import on an older engine (genesis itself must still be importable). A
+genesis-world >= 1.6 logs one "not validated" WARNING and continues; **a 1.5.x
+patch release (1.5.1, ...) is admitted silently and is NOT validated** — the 20
+engine-keyed identity locks skip on it, and it needs its own capture / parity
+round. The 2.0.5 suite runs on 1.5.0; **measurements published before v2.0.5
+were taken on 1.4.5 (v1.6.9-v2.0.4) or 1.4.0 (before) and keep their labels**;
+a figure in these docs without an engine label is not a 1.5.0 figure. Every
+`<= 1.3.3` / 1.4.x compatibility branch was removed in v2.0.5 (through v2.0.4
+this section called them "dead weight to be removed in a later release"); the
+legacy `RigidOptions.dt` normalisation (`vehicle_scene._normalize_rigid_dt`)
+remains. See
+the SDK v2.0.5 CHANGELOG entry for what 1.5.0 changed and the parity evidence;
+SDK v1.6.9 for the engine 1.4.0 → 1.4.5 bump; SDK v1.5.0 for the engine 1.3.3 →
+1.4.0 bump. Each cross-version parity
+table is a record of a measurement taken once at the bump, not an ongoing
+guarantee.
 
-**Default materials cost memory on 1.4.5.** genesis-world 1.4.5 computes every
-collision geom's SDF at `build()`, and the default
-`gs.materials.Rigid()` gives a mesh or URDF geom a 128-per-axis grid — measured
-+0.8 .. +1.2 s of build and +490 .. +508 MB of peak resident memory (two default-material cars, CHANGELOG 1.6.9 §3) versus 1.4.0. The SDK does NOT change a
-material you pass or leave as `None`. For a body whose geoms are all convex,
-in a scene with no non-convex, non-terrain collision geom (so no contact reads
-any SDF), pass `gs.materials.Rigid(sdf_cell_size=1e4, sdf_min_res=16, ...)`; a large
-`sdf_cell_size` alone does not switch the SDF off (it lands on 32 per axis).
+Ask for the solver rate with `VehicleScene(substeps=...)` and do **not** pass
+`dt=` to `RigidOptions` — since genesis-world 1.4.0 that field means the
+substep interval. See [`CHANGELOG.md`](CHANGELOG.md) for the per-release
+backend-compatibility notes.
+
+**Default materials and memory.** Since 1.4.5 genesis-world computes every
+collision geom's SDF (signed distance field) at `build()`. On 1.4.5 the default
+`gs.materials.Rigid()` cost a car +0.8 .. +1.2 s of build and +490 .. +508 MB of
+peak resident memory versus 1.4.0 (two default-material cars, CHANGELOG 1.6.9
+§3) — a 1.4.5 fact. On 1.5.0 that penalty was not seen: reference car, default
+material 4.43 s / 1132 MB vs the SDK's coarse kwargs 4.34 s / 1133 MB
+(implementation, CPU/WSL2, cold asset cache, n=3 medians, CHANGELOG 2.0.5 §9).
+The SDK does NOT change a material you pass or leave as `None`. For a body whose
+geoms are all convex, in a scene with no non-convex, non-terrain collision geom
+(so no contact reads any SDF), `gs.materials.Rigid(**_gs_compat.COARSE_SDF_MATERIAL_KW)`
+(`sdf_cell_size=1e4, sdf_min_res=16, sdf_max_res=16` since v2.0.5) gives every
+geom the 16-per-axis minimum; a large `sdf_cell_size` alone does not switch the
+SDF off.
 
 The SDK is a single Python package directory; there is no `pip install`
 yet. Clone and add the parent directory to `PYTHONPATH`:
@@ -381,12 +396,13 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-1369 tests covering URDF parsing, config resolve, suspension sizing, strategy
+1391 tests collected (1388 passed, 3 skipped) covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
-predicates, the swept-envelope wheel contact (including a bit-identity witness
-of the point contact against the v1.5.0 tree, valid where no v1.8.0 mechanism
-acts, and a regression lock on the driving rollout), the config-rebuild state carry and the reset
+predicates, the swept-envelope wheel contact (including a no-axle-torque
+witness and a driving-rollout lock, both bit-identical to the v2.0.4 tree on
+genesis-world 1.5.0 since v2.0.5 — through v2.0.4 the witness reached back to
+the v1.5.0 tree on 1.4.5, a statement 2.0.5 no longer checks), the config-rebuild state carry and the reset
 semantics (v1.6.2), the raycast-mode benchmark harness (schedule,
 gates, pairing and publication rule, driven through an injected runner), the
 build-time config derivations staying live under a post-`build()` write
@@ -422,8 +438,9 @@ stall reproduced on the real NMPC, the PD golden up to its four `GOAL-MISSED`
 steps, a pre-registered run-away property test on a kinematic plant),
 the opt-in gear mode and the gear-mode follower (v2.0.2 — the shift and
 drive-torque rules on both solvers, every skid-steer refusal site, a
-a platform-gated byte-identity check of signed inputs, since v2.0.4 against its
-own 2.0.4 capture (the 2.0.1 fixture is kept, not asserted),
+a platform-gated byte-identity check of signed inputs, since v2.0.5 against a
+capture of the 2.0.4 tree on genesis-world 1.5.0 (the 2.0.1 and 2.0.4 fixtures
+are kept, not asserted),
 the stage-2 brake model and its low-speed coast, `SHIFT` / `GUARD` /
 `GEAR-ABORT` against an independent oracle),
 the opt-in K-turn (v2.0.3 — the trigger and planner, mirror symmetry, the leg
@@ -433,16 +450,19 @@ the pedal-free `StaticFrictionLock` and its spring cap (v2.0.4 — `brake_rem`,
 the engage window, holds at any pedal where the brake can hold, the drive
 overpowering the brake, the per-wheel and rigid-body caps over every wheel
 subset and steer angle, the cap report, a light vehicle and a low-yaw-inertia
-car at rest, the server's generic hook set),
-and the server subpackage surface.
+car at rest, the server's generic hook set), the required engine and where its
+check is called, `--no-target-collision` and its refusals, and per-env
+variants (v2.0.5), and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
-backend, so `genesis-world` must be importable. No GPU needed — measured on the
-v2.0.4 tree with the optional MPC packages installed, `1369 passed, 3 skipped`
-(implementation in 14 foreground calls, impl-review in 10; no timing quoted;
-CPU/WSL2, genesis-world 1.4.5, `test_fusion_probe.py` excluded;
+backend, so `genesis-world` 1.5.0 must be importable. No GPU needed — measured
+on the v2.0.5 tree with the optional MPC packages installed, `1388 passed,
+3 skipped`, 1391 node ids (implementation on a 1.5.0 overlay and again in the
+upgraded venv, impl-review on the overlay; no timing quoted; CPU/WSL2,
+genesis-world 1.5.0, `test_fusion_probe.py` excluded;
 the 3 skips are the env-gated live server tests,
 run them with `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`; without casadi + do_mpc the
-solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1285 passed,
+solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1369 passed,
+3 skipped` at v2.0.4 (genesis-world 1.4.5), `1285 passed,
 3 skipped` in five parts, 527.3 s summed, at v2.0.3, `1225 passed,
 3 skipped` in 433.5 s at v2.0.2, `1127 passed,
 3 skipped` in 347.1 s at v2.0.1, `1010 passed,
@@ -474,10 +494,31 @@ modes without changing any default; by the minor-bump rule it would be 2.1.0,
 and its number follows the 2.0.2 roadmap (CHANGELOG 2.0.3 §1.3). 2.0.4 is a
 patch that changes braking physics with no opt-out and REMOVES
 `StaticFrictionLock`'s `brake_thr` / `REST_SPEED` (breaking), by user decision
-(CHANGELOG 2.0.4 §1).
+(CHANGELOG 2.0.4 §1). 2.0.5 is a patch that REQUIRES a new engine
+(genesis-world 1.5.0; 1.4.5 dropped) and adds public surface
+(`GenesisVersionError`, `require_genesis`, per-env variants), by user decision
+(CHANGELOG 2.0.5 §1).
 (This line said "pre-1.0, so minor bumps
 may break" — stale since 1.0.) Current version: `genesis_vehicle.__version__`. Per-release notes
 in [`CHANGELOG.md`](CHANGELOG.md).
+
+**Upgrading to 2.0.5:** upgrade the ENGINE first, in this order — Python
+>= 3.12, then `genesis-world==1.5.0 quadrants==1.4.0 coacd==1.0.14
+PyGEL3D==0.8.2`, then `git pull`. Pulling 2.0.5 onto a 1.4.5 venv fails at
+import with `GenesisVersionError`; upgrading the engine under 2.0.4 breaks 2.0.4
+(`skip_forward` is gone from 1.5.0). The first run recompiles kernels (a first
+build took about 60 s cold on the measured machine). Physics on the default
+headless path is the 2.0.4 tree's on 1.5.0 bit for bit (46 items); across the
+engine change only tolerances hold (≤ 5.63e-5 m in x and ≤ 5.93e-5 m in z on 16
+parity scenarios; one
+forced tank scene 0.126 m apart through a round-off-decided touchdown sign that
+exists on 2.0.4, fixed in 2.0.6 — planned). Changed: `--no-target-collision`
+now works for primitive targets and EXITS (rc 2) with a URDF vehicle or
+`--multi-env` (it was a silent no-op); on 1.5.0 a URDF `effort="0"` makes the
+`visual_susp_mode="control"` PD live. The rendered `WheelJointInternalSync`
+path moves the chassis trajectory on both engines (a defect that exists on
+2.0.4, documented, fix planned for 2.0.6). Rollback = 2.0.4 + genesis-world
+1.4.5. Read CHANGELOG 2.0.5 (§12 is the field-team note) first.
 
 **Upgrading to 2.0.4:** `StaticFrictionLock` (in every `"control"` preset and,
 new, on the OSC server's generic-mapping vehicles) engages on every wheel the
