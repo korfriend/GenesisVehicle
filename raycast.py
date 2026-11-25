@@ -686,8 +686,9 @@ def is_ray_hit_corrected(d, miss: float):
     The unpopulated-buffer case is instead guarded by
     ``VehiclePhysics._stepped_once`` (per env since v1.5.2), which every
     consumer of this predicate is behind: ``wheels_grounded`` /
-    ``MultiVehiclePhysics.grounded_list`` AND it directly; the visual mirrors
-    (``core._susp_visual_offset``, ``visual._susp_visual_target``) run inside
+    ``MultiVehiclePhysics.grounded_list`` AND it directly; the visual mirror
+    (``core._susp_visual_offset``; through 2.0.5 also
+    ``visual._susp_visual_target``, removed in 2.0.6) runs inside
     the step (past the first-step protection) or, for the closed-form
     ``wheel_visual_transforms``, have their result MASKED back to the rest pose
     for any env whose ``_stepped_once`` is False. That dependency is

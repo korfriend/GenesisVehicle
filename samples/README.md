@@ -58,19 +58,23 @@ L2 with `--solver multi_batched`, city_traffic_ego for L2 × L3).
 
 ### Wheel animation is auto-managed by `VehicleScene`
 
-When the main scene renders (native viewer or any camera), `VehicleScene`
-draws the wheels via the solver-free **instanced renderer** (v1.1.17):
-closed-form `wheel_visual_transforms` poses are streamed into instanced
-render nodes each step. The wheels are **NOT updated through the Genesis
-rigid solver** — the nodes live in Genesis's external render channel (the
-same machinery as the debug-draw overlays) — so physics is identical to a
-headless run; the only cost is the pose streaming itself (a slight
-per-step overhead, ~2–3 ms at 30 vehicles on CPU). Headless runs draw
-nothing and pay nothing. Whenever a viewer or camera is present, wheel
-visuals are always active — there is no off switch.
-It is not a user-facing knob (`VehicleScene(wheel_render_mode=...)`
-exists only to force the legacy joint-sync fallback, which is also used
-automatically for `n_envs > 1`).
+When the main scene renders (native viewer or any visualizer camera),
+`VehicleScene` draws the wheels by overriding the poses of the ENGINE's own
+wheel render nodes with the closed-form `wheel_visual_transforms` pose on every
+sync of the main scene's rasterizer context, at every `n_envs` (v2.0.6; a wheel
+the engine draws no node for, e.g. under `vis_mode="collision"`, gets an SDK
+fallback node). The wheels are **NOT updated through the Genesis rigid
+solver**: no SDK code writes solver state for rendering, and rendered runs were
+measured bit-identical to headless on the rows in CHANGELOG 2.0.6 §6. Wheel
+pixels carry their wheel link's segmentation id. Headless runs draw nothing and
+pay nothing. Whenever a viewer or camera is present, wheel visuals are always
+active — there is no off switch, and `VehicleScene(wheel_render_mode=...)` has
+no other mode (`"internal_sync"` raises since v2.0.6). Camera SENSORS
+(`scene.add_sensor(...)`) are not hooked and show the URDF wheel at the solver
+pose. (Through v2.0.5 this paragraph described SDK-instanced nodes at `n_envs
+== 1` "in Genesis's external render channel" — a channel genesis-world 1.5.0
+removed — and a legacy joint-sync fallback "used automatically for `n_envs >
+1`"; that fallback moved the chassis trajectory and was removed in v2.0.6.)
 
 **Native-viewer camera follow:** use the viewer's own
 `vs.viewer.follow_entity(veh.entity_main)` (see
@@ -78,9 +82,11 @@ automatically for `n_envs > 1`).
 older Genesis), NOT a per-step `set_camera_pose` from the drive loop — the
 viewer draws on its own thread, and a camera set after `vs.step()` returns
 lags the vehicle within each drawn frame, which reads as the vehicle
-"trembling". Since v1.1.25 `VehicleScene.build()` additionally makes the
-follow camera, wheel buffers and node poses commit atomically per frame
-(physics-contracts.md §7.8).
+"trembling". (Through v2.0.5 this paragraph said that since v1.1.25
+`VehicleScene.build()` makes the follow camera, wheel buffers and node poses
+commit atomically per frame — true on genesis-world <= 1.3.3 only; the patch
+was removed in v2.0.5, physics-contracts.md §7.8. A followed vehicle can
+tremble in the native viewer at speed; a draw artefact.)
 
 For an **external** renderer (UE / Unity), keep the run headless and read
 wheel poses from `wheel_visual_transforms()` /

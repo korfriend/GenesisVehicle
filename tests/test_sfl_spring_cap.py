@@ -294,7 +294,8 @@ def test_spring_force_and_anchor_use_k_eff():
     hook.apply_post_tire(_ctx(meta, n=4, v=0.01, N=N))   # engage
     ctx = _ctx(meta, n=4, v=0.01, N=N)
     hook.apply_post_tire(ctx)                 # creep takeover step: d = 0
-    # Keep moving forward (a stop or reversal would re-anchor), at 1e-6 m/s
+    # Keep moving forward (through 2.0.5 a stop or reversal re-anchored; the
+    # re-anchor was removed in 2.0.6), at 1e-6 m/s
     # so the damper term (~5e-3 N) is negligible next to the spring.
     hook._d_long = torch.full((1, 4), 0.001)  # 1 mm from the anchor
     ctx = _ctx(meta, n=4, v=1e-6, N=N)

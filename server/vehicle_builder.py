@@ -61,6 +61,12 @@ def apply_monkey_patches(rigid_solver):
                                  links_idx, envs_idx, **kwargs)
     rigid_solver.apply_links_external_wrench = patched_apply_wrench
 
+    # The two squeeze patches below (set_dofs_position / control_dofs_position)
+    # have NO SDK caller since 2.0.6: their only SDK caller was the joint-writing
+    # wheel visuals, removed in 2.0.6 (no SDK, server or sample code calls
+    # RigidSolver.set_dofs_position / control_dofs_position; samples call the
+    # per-entity methods). Kept, unexercised; candidate for removal. They reshape
+    # only 2-D tensor inputs.
     orig_set_dofs_pos = rigid_solver.set_dofs_position
     def patched_set_dofs_pos(position, dofs_idx=None, envs_idx=None, **kwargs):
         if isinstance(position, torch.Tensor) and position.dim() == 2:
@@ -426,7 +432,6 @@ def build_cfg(urdf_path, mapping, t_fric, target_id=0):
             # here equal the profile's; the lock's spring is capped per wheel by
             # the SDK from the vehicle's static load and the scene dt.
             stability_hooks=stability_hooks_for_profile("control", "car"),
-            visual_susp_mode="kinematic"
         )
 
     # 6. Apply global strategies to loaded preset configurations if explicitly overridden in Unreal
@@ -614,11 +619,11 @@ def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
     (L2 path — one entity per vehicle (per-entity). proxy/sensor/VehiclePhysics
     are created in vs.build(), so the caller fills controllers after build.)
 
-    WheelJointInternalSync (driving the visual wheel joints) is auto-managed by
-    VehicleScene.build() — ON only when the main scene is rendered by Genesis
-    (show_viewer). The server is drawn by an external renderer (UE) and
-    captures via wheel_visual_transforms (closed-form), so it stays OFF when
-    headless.
+    Wheel visuals: the server sends closed-form wheel poses
+    (wheel_visual_transforms) to the external renderer; when the server's own
+    viewer is open, VehicleScene draws the wheels from the same closed form
+    (2.0.6; no solver write). Through 2.0.5 the joint-writing
+    WheelJointInternalSync was used for the viewer at n_envs > 1.
     """
     t_pos = target_info.get('pos', [0, 0, 2])
     t_quat = target_info.get('quat', [1, 0, 0, 0])
@@ -640,8 +645,6 @@ def build_vehicle(vs, target_entities, vehicles, target_id, target_info,
     t_color = (1.0, 0.3, 0.3, 0.5)   # debug color (semi-transparent red)
 
     # Build the vehicle config (single source shared with the L3 path).
-    # enable_wheel_joint_internal_sync is set automatically by vs.build() based on
-    # rendering, so it is not touched here.
     cfg = build_cfg(temp_path, mapping, t_fric, target_id=target_id)
 
     # VehicleScene builds the entity into the main scene + creates

@@ -365,7 +365,7 @@ def main():
     _add_loop_markers(vs, radius=args.radius, n=24)
 
     # One cfg per kind, shared across that kind's K vehicles → the batched solver
-    # groups them into one kind each. VJS is auto-managed by VehicleScene.
+    # groups them into one kind each. Wheel visuals are auto-managed by VehicleScene.
     cfg_per_kind = [preset_fn(urdf_paths[k_i], stability="control")
                     for k_i, (_n, _c, _u, preset_fn, _wb, _nw) in enumerate(kinds)]
 

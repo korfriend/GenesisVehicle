@@ -121,8 +121,8 @@ class L3State:
 
         Reads all N vehicles with 2 body pos/quat reads + 1 SDK closed-form
         wheel_visual_transforms call. Wheel pos/quat is the visual pose with
-        steer+suspension+spin all applied (regardless of WheelJointInternalSync
-        on/off). Spin is included in the quat, so w_angle=0."""
+        steer+suspension+spin all applied (closed form, no solver joint read).
+        Spin is included in the quat, so w_angle=0."""
         # [GPU-mode serving architecture v1.1.3] Only pure physics on GPU,
         # capture math on CPU: the 5 raw reads (pos/quat/steer/dist/spin) +
         # obstacle poses are downloaded in **one DtoH** via _to_host_batched,
@@ -323,9 +323,11 @@ def run_l3(args):
     from genesis_vehicle.urdf_prep import prepare_vehicle_urdf
     temp_urdf = prepare_vehicle_urdf(urdf_path)
     cfg = vehicle_builder.build_cfg(temp_urdf, mapping, t_fric, target_id="L3-shared")
-    # WheelJointInternalSync is auto-managed by VehicleScene.build() (on iff the main
-    # scene is rendered — show_viewer); headless reads wheel poses closed-form via
-    # wheel_visual_transforms, so no per-step engine FK is paid.
+    # Wheel poses are read closed-form via wheel_visual_transforms. With the
+    # viewer open (the default unless --headless), VehicleScene draws the wheels
+    # from the same closed form (2.0.6); through 2.0.5 that viewer path at
+    # n_envs > 1 was the joint-writing WheelJointInternalSync, which moved the
+    # trajectory.
     veh = vs.add_vehicle(
         temp_urdf, cfg=cfg,
         morph=gs.morphs.URDF(file=temp_urdf, pos=first_info.get('pos', [0, 0, 2]),

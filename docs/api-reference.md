@@ -45,7 +45,7 @@ class VehicleScene:
                  viewer_options=None,
                  view=None,                         # None headless | "native" | "cv2"
                  show_viewer=False,
-                 wheel_render_mode="auto",          # "auto" | "instanced" | "internal_sync"
+                 wheel_render_mode="auto",          # "auto" | "instanced" (same since v2.0.6); "internal_sync" raises ValueError since v2.0.6
                  init_genesis=True)
 
     # --- registration (before build) ---
@@ -83,6 +83,12 @@ class VehicleScene:
                     mass=None, name=None) -> DynamicBody           # for a surface wheels must sense
     def add_camera(*, res=(1280,720), pos=(3,-3,2), lookat=(0,0,0), up=(0,0,1),
                    fov=50.0, GUI=False, name=None, **kw) -> Camera   # any view mode
+    #   Camera.render(rgb=True, depth=False, segmentation=False, normal=False):
+    #   segmentation=True returns RAW indices (not colorized); map them through
+    #   vs.scene.segmentation_idx_dict. Since v2.0.6 wheel pixels carry the
+    #   wheel link's id at every n_envs; at n_envs == 1 the integers renumbered
+    #   relative to 2.0.5 (e.g. a second car's chassis link 3 -> 7). Ids do
+    #   not tell envs apart.
 
     def build(*, env_spacing=None, n_envs_per_row=None,
               center_envs_at_origin=None) -> None
@@ -198,7 +204,7 @@ targets (`add_dynamic`).
 | `viewer_options` | `None` | native-viewer config — `gs.options.ViewerOptions(camera_pos, camera_lookat, camera_fov, res, max_FPS, refresh_rate, …)`. Main scene only (the raycast scene is never shown). Needs `view="native"` to actually open a window |
 | `view` | `None` | `None` headless / `"native"` (Genesis viewer) / `"cv2"` (render cameras for a cv2 HUD) |
 | `show_viewer` | `False` | back-compat alias for `view="native"` |
-| `wheel_render_mode` | `"auto"` | how wheel visuals reach the Genesis renderer when the scene renders. Whenever a viewer/camera is present, wheel visuals are ALWAYS active (there is no off switch — headless runs simply have nothing to render). `"auto"` (default) uses the **instanced renderer** (v1.1.17) when supported (`n_envs == 1`): wheel poses are computed closed-form and drawn as instanced render nodes added to the rasterizer context (`_gs_compat.add_render_node` / `queue_instance_poses`; genesis-world 1.5.0 removed the external render-node channel this row named through v2.0.4) — **the wheels are NOT updated through the Genesis rigid solver**, so by construction no solver state is written (measured physics-identical to headless to 1e-6 m at v1.1.17; not re-measured on 1.5.0); the URDF wheel visuals are hidden through an engine-private per-env mask (`_gs_compat.hide_vgeoms`, raises if the engine drops it). Expect a slight per-step cost for the pose streaming (~2–3 ms at 30 vehicles, CPU, a pre-1.5.0 figure). `"instanced"` forces that path (raises when unsupported); `"internal_sync"` forces the legacy `WheelJointInternalSync` fallback, which is also what `n_envs > 1` rendered scenes fall back to automatically. It drives solver joints and MOVES THE CHASSIS TRAJECTORY: the reference car ends about +0.142 m ahead of a headless run over 10.7 m (genesis-world 1.4.5 and 1.5.0; mechanism not established). Through v2.0.4 this row said "small physical side effects, clamped since v1.1.16" — the clamp bounds landing compression only; see [`physics-contracts.md`](physics-contracts.md) §7.8 |
+| `wheel_render_mode` | `"auto"` | how wheel visuals reach the Genesis renderer when the scene renders. Whenever a viewer or a visualizer camera is present (a camera added through `vs.scene.add_camera` included), wheel visuals are ALWAYS active (no off switch; headless scenes are never wired). **Since v2.0.6, at every `n_envs`**: `VehicleScene` overrides the poses of the ENGINE's own wheel render nodes with the closed-form wheel pose (`wheel_visual_transforms`: steer + suspension + spin) on every sync of `scene.visualizer.context` (engine-node override, `physics-contracts.md` §7.8); no SDK code writes solver state for rendering; the URDF wheel visuals are not hidden, so wheel pixels carry their wheel link's segmentation id at every `n_envs` and level; a wheel the engine draws no node for (e.g. `vis_mode="collision"`) gets an SDK fallback node. `"auto"` and `"instanced"` mean the same (through v2.0.5 `"instanced"` meant SDK-instanced nodes at `n_envs == 1` and raised at `n_envs > 1` or on a harvest failure). **`"internal_sync"` raises `ValueError` since v2.0.6** (through v2.0.5 it forced `WheelJointInternalSync`, which moved the chassis trajectory: the reference car ended +0.142 m ahead of a headless run over 10.7 m). Render contexts the SDK does not hook (camera sensors, visual raycasting / picking, viewer frames during `build()`) show the URDF wheel at the solver pose, with no warning. Hook cost about 0.5 ms per sync at `n_envs` 2, K 2 (implementation, CHANGELOG 2.0.6 §8.5; measured on the tree before fix round 1, which added about 2 µs per wheel node per sync; not re-measured) |
 | `init_genesis` | `True` | auto-init the (cpu-default) physics backend if not already up; set `False` to manage `gs.init` yourself. **The backend itself is chosen by `VehicleScene.init_backend()`, not here** |
 
 > **Physics backend** is set by the classmethod `VehicleScene.init_backend("cpu" \| "gpu")` (process-global, once, default **cpu**) BEFORE any scene — not a constructor arg. The renderer is separate (always GPU). See "Backends" above.
@@ -594,8 +600,8 @@ vehicle (a fresh cfg per vehicle splits K vehicles into K kinds × 1 and
 the batching never engages — measured 10 tanks: SDK compute 33.8 vs
 2.8 ms/step). Since v1.0.15 multi-kind steps also batch the solver I/O
 across kinds (one combined state read + one force/torque apply pair)
-and same-kind WheelJointInternalSync writers collapse into one solver call
-(``KindVisualBatch`` — 30 tanks with visuals: 23.3 → 14.2 ms/step);
+and (through v2.0.5) same-kind WheelJointInternalSync writers collapsed into one solver call
+(``KindVisualBatch`` — 30 tanks with visuals: 23.3 → 14.2 ms/step; both removed in v2.0.6);
 bounded by Genesis's per-entity ``scene.step()`` cost. For RL/MPPI
 throughput use ``n_envs > 1`` instead (L3 batching — see
 [`../samples/perf_vectorization.py`](../samples/perf_vectorization.py)).
@@ -718,7 +724,7 @@ class VehicleConfig:
     chassis: ChassisConfig = field(default_factory=ChassisConfig)
     stability_hooks: list[StabilityHook] = field(default_factory=list)
     recommended_dt: float = 0.025    # 40 Hz SDK default (v1.0.19); `dt` is a deprecated alias
-    enable_wheel_joint_internal_sync: bool = False   # auto-managed by VehicleScene.build() (not a user knob)
+    enable_wheel_joint_internal_sync: bool = False   # v2.0.6: True raises ConfigError (joint-writing visuals removed); kept as a field so cfg copies still work
     susp_visual_clamp: float | None = None   # v0.7.14: None=per-wheel rest_stroke
 
     @classmethod
@@ -780,13 +786,15 @@ when it declares a non-zero stiffness**, and only then reads `damping` /
 
 Note this is about *sourcing the number*. The ray-wheel pipeline never applies
 suspension force through the URDF joint — `N` goes onto the chassis with the
-rest of the wrench (`_gs_compat.apply_links_wrench`), and the prismatic joint
-is driven only for the Genesis viewer (`visual_susp_mode`). That joint path is
-NOT physics-neutral (`physics-contracts.md` §7.8, corrected in v2.0.5): the set
-(kinematic) write moves the chassis trajectory, and on genesis-world 1.5.0 a
-URDF `effort="0"` is an UNBOUNDED force range, so the `"control"` path's PD is
-live there (it was inert on 1.4.5). Through v2.0.4 this paragraph called the
-prismatic joint "visual".
+rest of the wrench (`_gs_compat.apply_links_wrench`). **Since v2.0.6 no SDK
+code drives the prismatic joint at all**: the joint-writing wheel visuals were
+removed and `visual_susp_mode` has no effect (one WARNING for a value other
+than `"auto"`). Through v2.0.5 the joint was driven for the Genesis viewer
+(`visual_susp_mode`), and that path was NOT physics-neutral
+(`physics-contracts.md` §7.8): the set (kinematic) write moved the chassis
+trajectory, and on genesis-world 1.5.0 a URDF `effort="0"` made the
+`"control"` path's PD live. Through v2.0.4 this paragraph called the prismatic
+joint "visual".
 
 `ConfigError` — raised on bad config (missing required fields, wheel count
 mismatch, sides missing for skid-steer, etc.). It subclasses `ValueError`.
@@ -971,13 +979,18 @@ class StaticFrictionLock(StabilityHook):
     SPRING_C_MAX = 1.0     # v2.0.4: per-wheel spring-number cap on the static load
     SPRING_C_RB = 1.5      # v2.0.4: planar rigid-body constant -- chosen by the user, NOT derived
     STATE_ATTRS = ("_d_long", "_d_lat", "_was_active",
-                   "_s_eng", "_rested", "_rest", "_v_prev_sq")   # v1.8.0: last four new
+                   "_rest", "_v_prev_sq")   # v1.8.0: last two new; v2.0.6: 7 -> 5 names
+    # v2.0.6: _s_eng / _rested (the reversal re-anchor's state, v1.8.0-2.0.5)
+    # REMOVED: read / write / delete raises AttributeError (instance and class).
+    # v2.0.6: ALSO requires ctx.N > 0 per wheel to engage (ground gate, enforced
+    # in apply_post_tire; physics-contracts.md §7.22.5).
     # v2.0.4: ENGAGES per wheel where ctx.brake_rem > 0 (the brake holds the
     # wheel) AND sqrt(v_long^2 + v_lat^2) < min(v_thr, 0.5), at ANY pedal.
     # v_thr above 0.5 no longer widens the window (TankTuning's 5.0 acts as
     # 0.5). Never sets ctx.omega_override. The 2D spring-damper replaces the
-    # tyre force only after the creep test and holds the point where the
-    # contact stopped. A wheel whose drive torque exceeds its brake torque has
+    # tyre force only after the creep test and holds the TAKEOVER point (through
+    # v2.0.5 "the point where the contact stopped", via the reversal re-anchor
+    # removed in v2.0.6). A wheel whose drive torque exceeds its brake torque has
     # brake_rem == 0 and turns (brake does not override drive).
     # Spring rate actually used (spring, anchor re-placement, damper floor):
     #   k_eff_i = min(k_spring, f * m_static_i / dt^2),
@@ -1331,6 +1344,22 @@ genesis_vehicle.require_genesis(gs_module=None) -> None
 # New engine-private helpers in _gs_compat (v2.0.5): variant_index,
 # kinematic_raycast_entity, add_render_node, queue_instance_poses, hide_vgeoms
 # (writes the private vgeom.active_envs_mask; raises AttributeError if absent).
+# v2.0.6: hide_vgeoms and queue_instance_poses DELETED. New (wheel renderer,
+# private module): on_render_sync (WRITES ctx._sync_shapes, a wrapper),
+# queue_part_poses (WRITES primitive.poses, mesh._bounds and the queued "model"
+# buffer of the ENGINE's wheel nodes), register_fallback_seg (calls
+# ctx.create_node_seg; fallback nodes only), add_render_node (ctx.add_node,
+# fallbacks only); READS check_render_seg_api (ctx.nodes_by_seg_keys,
+# rendered_envs_idx, update_buffer signature, from_trimesh(envs=)),
+# engine_part_nodes, rendered_envs, part_is_posed (vgeom.desc.dynamic_vertices),
+# pose_max_abs (rasterizer_context.POSE_MAX_ABS), queued_model (ctx.jit._buffer,
+# self-test only), check_render_fallback_api (before the first fallback node),
+# render_sync_depth (the wrapper depth), force_render_sync
+# (ctx.update(force_render=True), wiring self-test); constants WHEEL_RENDER_TAG
+# ("[genesis_vehicle:wheel-render]") and RENDER_TESTED_GENESIS ("1.5.0").
+# Full list: _gs_compat.__all__. Every render target first appeared in genesis-world 1.5.0;
+# a 1.5.x patch is admitted silently. Each raises RuntimeError naming the
+# attribute if it is missing (rendered scenes only).
 ```
 
 ### 7.5 Per-link transforms (telemetry / animation / attach, v0.6.0)
@@ -1367,17 +1396,25 @@ base/root link; `"parent"` (default) = relative to each link's immediate URDF
 parent (root → world). See [`physics-contracts.md`](physics-contracts.md) for
 the quaternion/position conventions.
 
-> **For wheel VISUAL pose, prefer `wheel_visual_transforms` (below), not
-> `link_transforms`.** `link_transforms` reads the engine's link state, which
-> reflects steering/suspension/spin only when WheelJointInternalSync is ON (it drives those
-> joints). Called with WheelJointInternalSync off, it returns the rest pose and emits a
-> one-time warning.
+> **For wheel VISUAL pose, use `wheel_visual_transforms` (below), not
+> `link_transforms`.** Since v2.0.6 `link_transforms` wheel links are always the
+> solver's own joint state, which no SDK code writes, so they do not follow the
+> commanded steer, suspension or spin (impl-review, reference car after 200
+> steps at steer 0.5: steer joint −0.0042 rad, spin 1e-4 rad, suspension
+> −0.1501 m, URDF lower limit −0.15 m); one stderr WARNING per process on the
+> first call. Through v2.0.5 they followed steer / suspension / spin only where
+> WheelJointInternalSync ran (rendered `n_envs > 1`, `internal_sync`,
+> `enable_wheel_joint_internal_sync=True`), and this note said "returns the rest
+> pose" otherwise. A `DifferentiablePlant` reads wheel links through
+> `get_link_transforms` for its mass properties: in a 2.0.5 rendered `n_envs > 1`
+> scene it read joint-written links, since v2.0.6 physical ones.
 
 ### 7.6 Wheel visual pose for external renderers (`wheel_visual_transforms`, v0.7.7)
 
 Closed-form per-wheel VISUAL transform — steer + suspension + spin applied —
-computed **without driving Genesis joints**, so it works whether or not
-WheelJointInternalSync is enabled. This is the intended feed for an external renderer
+computed **without driving Genesis joints**. Since v2.0.6 it is also what
+`VehicleScene`'s own wheel renderer draws (and, through v2.0.5, it worked
+whether or not WheelJointInternalSync was enabled). This is the intended feed for an external renderer
 (Unreal / Unity): the SDK owns the steer-sign / spin-axis / suspension
 conventions, so the client just places the wheel.
 
@@ -1412,7 +1449,7 @@ closed-form omits spin too, matching the viewer).
 ### 7.7 One-call visual-parts feed (`visual_parts_transforms`, v0.7.8; renamed v0.7.10)
 
 The high-level convenience for an external renderer: chassis **and** wheels in
-one call, WheelJointInternalSync-independent. (Named `render_transforms` in v0.7.8–0.7.9;
+one call, independent of any joint state. (Named `render_transforms` in v0.7.8–0.7.9;
 renamed to `visual_parts_transforms` in v0.7.10.)
 
 ```python
@@ -1429,10 +1466,10 @@ class VisualPartsTransforms:
 ```
 
 The chassis is the real **dynamics** pose (`get_pos/get_quat`, always world —
-the physical truth, unaffected by WheelJointInternalSync). The wheels are the closed-form
+the physical truth). The wheels are the closed-form
 visual pose (`wheel_visual_transforms`). `frame` applies to the wheels:
 `"world"` absolute, `"local"` relative to the chassis. This is the recommended
-one-stop feed for a UE / Unity bridge — no `get_link`, no WheelJointInternalSync.
+one-stop feed for a UE / Unity bridge — no `get_link`, no joint writes.
 
 **Multi-vehicle (L2 / L2×L3):** `MultiVehiclePhysics` exposes the same two
 methods — `wheel_visual_transforms(frame)` returns a **list** (length
@@ -1441,7 +1478,9 @@ and `visual_parts_transforms(frame)` a list of `VisualPartsTransforms`
 (per-vehicle, since kinds may differ in wheel count). Verified identical to a
 single `VehiclePhysics` at K=1 (Δ = 0).
 
-> **Naming:** the legacy viewer-side wheel-joint driver (internal since v1.1.18) is **`WheelJointInternalSync`** (formerly `VisualJointSync`, renamed v1.1.19)
+> **Removed in v2.0.6 — the three notes below are history.** `WheelJointInternalSync` and `KindVisualBatch` were deleted; `from genesis_vehicle.visual import WheelJointInternalSync` (and `visual.WheelJointInternalSync`, and even `hasattr(visual, ...)` / `getattr(visual, ..., None)`, because the module `__getattr__` raises) raise `ImportError` naming the replacement; `enable_wheel_joint_internal_sync=True` raises `ConfigError`; `VehiclePhysics.visual` is a read-only `None` and `MultiVehicleKindPhysics.visuals` is `()`; read the spin angle from `VehiclePhysics.wheel_spin_angle`. A raw `VehiclePhysics` in your own `gs.Scene` no longer gets animated wheels from the SDK: use `VehicleScene`, or draw from `wheel_visual_transforms()` / `visual_parts_transforms()`.
+
+> **Naming (history):** the legacy viewer-side wheel-joint driver (internal since v1.1.18) was **`WheelJointInternalSync`** (formerly `VisualJointSync`, renamed v1.1.19)
 > (renamed from `VisualSync` in v0.7.8; the old alias was removed in v0.7.9).
 > The name is explicit on purpose — it drives the **wheel** visual joints
 > (spin/steer/suspension) for the **Genesis viewer** only; it never writes the
@@ -1452,7 +1491,7 @@ single `VehiclePhysics` at K=1 (Δ = 0).
 > External renderers don't need it at all — use `visual_parts_transforms` /
 > `wheel_visual_transforms`.
 
-> **Auto-managed by `VehicleScene` (v0.9.18):** `enable_wheel_joint_internal_sync` is
+> **(History, v0.9.18 through v2.0.5; since v2.0.6 setting the field to `True` raises `ConfigError` on every path, and VehicleScene sets nothing.) Auto-managed by `VehicleScene` (v0.9.18):** `enable_wheel_joint_internal_sync` is
 > **not a user-facing knob**. `VehicleScene.build()` sets it automatically — ON iff
 > the main scene is rendered by Genesis (`view="native"` **or** a camera was added
 > with `vs.add_camera(...)`), OFF otherwise (headless /
@@ -1460,7 +1499,7 @@ single `VehiclePhysics` at K=1 (Δ = 0).
 > through v0.7.13). When driving the low-level `VehiclePhysics` directly you may
 > still set it on the config yourself.
 
-> **Perf advisory (v0.7.10):** when `WheelJointInternalSync` is active
+> **(History, v0.7.10 through v2.0.5; the class and the warning no longer exist.) Perf advisory (v0.7.10):** when `WheelJointInternalSync` is active
 > (`enable_wheel_joint_internal_sync=True`) it logs a one-time-per-process
 > `[genesis_vehicle] PERF:` warning to stderr — it drives the URDF wheel joints
 > through the engine's articulated-body forward kinematics every step and is

@@ -35,12 +35,13 @@ class URDFParsedConfig:
     # sprung children such as a turret or a cargo body. (v1.2.1)
     sprung_mass: Optional[float] = None
     unsprung_mass: Optional[float] = None
-    # steer_axis_signs[name] = +1 or -1 depending on URDF <axis xyz>; used by visual layer
-    # to flip the visual command so users see the requested rotation in the viewer.
+    # steer_axis_signs[name] = +1 or -1 depending on URDF <axis xyz>. Through 2.0.5 the
+    # joint-writing wheel visuals used it to flip the steer joint command; since 2.0.6
+    # (joint writing removed) no SDK code reads it. Still parsed and kept as a field.
     steer_axis_signs: dict[str, int] = field(default_factory=dict)
     # Whether each suspension prismatic joint has non-zero stiffness/damping in the URDF.
-    # If non-zero, visual sync should use control_dofs_position; otherwise
-    # set_dofs_position is preferred.
+    # Through 2.0.5 it chose control_dofs_position over set_dofs_position for the
+    # joint-writing wheel visuals; since 2.0.6 no SDK code reads it. Still parsed.
     susp_has_dynamics: dict[str, bool] = field(default_factory=dict)
 
 

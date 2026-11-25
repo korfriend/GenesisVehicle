@@ -363,11 +363,16 @@ class _OmegaOverride:
 _BRAKE_THR_REMOVED = (
     "StaticFrictionLock: brake_thr was removed in 2.0.4 — the lock now engages "
     "where the brake holds the wheel; drop the argument")
+_RULE_A_REMOVED = (
+    "StaticFrictionLock.{name} was removed in 2.0.6: the reversal re-anchor "
+    "was a round-off branch; copy StaticFrictionLock.STATE_ATTRS instead")
 _REMOVED_MSG = {
     "brake_thr": _BRAKE_THR_REMOVED,
     "REST_SPEED": ("StaticFrictionLock.REST_SPEED was removed in 2.0.4 — the "
                    "lock takes over only through its creep test; there is no "
                    "rest-speed takeover any more"),
+    "_s_eng": _RULE_A_REMOVED.format(name="_s_eng"),
+    "_rested": _RULE_A_REMOVED.format(name="_rested"),
 }
 
 
@@ -391,6 +396,10 @@ class _StaticFrictionLockMeta(type(StabilityHook)):
                          _removed_set("brake_thr"))
     REST_SPEED = property(_removed_get("REST_SPEED"), _removed_set("REST_SPEED"),
                           _removed_set("REST_SPEED"))
+    _s_eng = property(_removed_get("_s_eng"), _removed_set("_s_eng"),
+                      _removed_set("_s_eng"))
+    _rested = property(_removed_get("_rested"), _removed_set("_rested"),
+                       _removed_set("_rested"))
 
 
 class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
@@ -401,8 +410,15 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
     step — ``ctx.brake_rem > 0``, the brake torque left after the pipeline's
     brake projection — AND its planar contact speed
     ``sqrt(v_long^2 + v_lat^2)`` is below ``min(v_thr, V_ENGAGE_MAX)``
-    (:attr:`V_ENGAGE_MAX` 0.5 m/s), at ANY pedal value. A duck-typed ctx
-    without ``brake_rem`` engages no wheel. The lock never forces a wheel's
+    (:attr:`V_ENGAGE_MAX` 0.5 m/s), at ANY pedal value, AND (since 2.0.6)
+    its normal force ``ctx.N`` is positive. A duck-typed ctx
+    without ``brake_rem`` engages no wheel. The pipeline sets ``N = 0`` on
+    every airborne wheel (``compression <= 0``) and on a wheel in contact
+    whose spring + damper force is not positive (``N`` is clamped at 0); on
+    such a wheel the creep test below holds vacuously (the held-wheel deadbeat
+    is 0 at ``N = 0``), which is how 2.0.4 / 2.0.5 engaged and took over
+    wheels in the air. The gate is enforced in :meth:`apply_post_tire`, per
+    wheel, with no threshold and no hysteresis. The lock never forces a wheel's
     spin (no ``ctx.omega_override``), and it TAKES OVER only through the
     creep test: the pipeline's held-wheel deadbeat binds on the raw tyre force
     (``|ctx.F_long| >= ctx.F_long_deadbeat``) and the planar speed did not
@@ -440,14 +456,45 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
         ``F_lat   = -K_spring·d_lat   - D·v_lat``
 
     where ``d_{long,lat}`` are displacements from the anchor (integrated from
-    ``v_{long,lat}·dt`` per step). The anchor is placed so the lock holds the
-    point where the contact came to REST:
+    ``v_{long,lat}·dt`` per step). The lock holds the TAKEOVER point: the
+    takeover step anchors at the END of the step (``d = 0`` after
+    integration), so only the damper acts on it, and the anchor then stays
+    where it is except where the friction or brake limits below move it.
 
-    * the takeover step anchors at the END of the step (``d = 0`` after
-      integration), so only the damper acts on it;
-    * the first step after engagement on which ``s_eng·v_long <= 0`` (``s_eng``
-      the travel sign at engagement: the contact stopped or reversed)
-      re-anchors the longitudinal spring at the contact.
+    **The reversal re-anchor was removed in 2.0.6.** From 1.8.0 through 2.0.5
+    the first step after engagement on which ``s_eng·v_long <= 0`` (``s_eng``
+    the sign of ``v_long`` at engagement) re-anchored the longitudinal spring
+    at the contact once (state ``_s_eng`` / ``_rested``; reading or writing
+    either name now raises ``AttributeError``). At a touchdown ``v_long`` is
+    at round-off level, so that sign, and with it the branch the lock took,
+    was round-off: in the ``direct_single_3`` scene of
+    ``tests/test_legacy_inputs_bit_identity.py`` the tank's final x on 2.0.5
+    differs by 0.121 m between an initial tank velocity of -1e-6 and +1e-6
+    m/s. Without it the final positions of that scene's tank agree within
+    1e-3 m across the perturbation set {nominal; vx, vy, wx, wy, wz +-1e-6;
+    vx +-3e-5; vx +-1e-4} (per-env spread, max over x, y, z: measured at most
+    1.33e-4 m on the 2.0.6 code and 1.48e-4 m with the re-anchor removal
+    alone, before the ground gate; implementation measurement on
+    genesis-world 1.5.0, CPU/WSL2, harness in the 2.0.6 CHANGELOG; 2.0.5:
+    0.121 m in the +-1e-6 group). ``tests/test_sfl_touchdown_continuity.py`` (line 73) asserts
+    the 1e-3 m bound for three of those runs only: vx -1e-6, vx +1e-6 and
+    wz -1e-6. The lock is NOT continuous: the creep-test takeover
+    step is still a discrete decision, and a pitch-rate sweep of the same
+    scene shows steps of about 3 mm in the tank's final x (CHANGELOG 2.0.6);
+    whether 2.0.5 has such steps elsewhere is not established (at the same
+    sweep points 2.0.5 sat on the other re-anchor branch, 73-121 mm away).
+    What the re-anchor did, and what its removal costs, measured on
+    genesis-world 1.5.0 (CPU/WSL2, dt 0.025 x 4 substeps, plane mu 1.0; the
+    2.0.6 CHANGELOG has the harness): the reference car braking at 1.0 from
+    3 m/s down a 20° slope now rolls back 0.88 mm after stopping (2.0.5:
+    0) with a reverse speed down to -0.046 m/s (2.0.5: -0.021); on the 2.0.4
+    braked-slope acceptance rows (50 s per row, 20 s for rows expected to
+    roll) no row changed its outcome class, and removing the re-anchor
+    changed the final travel by up to 24.0 mm shorter on the reference car
+    and 15.1 mm shorter on the reference tank; some reference-car rows got
+    longer, by up to 0.271 mm (AC-1 rows, dt 0.025) and 0.52 mm (dt 0.04,
+    5° downhill, brake 1.0); on a light tank of 1 % of the reference tank's
+    mass travel got longer by up to 21.1 mm.
 
     The damper is ``D = max(k_damp, 2·sqrt(k_spring·N/g))`` — at least
     critical for the wheel's mass share ``N/g`` — and the damper force is
@@ -605,12 +652,15 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
         pulled back toward that point (measured in the 1.8.0 design probe,
         reference car, brake 1.0 from 10 m/s, CPU/WSL2, genesis-world 1.4.5,
         dt 0.025 x 4 substeps: reverse speed -0.107 m/s after the stop; with
-        the rest anchor -3e-5 m/s). (On 1.7.0 itself, whose brake faded near
+        the 1.8.0 rest anchor -3e-5 m/s — a 1.8.0 / genesis-world 1.4.5
+        measurement, taken with the reversal re-anchor that 2.0.6 removed;
+        not re-measured since). (On 1.7.0 itself, whose brake faded near
         standstill, the same stop measured +2e-7 m/s.)
 
     State (:attr:`STATE_ATTRS`): ``_d_long``, ``_d_lat``, ``_was_active`` and,
-    since 1.8.0, ``_s_eng``, ``_rested``, ``_rest``, ``_v_prev_sq`` — all
-    ``(n_envs, n_wheels)``. Like the first three, the new state survives every
+    since 1.8.0, ``_rest``, ``_v_prev_sq`` — all ``(n_envs, n_wheels)``
+    (1.8.0-2.0.5 also kept ``_s_eng`` / ``_rested`` for the reversal
+    re-anchor, removed in 2.0.6). Like the first three, the new state survives every
     reset (a documented known gap). Two consequences of the new state: a
     stale ``_v_prev_sq`` can trigger one early creep takeover on a wheel that
     engages on that exact step; and a stale ``_rest = True`` (with
@@ -625,6 +675,52 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
     :attr:`STATE_ATTRS` entry yourself after a reset that teleports a braked
     vehicle if that offset matters. (The first 1.8.0 implementation named
     only the ``_v_prev_sq`` consequence here.)
+
+    Lift-off and landing (the 2.0.6 ground gate, exactly what the one gate
+    term in :meth:`apply_post_tire` does). On a wheel with ``ctx.N <= 0`` the
+    lock is not active: no engagement edge, no creep latch, no anchor
+    zeroing, ``_d_long`` / ``_d_lat`` not integrated, no anchor advance or
+    limit, no hold and no ``ctx.hold_applied``; ``_was_active`` becomes
+    False. ``_rest``, ``_d_long`` and ``_d_lat`` keep their values while the
+    wheel is gated; ``_v_prev_sq`` is updated every step, gated or not, so the
+    creep test on the first loaded step compares against the last unloaded
+    step's speed. When the wheel is loaded again it engages afresh (the
+    ``just_engaged`` edge clears ``_d_*`` and ``_rest``) and is taken over
+    only through the creep test. The spring cap is unchanged (static shares,
+    not ``N``). The pipeline's held-wheel and lateral deadbeats are not
+    exempted on a gated wheel, and both are 0 at ``N = 0``. Through 2.0.5 a
+    braked wheel could latch ``_rest`` in the air (the creep test holds
+    vacuously at ``N = 0``); since 2.0.6 it cannot. NOT closed: a partial
+    reset still keeps the lock's state (see above), except where the reset
+    leaves the wheel at ``N = 0`` for at least one step. There is no
+    engage / release hysteresis: a hopping braked wheel gets one engage /
+    release pair per unload, and after landing it is held again only after a
+    fresh creep-test takeover. (Through 2.0.5 the anchor of an airborne,
+    already-held wheel was also moved on every air step -- the
+    friction-limit anchor advance (``advance_mask``) binds at ``N = 0`` --
+    and its ``_rest`` latch was kept.) A braked vehicle that hops creeps
+    downhill by more per hop than on 2.0.5: up to 1.68x per hop measured
+    (reference car, brake 1.0, 5° gravity tilt, a 0.8 m/s upward chassis
+    kick every 2 s: 5.2 -> 8.7 mm per hop); with kicks too small to unload a
+    wheel the result is unchanged (within 1e-5 m). Measured on
+    genesis-world 1.5.0, CPU/WSL2, dt 0.025 x 4 substeps, plane mu 1.0
+    (harness in the 2.0.6 CHANGELOG). In that scene (reference car, 5°,
+    kv 0.8, dt 0.025; trace, implementation; figures re-measured by
+    impl-review) the difference arises from the first loaded step on; the
+    flight is identical (7.13 mm). Through 2.0.5 the wheels stayed engaged
+    through the flight with the anchor following the wheel; on the first
+    loaded step the anchor offset grew from 0 to 4.32 mm, and over the next
+    two steps the chassis moved 3.15 mm back uphill, settling 5.20 mm per
+    hop. Since 2.0.6 the touchdown is a fresh engagement, taken over on the
+    first loaded step with the anchor offset 0 at its end; the chassis
+    settles within 0.35 mm of its landing-step position, 8.71 mm per hop.
+    The landing step itself already differs by 0.71 mm between the trees.
+    The hold is applied on the first loaded step on both trees; D and Y bind
+    on no wheel on the first loaded step of any of the 7 hops, nor anywhere
+    in hop 1's traced steps 239-262. The change is entirely due to the
+    ground gate (the re-anchor removal alone equals 2.0.5 to 1e-3 mm). Not
+    explained: why the 10° row of the same scene is unchanged (17.615 mm on
+    all trees), and the size of the effect.
 
     BREAKING from v0.5.6:
       The old ``hold_k``, ``hold_k_lat``, ``slip_scale`` constructor kwargs
@@ -643,6 +739,12 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
                          _removed_set("brake_thr"))
     REST_SPEED = property(_removed_get("REST_SPEED"), _removed_set("REST_SPEED"),
                           _removed_set("REST_SPEED"))
+    # (v2.0.6) The reversal re-anchor's state was removed with it (see the
+    # class docstring); reading or writing either name raises AttributeError.
+    _s_eng = property(_removed_get("_s_eng"), _removed_set("_s_eng"),
+                      _removed_set("_s_eng"))
+    _rested = property(_removed_get("_rested"), _removed_set("_rested"),
+                       _removed_set("_rested"))
 
     #: Creep equilibrium test (v1.8.0, A6): the held-wheel deadbeat binds and
     #: ``v_planar^2 >= CREEP_RATIO * v_planar_prev^2`` (the speed did not fall
@@ -669,9 +771,9 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
     #: The hook's per-wheel INTEGRATOR state, every attribute
     #: ``control.plant._sync_hooks`` row-slices and every tensor this hook
     #: holds. Code that copies the lock's state between hooks by name must copy
-    #: all of these (the last four are new in 1.8.0).
-    STATE_ATTRS = ("_d_long", "_d_lat", "_was_active",
-                   "_s_eng", "_rested", "_rest", "_v_prev_sq")
+    #: all of these (the last two are new in 1.8.0; 1.8.0-2.0.5 also had
+    #: ``_s_eng`` / ``_rested``, removed in 2.0.6 with the reversal re-anchor).
+    STATE_ATTRS = ("_d_long", "_d_lat", "_was_active", "_rest", "_v_prev_sq")
 
     def __init__(
         self,
@@ -707,11 +809,8 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
         # v1.8.0 rest-anchor state (see the class docstring), also
         # (n_envs, n_wheels), created here as None so a generic attribute sweep
         # sees the same names before and after the first step:
-        # travel sign at engagement (float), "came to rest since engagement"
-        # (bool), "the lock has taken over" (bool), last step's planar contact
+        # "the lock has taken over" (bool), last step's planar contact
         # speed squared (float, +inf before the first step).
-        self._s_eng: torch.Tensor | None = None
-        self._rested: torch.Tensor | None = None
         self._rest: torch.Tensor | None = None
         self._v_prev_sq: torch.Tensor | None = None
 
@@ -864,9 +963,6 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
             self._d_long = torch.zeros_like(ref)
             self._d_lat = torch.zeros_like(ref)
             self._was_active = torch.zeros(ref.shape, device=ref.device, dtype=torch.bool)
-        if self._s_eng is None or self._s_eng.shape != ref.shape:
-            self._s_eng = torch.zeros_like(ref)
-            self._rested = torch.zeros(ref.shape, device=ref.device, dtype=torch.bool)
         if self._rest is None or self._rest.shape != ref.shape:
             self._rest = torch.zeros(ref.shape, device=ref.device, dtype=torch.bool)
         if self._v_prev_sq is None or self._v_prev_sq.shape != ref.shape:
@@ -884,7 +980,12 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
         if brake_rem is None:
             active = torch.zeros_like(active_v)
         else:
-            active = (brake_rem > 0) & active_v                         # (n_envs, n_wheels)
+            # (v2.0.6) Ground gate: never on a wheel with no normal force
+            # (airborne, or in contact with a non-positive spring + damper
+            # force). There the creep bind |F_long| >= F_long_deadbeat holds
+            # vacuously (the deadbeat is 0 at N = 0), so 2.0.5 engaged and
+            # took over wheels in the air.
+            active = (brake_rem > 0) & active_v & (ctx.N > 0)           # (n_envs, n_wheels)
 
         self._ensure_state(ctx.v_long)
         dt = ctx.dt
@@ -893,12 +994,10 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
         k_eff = self._k_eff(ctx.wheel_meta, dt, ctx.v_long.device, ctx.v_long.dtype)
 
         # On rising edge of active (just-engaged), reset the anchor → d = 0 and
-        # record the travel sign (A) and clear the rest flag (A6).
+        # clear the rest flag (A6).
         just_engaged = active & (~self._was_active)
         self._d_long = torch.where(just_engaged, torch.zeros_like(self._d_long), self._d_long)
         self._d_lat  = torch.where(just_engaged, torch.zeros_like(self._d_lat),  self._d_lat)
-        self._s_eng = torch.where(just_engaged, torch.sign(ctx.v_long), self._s_eng)
-        self._rested = torch.where(just_engaged, self._s_eng == 0, self._rested)
         self._rest = torch.where(just_engaged, torch.zeros_like(self._rest), self._rest)
 
         # [A6] Take over only through the creep test (v2.0.4; through 2.0.3
@@ -928,12 +1027,10 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
         self._d_long = torch.where(pre_rest, torch.zeros_like(self._d_long), self._d_long)
         self._d_lat  = torch.where(pre_rest, torch.zeros_like(self._d_lat),  self._d_lat)
 
-        # [A] The first step after engagement on which the contact came to rest
-        # or reversed (s_eng * v_long <= 0) re-anchors the longitudinal spring
-        # at the contact: the lock holds the STOP point, not the engagement point.
-        came_to_rest = active & (~self._rested) & (self._s_eng * ctx.v_long <= 0)
-        self._d_long = torch.where(came_to_rest, torch.zeros_like(self._d_long), self._d_long)
-        self._rested = self._rested | came_to_rest
+        # (v2.0.6) The 1.8.0 reversal re-anchor [A] (the first step after
+        # engagement with s_eng * v_long <= 0 zeroed d_long once) was removed:
+        # at touchdown s_eng = sign(v_long) is a round-off sign, so the branch
+        # it took was decided by round-off. The lock holds the TAKEOVER point.
 
         # [C] Damping at least critical for the wheel's mass share N/g ...
         k_damp = torch.maximum(
@@ -995,8 +1092,9 @@ class StaticFrictionLock(StabilityHook, metaclass=_StaticFrictionLockMeta):
             hold_long_clamped = lim
 
         # Replace the tyre force only where the lock has taken over (after
-        # rest). (When N=0 the friction ellipse has μ·N ≈ 0 so `norm` is huge
-        # and `scale ≈ 0` → hold_clamped ≈ 0 automatically.)
+        # rest). A wheel with N <= 0 is never `active` since 2.0.6 (the ground
+        # gate above), so it is never replaced here. (Through 2.0.5 this
+        # comment relied on mu*N ~ 0 making `scale ~ 0` and hold_clamped ~ 0.)
         apply = active & self._rest
         prev_hold = getattr(ctx, "hold_applied", None)
         ctx.hold_applied = apply if prev_hold is None else (prev_hold | apply)

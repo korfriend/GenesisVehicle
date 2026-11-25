@@ -9,7 +9,8 @@ raycaster's DEFAULT ``max_range`` of 20.0. Genesis reports a miss as
 a ray that measured nothing. Three copies of that wrong test existed
 (``raycast.read_distances``, ``core._susp_visual_offset``,
 ``visual._susp_visual_target``), consistent only because all three were wrong
-the same way.
+the same way. (``visual._susp_visual_target`` was removed in 2.0.6 with the
+joint-writing wheel visuals; its legs were dropped from these tests.)
 
 Every test here fails on v1.5.1.
 
@@ -37,7 +38,6 @@ from genesis_vehicle.raycast import (
     is_ray_hit, is_ray_hit_corrected, ray_miss_value, read_distances,
     set_sensor_miss_value, set_sensor_up_offset,
 )
-from genesis_vehicle.visual import _susp_visual_target
 
 URDF = os.path.abspath(os.path.join(os.path.dirname(__file__),
                                     "..", "samples", "urdf", "car_4w.urdf"))
@@ -211,7 +211,7 @@ def test_miss_none_raises_on_every_predicate():
     """C6 (v1.8.0): ``is_ray_hit`` / ``is_ray_hit_corrected`` take ``miss`` as
     a REQUIRED argument; an explicit ``None`` raises ``ValueError`` with the
     message naming the removal and the way out. The same guard covers the fan
-    fill and the two visual helpers (which forward ``miss``)."""
+    fill and the visual helper (which forwards ``miss``)."""
     import inspect
     d = torch.tensor([[0.5, 20.0]])
     for fn in (is_ray_hit, is_ray_hit_corrected):
@@ -223,8 +223,6 @@ def test_miss_none_raises_on_every_predicate():
             fn(d)                                   # required
     with pytest.raises(ValueError, match=_C6):
         _susp_visual_offset(d, 0.4, 0.1)
-    with pytest.raises(ValueError, match=_C6):
-        _susp_visual_target(d, 0.4, 0.1, None, None, 0.0)
 
 
 # --- the unsupported configuration raises ------------------------------------
@@ -256,7 +254,7 @@ def test_stamping_a_sensor_without_options_is_a_no_op():
     assert ray_miss_value(s) == pytest.approx(20.0)
 
 
-# --- the three definitions now agree -----------------------------------------
+# --- the remaining definitions agree -----------------------------------------
 
 def test_read_layer_core_and_visual_agree_at_a_non_default_range(cpu_genesis):
     """The unification. At max_range=10.0 all three layers used to misjudge a
@@ -268,14 +266,11 @@ def test_read_layer_core_and_visual_agree_at_a_non_default_range(cpu_genesis):
     mesh_r, l_susp = 0.4, 0.1
 
     off = _susp_visual_offset(d, mesh_r, l_susp, 0.19, miss)
-    tgt = _susp_visual_target(d, mesh_r, l_susp, None, None, 0.0, miss)
 
     air_read = ~hit[0]
     air_core = torch.tensor([bool(x == pytest.approx(-l_susp)) for x in off[0]])
-    air_vis = torch.tensor([bool(x == pytest.approx(-l_susp)) for x in tgt[0]])
     assert air_read.tolist() == [True, False]
     assert air_core.tolist() == air_read.tolist()
-    assert air_vis.tolist() == air_read.tolist()
 
     # (Through 1.7.x `miss=None` took the legacy 19.9 threshold, which called
     # the 10.0 sentinel a hit and drove the wheel mesh to a bogus pose -- the
@@ -285,15 +280,13 @@ def test_read_layer_core_and_visual_agree_at_a_non_default_range(cpu_genesis):
 
 
 def test_susp_helpers_keep_their_legacy_positional_signature():
-    """core._susp_visual_offset / visual._susp_visual_target gained `miss` as a
+    """core._susp_visual_offset gained `miss` as a
     trailing argument; the positional order is unchanged. (Since 1.8.0 the
     trailing `miss` must be given -- its `None` default raises -- so this
     passes the default range's sentinel 20.0.)"""
     d = torch.tensor([[0.4, 0.5, 20.0]], dtype=torch.float64)
     off = _susp_visual_offset(d, 0.4, 0.1, 0.19, 20.0)
     assert [round(float(x), 6) for x in off[0]] == [0.0, -0.1, -0.1]
-    tgt = _susp_visual_target(d, 0.4, 0.1, None, None, 0.0, 20.0)
-    assert [round(float(x), 6) for x in tgt[0]] == [0.0, -0.1, -0.1]
 
 
 # --- the public grounded API -------------------------------------------------

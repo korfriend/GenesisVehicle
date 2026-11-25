@@ -443,11 +443,10 @@ def tank_skid_belt(
     (~67 km/h, M1A2 road); use ~13.3 for off-road (~48 km/h). This replaces the
     old hard-coded 100 rad/s (~115 km/h at a 0.33 m wheel).
 
-    Uses ``visual_susp_mode="control"`` because the tank's wheels are heavy
-    (500 kg each) and a kinematic set_dofs_position cannot prevent them from
-    falling under gravity between substeps. The control path applies a stiff
-    PD (kp=1e7, kv=1e5) on each suspension prismatic joint, matching the
-    reference-tank behavior.
+    Through 2.0.5 this preset set ``visual_susp_mode="control"`` (a stiff PD
+    the removed joint-writing wheel visuals applied to the heavy suspension
+    joints); the field has no effect since 2.0.6 and the preset leaves it at
+    ``"auto"``.
     """
     from .urdf import parse_urdf
 
@@ -470,9 +469,6 @@ def tank_skid_belt(
         chassis=ChassisConfig(omega_max=100.0, eps_v=0.5, drag_area=drag_area),
         stability_hooks=stability_hooks_for_profile(stability, vehicle_kind="tank"),
         recommended_dt=0.025,   # 40 Hz SDK default (v1.0.19; legacy 0.005 verified unnecessary)
-        visual_susp_mode="control",
-        # Tank wheels are cylinder primitives — visible spin doesn't add anything
-        # but the extra set_dofs_position call costs ~3-5ms per step (noticeable
-        # in interactive chase-cam mode).
+        # Tank wheels are cylinder primitives — visible spin doesn't add anything.
         visual_spin_enabled=False,
     )

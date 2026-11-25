@@ -145,14 +145,21 @@ interceptor works. Examples:
   `min(v_thr, 0.5)`, at any pedal (v2.0.4; through 2.0.3 this bullet said
   "when `brake > thr` … it forces `omega = 0` at once" — the 2.0.3 rule, which
   never engaged at brake ≤ 0.3 and slid locked wheels above it; it no longer
-  forces ω). Once its creep test detects the stop it replaces the tyre force
-  with a 2D spring-damper (spring rate capped per wheel since v2.0.4,
+  forces ω), and, since v2.0.6, whose normal force `ctx.N > 0` (the ground
+  gate, enforced in `StaticFrictionLock.apply_post_tire`;
+  [`physics-contracts.md` §7.22.5](physics-contracts.md)). Once its creep test
+  detects the stop it replaces the tyre force with a 2D spring-damper (spring
+  rate capped per wheel since v2.0.4,
   [`physics-contracts.md` §7.22](physics-contracts.md))
-  `F = -K_spring·displacement - D·velocity` around the point where the
-  contact stopped, projected onto the per-wheel friction ellipse and limited
-  to what the brake can transmit. Stuck = held at that point; slipping =
-  anchor advances along the limit (kinetic mode). Through v1.7.0 it anchored
-  where it engaged and replaced the force from there on.
+  `F = -K_spring·displacement - D·velocity` around the TAKEOVER point (anchored
+  at the end of the takeover step), projected onto the per-wheel friction
+  ellipse and limited to what the brake can transmit. Stuck = held at that
+  point; slipping = anchor advances along the limit (kinetic mode). Through
+  v2.0.5 this bullet said "around the point where the contact stopped": 1.8.0-2.0.5
+  moved the anchor there once through a reversal re-anchor, whose branch was
+  decided by round-off at a touchdown; v2.0.6 removed it (CHANGELOG 2.0.6 §3).
+  Through v1.7.0 it anchored where it engaged and replaced the force from there
+  on.
 
 Since v1.8.0 the pipeline itself (not a hook) also bounds the force on a
 braked-and-held wheel and the lateral force at low speed by one-step

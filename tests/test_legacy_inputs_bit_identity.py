@@ -1,6 +1,7 @@
 """AC-1b / AC-1c (v2.0.2): signed (``gear=None``) inputs match the capture bit
-for bit — since v2.0.5 the capture from the v2.0.4 tree on genesis-world 1.5.0
-(the 2.0.4 capture on 1.4.5 through v2.0.4, the 2.0.1 one through 2.0.3).
+for bit — since v2.0.6 the capture from the 2.0.6 tree on genesis-world 1.5.0
+(through v2.0.5 the capture from the v2.0.4 tree on 1.5.0; the 2.0.4 capture on
+1.4.5 through v2.0.4, the 2.0.1 one through 2.0.3).
 
 What it proves: on the platform and genesis-world version the fixture was
 captured on, 300 scripted steps of LEGACY inputs (negative throttle, brake,
@@ -20,10 +21,20 @@ What it does NOT prove: anything on another platform / genesis version (the
 fixture is a float32 bit pattern; an uncaptured pair SKIPS, like
 ``test_fan_default_identity.py``), or anything about gear mode itself.
 
-Fixture (v2.0.5): ``tests/data/legacy_inputs_2_0_5.json``. Captured from the
+Fixture (v2.0.6): ``tests/data/legacy_inputs_2_0_6.json``. Captured from the
+2.0.6 tree (the ``StaticFrictionLock`` reversal re-anchor removed and the ground
+gate ``ctx.N > 0`` added; before the version bump) on genesis-world 1.5.0
+(linux-x86_64), with this file's own ``run_scene``, signed inputs; CPU, WSL2;
+2026-11-24 (harness ``.pm_r2/r206/h/capture206.py`` outside the repo). The gear
+rows were checked at capture time: with car "b" in gear, "a" and the tank gave
+the signed capture's digests on all 8 gear scenes. It is a regression lock on
+exactly this engine version and platform, not evidence that the 2.0.6 physics
+is right: see "Why it was re-captured in 2.0.6" below for the evidence that was
+required before it was written.
+
+Fixture through v2.0.5: ``tests/data/legacy_inputs_2_0_5.json``. Captured from the
 v2.0.4 tree + the two-line ``skip_forward`` patch on genesis-world 1.5.0
-(linux-x86_64); 2.0.5 reproduces it bit for bit. A regression lock for later
-releases on exactly this engine version and platform. (2026-11-24: ``git
+(linux-x86_64); 2.0.5 reproduces it bit for bit. (2026-11-24: ``git
 archive 9e5c4d5`` with ``skip_forward=`` deleted from the two
 ``set_base_links_pos`` / ``_quat`` calls in ``vehicle_scene.py``; this file's own
 ``run_scene`` from that tree, signed inputs; CPU, WSL2. The gear rows were
@@ -33,22 +44,47 @@ over all 300 steps and the raw values at ``CHECKPOINTS`` (the values only make
 a failure readable). On another engine version, a 1.5.x patch release included,
 or another platform, the tests SKIP.
 
-``direct_single_3`` — the tank: this entry encodes the +1 branch of
-``StaticFrictionLock``'s travel sign and is round-off-branch sensitive. At
-touchdown the lock records ``_s_eng = sign(v_long)`` while ``v_long`` is
-free-fall round-off (instrumented by plan-review: -8.0e-10 m/s on 1.4.5, which
-took the -1 branch, +2.5e-9 m/s on 1.5.0, which takes +1); the two branches end
-0.126 m apart, and a 1e-6 m spawn shift on 1.4.5 already reproduces the 1.5.0
-outcome to 2e-5 m. So a change that only moves that round-off can flip this
-entry; that is the knife-edge (present on 2.0.4, engine-independent, a known
-limitation until it is fixed), not a physics change, and not an engine change.
-Measured against the 1.4.5 capture (final position, same scenario): the two
+``direct_single_3`` — the tank: through 2.0.5 this entry encoded the +1
+branch of ``StaticFrictionLock``'s travel sign and was round-off-branch
+sensitive. At touchdown the lock recorded ``_s_eng = sign(v_long)`` while
+``v_long`` was free-fall round-off (instrumented by plan-review: -8.0e-10 m/s
+on 1.4.5, which took the -1 branch, +2.5e-9 m/s on 1.5.0, which takes +1); the
+two branches end 0.126 m apart, and a 1e-6 m spawn shift on 1.4.5 already
+reproduced the 1.5.0 outcome to 2e-5 m. That was the knife-edge (present on
+2.0.4 and 2.0.5, engine-independent). 2.0.6 removed the reversal re-anchor
+that read the sign (and ``_s_eng`` with it); the tree with only that removal
+reproduces ``legacy_inputs_2_0_5.json`` byte for byte (all 9 scenes, measured on
+1.5.0, linux-x86_64); the 2.0.6 capture comes from the tree that also has the
+ground gate. ``tests/test_sfl_touchdown_continuity.py`` checks that the tank's
+final position no longer depends on the sign of a tiny perturbation. The lock
+still has discrete decisions (the creep-test takeover step), so this entry is
+not claimed to be free of every round-off sensitivity.
+The 2.0.5 capture measured against the 1.4.5 capture (final position, same scenario): the two
 cars of ``direct_single_3`` within 7.7e-4 m, every vehicle of the other 8
 scenes within 1.3e-4 m (CPU, WSL2; a comparison, not a bound for other scenes).
 
-Fixture history: ``legacy_inputs_2_0_4.json`` (genesis-world 1.4.5, asserted
-v2.0.4) and ``legacy_inputs_2_0_1.json`` (asserted through v2.0.3) stay in the
-repository, no longer asserted.
+Fixture history: ``legacy_inputs_2_0_5.json`` (genesis-world 1.5.0, asserted
+v2.0.5), ``legacy_inputs_2_0_4.json`` (genesis-world 1.4.5, asserted v2.0.4) and
+``legacy_inputs_2_0_1.json`` (asserted through v2.0.3) stay in the repository,
+no longer asserted.
+
+Why it was re-captured in 2.0.6 (on 1.5.0): the lock's ground gate moves all
+three vehicles of every scene (first at checkpoint 59). Measured before the
+capture, against ``legacy_inputs_2_0_5.json`` (CPU/WSL2; harnesses in
+``.pm_r2/r206`` outside the repo): the 2.0.6 tree with only the gate removed
+reproduces ``legacy_inputs_2_0_5.json`` byte for byte (all 17 tests), so every
+difference is the gate's (the first differing step, 12 for the cars and 17
+for the tank, also comes after the first step on which a braked wheel had no
+normal force, 0 or 1 — but every scene starts with a braked drop, so that
+ordering does not discriminate and is not evidence); the 2.0.4 physical
+acceptance proof described below (``fixture_proof204.py``, unstretched and
+stretched by 160 steps; for ``direct_single_3`` the amended rule, with 2.0.5
+in place of 2.0.3 and its net-movement check run stretched by 400 steps)
+passes on the 9 signed scenes with no lock
+engagement or takeover on a wheel at ``N <= 0``; and the largest position
+change at a checkpoint is 1.92 mm (``direct_single_3``, car "b"), 7.3e-5 m in
+every other scene. The re-captured file is not itself evidence; those checks
+are, and they cover the 9 signed scenes only.
 
 Why it was re-captured in 2.0.4 (on 1.4.5): the lock change moves all three vehicles
 (first at checkpoint 179 for both cars, 239 / 299 for the tank). It was written
@@ -191,7 +227,7 @@ def run_scene(name, solver, raycast_mode, n_envs, direct, *, gear_b=False):
     return {w: {"sha": hs[w].hexdigest(), "cp": cps[w]} for w in vehs}
 
 
-FIXTURE = os.path.join(HERE, "data", "legacy_inputs_2_0_5.json")
+FIXTURE = os.path.join(HERE, "data", "legacy_inputs_2_0_6.json")
 
 
 def _platform_key():
@@ -225,7 +261,7 @@ def _compare(name, who, got, want):
 
 
 @pytest.mark.parametrize("scene", SCENES, ids=[s[0] for s in SCENES])
-def test_legacy_inputs_match_the_2_0_4_tree_on_1_5_0(scene):
+def test_legacy_inputs_match_the_2_0_6_capture_on_1_5_0(scene):
     fx = _fixture()
     got = run_scene(*scene)
     want = fx["scenes"][scene[0]]
@@ -237,7 +273,7 @@ GEAR_SCENES = [s for s in SCENES if not s[4]]
 
 
 @pytest.mark.parametrize("scene", GEAR_SCENES, ids=[s[0] for s in GEAR_SCENES])
-def test_a_gear_vehicle_matches_the_2_0_4_tree_on_1_5_0(scene):
+def test_a_gear_vehicle_matches_the_2_0_6_capture_on_1_5_0(scene):
     fx = _fixture()
     got = run_scene(*scene, gear_b=True)
     want = fx["scenes"][scene[0]]

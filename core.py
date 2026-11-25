@@ -35,16 +35,17 @@ from .raycast import (
     check_miss_supported, is_ray_hit_corrected, ray_miss_value, read_distances,
 )
 from .urdf import estimate_spin_inertia_from_genesis
-from .visual import WheelJointInternalSync
 
 
 # Process-level flag so the version banner prints at most once per process,
 # even if the user instantiates several VehiclePhysics objects.
 _BANNER_PRINTED = False
 
-# One-time-per-process warning guard for reading visual link transforms while
-# WheelJointInternalSync is disabled (the result is the rest pose — see link_transforms).
-_VISUAL_OFF_WARNED = False
+# One-time-per-process warning guard for link_transforms(): since 2.0.6 its wheel
+# links are always the solver's own (never written by the SDK) pose.
+_LINK_TRANSFORMS_WARNED = False
+
+from .config import JOINT_SYNC_REMOVED_MSG  # noqa: E402,F401  (re-export)
 
 
 def _quat_axis_angle(axis: str, theta: torch.Tensor) -> torch.Tensor:
@@ -78,11 +79,10 @@ def _susp_visual_offset(distance: torch.Tensor, mesh_radius: float,
                         l_susp: float, clamp=0.19, miss=None) -> torch.Tensor:
     """Vertical wheel-mesh offset (chassis +z) from ray hit distance.
 
-    Mirror of the suspension command in ``visual.WheelJointInternalSync.step`` (joint_pos =
-    mesh_radius − distance; air → −l_susp; clamp). Kept here so the closed-form
-    ``wheel_visual_transforms`` matches what WheelJointInternalSync drives into the URDF
-    joints. If you change one, change the other (the equivalence is unit-checked
-    against ``entity.get_link`` in tests/smoke).
+    joint_pos = mesh_radius − distance; air → −l_susp; clamp. Through 2.0.5 this
+    mirrored the suspension command of the joint-writing
+    ``visual.WheelJointInternalSync`` (removed in 2.0.6); it is now the only
+    definition of the visual suspension offset.
 
     ``clamp`` bounds the offset to ±clamp. It should be the **per-wheel
     suspension stroke** (so a vehicle whose travel exceeds the old fixed 0.19 m
@@ -93,8 +93,7 @@ def _susp_visual_offset(distance: torch.Tensor, mesh_radius: float,
     since v1.8.0 (through 1.7.x it fell back to the deprecated
     ``raycast.RAY_MISS_THRESHOLD``, correct only at the default
     ``max_range=20.0``; the constant was removed in 1.8.0)."""
-    # Air = ray MISS, i.e. the sensor's own sentinel. ONE definition, shared
-    # with visual._susp_visual_target: raycast.is_ray_hit_corrected — the
+    # Air = ray MISS, i.e. the sensor's own sentinel: raycast.is_ray_hit_corrected — the
     # CORRECTED-distance predicate, because `distance` here is post-offset
     # (last_distances). It carries no unpopulated-sensor term; callers reach
     # this either inside a full step, or from wheel_visual_transforms whose
@@ -102,8 +101,7 @@ def _susp_visual_offset(distance: torch.Tensor, mesh_radius: float,
     # A NEGATIVE distance is a valid
     # deep-over-compression reading under the high-cast ray scheme
     # (raycast.RAY_UP_OFFSET), not air — the clamp below bounds it.
-    # (WheelJointInternalSync additionally slew-rate-limits its target; this
-    # closed-form mirror is stateless and does not.)
+    # (The closed form is stateless: no slew-rate limit.)
     air = ~is_ray_hit_corrected(distance, miss)
     jp = mesh_radius - distance
     # broadcast_to, not full_like: `full_like`'s fill_value must be a Number
@@ -388,7 +386,7 @@ class PipelineContext:
 @dataclass
 class VisualPartsTransforms:
     """One-stop render feed for an external engine (UE / Unity), produced by
-    :meth:`VehiclePhysics.visual_parts_transforms`. WheelJointInternalSync-independent.
+    :meth:`VehiclePhysics.visual_parts_transforms`. Closed form; no solver joint read.
 
     ``chassis_*`` is the real dynamics pose (always world). ``wheel_*`` is the
     closed-form visual pose in ``frame`` (``"world"`` absolute, or ``"local"``
@@ -573,16 +571,12 @@ class VehiclePhysics:
         self.last_kappa = torch.zeros(n_envs, n_wheels, device=self.dev, dtype=self.fdt)
         self.last_alpha = torch.zeros(n_envs, n_wheels, device=self.dev, dtype=self.fdt)
 
-        self.visual: Optional[WheelJointInternalSync] = None
+        # The joint-writing wheel visuals were removed in 2.0.6. A cfg that
+        # still asks for them raises here too (resolve() raises first; this
+        # covers a ResolvedConfig mutated after resolve, and every rebuild).
         if self.resolved.enable_wheel_joint_internal_sync:
-            self.visual = WheelJointInternalSync(
-                entity=entity, resolved=self.resolved,
-                n_envs=n_envs, device=self.dev, dtype=self.fdt,
-            )
-            # Same ray-miss sentinel the read layer uses, so the visual air
-            # pose and the physics air mask cannot disagree (set_ray_miss_value
-            # keeps them in sync when the scene injects it later).
-            self.visual.ray_miss = self._ray_miss
+            from .config import ConfigError
+            raise ConfigError(JOINT_SYNC_REMOVED_MSG)
 
         self._up_world = torch.tensor(
             [0.0, 0.0, 1.0], device=self.dev, dtype=self.fdt,
@@ -592,16 +586,14 @@ class VehiclePhysics:
             n_envs, n_wheels, 3
         ).contiguous()
 
-        # ---- Visual-pose state (for wheel_visual_transforms / WheelJointInternalSync) ----
+        # ---- Visual-pose state (for wheel_visual_transforms) ----
         # Per-wheel steer angle from the last step (exposed for external
-        # renderers); accumulated spin angle (maintained whether or not
-        # WheelJointInternalSync runs, so the closed-form getter works headless).
+        # renderers); accumulated spin angle (the closed-form getter works headless).
         self.last_steer_per_wheel = torch.zeros(
             n_envs, n_wheels, device=self.dev, dtype=self.fdt)
         self.wheel_spin_angle = torch.zeros(
             n_envs, n_wheels, device=self.dev, dtype=self.fdt)
-        # True only after a FULL step (not the first-step early-return, where
-        # WheelJointInternalSync is skipped). Gates wheel_visual_transforms'
+        # True only after a FULL step (not the first-step early-return). Gates wheel_visual_transforms'
         # deltas and wheels_grounded. PER ENV (n_envs,) since v1.5.2: a partial
         # reset(env_ids=...) zeroes only those envs' last_distances, so a single
         # scalar flag would report their stale zeros as a valid reading.
@@ -633,13 +625,13 @@ class VehiclePhysics:
                 self.wheel_meta.rest_d - self.wheel_meta.radius, min=0.02)
         self._susp_clamp = pw(susp_stroke)
         # Skid-steer/tank presets disable the wheel spin visual (cylindrical
-        # road wheels — spin is invisible). Match WheelJointInternalSync so the
-        # closed-form pose agrees: no spin baked into the quat when disabled.
+        # road wheels — spin is invisible): no spin baked into the quat when disabled.
         self._visual_spin_enabled = bool(
             getattr(self.resolved, "visual_spin_enabled", True))
 
         # Capture each wheel link's REST pose relative to the chassis (joints
-        # still at 0 — no step / WheelJointInternalSync yet). wheel_visual_transforms then
+        # still at 0 — no step yet; since 2.0.6 no SDK code writes them at all).
+        # wheel_visual_transforms then
         # composes steer/spin/suspension deltas ON TOP of this, so it reproduces
         # entity.get_link(wheel) exactly (rest link frame may sit below the
         # raycast attach point and carry a rest orientation).
@@ -757,8 +749,6 @@ class VehiclePhysics:
                 "sentinel (genesis_vehicle.sensor_miss_value(sensor)).")
         src = sensor if sensor is not None else self.sensor
         self._ray_miss = check_miss_supported(src, float(miss))
-        if self.visual is not None:
-            self.visual.ray_miss = self._ray_miss
 
     @property
     def wheels_grounded(self) -> torch.Tensor:
@@ -973,8 +963,6 @@ class VehiclePhysics:
             self.last_steer_per_wheel.zero_(); self.wheel_spin_angle.zero_()
             self._stepped_once.zero_()
             self._gear.fill_(1.0)       # (v2.0.2) engaged gear back to forward
-            if self.visual is not None:
-                self.visual.reset_visual_state()
             return
         idx = env_ids
         if idx.dtype == torch.bool:
@@ -992,8 +980,6 @@ class VehiclePhysics:
         # a stale True here and wheels_grounded reported the zeros as ground).
         self._stepped_once[idx] = False
         self._gear[idx] = 1.0           # (v2.0.2) engaged gear back to forward
-        if self.visual is not None:
-            self.visual.reset_visual_state(idx)
 
     # -----------------------------------------------------------------
     # Runtime-state carry (config rebuild) — v1.6.2
@@ -1115,6 +1101,14 @@ class VehiclePhysics:
             self.wheel_meta.yaw_inertia = None
             self._ensure_yaw_inertia()
 
+    @property
+    def visual(self) -> None:
+        """Always ``None`` since 2.0.6 (read-only). Through 2.0.5 this held the
+        joint-writing ``WheelJointInternalSync`` when it was enabled; code that
+        tests ``physics.visual is not None`` keeps working and skips its branch.
+        The spin angle it accumulated is :attr:`wheel_spin_angle`."""
+        return None
+
     def link_transforms(self, frame: str = "parent", *, envs_idx: Optional[Any] = None):
         """Per-link transforms of this vehicle's entity in ``frame``.
 
@@ -1126,22 +1120,30 @@ class VehiclePhysics:
         Use for telemetry → animation retargeting, sensor/effect attachment, or
         placing ghost copies. See the kinematics module docstring for frames.
 
-        NOTE: the wheel links reflect steering / suspension / spin ONLY when
-        WheelJointInternalSync is enabled (it drives those URDF joints). With WheelJointInternalSync
-        off, wheel links sit at the rest pose. For an external renderer (UE /
-        Unity), prefer :meth:`wheel_visual_transforms`, which is computed
-        closed-form and works regardless of WheelJointInternalSync. A one-time warning is
-        emitted if you call this with WheelJointInternalSync disabled.
+        NOTE: wheel links show the solver's own joint state, which no SDK code
+        writes since 2.0.6, so they do not follow the commanded steer, the
+        suspension compression or the wheel spin. Measured once (impl-review,
+        2.0.6 fix-round input; CPU, genesis-world 1.5.0): the reference car
+        (``samples/urdf/car_4w.urdf``, ``car_4w_rwd_ackermann``, per_vehicle,
+        n_envs 1) after 200 steps at steer 0.5 (41 braked, then throttle 0.5)
+        read steer joint -0.0042 rad, spin joint 1e-4 rad and suspension joint
+        -0.1501 m (its URDF lower limit is -0.15 m); other vehicles and inputs
+        were not measured. (Through 2.0.5 a rendered ``n_envs > 1`` VehicleScene, ``internal_sync``
+        or ``enable_wheel_joint_internal_sync=True`` wrote those joints, and only
+        then did the wheel links follow steer / suspension / spin.) For wheel
+        poses use :meth:`wheel_visual_transforms` (closed form). A one-time
+        warning per process is emitted on every first call.
         """
-        global _VISUAL_OFF_WARNED
-        if self.visual is None and not _VISUAL_OFF_WARNED:
+        global _LINK_TRANSFORMS_WARNED
+        if not _LINK_TRANSFORMS_WARNED:
             import sys
             print(
-                "[genesis_vehicle] WARN: link_transforms() read with WheelJointInternalSync "
-                "disabled — wheel links are at the REST pose (no steer/suspension/"
-                "spin). Use wheel_visual_transforms() for a WheelJointInternalSync-independent "
-                "visual pose.", file=sys.stderr, flush=True)
-            _VISUAL_OFF_WARNED = True
+                "[genesis_vehicle] WARN: link_transforms() wheel links are the solver's "
+                "own pose (no SDK code writes wheel joints since 2.0.6, so they do not "
+                "follow the commanded steer, suspension or spin; see the docstring for "
+                "measured values). Use wheel_visual_transforms() for the visual wheel pose.",
+                file=sys.stderr, flush=True)
+            _LINK_TRANSFORMS_WARNED = True
         from .kinematics import get_link_transforms
         return get_link_transforms(self.entity, frame, envs_idx=envs_idx)
 
@@ -1169,8 +1171,8 @@ class VehiclePhysics:
     def wheel_visual_transforms(self, frame: str = "world", *,
                                 envs_idx: Optional[Any] = None):
         """Closed-form per-wheel VISUAL pose — steer + suspension + spin applied
-        — **without** driving Genesis joints (works whether or not WheelJointInternalSync is
-        enabled). The intended feed for an external renderer (UE / Unity).
+        — **without** driving Genesis joints. The intended feed for an external
+        renderer (UE / Unity), and what VehicleScene's wheel renderer draws.
 
         Parameters
         ----------
@@ -1192,10 +1194,10 @@ class VehiclePhysics:
         -----
         Assumes the conventional ray-wheel axes the presets use: steer about
         chassis +z, suspension travel along chassis ±z, spin about the wheel
-        axle (+y). The steer sign follows the URDF steer-axis convention (same
-        as WheelJointInternalSync). This matches ``entity.get_link(wheel)`` when WheelJointInternalSync
-        is enabled (unit-checked in tests), but costs ~µs (a few quaternion
-        ops per wheel) instead of the engine's articulated-body FK.
+        axle (+y). The net visual steer is -phys about chassis +z whatever the
+        URDF steer-axis sign. Costs ~µs (a few quaternion ops per wheel). (Through
+        2.0.5 this was documented as matching ``entity.get_link(wheel)`` with the
+        removed joint writer on; nothing in 2.0.6 writes those links.)
         """
         if frame not in ("world", "local"):
             raise ValueError(f"frame must be 'world' or 'local', got {frame!r}")
@@ -1203,7 +1205,7 @@ class VehiclePhysics:
             self._capture_rest_wheel_pose(self.entity)
 
         # Before the first FULL step (the first-step early-return skips the
-        # pipeline AND WheelJointInternalSync), wheels are at the rest pose.
+        # pipeline), wheels are at the rest pose.
         # Apply no deltas. `_stepped_any()` is the batch-wide shortcut for
         # "nobody has stepped"; envs that a PARTIAL reset un-stepped are
         # masked back to the rest pose below.
@@ -1225,9 +1227,9 @@ class VehiclePhysics:
 
         # Per-wheel visual deltas, applied on top of the captured rest pose.
         # Net visual steer about chassis +z is -phys regardless of the URDF
-        # steer-axis sign: WheelJointInternalSync's visual_cmd (= -phys·sign) rotated about
-        # the axis (z-component = sign) gives (-phys·sign)·sign = -phys. So the
-        # axis sign cancels — do NOT multiply by it here.
+        # steer-axis sign: a joint command of -phys·sign rotated about the axis
+        # (z-component = sign) gives (-phys·sign)·sign = -phys. So the axis sign
+        # cancels — do NOT multiply by it here.
         steer_z = -self.last_steer_per_wheel                                 # (N, n)
         susp_off = _susp_visual_offset(
             self.last_distances, self._mesh_radius, self._l_susp,
@@ -1280,8 +1282,8 @@ class VehiclePhysics:
     def visual_parts_transforms(self, frame: str = "world", *,
                           envs_idx: Optional[Any] = None) -> "VisualPartsTransforms":
         """One call returning everything an external renderer needs for this
-        vehicle: the chassis pose **and** the wheel visual poses. Fully
-        WheelJointInternalSync-independent (works headless).
+        vehicle: the chassis pose **and** the wheel visual poses. Closed form
+        (works headless).
 
         The chassis comes from real dynamics (``entity.get_pos/get_quat`` —
         always world, the physical truth). The wheels come from
@@ -1291,7 +1293,7 @@ class VehiclePhysics:
         component). The chassis is always world.
 
         Returns a :class:`VisualPartsTransforms`. This is the recommended feed for a
-        UE / Unity bridge — one call per vehicle, no get_link, no WheelJointInternalSync.
+        UE / Unity bridge — one call per vehicle, no get_link.
         """
         cpos = self.entity.get_pos(envs_idx=envs_idx) if envs_idx is not None else self.entity.get_pos()
         cquat = self.entity.get_quat(envs_idx=envs_idx) if envs_idx is not None else self.entity.get_quat()
@@ -1458,9 +1460,8 @@ class VehiclePhysics:
         self.omega = res.new_omega
         total_F, total_T = res.total_F, res.total_T
 
-        # Visual-pose bookkeeping (cheap; needed by wheel_visual_transforms even
-        # when WheelJointInternalSync is disabled). Spin integrates the post-update omega,
-        # matching WheelJointInternalSync's accumulator.
+        # Visual-pose bookkeeping (cheap; needed by wheel_visual_transforms).
+        # Spin integrates the post-update omega.
         self.last_steer_per_wheel = steer_per_wheel
         two_pi = 2.0 * math.pi
         self.wheel_spin_angle = (
@@ -1480,10 +1481,6 @@ class VehiclePhysics:
                            self.base_idx_list)
         self._prev_init = True
         self._stepped_once[:] = True
-
-        # [VISUAL]
-        if self.visual is not None:
-            self.visual.step(steer_per_wheel, distances, self.omega, DT)
 
     # -----------------------------------------------------------------
     # Internals

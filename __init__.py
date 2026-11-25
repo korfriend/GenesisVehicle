@@ -239,10 +239,10 @@ __all__ = [
     "VehicleScene", "Vehicle", "StaticBody", "DynamicBody", "Camera",
     # Legal values of add_vehicle/make_wheel_raycaster's wheel_contact (lazy)
     "WHEEL_CONTACT_MODES",
-    # (WheelJointInternalSync was removed from the public API in v1.1.18 — wheel
-    # visuals are auto-managed by VehicleScene via the solver-free
-    # InstancedWheelRenderer; the legacy joint-sync path survives only as
-    # an internal fallback, genesis_vehicle.visual.WheelJointInternalSync.)
+    # (WheelJointInternalSync left the public API in v1.1.18 and was removed
+    # entirely in 2.0.6 together with KindVisualBatch — importing either from
+    # genesis_vehicle.visual raises ImportError. VehicleScene draws wheels from
+    # the closed form, visual.InstancedWheelRenderer.)
     # Config
     "VehicleConfig", "WheelConfig", "ChassisConfig", "ResolvedConfig", "ConfigError",
     "resolve", "suspension_from_mass",

@@ -172,37 +172,29 @@ class VehicleConfig:
     # speed / z-oscillation / yaw-rate within noise (see CHANGELOG 1.0.17).
     # Users can always pick their own dt (server: --override_dt).
     recommended_dt: float = 0.025
-    # Drive the URDF wheel visual joints (spin/steer/suspension) through the
-    # engine each step so the **Genesis native viewer** shows wheels moving.
-    # Default False: the dominant path (headless / external UE·Unity renderer)
-    # does NOT need it — read poses from wheel_visual_transforms() (closed-form,
-    # ~µs) instead, which works regardless of this flag. Set True ONLY when you
-    # actually open the Genesis viewer (`gs.Scene(show_viewer=True)` or a sample
-    # `--viewer`). Leaving it on headless is a silent ~ms/step perf trap (it is
-    # the dominant SDK cost at scale). Internal/legacy since v1.1.18 —
-    # VehicleScene manages wheel visuals itself (instanced renderer);
-    # this flag only drives the joint-sync fallback. See docs/server.md.
+    # REMOVED in 2.0.6 (kept as a field so cfg copies keep working): through
+    # 2.0.5 True drove the URDF wheel visual joints through the rigid solver
+    # (WheelJointInternalSync), which moved the chassis trajectory. True now
+    # raises ConfigError in resolve(), VehiclePhysics.__init__ and
+    # MultiVehicleKindPhysics.__init__. VehicleScene draws wheels from the
+    # closed form; a raw gs.Scene + VehiclePhysics gets no wheel animation from
+    # the SDK any more (draw wheel_visual_transforms() yourself).
     enable_wheel_joint_internal_sync: bool = False
 
-    # Visual suspension joint mode:
-    #   "auto"       — per-joint decision based on URDF <dynamics> presence (legacy default)
-    #   "kinematic"  — force set_dofs_position (light wheels < ~50 kg)
-    #   "control"    — force control_dofs_position with high kp/kv (heavy wheels)
-    # Heavy wheels (e.g. a 500 kg tank wheel) need PD control or they fall under
-    # gravity between substeps even though set_dofs_position is re-applied each
-    # step. Tank preset opts into "control" automatically.
+    # NO EFFECT since 2.0.6 (accepted and validated; any value other than
+    # "auto" logs one [genesis_vehicle:visual-susp-mode] WARNING per process in
+    # resolve()). Through 2.0.5 it chose how the removed joint writer drove the
+    # wheel suspension joints ("kinematic" set_dofs_position, "control" a PD).
     visual_susp_mode: str = "auto"
 
-    # Whether to sync wheel spin angle (set_dofs_position on each wheel's
-    # continuous joint). Costs one Genesis call per step; safe to disable for
-    # vehicles where wheel rotation is invisible (e.g. tank cylinder wheels are
-    # rotationally symmetric in mesh). Tank preset sets this to False for ~3-5ms
-    # /step savings in interactive mode. Cars keep it True so mesh wheels visibly
-    # roll.
+    # Whether the closed-form wheel pose (wheel_visual_transforms, and so the
+    # rendered wheels) includes the spin angle. Safe to disable for vehicles
+    # where wheel rotation is invisible (e.g. tank cylinder wheels). Tank
+    # preset sets this to False. Cars keep it True so mesh wheels visibly roll.
     visual_spin_enabled: bool = True
 
     # Visual suspension-offset clamp (metres). Bounds how far the wheel mesh may
-    # visually travel from rest in wheel_visual_transforms / WheelJointInternalSync — a
+    # visually travel from rest in wheel_visual_transforms — a
     # safety bound against raycast spikes, NOT a physics limit.
     #   None  -> auto: per-wheel = that wheel's rest_stroke (min 0.02 m). Scales
     #            with the vehicle, so large-travel rigs aren't muted.
@@ -324,7 +316,7 @@ class ResolvedConfig:
     stability_hooks: list[Any]
     recommended_dt: float
     enable_wheel_joint_internal_sync: bool
-    urdf: Any   # URDFParsedConfig — used by visual layer for joint axis-sign lookup
+    urdf: Any   # URDFParsedConfig
     visual_susp_mode: str = "auto"
     visual_spin_enabled: bool = True
     susp_visual_clamp: Optional[float] = None
@@ -445,6 +437,29 @@ def _warn_if_undersprung(
     )
 
 
+#: Message of the ConfigError for the removed joint-writing flag (2.0.6).
+JOINT_SYNC_REMOVED_MSG = (
+    "enable_wheel_joint_internal_sync=True was removed in 2.0.6: the joint-writing "
+    "wheel visuals (WheelJointInternalSync) wrote the URDF wheel joints into the "
+    "rigid solver, which moved the chassis trajectory. Set it False or delete it. "
+    "VehicleScene draws the wheels from the closed form at every n_envs; for your "
+    "own renderer read wheel_visual_transforms() / visual_parts_transforms().")
+
+
+_VISUAL_SUSP_MODE_WARNED = False
+
+
+def _warn_visual_susp_mode_once(mode: str) -> None:
+    global _VISUAL_SUSP_MODE_WARNED
+    if _VISUAL_SUSP_MODE_WARNED:
+        return
+    _VISUAL_SUSP_MODE_WARNED = True
+    _logger.warning(
+        "[genesis_vehicle:visual-susp-mode] visual_susp_mode=%r has no effect since "
+        "2.0.6 (the joint-writing wheel visuals it configured were removed). Leave it "
+        "at 'auto' to silence this. (one warning per process)", mode)
+
+
 def resolve(config: VehicleConfig) -> ResolvedConfig:
     """URDF -> user-config -> module-default merge.
 
@@ -492,6 +507,10 @@ def resolve(config: VehicleConfig) -> ResolvedConfig:
             f"visual_susp_mode must be 'auto', 'kinematic', or 'control', "
             f"got {config.visual_susp_mode!r}"
         )
+    if config.visual_susp_mode != "auto":
+        _warn_visual_susp_mode_once(config.visual_susp_mode)
+    if config.enable_wheel_joint_internal_sync:
+        raise ConfigError(JOINT_SYNC_REMOVED_MSG)
 
     if config.susp_visual_clamp is not None and config.susp_visual_clamp <= 0:
         raise ConfigError(

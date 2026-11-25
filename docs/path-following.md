@@ -1286,10 +1286,12 @@ m/s² on the reference car) in 2.0.2: gear mode's brake model is in stage 2 only
 (§5.9). The MPC itself still plans forward only (`v_cg_x >= 0`): the v2.0.3
 K-turn (§5.10, opt-in) is a separate state machine outside the MPC. The
 light-brake slope hold, listed here as planned through 2.0.3, shipped in 2.0.4
-(a vehicle-side change, `physics-contracts.md` §7.22). Planned, not present:
-2.0.6 the `StaticFrictionLock` touchdown-sign fix, the visual-joint
-feedback fix and the `"control"`-path force range of the visual suspension PD
-(vehicle-side, CHANGELOG 2.0.5 §10.1-§10.3, roadmap §14); 2.1.0 the Pacejka prediction
+(a vehicle-side change, `physics-contracts.md` §7.22). The 2.0.6 items listed
+here as planned through 2.0.5 — the `StaticFrictionLock` touchdown-sign fix,
+the visual-joint feedback fix and the `"control"`-path force range — SHIPPED in
+2.0.6 (re-anchor removed, joint-writing visuals removed), together with a
+ground gate on the lock (vehicle-side; braked low-speed physics changed,
+CHANGELOG 2.0.6 §3-§4). Planned, not present: 2.1.0 the Pacejka prediction
 model (opt-in `mpc_model="pacejka"`) with a deceleration bound widened to the
 brake's limit (opt-in `mpc_decel_limit="brake"`), 2.2.0 feedforward
 from the MPC plan and the PD correction (closed-loop tracking of the K-turn's
@@ -2395,6 +2397,18 @@ vehicle's braking did):
 - a `DifferentiablePlant` built before the vehicle's first step predicts with
   the same capped lock spring as the live vehicle (it computes the lock's
   inputs at bind).
+
+**From 2.0.5 to 2.0.6** (CHANGELOG 2.0.6; no follower code changed — the
+vehicle's braked low-speed physics did): `StaticFrictionLock` lost its reversal
+re-anchor and gained a ground gate. On the tree with both changes (its lock
+code identical to the release) the five `mpc_follow_demo` acceptance courses all
+end `DONE` at the 2.0.5 times except vertex, 9.775 → 9.800 s, and mean
+cross-track error moved by at most 0.023 m (vertex 0.6968 → 0.7191 m;
+implementation, CPU/WSL2, genesis-world 1.5.0). Sweep tables run at brake 0 and
+are unaffected by construction; identify was not re-run — re-run it for a
+vehicle where the `[genesis_vehicle:sfl-cap]` line reports. A plant
+(`DifferentiablePlant`) bound in a rendered scene reads physical wheel-link
+poses since 2.0.6 (CHANGELOG 2.0.6 §5.10).
 
 **From 2.0.4 to 2.0.5** (CHANGELOG 2.0.5; no follower code changed — the
 engine did): genesis-world 1.5.0 is required. Sweep tables and identify

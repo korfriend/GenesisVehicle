@@ -18,8 +18,14 @@ enforced by `genesis_vehicle.dynamics` (pure-Python, unit-tested in
 | `dual_scene` / `single_scene` | the two `raycast_mode` values: separate raycast scene holding no vehicle collision geometry / one shared scene |
 | BVH | Bounding Volume Hierarchy (the acceleration structure rays are cast against) |
 | AABB | Axis-Aligned Bounding Box |
-| VJS | `WheelJointInternalSync` — the legacy wheel-visual writer that drives solver joints |
-| PD | proportional-derivative controller (the VJS `control_dofs_position` path) |
+| VJS | `WheelJointInternalSync` / `KindVisualBatch` — the wheel-visual writers that drove solver joints (removed in v2.0.6) |
+| PD | proportional-derivative controller (the VJS `control_dofs_position` path, removed in v2.0.6) |
+| ENO | engine-node override: the v2.0.6 wheel renderer, which overwrites the poses of the engine's own wheel render nodes from the closed form on every sync (§7.8) |
+| ground gate / G-only | the v2.0.6 term `ctx.N > 0` in the lock's engage rule: `StaticFrictionLock` is inactive on a wheel with `ctx.N` 0 (§7.22.5) / travel on the 2.0.6 code minus travel with the re-anchor removal alone, i.e. the gate's own share (§7.22.5). The gate is not abbreviated `G` here: `G` is the lateral tyre gain below |
+| AC-19 | the 2.0.4 acceptance rowset of a light tank (1 % of the reference tank's mass) on braked slopes, re-run for 2.0.6 (CHANGELOG 2.0.6 §4.4) |
+| REST gate | the 2.0.4 braked-slope harness's acceptance class REST ("at rest"), fixed before the 2.0.4 measurement and graded on a 50-s row (CHANGELOG 2.0.4 table; 2.0.6 §4.4) |
+| gate 1 | largest entry of (drawn wheel pose − closed form ∘ local geom offset), 3×4, read when the renderer flushes; mixes metres and rotation entries, quoted without a unit (§7.8) |
+| kv | upward chassis velocity set by the hop (kick) probe (§7.22.5) |
 | RL | reinforcement learning (the partial-reset rollout pattern) |
 | ISO 8855 | the vehicle-axis standard this SDK follows: `+X` forward, `+Y` left, `+Z` up |
 | M | `contact_samples` — rays per wheel in a swept-envelope fan; 1 is the point contact |
@@ -37,7 +43,7 @@ enforced by `genesis_vehicle.dynamics` (pure-Python, unit-tested in
 | `g` | 9.81 m/s², `dynamics.DEADBEAT_G` |
 | SFL | `StaticFrictionLock` (§7.17) |
 | `brake_thr` | REMOVED in v2.0.4: through 2.0.3, the brake level `StaticFrictionLock` had to EXCEED to engage (0.3 in the `"control"` profile) |
-| `brake_rem` | v2.0.4 `PipelineContext` field: `B_rem` per wheel, read-only for hooks; the lock engages on `brake_rem > 0` (§7.22) |
+| `brake_rem` | v2.0.4 `PipelineContext` field: `B_rem` per wheel, read-only for hooks; the lock engages on `brake_rem > 0` and, since v2.0.6, `ctx.N > 0` (§7.22, §7.22.5) |
 | `k_eff` / β / f | v2.0.4: the lock's capped per-wheel stiffness / its planar rigid-body factor / its cap factor `min(1.0, 1.5/β)` (§7.22) |
 | MPPI | Model Predictive Path Integral (a sampling-based controller that copies hook state between rollouts) |
 | ζ / θ | damping ratio / slope angle |
@@ -102,10 +108,14 @@ B_rem     = T_brake - stop_T                 if held, else 0
   wheel loads (5°: 0.02497 m/s
   predicted, 0.024974 measured; halving DT halves it). Since v2.0.4
   `StaticFrictionLock` engages on every wheel the brake holds (`B_rem > 0`) at
-  any pedal (§7.22): reference car, 5° downhill, brake 0.3 now rests (4e-6
+  any pedal (§7.22; and, since v2.0.6, only where `ctx.N > 0`, see the end of
+  this bullet): reference car, 5° downhill, brake 0.3 now rests (4e-6
   m/s; 2.0.3 0.02497 m/s; impl-review, same conditions, CHANGELOG 2.0.4 §7). A
   held WHEEL is still not, by itself, a vehicle at rest: the vehicle rests
   where the lock takes over, and only if the brakes can hold the load.
+  **Since v2.0.6** the lock engages and takes over only on a wheel with
+  `ctx.N > 0` (§7.22.5); `F_long = F_lat = 0` at N = 0 (§7.2) stands, so a
+  wheel off the ground holds nothing either way.
 
 **What this section said through v1.7.0, and why it no longer holds.** It gave
 `T_brake_eff = T_brake * tanh(omega / smoothing_scale)` inside
@@ -199,8 +209,11 @@ from above = right turn — matches `+steer`. Using `(0, 0, 1)` instead makes
 +joint_angle = CCW = left turn, which is **opposite-handed** to the SDK's
 user-facing convention.
 
-`WheelJointInternalSync` does compensate either way (`visual_cmd = -phys * sign`), so
-existing URDFs with `(0, 0, 1)` still render correctly. The recommendation
+Through v2.0.5 `WheelJointInternalSync` compensated either way (`visual_cmd = -phys * sign`), so
+existing URDFs with `(0, 0, 1)` rendered correctly. Since v2.0.6 no SDK code
+writes the steer joint: `VehicleScene` and the servers draw the closed-form
+wheel pose, which does not read the URDF steer axis (`urdf.steer_axis_signs`
+is still parsed, and read by no SDK code), so either sign renders the same. The recommendation
 is only for NEW URDFs: declaring `(0, 0, -1)` keeps URDF joint values and
 user-facing steer values in the same sign domain, which makes URDF-side
 inspection / debugging less surprising.
@@ -208,7 +221,7 @@ inspection / debugging less surprising.
 Examples surveyed:
 - the reference car URDF — `(0, 0, -1)` ✓ (matches recommendation)
 - the 6-wheel truck URDF — `(0, 0, -1)` ✓ (fixed in v0.5.4)
-- one externally authored URDF — `(0, 0, 1)` (SDK handles via WheelJointInternalSync sign flip)
+- one externally authored URDF — `(0, 0, 1)` (through v2.0.5 handled by the WheelJointInternalSync sign flip; since v2.0.6 irrelevant to rendering)
 
 ## 7.5 Coupling order
 
@@ -345,6 +358,8 @@ subtracts back exactly what the pattern added. Contract points:
   > from a distance that measured nothing. Three separate copies of the
   > threshold (`raycast.py`, `core._susp_visual_offset`,
   > `visual._susp_visual_target`) encoded the same false claim.
+  > (`visual._susp_visual_target` was removed with the joint-writing wheel
+  > visuals in v2.0.6.)
 
 - The MISS test is an **equality**, `d_raw == miss`, evaluated on the **RAW**
   distance before the offset is taken off, plus a `d_raw != 0.0` term. Both
@@ -427,12 +442,134 @@ subtracts back exactly what the pattern added. Contract points:
 - Keep overhead raycast terrain (tunnel ceilings) more than the vehicle's
   effective offset above the wheel attachment points.
 
-Related: `WheelJointInternalSync` (VJS) is NOT physics-neutral, and the
-paragraph that stood here through v2.0.4 under-stated it. It said the
-disturbance was bounded "to < 1 cm extra compression on hard landings" by
-the stroke clamp and slew-rate limit (`_SUSP_VIS_MAX_RATE`; 2-3 cm
-unclamped). That bound is real but covers landing compression only; **the
-VJS path moves the whole chassis trajectory** (corrected in v2.0.5):
+### Wheel visuals since v2.0.6: the engine-node override (ENO)
+
+**Rendering through `VehicleScene` writes no solver state.** Enforced by: no
+SDK code writes wheel joints (`WheelJointInternalSync` / `KindVisualBatch` are
+deleted; importing either raises `ImportError`; `enable_wheel_joint_internal_sync=True`
+raises `ConfigError` in `resolve`, `VehiclePhysics.__init__` and
+`MultiVehicleKindPhysics.__init__`; `wheel_render_mode="internal_sync"` raises
+`ValueError`); `VehicleScene.step()` is a plain `Scene.step()`; and the
+renderer writes only render data — the engine wheel nodes' `primitive.poses`
+and `mesh._bounds`, the queued `"model"` buffer, the context's `_sync_shapes`
+attribute (the hook) and SDK fallback nodes. Measured, not only by
+construction: spies that count a write when the IMMEDIATELY calling frame is
+SDK code read 0 `active_envs_mask` / `active_envs_idx` writes and 0
+`set_dofs_position` / `control_dofs_position` / `set_dofs_kp` / `set_dofs_kv`
+calls over a rendered `n_envs` 2 scene (2.0.5 on the same probe: 16 mask writes
+at `n_envs` 1, 10 setter calls at `n_envs` 2; implementation, reproduced by
+impl-review; the server's instance patch, `samples/`, `tools/` and engine code
+called by the SDK are not covered). Rendered and headless runs are
+bit-identical per step on the rows listed in CHANGELOG 2.0.6 §6 (N1-N10, the
+segmentation scenes, three impl-review scenes) — those rows, not every scene.
+
+**How the poses reach every draw.** `VehicleScene.build()` of a rendered scene
+(a viewer or any visualizer camera, a camera added through
+`vs.scene.add_camera` included) wires one `InstancedWheelRenderer` at every
+`n_envs`. `_gs_compat.on_render_sync` wraps the main scene's
+`RasterizerContext._sync_shapes` (wrapper depth always 1; installing the same function twice raises `RuntimeError`); after the
+engine's own `_sync_shapes` the hook runs `InstancedWheelRenderer.update()`,
+which writes `T_closed(env, k, i) @ T_local(part)` (from
+`wheel_visual_transforms`: steer + suspension + spin) into every engine render
+node of each wheel part for the rendered envs. Which parts are drawn is decided
+from the engine model, never from an empty node lookup: entity
+`surface.vis_mode` None → the wheel link's visual geoms; `"collision"` → its
+collision geoms; a link with no such geoms or a wheel name that does not
+resolve → one SDK FALLBACK node (the harvested mesh, or a cylinder of the wheel
+radius with one `[genesis_vehicle:wheel-harvest]` WARNING). A part that must be
+drawn but has no node raises `RuntimeError`. Wheel colliders are stripped by
+`urdf_prep`, so under `vis_mode="collision"` every wheel is a fallback node.
+
+- The two syncs `Visualizer.build` makes, and viewer frames drawn during
+  `build()`, precede the hook. `wire()` runs one build-time `update()` under the
+  viewer lock (every node posed before any later draw), then a wiring
+  self-test (one forced sync runs the hook exactly once and leaves every posed
+  primitive and its queued buffer at the override). The self-test cannot test
+  ordering: on 1.5.0 the engine writes node poses only on a sync after a state
+  change. **The build-time wheel-pose update is untested offscreen** (its
+  mutant leaves the spawn pose within 6e-8 of the closed form).
+- The first unforced render after `build()` skips the sync, in camera-only
+  scenes too (the self-test leaves the context at the forced sync); frame 0 is
+  still correct (post-build gate 1 6.7e-12; frame 0 pixel-equal to 2.0.5).
+- `n_envs == 1` recordings are current since v2.0.6 (2.0.5 streamed after
+  `Scene.step`, one step stale: 14.2 mm at ≤ 0.6 m/s; plan agent).
+- **The native viewer thread was not run** (no display); what it draws is
+  inferred from the source and the headless emulation.
+
+**Segmentation (restored in v2.0.6).** The URDF wheel visual geoms are no
+longer hidden, so a wheel pixel returns, through `scene.segmentation_idx_dict`,
+the key Genesis gives that wheel's URDF link part (entity / `LinkKey` / visual
+`GeomKey`), at every `n_envs` and level. Enforcement point:
+`InstancedWheelRenderer.update` via `on_render_sync` (the engine's own nodes
+keep their own keys); a fallback node is registered with `ctx.create_node_seg`
+under the link's first visual geom, after the engine's keys, in (unit, k, i)
+order; at geom level a fallback wheel with several visual geoms is one merged
+mesh under visual geom 0's `GeomKey`; a wheel with no geometry and an
+unresolvable name gets no id. At `n_envs > 1` the index map equals 2.0.5's; at
+`n_envs == 1` the integers renumber (car 2's chassis link index 3 → 7) — read
+ids through `scene.segmentation_idx_dict`. Segmentation does not tell envs
+apart (Genesis's keys are not per env).
+
+**Non-finite poses.** A non-finite closed-form wheel pose (NaN, inf or
+|x| ≥ 1e20, the engine's `POSE_MAX_ABS` rule) is not written: that wheel
+instance keeps the pose the SDK last wrote to it on a completed sync, or —
+before any write — the node's current row (the solver pose for an engine node;
+the identity, the world origin, for a fallback node). The frozen wheel keeps
+its WORLD pose and does not follow a chassis that keeps moving. No warning in
+2.0.6. Measured on Genesis for NaN at `n_envs` 2 on engine nodes; inf, 1e21
+and fallback nodes are unit-tested only.
+
+**The per-sync ordering guard** (`InstancedWheelRenderer._check_last_writes`,
+run by the hook before the engine's `_sync_shapes`) compares each pose array
+the SDK wrote on the previous COMPLETED hooked sync with the primitive's
+current `poses`, by value, then discards the record. A `RuntimeError` means
+those poses were changed before this sync (for example an engine whose pose
+write moved after the hook). Limits, as implemented:
+- **one sync late** — the first affected frame is drawn at the solver pose and
+  the raise comes at the next hooked sync; a frame with no later hooked sync is
+  never checked. **Never read this as "detected before draw".**
+- **blind to an engine `"model"` buffer queued after the hook** without
+  touching `primitive.poses`; only the flush gate in
+  `tests/test_render_sync_pose.py` sees that case, so that file must run on
+  every engine bump;
+- **no check on the sync after a hooked sync that did not complete** (the
+  guard, the engine's `_sync_shapes` or the pose provider raised, or a
+  `BaseException`); checking resumes on the one after, so a persistent late
+  write raises on at least every second hooked sync;
+- `equal_nan=True` is defence only; no test gates it.
+
+**Render contexts the SDK does not hook.** The hook sits on
+`scene.visualizer.context` only. Camera sensors
+(`scene.add_sensor(gs.sensors.{Rasterizer,BatchRenderer,Raytracer}CameraOptions)`;
+the rasterizer one renders from its own context when there is no viewer),
+visual raycasting / picking, the two `Visualizer.build` syncs and viewer frames
+drawn during `build()` show the URDF wheel at the solver's pose — the solver's
+own joint state, which no SDK code writes (measured values in
+`api-reference.md` §7.5). **No runtime warning is emitted when camera sensors are
+present.** A render with no engine sync after a state change draws the last
+synced wheel poses: after `VehicleScene.reset()` or a kind / driver reset with
+no step (chassis node unchanged), or after a setter that follows the step's
+last sync (the chassis node is stale too; engine behaviour). 2.0.5 had the
+same at `n_envs` 1 and worse at `n_envs > 1` (impl-review).
+
+**Build-time raises, rendered scenes only** (headless scenes are never wired):
+missing engine internals (`RuntimeError`); a wheel visual with
+`DynamicVertices` (`ValueError`, defensive: not reachable through
+`VehicleScene.add_vehicle`); `vis_mode="sdf"` with collision geoms on a wheel
+link (`ValueError`; with a prepared URDF the wheels are drawn by fallback
+nodes — run once by impl-review, 4 fallback nodes, otherwise untested). ENO
+depends on render internals new in genesis-world 1.5.0, and the SDK admits
+every 1.5.x silently.
+
+### What this section said through v2.0.5 (history)
+
+**Through v2.0.5** this section documented the joint-writing path as present:
+"`WheelJointInternalSync` (VJS) is NOT physics-neutral … **the VJS path moves
+the whole chassis trajectory**", and (v2.0.5) "`wheel_render_mode="internal_sync"`
+restores VJS; multi-env and raw-`VehiclePhysics` use still fall back to it —
+and so move physics". That was true of the 2.0.5 code and is HISTORY since
+v2.0.6, which removed the path. The measurements, kept as history (no cause is
+claimed beyond the two facts):
 
 | measured against the same run with no visual joint path | genesis-world 1.4.5 | 1.5.0 | who |
 |---|---|---|---|
@@ -440,48 +577,31 @@ VJS path moves the whole chassis trajectory** (corrected in v2.0.5):
 | truck (`truck_6w.urdf` demo URDF, `truck_6w_partial_ackermann`), set path, dt 0.025 × 4 substeps, 1.5 s brake then 10 s at throttle 0.3, final x | 51.9015 → 52.2209 m (+0.319 m) | 51.9015 → 52.2209 m (+0.319 m) | implementation |
 
 Both with one offscreen camera and `wheel_render_mode="internal_sync"`,
-`dual_scene`, plane μ 1.0, CPU/WSL2. **Which coupling produces it is not
-established.** Candidates visible in code (physics-review, none measured):
-every `set_dofs_position` resets the constraint solver and the collider cache
-and wakes the entity; the URDF wheel links carry mass (carrier + steer + wheel
-links about 140 of the reference car's 1340 kg) and are dofs of the chassis
-articulation, so writing the suspension positions moves the entity's centre
-of mass, the reference point of the SDK's chassis wrench torque. What still
-holds: the suspension force N is applied ONCE, through the chassis wrench;
-VJS adds no second N. `visual_susp_mode="auto"` resolves to the set path on
-both URDFs above (their suspension `<dynamics>` are all zero), so any rendered
-VJS run of them moves physics.
+`dual_scene`, plane μ 1.0, CPU/WSL2. The second measured fact (2.0.6 plan
+agent, 1.5.0): the kinematic suspension write with velocity zeroing removed the
+wheel-side weight from ΣN — car 1271.6 N against Σm_w·g = 1275.3 N, truck
+3723.4 N against 3727.8 N. Through 2.0.5 the coupling was "not established";
+it is still not attributed, and no attribution is attempted now that no SDK
+path writes the joints. Through v2.0.4 this section bounded the disturbance
+"to < 1 cm extra compression on hard landings" — wrong (corrected in v2.0.5).
 
-**The `"control"` path depends on the engine.** It drives the suspension
-joints with a PD (`control_dofs_position`, kp 1e7 / kv 1e5) and sets no force
-range. A URDF `effort="0"` (written on the suspension joints of
-`tests/data/car_ref.urdf`, `samples/urdf/car_4w.urdf` and `truck_6w.urdf`) is
-a ZERO force range on genesis-world 1.4.5 — the PD is inert and the joint hangs
-at its limit — and UNBOUNDED on 1.5.0, where the PD tracks its target and its
-reaction is a real force on the chassis outside N. Measured with
-`visual_susp_mode="control"` forced, 1.5.0 against 1.5.0 with the suspension
-dofs' force range set to 0 after build (implementation): reference car max
-|Δx| 8.17 mm (the deterministic tolerance at that distance is 6.36 mm), max
-|Δz| 0.190 m at step 34 (the landing); truck max |Δx| 15.7 mm, max |Δz| 30.4 mm
-at step 43; with the force range 0, 1.5.0 reproduces 1.4.5 within 6.1e-5 m. The
-SDK does not pin it in v2.0.5 (a user decision; settled in 2.0.6, planned). A
-URDF with non-zero suspension `<dynamics>` — the case where `"auto"` picks the
-control path — was not run. Headless runs never drive the visual joints.
+**The `"control"` path, through v2.0.5.** Through 2.0.5
+`visual_susp_mode="control"` was reachable through the documented cfg field
+`enable_wheel_joint_internal_sync` and VehicleScene's joint-sync paths, and its
+PD was live on 1.5.0 through the URDFs' `effort="0"` (reference car max |Δx|
+8.17 mm, max |Δz| 0.190 m at the landing, against the same run with the force
+range set to 0; implementation, CHANGELOG 2.0.5 §10.3). Since 2.0.6 no SDK code
+reads the field: it is validated, has no effect, and a value other than
+`"auto"` logs one `[genesis_vehicle:visual-susp-mode]` WARNING per process.
+This section's v2.0.5 "settled in 2.0.6, planned" is settled by that removal.
 
-Since v1.1.17 `VehicleScene` no longer uses VJS by default: rendered
-scenes with `n_envs == 1` draw wheels via `InstancedWheelRenderer` —
-closed-form poses streamed into instanced render nodes (NOT the rigid
-solver; since v2.0.5 through `_gs_compat.add_render_node` /
-`queue_instance_poses`, because genesis-world 1.5.0 removed the "external
-render-node channel" this paragraph named), measured physics-identical to
-headless to 1e-6 m at v1.1.17 (not re-measured on 1.5.0; by construction it
-writes no solver state) at a slight pose-streaming cost (~2–3 ms/step at 30
-vehicles, CPU, a pre-1.5.0 figure). The URDF wheel visual geoms it replaces
-are hidden through the ENGINE-PRIVATE per-env mask `vgeom.active_envs_mask`
-(`_gs_compat.hide_vgeoms`, which raises `AttributeError` if the attribute is
-gone); the 2.0.4 `active_envs_idx = []` hide is a no-op on 1.5.0.
-`wheel_render_mode="internal_sync"` restores VJS; multi-env and
-raw-`VehiclePhysics` use still fall back to it — and so move physics as above.
+**The instanced renderer, through v2.0.5.** From v1.1.17 through v2.0.5
+`VehicleScene` drew wheels at `n_envs == 1` only, through SDK-owned instanced
+nodes, and HID the URDF wheel visual geoms through the engine-private
+`vgeom.active_envs_mask` (`_gs_compat.hide_vgeoms`, deleted in v2.0.6); wheel
+pixels then carried no wheel segmentation id. At `n_envs > 1`, with
+`internal_sync`, on a harvest failure and with a camera added through
+`vs.scene.add_camera` (VehicleScene counted only its own cameras), it used VJS.
 
 **Through v2.0.4 this section said** that since v1.1.25 the native viewer
 committed the wheel buffers, the `follow_entity` camera and the rigid node
@@ -489,7 +609,8 @@ poses in ONE render-lock hold (`visual.patch_viewer_atomic_update`, applied
 at `build()`). **That was true on genesis-world <= 1.3.3 only.** On 1.4.x the
 patch returned False and changed nothing, so the non-atomic ordering ran
 there; 1.5.0 has no viewer hook that runs before the scene render under the
-lock. The patch was removed in v2.0.5. So a followed vehicle may "tremble"
+lock for the follow camera (since v2.0.6 the WHEEL poses are written inside the
+locked sync by the SDK hook above; the camera half is unchanged). The patch was removed in v2.0.5. So a followed vehicle may "tremble"
 fore/aft in the native viewer at speed — the async draw thread can pair state
 from adjacent steps; a draw artefact, physics unaffected (CHANGELOG 1.1.25);
 not measured on 1.5.0.
@@ -508,7 +629,7 @@ complies is used as-is (no copy).
 
 | contract | why | auto-correction |
 |---|---|---|
-| **Wheels must not collide** | ground contact IS the raycast + suspension force model; a colliding wheel is a SECOND support that fights it (vehicle jitters in place, or rides on its colliders while the suspension pushes several times its weight) | wheel colliders are removed. A collider that is the wheel's ONLY geometry is first promoted to a `<visual>`, so the wheel still RENDERS — the instanced wheel renderer draws visual geoms, and physics never touches them |
+| **Wheels must not collide** | ground contact IS the raycast + suspension force model; a colliding wheel is a SECOND support that fights it (vehicle jitters in place, or rides on its colliders while the suspension pushes several times its weight) | wheel colliders are removed. A collider that is the wheel's ONLY geometry is first promoted to a `<visual>`, so the wheel still RENDERS — the wheel renderer draws visual geoms (since v2.0.6 the engine's own nodes, posed from the closed form), and physics never touches them |
 | **The suspension attach point IS the wheel centre** | the ray is cast down from `WheelConfig.position` (= the prismatic joint origin) and `rest_d = radius + rest_stroke` measures from there | a chain that hangs the wheel off a carrier (`body --susp--> carrier --spin(z=+h)--> wheel`) puts the attach `h` below the wheel centre — the hull then settles `h` too high with the wheels visibly floating (measured on a 14-wheel tracked-vehicle model: h = 0.433 m). The spin-joint offset is folded into the suspension origin, leaving every link's rest pose unchanged |
 | **Moving links need a valid inertial** | links with no `<inertial>` have zero mass AND inertia; Genesis warns ("mass and inertia of moving bodies must be larger than mjMINVAL"), falls back to its legacy URDF parser, and the articulated chain goes degenerate — the hull stops responding to force properly | a small inertial is injected where one is missing |
 
@@ -530,11 +651,16 @@ corrections are therefore reported as an informational line. A link with no
 injects a placeholder mass the author never chose — so it raises a
 `logging.WARNING` naming the offending links. Fix that one at the source.
 
-Wheel RENDERING is independent of all of this: the instanced renderer
-harvests the wheel link's visual geoms (falling back to its colliders, and
-finally to a cylinder synthesized from `radius`) and draws them at the
-closed-form ray-wheel pose. The wheel link's own solver pose is never used
-— its visuals are hidden and its body only contributes mass.
+Wheel RENDERING is independent of all of this. Since v2.0.6 `VehicleScene`
+overrides the poses of the engine's own wheel render nodes with the
+closed-form ray-wheel pose (§7.8); a wheel the engine draws no node for (for
+example under `vis_mode="collision"`, whose wheel links have no colliders after
+this preparation) gets an SDK fallback node from the harvested mesh, or a
+cylinder synthesized from `radius`. The wheel link's own solver pose is not
+drawn by that context, and its body only contributes mass. (Through v2.0.5
+this paragraph said the URDF wheel visuals were hidden — true then; since
+v2.0.6 they are drawn, at the closed-form pose, which restores wheel
+segmentation.)
 
 ## 7.10 `wheels_grounded` is a read-layer diagnostic, not the air mask (v1.5.2)
 
@@ -583,12 +709,17 @@ earlier release.** What the tests prove about it, since v2.0.5, exactly:
 - `test_point_contact_equals_a_degenerate_fan_bit_for_bit`: point vs
   `swept_envelope` M = 3 at the default span on the SAME tree. A change to
   shared code moves both and passes it.
-- `test_contact_path_rollout_matches_the_2_0_4_tree_on_1_5_0`: the driving
-  rollout (60 brake + 140 throttle-0.5 steps) against its capture from the same
-  patched 2.0.4 tree on 1.5.0. A regression lock for later releases on exactly
-  that engine version and platform.
+- `test_contact_path_rollout_matches_the_2_0_6_capture_on_1_5_0` (named
+  `..._the_2_0_4_tree_on_1_5_0` in v2.0.5): the driving rollout (60 brake + 140
+  throttle-0.5 steps) against its capture. In v2.0.5 that capture came from the
+  patched 2.0.4 tree; **since v2.0.6 it is re-captured from the 2.0.6 tree**
+  (final x 6.018531322479248 → 6.019377708435059, 0.846 mm), because the ground
+  gate changes the braked spawn drop. The 2.0.6 code with only the gate
+  removed reproduces the 2.0.5 capture byte for byte (attribution;
+  implementation, impl-review). A regression lock for later releases on exactly
+  that engine version and platform, not evidence.
 
-All three captured locks are keyed `("1.5.0", "linux-x86_64")` and SKIP on
+The witness (no brake) passes unchanged on v2.0.6. All three captured locks are keyed `("1.5.0", "linux-x86_64")` and SKIP on
 any other pair — a 1.5.x patch release included — because the baseline is a
 float32 bit pattern bound to the engine and platform it was captured on.
 
@@ -709,7 +840,7 @@ replacement promises.
 | SFL | `StaticFrictionLock` — the hold-at-rest stability hook |
 | `comp_rate` | suspension compression RATE, `(compression - prev_compression)/dt`, the damper's input |
 | `rest_d` | suspension rest length (§7.2) |
-| PD | proportional-derivative controller (the `visual_susp_mode="control"` joint path) |
+| PD | proportional-derivative controller (the `visual_susp_mode="control"` joint path, removed in v2.0.6) |
 
 **Through 1.6.1 there was no carry.** A rebuild constructed a fresh driver and
 dropped everything the old one held. Measured on the reference car
@@ -753,9 +884,12 @@ kind/row placement can move.
   turret links; the rebuilt driver re-derives `wheel_meta.yaw_inertia` from
   them with `rho^2` recomputed from the REBUILT wheel positions. A driver that
   never stepped carries `None` and reads them on its own first step.
-- Visual accumulators, per vehicle: the per-entity `WheelJointInternalSync`
+- Visual accumulators (through v2.0.5): the per-entity `WheelJointInternalSync`
   spin angle and its slew origin, and this vehicle's column of the batched
-  `KindVisualBatch` spin accumulator.
+  `KindVisualBatch` spin accumulator. Since v2.0.6 those writers are gone;
+  `export_slot` no longer writes their keys and `import_slot` ignores them if
+  present (a 2.0.5 snapshot still imports). The render state the wheel renderer
+  draws from is `wheel_spin_angle`, carried above.
 
 **The config is still fully re-resolved** — that is the point of the call.
 `resolved`, `wheel_meta`, the hook slotting, `dt`, `base_idx_list`, the
@@ -769,10 +903,11 @@ same config was measured bit-identical, which is why the tests compare with
 Both of these raise `ValueError` from the **config precheck**
 (`VehicleScene._precheck_wheel_counts`), which runs off the grouped cfgs before
 any replacement driver is constructed. That ordering is load-bearing:
-constructing an MVP is not side-effect free even when the result is discarded —
-`WheelJointInternalSync.__init__` writes `set_dofs_kp` / `set_dofs_kv` onto the
-LIVE entity's suspension dofs (`visual.py:227-228`) — so on the refusal path
-there is no such side effect at all.
+through v2.0.5, constructing an MVP was not side-effect free even when the
+result was discarded — `WheelJointInternalSync.__init__` wrote `set_dofs_kp` /
+`set_dofs_kv` onto the LIVE entity's suspension dofs — so on the refusal path
+there was no such side effect at all. Since v2.0.6 no SDK constructor writes
+solver gains (the writer is removed); the ordering is kept.
 
 - **A wheel-count change.** The raycast sensor's ray count is fixed at
   `build()` and is not rebuilt here, so a vehicle whose `cfg.wheels` shrank
@@ -806,11 +941,12 @@ into a local and published to `self._mvp` only after validation, the state
 import and the renderer rebind all succeed, so a failed rebuild leaves the
 PREVIOUS driver installed and stepping.
 
-**Residual side effect, not fixed in v1.6.2.** A failure that happens AFTER the
+**Residual side effect, not fixed in v1.6.2 — gone since v2.0.6** (no SDK code
+writes the suspension gains any more). Through v2.0.5: a failure that happened AFTER the
 new driver was constructed — the authoritative shape check, `import_state`, or
-the renderer rebind — leaves the new cfg's `set_dofs_kp` / `set_dofs_kv` values
-written onto the live entity's suspension dofs (`visual.py:227-228`) while the
-OLD driver continues to run. The physics driver is consistent; the visual
+the renderer rebind — left the new cfg's `set_dofs_kp` / `set_dofs_kv` values
+written onto the live entity's suspension dofs while the
+OLD driver continued to run. The physics driver is consistent; the visual
 suspension joint's PD gains are the new cfg's. The precheck keeps every
 user-reachable structural change out of this window, but a `resolve()` that
 raised, for instance, does not.
@@ -840,6 +976,12 @@ flow that triggers it.
   a rebuild that changed the stability-hook set is followed.
 
 ### Partial reset and the visual writers
+
+**Since v2.0.6 the visual writers below no longer exist**; a reset touches the
+physics rows (and `wheel_spin_angle`) only, and the wheel renderer draws from
+that state at the next sync (a render with no sync after a reset draws the
+last synced wheel poses, §7.8). The rest of this subsection describes v1.6.2-v2.0.5
+and is history.
 
 `MultiVehiclePhysics.reset(vehicle_ids=...)` (new in v1.6.2) is per-VEHICLE; it
 expands each vehicle to its own kind's `env * K + slot` rows.
@@ -899,8 +1041,12 @@ touched by any reset — place vehicles with `Vehicle.set_pos` / `set_quat`.
 ### Known gap — `StaticFrictionLock` state survives every reset
 
 `SFL`'s per-wheel state (`StaticFrictionLock.STATE_ATTRS`: `_d_long`, `_d_lat`,
-`_was_active` and, since v1.8.0, `_s_eng`, `_rested`, `_rest`, `_v_prev_sq`;
-declared in `StaticFrictionLock.__init__`) is allocated on the hook instance and
+`_was_active` and, since v1.8.0, `_rest`, `_v_prev_sq` — five names since
+v2.0.6; v1.8.0-v2.0.5 also had `_s_eng`, `_rested`, removed with the reversal
+re-anchor, §7.17; `STATE_ATTRS` is a class attribute, the attributes are set to
+`None` in `StaticFrictionLock.__init__` and allocated by `_ensure_state` on the
+first step — this sentence said "declared in `StaticFrictionLock.__init__`",
+which was imprecise) is allocated on the hook instance and
 is therefore **kind-wide**: one tensor shared by all K vehicles of the kind. No
 reset path touches it — not `VehiclePhysics.reset`, not
 `MultiVehicleKindPhysics.reset(rows=)`, not
@@ -920,7 +1066,11 @@ dt 0.025 × 4, plane μ 1.0): at most 0.827 mm (to flat) / 2.056 mm (to the
 opposite 5° slope) of displacement, at rest within 2 s; with a manual
 `STATE_ATTRS` clear 0.298 / 1.498 mm. Not run through the live server. Clear every `STATE_ATTRS`
 entry yourself after a reset that teleports a braked vehicle. Separately
-ticketed; the fix needs the hooks to carry row-indexed reset. (This section
+ticketed; the fix needs the hooks to carry row-indexed reset. **The v2.0.6
+ground gate does not close this gap**: the teleport rows above measured 0.652 →
+0.654 mm on 2.0.6 (L2 / L3 flat; implementation, genesis-world 1.5.0); the
+state clears incidentally only where the reset leaves the wheel at `N = 0` for
+at least one step (the next engagement edge clears `_d_*` and `_rest`). (This section
 cited `strategies/stability.py:204-206` for the anchors through v1.7.0; that
 line reference was stale.)
 
@@ -931,11 +1081,12 @@ line reference was stale.)
 immutable vehicle list on both sides: `_ensure_grouped` buckets by
 `veh._kind_key` (set once, in `add_vehicle`, which is build-time only) in
 first-seen vehicle order, and `MultiVehiclePhysics` groups by cfg identity in
-that same order. `InstancedWheelRenderer.rebind` validates K and the wheel count
-per unit and raises without touching any unit if either moved — but K and *n*
-alone would not notice two same-shaped kinds swapping places. If a future API
-ever lets `_kind_key` change after build, the unit must carry a kind identity
-instead.
+that same order. `InstancedWheelRenderer.rebind` validates K, the wheel count
+AND (since v2.0.6) the identity of every entity in slot order per unit, and
+raises without touching any unit if any moved. Through v2.0.5 it checked K and
+*n* only, which would not notice two same-shaped kinds swapping places; the
+v2.0.6 renderer's parts are tied to entities, so the identity check was
+added. The positional matching premise above still holds.
 
 Without the rebind the renderer stays bound to the DISCARDED kind, which is
 never stepped again, and **the rendered wheels stop turning permanently** while
@@ -1269,6 +1420,10 @@ Y:    |F_lat|  <= s * (N/g) * |v_lat| / DT                  on wheels NOT in ctx
 SFL:  damper force <= s * (N/g) * |v| / DT                  (§7.17)
 ```
 
+Since v2.0.6 a wheel with `N = 0` is never in `ctx.hold_applied` (the lock is
+inactive there, §7.22.5), so D and Y are not exempted on it; both bounds are 0
+at `N = 0`, and the tyre force is 0 there anyway.
+
 - **Why `s`.** With every wheel acting at once the contact velocities update
   as `(I - W·G)`, `W = J·M⁻¹·Jᵀ`. For loads in moment balance about the centre
   of mass, `M⁻¹·Jᵀ·G·J = s0·diag(1, 1, Σ(N_i/g)·ρ_i²/I_cg)`: with `s = 1` the
@@ -1354,11 +1509,16 @@ review) the Truck6w and AWD car.
   speed. On 0.08 m bumps no dt-0.025 tree is within 67% of an unconverged
   reference. Nothing here shows Y closer to the reference.
 
-## 7.17 `StaticFrictionLock` holds the point where the contact came to rest (v1.8.0; engage rule v2.0.4)
+## 7.17 `StaticFrictionLock` holds the takeover point (v1.8.0; engage rule v2.0.4; re-anchor removed and ground gate v2.0.6)
+
+(Through v2.0.5 this heading read "holds the point where the contact came to
+rest": with the reversal re-anchor the longitudinal anchor moved to where the
+contact stopped or reversed. Since v2.0.6 it is the takeover point.)
 
 **Since v2.0.4** the lock ENGAGES per env, per wheel where the brake holds the
 wheel this step (`ctx.brake_rem > 0`) and the planar contact speed
-`sqrt(v_long² + v_lat²)` is below `min(v_thr, 0.5)`, at any pedal; it never
+`sqrt(v_long² + v_lat²)` is below `min(v_thr, 0.5)`, at any pedal, **and (since
+v2.0.6) its normal force `ctx.N` is positive** (§7.22.5); it never
 forces ω; it REPLACES the tyre force only after a creep equilibrium — the
 held-wheel deadbeat binds on the raw tyre force (`|ctx.F_long| >=
 ctx.F_long_deadbeat`) and the planar speed did not fall this step (`v² >=
@@ -1383,8 +1543,24 @@ should have turned (§7.22). `brake_thr` and `REST_SPEED` are removed.
 
 Before rest the anchor follows the contact and the brake (§7.1, D) does the
 stopping. The takeover step anchors at the END of the step, so only the damper
-acts on it. The first step after engagement on which `s_eng·v_long <= 0` (the
-contact stopped or reversed) re-anchors the longitudinal spring at the contact.
+acts on it, and the anchor then stays there except where the ellipse or
+`F_long_bounds` move it: the lock holds the TAKEOVER point, and the rest point
+on a slope is that point plus the hold deflection. **Through v2.0.5** the first
+step after engagement on which `s_eng·v_long <= 0` (`s_eng` the sign of `v_long`
+at engagement) re-anchored the longitudinal spring at the contact (state
+`_s_eng` / `_rested`). At a touchdown `v_long` is round-off, so the branch was
+round-off: the `direct_single_3` tank of `tests/test_legacy_inputs_bit_identity.py`
+ended 0.121 m apart for an initial velocity of −1e-6 vs +1e-6 m/s on 2.0.5.
+**Removed in v2.0.6** (reading or writing either name raises
+`AttributeError`). Since then that scene's tank agrees within 1e-3 m across
+{nominal; vx, vy, wx, wy, wz ±1e-6; vx ±3e-5; vx ±1e-4} (measured per-env
+spread ≤ 1.33e-4 m; implementation; asserted at 1e-3 m by
+`tests/test_sfl_touchdown_continuity.py` for vx ±1e-6 and wz −1e-6 only).
+**The lock is NOT continuous**: the creep-test takeover is still a discrete
+decision, and a pitch-rate sweep of the same scene shows steps of 3.147 mm
+and 2.56 mm in the final x (lock off: ≤ 0.5 mm); at the same sweep points
+2.0.5 sat on its other re-anchor branch with steps ≤ 0.55 mm, and whether 2.0.5
+has such steps elsewhere is not established (CHANGELOG 2.0.6 §3).
 The damper is `max(k_damp, 2·sqrt(k_eff·N/g))` (at least critical for the
 wheel's mass share; `k_damp` is a floor; `k_eff` is `k_spring` capped per wheel
 since v2.0.4, §7.22 — through 2.0.3 it was `k_spring`) and its force is bounded by
@@ -1396,15 +1572,16 @@ ORed into `ctx.hold_applied` and are exempt from D and Y.
 
 | claim | status | where |
 |---|---|---|
-| No back-slide after a stop: back-travel ≤ 2 mm and vmin ≥ -0.01 m/s after the first \|v\| < 0.05 m/s | measured on the 14-row matrix of CHANGELOG 1.8.0 §6.2 (car and tank; brake 0.5 / 1.0; both pedals; from reverse; 10° downhill), CPU, dt 0.025 x 4. **One accepted exception:** car throttle 1.0 + brake 1.0 reaches -0.01036 m/s for one step with zero back-travel. Car 20° downhill: -0.0208 m/s (from 3 m/s, 0 mm) and -0.0258 m/s (from rest, 0.81 mm), reported | `test_n17_no_back_travel_or_reverse_speed_after_a_stop` (floor -0.0104 on the exception row) |
-| The lock holds where the contact came to rest | measured (tank brake 1.0 from ±5 m/s: back-travel from the furthest point ≤ 0.5 mm; with A disabled 0.98 mm) | `test_n20_the_lock_holds_where_the_tank_came_to_rest` |
-| A downhill stop is taken over and held | measured at **brake 1.0**: car 10° / 20° from 3 m/s stop in 0.95 / 1.575 s, hold ≤ 6e-6 m/s. Through 2.0.3 **only above `brake_thr`** (this row did not say so through v2.0.1). Since v2.0.4 at any pedal whose brake can hold the load: the 420-row car slope matrix of CHANGELOG 2.0.4 §7.2 (REST 276 / 276, signed and gear inputs; implementation) | `test_n12_*`, `test_n18_*`, `tests/test_light_brake_hold.py` |
+| No back-slide after a stop: back-travel ≤ 2 mm and vmin ≥ -0.01 m/s after the first \|v\| < 0.05 m/s | measured on the 14-row matrix of CHANGELOG 1.8.0 §6.2 (car and tank; brake 0.5 / 1.0; both pedals; from reverse; 10° downhill), CPU, dt 0.025 x 4, genesis-world 1.4.5. **One accepted exception:** car throttle 1.0 + brake 1.0 reaches -0.01036 m/s for one step with zero back-travel. Car 20° downhill (1.8.0 / 1.4.5): -0.0208 m/s (from 3 m/s, 0 mm) and -0.0258 m/s (from rest, 0.81 mm), reported. **Since v2.0.6 (re-anchor removed; genesis-world 1.5.0, implementation): car 20° from 3 m/s, brake 1.0: back-travel 0.880 mm, vmin −0.04619 m/s (2.0.5 on 1.5.0: 0 mm, −0.02058 m/s) — outside the −0.01 bound, held by a separate `car_down20` floor of −0.06 m/s, a regression bound fixed after the prototype measured −0.0462, not acceptance evidence**; 10° row 0.085 mm (2.0.5 0.043) | `test_n17_no_back_travel_or_reverse_speed_after_a_stop` (floor -0.0104 on the exception row; `car_down20` -0.06 since v2.0.6) |
+| ~~The lock holds where the contact came to rest~~ | **history since v2.0.6** (the re-anchor that made it true was removed): measured on 1.4.5 (tank brake 1.0 from ±5 m/s: back-travel from the furthest point ≤ 0.5 mm; with the re-anchor disabled 0.98 mm). On genesis-world 1.5.0 the test does not discriminate: 0.2179 / 0.2165 mm with and without the re-anchor (plan-review); kept as a regression bound | `test_n20_the_lock_holds_where_the_tank_came_to_rest` |
+| A downhill stop is taken over and held | measured at **brake 1.0** (1.8.0 / genesis-world 1.4.5; not re-measured on 2.0.6): car 10° / 20° from 3 m/s stop in 0.95 / 1.575 s, hold ≤ 6e-6 m/s. Through 2.0.3 **only above `brake_thr`** (this row did not say so through v2.0.1). Since v2.0.4 at any pedal whose brake can hold the load: the 420-row car slope matrix of CHANGELOG 2.0.4 §7.2 (REST 276 / 276, signed and gear inputs; implementation, 2.0.4 / 1.4.5). On 2.0.6 / 1.5.0 the same rowsets keep their classes, travel per row in CHANGELOG 2.0.6 §4.3 | `test_n12_*`, `test_n18_*`, `tests/test_light_brake_hold.py` |
 | ~~"The vehicle truly stops when external force ≤ μ·N"~~ | **wrong since v0.5.7**: the hold is also limited by what the wheel can transmit — by the brake capacity since v1.8.0 (the `tank_skid_belt` preset, 75 kN of brake, does not hold 10°: 99 kN slope load) | SFL docstring, corrected in place |
 | ~~The explicit spring is stable: `c < 4 - 2s` suffices~~ | **wrong** (corrected in v2.0.4). The per-mode condition `c + 2b < 4`, `0 < b < 2` is right, but this row applied it to each wheel as an independent mass share. In the planar YAW mode the damper bound puts modal b at 1 and the spring number is about `c / s`, set by mass and yaw inertia, not by the wheel loads: `tests/data/low_yaw_inertia_car.urdf` (s 0.288, every wheel's `c` 0.93-0.95) cycled in yaw at about 0.27 rad/s under a full brake on 2.0.3 (impl-review, CPU/WSL2, genesis-world 1.4.5, DT 0.025 × 4, plane μ 1.0). Since v2.0.4 the spring is capped (§7.22); that bounds λ(K) of the planar model only and is NOT a stability guarantee | `StaticFrictionLock` docstring (corrected) |
 
 **State.** `StaticFrictionLock.STATE_ATTRS` lists every per-wheel tensor
-(`_d_long`, `_d_lat`, `_was_active`, `_s_eng`, `_rested`, `_rest`,
-`_v_prev_sq`). Code that copies the lock's state between hooks by name (MPPI
+(`_d_long`, `_d_lat`, `_was_active`, `_rest`, `_v_prev_sq` — five since v2.0.6;
+v1.8.0-v2.0.5 also listed `_s_eng`, `_rested`, which now raise
+`AttributeError`). Code that copies the lock's state between hooks by name (MPPI
 rollouts) must copy all of them; a hard-coded three-name list is silently wrong
 since v1.8.0. The state survives every reset (§7.12 known gap). Not covered:
 the A6 thresholds were chosen on the reference car, tank and HJW demo car only;
@@ -1724,7 +1901,7 @@ through them `MultiVehiclePhysics.step` and `VehicleScene.step`.
 
 | guarantee | enforced by | scope |
 |---|---|---|
-| no input of a step carries a gear → the 2.0.1 gear-free code path | `encode_requests` returns `None`; the drivers then run their 2.0.1 lines in the 2.0.1 order | the four paths above. **Through 2.0.3 this row said "the 2.0.1 numbers"**, byte-identity measured on nine scenes against `tests/data/legacy_inputs_2_0_1.json`. Since v2.0.4 the physics of a braked wheel changed for every input (§7.22): the gear-free path is still the 2.0.1 path, but a scene with a brake no longer reproduces the 2.0.1 numbers; `tests/test_legacy_inputs_bit_identity.py` (platform-gated) asserted the 2.0.4 capture `legacy_inputs_2_0_4.json` (genesis-world 1.4.5) through v2.0.4; since v2.0.5 it asserts `legacy_inputs_2_0_5.json`, captured from the v2.0.4 tree plus the two-line `skip_forward` patch on genesis-world 1.5.0 (linux-x86_64), which 2.0.5 reproduces bit for bit; the 2.0.1 and 2.0.4 files are kept but no longer asserted |
+| no input of a step carries a gear → the 2.0.1 gear-free code path | `encode_requests` returns `None`; the drivers then run their 2.0.1 lines in the 2.0.1 order | the four paths above. **Through 2.0.3 this row said "the 2.0.1 numbers"**, byte-identity measured on nine scenes against `tests/data/legacy_inputs_2_0_1.json`. Since v2.0.4 the physics of a braked wheel changed for every input (§7.22): the gear-free path is still the 2.0.1 path, but a scene with a brake no longer reproduces the 2.0.1 numbers; `tests/test_legacy_inputs_bit_identity.py` (platform-gated) asserted the 2.0.4 capture `legacy_inputs_2_0_4.json` (genesis-world 1.4.5) through v2.0.4; in v2.0.5 it asserted `legacy_inputs_2_0_5.json`, captured from the v2.0.4 tree plus the two-line `skip_forward` patch on genesis-world 1.5.0 (linux-x86_64), which 2.0.5 reproduces bit for bit; **since v2.0.6 it asserts `legacy_inputs_2_0_6.json`**, re-captured from the 2.0.6 tree because the ground gate (§7.22.5) changed braked physics in every scene (a regression lock, not evidence; CHANGELOG 2.0.6 §6); the 2.0.1, 2.0.4 and 2.0.5 files are kept but no longer asserted |
 | the gear is read off the caller's ORIGINAL input object, before `from_unified` | `getattr(inputs, "gear", None)` at the head of `VehiclePhysics.step`; the batched kind reads the input list directly | a custom `InputType.from_unified` that drops the field does not switch gear mode off |
 | on a gear row the drivetrain sees `thr_eff`; hooks see it as `ctx.throttle`; `ctx.gear` holds the post-shift gear | `effective_throttle`, `with_throttle` (`dataclasses.replace`, the caller's object untouched) | `ctx.gear` is `None` on a step with no gear; set before the `PRE_LOOP` hooks |
 | every wheel's `last_T_drive · g >= 0` on a gear row, g = the gear engaged AFTER this step's shift decision | `clamp_drive_to_gear`, after `update_gear`, before `compute_wheel_step` | custom drivetrains included — so a custom non-`PerSide` drivetrain's deliberate opposite-sign wheel torque is ZEROED in gear mode; driving in the gear's direction while rolling the other way (hill start) is allowed. `DifferentiablePlant`'s unroll is signed and not covered |
@@ -1738,8 +1915,8 @@ through them `MultiVehiclePhysics.step` and `VehicleScene.step`.
 
 **Not enforced:** that a braked vehicle on a slope comes to rest — through
 2.0.3 at brake ≤ `brake_thr` it crept with its wheels held (§7.1, §7.17); since
-v2.0.4 the lock engages at any pedal where the brake holds a wheel, and whether
-the vehicle rests is measured, not enforced (§7.22); that a vehicle driven
+v2.0.4 the lock engages at any pedal where the brake holds a wheel (since v2.0.6
+only where `ctx.N > 0`, §7.22.5), and whether the vehicle rests is measured, not enforced (§7.22); that a vehicle driven
 with `GearCommand.signed()` obeys the shift rule; anything about the friction
 limit (the brake model below is linear only below it).
 
@@ -1956,11 +2133,11 @@ ellipse, transmit bound) are §7.17.
 
 | guarantee | enforced by | scope |
 |---|---|---|
-| a wheel engages iff `brake_rem > 0` and `v_long² + v_lat² < min(v_thr, 0.5)²` | `StaticFrictionLock.apply_post_tire`, `_v_thr_squared` / `_engage_speed` (`V_ENGAGE_MAX` 0.5) | the pedal is not read. A ctx without `brake_rem` (duck-typed) engages nothing. `v_thr` above 0.5 does not widen the window (`TankTuning`'s 5.0 acts as 0.5); a tensor `v_thr` is clamped |
+| a wheel engages iff `brake_rem > 0` and `v_long² + v_lat² < min(v_thr, 0.5)²` **and (since v2.0.6) `ctx.N > 0`** | `StaticFrictionLock.apply_post_tire` (`active = (brake_rem > 0) & active_v & (ctx.N > 0)`), `_v_thr_squared` / `_engage_speed` (`V_ENGAGE_MAX` 0.5) | per wheel, no threshold, no hysteresis on the N term (§7.22.5); through v2.0.5 this row had no N term and a wheel in the air could engage and be taken over. The pedal is not read. A ctx without `brake_rem` (duck-typed) engages nothing. `v_thr` above 0.5 does not widen the window (`TankTuning`'s 5.0 acts as 0.5); a tensor `v_thr` is clamped |
 | `brake_rem > 0` only where the brake holds the wheel this step (not conversely) | `dynamics.brake_projection` (`held = T_b > 0 and T_b ≥ abs(ω_d)·I/DT`, `B_rem = T_b − abs(ω_d)·I/DT` on held wheels, else 0) | a held wheel whose brake has no torque to spare (`T_b` exactly equal to the stopping torque) has `B_rem` = 0 and does NOT engage the lock; at standstill that is an exact drive == brake tie |
-| the force is replaced only after the creep test (held-wheel deadbeat binds on the raw tyre force AND the planar speed did not fall this step) | `apply_post_tire` (`_rest`) | no rest-speed takeover (the 0.05 m/s `REST_SPEED` path was removed). Exceptions from state that survives a reset (§7.22.3, §7.12 known gap): a stale `_rest` re-applies the hold without a new creep test; a stale `_v_prev_sq` can trigger one early takeover |
+| the force is replaced only after the creep test (held-wheel deadbeat binds on the raw tyre force AND the planar speed did not fall this step) | `apply_post_tire` (`_rest`) | no rest-speed takeover (the 0.05 m/s `REST_SPEED` path was removed). Exceptions from state that survives a reset (§7.22.3, §7.12 known gap): a stale `_rest` re-applies the hold without a new creep test — since v2.0.6 not on a wheel that had `N = 0` for at least one step in between (its next engagement edge clears `_rest`); a stale `_v_prev_sq` can trigger one early takeover |
 | the lock never forces ω | `apply_post_tire` sets no `ctx.omega_override` | the pipeline feature stays for user hooks |
-| `ctx.brake_rem` is `None` in `apply_pre_tire` and a detached copy of `B_rem` in `apply_post_tire` | `_pipeline.compute_wheel_step` (reset with the other per-step fields; set with `F_long_bounds`) | N·m, ≥ 0, pre-coupling, NOT masked for airborne wheels; not observable on the first-step protection step (no hook is called); writes are not detected — the pipeline keeps its own tensor, but a LATER hook in the list (the lock included) sees a written value |
+| `ctx.brake_rem` is `None` in `apply_pre_tire` and a detached copy of `B_rem` in `apply_post_tire` | `_pipeline.compute_wheel_step` (reset with the other per-step fields; set with `F_long_bounds`) | N·m, ≥ 0, pre-coupling, NOT masked for airborne wheels (still true of the pipeline in v2.0.6; the lock itself ignores it where `ctx.N <= 0`, §7.22.5); not observable on the first-step protection step (no hook is called); writes are not detected — the pipeline keeps its own tensor, but a LATER hook in the list (the lock included) sees a written value |
 | `brake_thr` and `REST_SPEED` are gone | constructor (`TypeError` for `brake_thr=`, any positional argument, any unknown keyword), raising properties on the instance and, through a metaclass, on the class (`AttributeError` on read / write / delete) | a ≤ 2.0.3 pickled hook unpickles; reading its `brake_thr` raises |
 | per wheel `k_eff_i ≤ SPRING_C_MAX · m_i / DT²`; and `λ(K_eff)·DT² ≤ SPRING_C_RB` for the PLANAR (x, y, yaw) model, for any subset of grounded wheels and any steer angle | by construction of `k_eff` in `StaticFrictionLock._compute_k_eff` (no eigenvalue is computed at run time); three `AssertionError`s: β not finite or < 1 − 1e-6, a cap not positive and finite, a `k_eff` not positive | only where BOTH `static_mass_share` and `static_rigid_factor` exist; β ≤ 1.5 → `f` is `SPRING_C_MAX` itself, bit-for-bit the per-wheel cap; no wheel capped → `k_eff` is the `k_spring` object and the lock computes the 2.0.3 expression; to float32 rounding of the stored share (about 1e-7 relative). Verified over every wheel subset and steer in [−0.6, 0.6] rad on five fixtures (`tests/test_sfl_rigid_bound.py`) |
 | `m_i` and β are computed once per driver, on its first step, from the build-time link masses | `VehiclePhysics._ensure_static_mass_share` (top of `step`, also when `yaw_inertia` was preset; on a batched kind's proto in `MultiVehicleKindPhysics.step`), `dynamics.static_mass_shares`, `dynamics.rigid_share_factor`; `DifferentiablePlant` triggers it at bind | β never reads `wheel_meta.yaw_inertia`; a batched kind uses `entities[0]`; runtime `set_mass` / per-env masses are not reflected; `DT` is `ctx.dt` only |
@@ -2024,21 +2201,29 @@ brake-dominated wheels and excludes exact ties, where the wheel is free.
   (pre-existing, independent of the lock, cause not established). The bound
   covers spring deflection per unit of static load, not total post-rest travel
   (an ungated 3° / brake 0.1 row on the low-yaw car drifted 22.1 mm after first
-  coming to rest).
+  coming to rest). On a slope the rest point is the takeover point plus
+  `F_s/k_eff` downhill (since v2.0.6, with the re-anchor removed), so the roll-on
+  between engagement and takeover is part of the travel, not of this bound.
 - **That a braked vehicle rests.** Measured, not enforced: on the reference
   car (420-row slope matrix), tank, truck demo URDF, server generic car, a
   266 kg light car (DT 0.025 / 1/30 / 0.04) and the low-yaw car (DT 0.02 /
   0.025); CPU, plane μ 1.0, gravity-tilt slopes. Nothing about GPU, μ ≠ 1,
   inclined meshes, `swept_envelope`, brake 0, an external push.
 - **Reset.** The lock's state survives every reset (§7.12 known gap); since
-  v2.0.4 the stale-anchor path is reachable at any pedal. No engage / release
-  hysteresis. `_rest` can latch on an airborne braked wheel (no force there;
-  a 1 m drop at brake 1.0 lands identically to 2.0.3).
+  v2.0.4 the stale-anchor path is reachable at any pedal; the v2.0.6 ground
+  gate does not close it. No engage / release hysteresis (the gate adds a
+  second release condition, also without hysteresis). Through v2.0.5 this item
+  also said "`_rest` can latch on an airborne braked wheel (no force there; a
+  1 m drop at brake 1.0 lands identically to 2.0.3)". **The latch is closed
+  since v2.0.6** (§7.22.5), and **"lands identically" no longer holds**: that
+  row lands 0.420 mm from 2.0.5 on 2.0.6 (implementation, genesis-world 1.5.0).
 
 ### 7.22.4 Measured anchors (with conditions)
 
-CPU/WSL2, genesis-world 1.4.5, `per_vehicle`, `dual_scene`, plane μ 1.0, DT
-0.025 × 4, gravity-tilt slopes, `"control"`:
+These anchors were measured on **2.0.4 / genesis-world 1.4.5** (not re-measured
+on 2.0.6, whose travel changes per row are in CHANGELOG 2.0.6 §4.3): CPU/WSL2,
+`per_vehicle`, `dual_scene`, plane μ 1.0, DT 0.025 × 4, gravity-tilt slopes,
+`"control"`:
 
 - reference car, 5° downhill, brake 0.3, 50 s: rests, 4e-6 m/s, 0.004 mm over
   [20, 50] s (2.0.3: creeps 0.02497 m/s); brake 0.1 rolls identically on both
@@ -2052,6 +2237,53 @@ CPU/WSL2, genesis-world 1.4.5, `per_vehicle`, `dual_scene`, plane μ 1.0, DT
 - reference car at DT 1/30 / 0.04: capped (301 501 / 297 001 and 209 375 /
   206 250 N/m), the 6 REST rows rest (implementation; DT 0.04 re-run by
   impl-review).
+
+### 7.22.5 The ground gate (v2.0.6)
+
+**Since 2.0.6 the lock is inactive on every wheel whose normal force `ctx.N`
+is 0** (enforced in `StaticFrictionLock.apply_post_tire`: `active =
+(brake_rem > 0) & active_v & (ctx.N > 0)`, per wheel, no threshold, no
+hysteresis). The pipeline sets N = 0 on every airborne wheel (`compression <=
+0`) and on a wheel whose spring and damper force is not positive (N clamped at
+0; a rebound wheel can be gated while in contact). Such a wheel is not
+engaged, not taken over, not held, and its anchor is not integrated; once
+loaded again it is engaged afresh and taken over only through the creep test.
+
+| on a gated wheel (`ctx.N <= 0`) | code fact |
+|---|---|
+| engagement edge, creep latch, anchor zeroing, `_d_*` integration / advance / limit, hold, `ctx.hold_applied` | none (all use `active`) |
+| `_was_active` | becomes False |
+| `_rest`, `_d_long`, `_d_lat` | keep their values (dead: `apply` needs `active`, and the next engagement edge clears them) |
+| `_v_prev_sq` | updated every step, gated or not: the first loaded step's creep test compares against the last unloaded step's speed |
+| spring cap `k_eff` | unchanged (static shares, not N) |
+| D / Y | not exempted; both 0 at N = 0 (§7.16) |
+| `ctx.brake_rem` | unchanged, still not masked for air; the lock ignores it there |
+| `DifferentiablePlant` | runs the same gated lock on its own pipeline's N |
+
+Why: the creep test's bind `|F_long| >= F_long_deadbeat` holds vacuously at N =
+0 (the held-wheel deadbeat is 0 there), which is how 2.0.4 / 2.0.5 engaged and
+took over braked wheels in the air (car landing matrix: 58 engagements / 70
+takeovers at N ≤ 0 on 2.0.5, 0 / 0 on 2.0.6; implementation; a gate on the air
+mask alone left 14 takeovers at N = 0, plan agent).
+
+- **Closed:** `_rest` latching on an airborne braked wheel (2.0.4 known gap).
+- **Not closed:** a partial reset keeps the lock's state (§7.12), except where
+  the reset leaves the wheel at N = 0 for at least one step; no engage /
+  release hysteresis (a hopping braked wheel gets one engage / release pair per
+  unload).
+- **Not guaranteed:** continuity, a landing bound, an uneven-ground bound, a
+  travel bound. Measured effects are per vehicle, rowset and dt (CHANGELOG
+  2.0.6 §4.3-§4.6): for example, G-only travel at dt 0.025 within 2.4 mm on the
+  reference car and 12.2 mm on the reference tank, but −120.2 / +31.9 mm on
+  reference-car rows at dt 1/30 and +110.2 mm on the low-yaw car; a braked car
+  that hops creeps 8.71 mm per hop vs 5.20 on 2.0.5 (5°, kv 0.8 m/s kick every
+  2 s); the light tank's AC-19 flat row FAILS the 2.0.4 50-s REST gate (it rests
+  by the end of a 100-s run, a window chosen after the failure). The causes of
+  the hop and dt 1/30 changes are not established beyond the traces quoted
+  there.
+- **Identity locks:** 18 of the 20 re-captured from the 2.0.6 tree (a
+  regression lock, not evidence); attribution: the 2.0.6 code with only the
+  gate removed reproduces the 2.0.5 captures byte for byte (§7.11, §7.20).
 
 ## 7.23 Required engine: genesis-world 1.5.0 (v2.0.5)
 
@@ -2069,7 +2301,8 @@ CPU/WSL2, genesis-world 1.4.5, `per_vehicle`, `dual_scene`, plane μ 1.0, DT
 | the message is visible even if a caller swallows `ImportError` | logged ONCE per process at ERROR on the `genesis_vehicle` logger before the raise | a logger configured to drop ERROR hides it |
 | genesis-world >= 1.6.0 is flagged | one WARNING per process, then continues | a 1.5.x patch release (1.5.1, ...) is admitted silently and is NOT validated; the 20 engine-keyed identity locks SKIP on it |
 | `require_genesis` is never called at module level on the Genesis-free path | AST test `test_floor_is_never_called_at_module_level_on_the_genesis_free_path` (`_pipeline`, `_gs_compat`, `dynamics`, `control/*`) | — |
-| the URDF wheel visual is hidden where the instanced renderer draws its own copy | `_gs_compat.hide_vgeoms` writes the engine-private `vgeom.active_envs_mask`; raises `AttributeError` before writing if the attribute is missing | 1.5.0's attribute only; measured 0 wheel pixels with the hide, 6368-6500 with it skipped (implementation, AC-V-hide) |
+| ~~the URDF wheel visual is hidden where the instanced renderer draws its own copy~~ | **wrong since v2.0.6** (true of 2.0.5): `_gs_compat.hide_vgeoms` is deleted and the URDF wheel visual is NOT hidden; `VehicleScene` overrides the poses of the engine's own wheel nodes instead (§7.8), which restores wheel segmentation. In 2.0.5: `hide_vgeoms` wrote the engine-private `vgeom.active_envs_mask` (measured 0 wheel pixels with the hide, 6368-6500 with it skipped; implementation, AC-V-hide) | — |
+| (v2.0.6) a rendered `VehicleScene` raises at `build()` if a render internal its wheel renderer needs is missing | `_gs_compat.check_render_seg_api` (override surface, at wiring), the fallback checks (when the first fallback is made), `pose_max_abs` (no default) — `RuntimeError` naming the attribute, the found and the tested (1.5.0) version | existence and signatures only; a 1.5.x patch that keeps a name and moves its meaning is caught only partly (the wiring self-test; the per-sync guard, one sync late, §7.8); headless scenes are never checked |
 
 ### 7.23.2 What the 2.0.5 identity evidence covers, and what it does not
 
@@ -2082,7 +2315,7 @@ CPU/WSL2, genesis-world 1.4.5, `per_vehicle`, `dual_scene`, plane μ 1.0, DT
   fixture scenarios, 2 per-env lateral ray replays (implementation, on the
   overlay and again in the upgraded venv; impl-review re-ran 6 of them, plus
   two 1e-6 m spawn-shifted variants). The
-  `WheelJointInternalSync` / `KindVisualBatch` joint path, which B204m cannot run,
+  `WheelJointInternalSync` / `KindVisualBatch` joint path (removed in v2.0.6), which B204m cannot run,
   was checked separately: B204m with the two `visual.py` `skip_forward` keywords
   also deleted equals 2.0.5 on three pairs (kinematic per-entity, control
   per-entity, kinematic batched; implementation).
@@ -2092,4 +2325,6 @@ CPU/WSL2, genesis-world 1.4.5, `per_vehicle`, `dual_scene`, plane μ 1.0, DT
   scene). GPU. A URDF with non-zero suspension `<dynamics>`.
 - **Engine behaviour changes the SDK passes through unpinned** (v2.0.5, a user
   decision): URDF `effort="0"` is an unbounded force range on 1.5.0, which
-  makes the `visual_susp_mode="control"` PD live (§7.8).
+  made the `visual_susp_mode="control"` PD live through v2.0.5 (§7.8); since
+  v2.0.6 no SDK code drives that PD, so the SDK no longer reaches this engine
+  behaviour.

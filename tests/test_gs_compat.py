@@ -325,55 +325,325 @@ def test_sensor_miss_value_is_none_when_the_engine_exposes_nothing():
     assert sensor_miss_value(_Sensor(_Options())) is None
 
 
-# --- hide_vgeoms: an ENGINE-PRIVATE write, guarded ---------------------------
+# --- wheel render shims (2.0.6, engine-node override): fake objects ----------
+#
+# One test per shim and per structure item (api_review_r206 A1, A5; plan C24,
+# C26). The engine objects are stand-ins with the 1.5.0 shapes, so a renamed or
+# re-signed engine item is exercised without a renderer.
 
-class _VGeom150:
-    """genesis-world 1.5.0 RigidVisGeom shape: `active_envs_mask` exists (None
-    until the engine or the SDK sets it)."""
+class _FakeJit:
     def __init__(self):
-        self.active_envs_mask = None
-        self.active_envs_idx = None
+        self.calls = []
+        self._buffer = {}
+
+    def update_buffer(self, primitives, buffer_name, data):
+        primitives, data = list(primitives), list(data)
+        self.calls.append((primitives, buffer_name, data))
+        for p, d in zip(primitives, data):
+            self._buffer[(p, buffer_name)] = d
 
 
-class _VGeomNoMask:
-    """An engine that renamed / dropped the private mask."""
-    def __init__(self):
-        self.active_envs_idx = None
+class _FakeJit145:
+    """The 1.4.5 signature: (node, buffer_name, data)."""
+    def update_buffer(self, node, buffer_name, data):
+        pass
 
 
-def test_hide_vgeoms_writes_an_all_false_mask_per_env():
-    from genesis_vehicle._gs_compat import hide_vgeoms
-    vgs = [_VGeom150(), _VGeom150()]
-    assert hide_vgeoms(vgs, 3) == 2
-    for vg in vgs:
-        assert vg.active_envs_mask.dtype == torch.bool
-        assert vg.active_envs_mask.shape == (3,) and not bool(vg.active_envs_mask.any())
-        assert len(vg.active_envs_idx) == 0
-    one = _VGeom150()
-    hide_vgeoms([one], 0)                       # n_envs 0 (unbatched) -> length 1
-    assert one.active_envs_mask.shape == (1,)
+class _FakePrim:
+    def __init__(self, R=2):
+        self.poses = np.tile(np.eye(4, dtype=np.float32), (R, 1, 1))
 
 
-def test_hide_vgeoms_raises_when_the_private_mask_is_missing():
-    """review_gs150_5.md 3(i): without `active_envs_mask` the write would add a
-    new attribute the engine never reads (wheel drawn twice, silently). It must
-    raise, naming the attribute, BEFORE writing anything to that geom."""
-    from genesis_vehicle._gs_compat import hide_vgeoms
-    ok, bad = _VGeom150(), _VGeomNoMask()
-    with pytest.raises(AttributeError, match="active_envs_mask"):
-        hide_vgeoms([ok, bad], 1)
-    assert not hasattr(bad, "active_envs_mask")
-    assert bad.active_envs_idx is None          # nothing written to the bad geom
+class _FakeMesh:
+    def __init__(self, n_prims=1, R=2):
+        self.primitives = [_FakePrim(R) for _ in range(n_prims)]
+        self._bounds = "stale"
 
 
-def test_hide_vgeoms_targets_an_attribute_this_engine_has():
-    """The guard is only meaningful if the engine's visual geom really carries
-    the attribute: read it off the installed genesis class."""
+class _FakeNode:
+    def __init__(self, n_prims=1, R=2):
+        self.mesh = _FakeMesh(n_prims, R)
+
+
+class _FakeCtx:
+    def __init__(self, level="link"):
+        self.nodes_by_seg_keys = {}
+        self.rendered_envs_idx = [0, 1]
+        self.jit = _FakeJit()
+        self.segmentation_level = level
+        self.seg = []
+
+    def _sync_shapes(self):
+        self.order = getattr(self, "order", []) + ["engine"]
+
+    def create_node_seg(self, seg_key, seg_node):
+        self.seg.append((seg_key, seg_node))
+
+
+def _render_shims():
     pytest.importorskip("genesis")
-    import inspect
-    from genesis.engine.entities.rigid_entity import rigid_geom
-    src = inspect.getsource(rigid_geom.RigidVisGeom.__init__)
-    assert "self.active_envs_mask" in src
+    from genesis_vehicle import _gs_compat as c
+    return c
+
+
+def test_check_render_seg_api_accepts_the_1_5_0_shape():
+    c = _render_shims()
+    c.check_render_seg_api(_FakeCtx())
+
+
+@pytest.mark.parametrize("attr", ["nodes_by_seg_keys", "_sync_shapes", "rendered_envs_idx", "jit"])
+def test_check_render_seg_api_names_a_missing_context_attribute(attr):
+    c = _render_shims()
+
+    class _Ctx(_FakeCtx):
+        pass
+    ctx = _Ctx()
+    if attr == "_sync_shapes":
+        _Ctx._sync_shapes = None
+        ctx = _Ctx()
+        with pytest.raises(RuntimeError, match="_sync_shapes"):
+            c.check_render_seg_api(ctx)
+        return
+    delattr(ctx, attr)
+    with pytest.raises(RuntimeError, match=attr) as e:
+        c.check_render_seg_api(ctx)
+    # C26: the message names the engine version, the tested 1.5.0 and headless.
+    assert "1.5.0" in str(e.value) and "headless" in str(e.value)
+    assert str(e.value).startswith(c.WHEEL_RENDER_TAG)
+
+
+def test_check_render_seg_api_refuses_a_non_dict_node_lookup():
+    c = _render_shims()
+    ctx = _FakeCtx()
+    ctx.nodes_by_seg_keys = [("k", [])]
+    with pytest.raises(RuntimeError, match="not a dict"):
+        c.check_render_seg_api(ctx)
+
+
+def test_check_render_seg_api_refuses_the_1_4_5_update_buffer_signature():
+    """A1: same name, different meaning on 1.4.5 ((node, ...) vs (primitives, ...))."""
+    c = _render_shims()
+    ctx = _FakeCtx()
+    ctx.jit = _FakeJit145()
+    with pytest.raises(RuntimeError, match="update_buffer"):
+        c.check_render_seg_api(ctx)
+
+
+def test_check_render_seg_api_requires_from_trimesh_envs(monkeypatch):
+    c = _render_shims()
+    from genesis.ext import pyrender
+
+    def _no_envs(mesh, name=None, poses=None):
+        return None
+    monkeypatch.setattr(pyrender.Mesh, "from_trimesh", staticmethod(_no_envs))
+    with pytest.raises(RuntimeError, match="envs"):
+        c.check_render_seg_api(_FakeCtx())
+
+
+@pytest.mark.parametrize("cls_name,attr", [("RigidLink", "vgeoms"), ("RigidLink", "geoms"),
+                                           ("RigidVisGeom", "seg_keys"), ("RigidGeom", "seg_keys")])
+def test_check_render_seg_api_requires_the_rigid_part_api(monkeypatch, cls_name, attr):
+    """A1: RigidLink.vgeoms / RigidVisGeom.seg_keys (and the collision twins)."""
+    c = _render_shims()
+    from genesis.engine.entities import rigid_entity as re_mod
+    real = getattr(re_mod, cls_name)
+    keep = {a: getattr(real, a) for a in ("vgeoms", "geoms", "seg_keys") if hasattr(real, a) and a != attr}
+    monkeypatch.setattr(re_mod, cls_name, type(cls_name, (), keep))   # same class, attribute gone
+    with pytest.raises(RuntimeError, match=f"{cls_name}.*{attr}|{attr}.*{cls_name}"):
+        c.check_render_seg_api(_FakeCtx())
+
+
+def test_check_render_fallback_api_accepts_the_1_5_0_shape():
+    c = _render_shims()
+    for level in ("entity", "link", "geom"):
+        c.check_render_fallback_api(_FakeCtx(level))
+
+
+def test_check_render_fallback_api_names_a_missing_create_node_seg():
+    c = _render_shims()
+
+    class _Ctx:                                  # a context with no create_node_seg
+        segmentation_level = "link"
+    ctx = _Ctx()
+    with pytest.raises(RuntimeError, match="create_node_seg"):
+        c.check_render_fallback_api(ctx)
+
+
+def test_check_render_fallback_api_refuses_a_reordered_create_node_seg():
+    c = _render_shims()
+
+    class _Ctx(_FakeCtx):
+        def create_node_seg(self, seg_node, seg_key):
+            pass
+    with pytest.raises(RuntimeError, match="create_node_seg"):
+        c.check_render_fallback_api(_Ctx())
+
+
+def test_check_render_fallback_api_refuses_an_unknown_level():
+    c = _render_shims()
+    with pytest.raises(RuntimeError, match="segmentation_level"):
+        c.check_render_fallback_api(_FakeCtx("instance"))
+
+
+def test_check_render_fallback_api_refuses_level_order_drift(monkeypatch):
+    """A1 (d): SEGMENTATION_LEVELS drifting away from SegmentationKeys' fields."""
+    c = _render_shims()
+    from genesis.vis import rasterizer_context as rc
+    monkeypatch.setattr(rc, "SEGMENTATION_LEVELS", ("link", "entity", "geom"))
+    with pytest.raises(RuntimeError, match="SEGMENTATION_LEVELS"):
+        c.check_render_fallback_api(_FakeCtx())
+
+
+def test_rendered_envs_reads_the_context_list():
+    c = _render_shims()
+    ctx = _FakeCtx()
+    ctx.rendered_envs_idx = [np.int64(1)]
+    assert c.rendered_envs(ctx) == [1]
+    del ctx.rendered_envs_idx
+    with pytest.raises(RuntimeError, match="rendered_envs_idx"):
+        c.rendered_envs(ctx)
+
+
+def test_engine_part_nodes_looks_up_by_seg_keys():
+    c = _render_shims()
+
+    class _Part:
+        seg_keys = ("e", "l", "g")
+    ctx = _FakeCtx()
+    n = _FakeNode()
+    ctx.nodes_by_seg_keys[("e", "l", "g")] = [n]
+    assert c.engine_part_nodes(ctx, _Part()) == (n,)
+    ctx.nodes_by_seg_keys.clear()
+    assert c.engine_part_nodes(ctx, _Part()) == ()
+
+    class _NoKeys:
+        pass
+    with pytest.raises(RuntimeError, match="seg_keys"):
+        c.engine_part_nodes(ctx, _NoKeys())
+
+
+def test_part_is_posed_reads_dynamic_vertices():
+    c = _render_shims()
+
+    class _Desc:
+        def __init__(self, dv):
+            self.dynamic_vertices = dv
+
+    class _VG:
+        def __init__(self, desc):
+            self.desc = desc
+    assert c.part_is_posed(_VG(_Desc(None))) is True
+    assert c.part_is_posed(_VG(_Desc(object()))) is False
+    with pytest.raises(RuntimeError, match="dynamic_vertices"):
+        c.part_is_posed(_VG(object()))
+
+    class _NoDesc:
+        pass
+    with pytest.raises(RuntimeError, match="desc"):
+        c.part_is_posed(_NoDesc())
+
+
+def test_queue_part_poses_is_one_batched_transposed_call_and_sets_poses():
+    """A5 / C24: primitive.poses set on EVERY primitive, mesh bounds reset, one
+    update_buffer call with one transposed array per primitive."""
+    c = _render_shims()
+    ctx = _FakeCtx()
+    a, b = _FakeNode(n_prims=2), _FakeNode()
+    Ta = np.ascontiguousarray(np.random.default_rng(0).standard_normal((2, 4, 4)), dtype=np.float32)
+    Tb = np.ascontiguousarray(np.random.default_rng(1).standard_normal((2, 4, 4)), dtype=np.float32)
+    c.queue_part_poses(ctx, [(a, Ta), (b, Tb)])
+    assert len(ctx.jit.calls) == 1
+    prims, name, data = ctx.jit.calls[0]
+    assert name == "model" and len(prims) == len(data) == 3
+    assert prims == a.mesh.primitives + b.mesh.primitives
+    for p, d, T in zip(prims, data, (Ta, Ta, Tb)):
+        assert p.poses is T
+        np.testing.assert_array_equal(d, T.transpose(0, 2, 1))
+        assert d.flags.c_contiguous
+    assert a.mesh._bounds is None and b.mesh._bounds is None
+
+
+@pytest.mark.parametrize("bad", [
+    np.eye(4, dtype=np.float32),                               # bare (4, 4): would zip row by row
+    np.zeros((2, 4, 4), dtype=np.float64),                     # wrong dtype
+    np.zeros((2, 4, 8), dtype=np.float32)[:, :, :4],           # not C-contiguous
+    [np.eye(4, dtype=np.float32)] * 2,                         # a list, not an array
+])
+def test_queue_part_poses_refuses_a_bad_pose_array(bad):
+    c = _render_shims()
+    ctx = _FakeCtx()
+    with pytest.raises(ValueError, match="queue_part_poses"):
+        c.queue_part_poses(ctx, [(_FakeNode(), bad)])
+    assert ctx.jit.calls == []
+
+
+def test_register_fallback_seg_uses_the_level_key_and_skips_the_engine_lookup():
+    c = _render_shims()
+    from genesis.engine.render_context import SegmentationKeys
+    keys = SegmentationKeys("E", "L", "G")
+    for level, want in (("entity", "E"), ("link", "L"), ("geom", "G")):
+        ctx = _FakeCtx(level)
+        node = _FakeNode()
+        c.register_fallback_seg(ctx, node, keys)
+        assert ctx.seg == [(want, node)]
+        assert ctx.nodes_by_seg_keys == {}
+
+
+def test_on_render_sync_runs_after_the_engine_once_per_sync():
+    c = _render_shims()
+    ctx = _FakeCtx()
+    ctx.order = []
+    hook = c.on_render_sync(ctx, lambda: ctx.order.append("sdk"),
+                            before=lambda: ctx.order.append("check"))
+    ctx._sync_shapes()
+    assert ctx.order == ["check", "engine", "sdk"]
+    assert hook.calls == 1 and c.render_sync_depth(ctx) == 1
+
+
+def test_on_render_sync_refuses_a_second_install_and_keeps_depth_one():
+    """C17: re-install detected with == on the callable (a bound method of the
+    same object compares equal although it is a new object each access)."""
+    c = _render_shims()
+    ctx = _FakeCtx()
+
+    class _R:
+        def update(self):
+            pass
+    r = _R()
+    c.on_render_sync(ctx, r.update)
+    with pytest.raises(RuntimeError, match="already installed"):
+        c.on_render_sync(ctx, r.update)
+    c.on_render_sync(ctx, _R().update)          # another renderer: same wrapper
+    assert c.render_sync_depth(ctx) == 1
+
+
+def test_on_render_sync_prefixes_hook_errors():
+    """A8: on the viewer thread a bare error surfaces only as 'Unexpected viewer error'."""
+    c = _render_shims()
+    ctx = _FakeCtx()
+
+    def boom():
+        raise KeyError("x")
+    c.on_render_sync(ctx, boom)
+    with pytest.raises(RuntimeError, match=r"^\[genesis_vehicle:wheel-render\] KeyError"):
+        ctx._sync_shapes()
+
+
+def test_queued_model_reads_the_pending_buffer():
+    c = _render_shims()
+    ctx = _FakeCtx()
+    n = _FakeNode()
+    assert c.queued_model(ctx, n.mesh.primitives[0]) is None
+    c.queue_part_poses(ctx, [(n, np.zeros((2, 4, 4), dtype=np.float32))])
+    assert c.queued_model(ctx, n.mesh.primitives[0]).shape == (2, 4, 4)
+
+
+def test_hide_vgeoms_is_gone():
+    """2.0.6: the private active_envs_mask write was removed with the hidden
+    URDF wheel visuals (the engine draws them now; their poses are overridden)."""
+    c = _render_shims()
+    assert not hasattr(c, "hide_vgeoms") and "hide_vgeoms" not in c.__all__
+    assert not hasattr(c, "queue_instance_poses")
 
 
 # --- require_genesis: the REQUIRED engine floor (2.0.5) ----------------------

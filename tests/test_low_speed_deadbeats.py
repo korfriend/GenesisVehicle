@@ -205,6 +205,7 @@ _PD13 = [
     ("car_rev_both", "car", dict(V0=-5, THR=-0.5, BRK=1.0, SECS=10), -1),
     ("car_revdown10", "car", dict(DEG=-10, V0=-3, BRK=1.0, SECS=10), -1),
     ("car_down10", "car", dict(DEG=10, V0=3, BRK=1.0, SECS=10), 1),
+    ("car_down20", "car", dict(DEG=20, V0=3, BRK=1.0, SECS=10), 1),
     ("tank_b05", "tank", dict(V0=5, BRK=0.5, SECS=16), 1),
     ("tank_b10", "tank", dict(V0=5, BRK=1.0, SECS=12), 1),
     ("tank_t03b10", "tank", dict(V0=5, THR=0.3, BRK=1.0, SECS=20), 1),
@@ -217,9 +218,19 @@ _PD13 = [
 #: AS MEASURED (design probe and this tree -0.010357 m/s; this test's bound is
 #: that value rounded outward at the 4th decimal) — not a relaxed gate for any
 #: other row. (The first version of this file used -0.0105, wider than this
-#: comment said.) This row also catches the A mutant (no re-anchor at the
-#: first reversal: -0.01214 m/s), see test_n20.
+#: comment said.) Through 2.0.5 this comment said the row also catches the A
+#: mutant (no re-anchor at the first reversal: -0.01214 m/s) — a 1.8.0
+#: measurement on genesis-world 1.4.5 that no longer holds on 1.5.0, where
+#: plan-review measured vmin -0.000123 m/s on this row both with and without
+#: the re-anchor; 2.0.6 removed the re-anchor (see test_n20).
 _DPS_VMIN = -0.0104
+
+#: car_down20 (v2.0.6): REGRESSION BOUND FIXED AFTER THE PROTOTYPE (-0.0462
+#: m/s), NOT ACCEPTANCE EVIDENCE. Removing the reversal re-anchor lets this
+#: stop reverse at up to -0.0462 m/s with 0.880 mm of back-travel (plan
+#: prototype on genesis-world 1.5.0, CPU/WSL2, ``.pm_r2`` stops harness);
+#: 2.0.5 -0.0206 m/s, 0 mm. The bound only catches a regression beyond it.
+_DOWN20_VMIN = -0.06
 
 
 @pytest.mark.parametrize("row", _PD13, ids=[r[0] for r in _PD13])
@@ -233,12 +244,14 @@ def test_n17_no_back_travel_or_reverse_speed_after_a_stop(row, request):
     too, by design — the 1.7.0 brake faded near standstill and never
     over-stopped — and guard against the back-slide a full-strength brake
     produced with the 1.7.0 engagement anchor (design probe, round 2: car
-    brake 1.0 from 10 m/s -0.107 m/s, tank brake 0.5 22.8 mm)."""
+    brake 1.0 from 10 m/s -0.107 m/s, tank brake 0.5 22.8 mm). The row
+    ``car_down20`` (v2.0.6) is not a PD13 row: it is a regression bound with
+    its own vmin floor, see ``_DOWN20_VMIN``."""
     rid, kind, scen, sign = row
     rig = request.getfixturevalue(kind)
     back, vmin, t_stop = _pd13(rig.run(**scen), sign)
     assert back <= 0.002, f"{rid}: back-travel {back * 1000:.2f} mm (stop {t_stop:.3f} s)"
-    floor = _DPS_VMIN if rid == "car_t10b10" else -0.01
+    floor = {"car_t10b10": _DPS_VMIN, "car_down20": _DOWN20_VMIN}.get(rid, -0.01)
     assert vmin >= floor, f"{rid}: vmin {vmin:+.5f} m/s (stop {t_stop:.3f} s)"
 
 
@@ -367,9 +380,14 @@ def test_n19_tank_downhill_hold_does_not_ring(tank):
 
 @pytest.mark.parametrize("V0, sign", [(5, 1), (-5, -1)], ids=["fwd", "rev"])
 def test_n20_the_lock_holds_where_the_tank_came_to_rest(tank, V0, sign):
-    """A (the first step after engagement on which the contact stopped or
-    reversed re-anchors the longitudinal spring at the contact): tank, brake
-    1.0 from 5 m/s forward and from -5 m/s. The lock takes over before the
+    """Since v2.0.6 a REGRESSION BOUND, not a discriminating test. It was
+    written for A (1.8.0-2.0.5: the first step after engagement on which the
+    contact stopped or reversed re-anchored the longitudinal spring at the
+    contact; removed in 2.0.6). On genesis-world 1.5.0 it does not
+    discriminate A: plan-review measured 0.2179 / 0.2165 mm back-travel both
+    with A (2.0.5) and without it (CPU/WSL2). The assertion is kept as a
+    regression bound. The rest of this docstring is the 1.8.0 / 1.4.5
+    account: tank, brake 1.0 from 5 m/s forward and from -5 m/s. The lock takes over before the
     contact has quite stopped and the tank rolls on ~0.63 mm; with A the
     spring is re-anchored where it stopped, so the back-travel from the
     furthest point reached after the first |v| < 0.05 m/s is ≤ 0.5 mm.
@@ -402,7 +420,8 @@ def test_n20_the_lock_holds_where_the_tank_came_to_rest(tank, V0, sign):
 def test_n21_a_plant_on_a_held_car_starts_from_the_lock_state(car):
     """``DifferentiablePlant._sync_hooks`` copies EVERY tensor attribute of a
     hook, so the prediction copy of the lock starts with the live
-    ``_rest`` / ``_s_eng`` / ``_rested`` / ``_v_prev_sq`` (v1.8.0 state), and a
+    ``_rest`` / ``_v_prev_sq`` (v1.8.0 state; ``_s_eng`` / ``_rested`` until
+    their removal in 2.0.6), and a
     plant built on a held car predicts no motion at brake 1.0."""
     from genesis_vehicle.control.plant import DifferentiablePlant
     car.run(V0=10, BRK=1.0, SECS=6)

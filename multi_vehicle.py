@@ -26,8 +26,6 @@ What is NOT batched
 -------------------
 - Per-entity raycaster reads (one `sensor.read()` per vehicle, then stack —
   small Python overhead that dominates only at K = 1-2)
-- Per-entity visual joint updates (`set_dofs_position` per vehicle —
-  Python loop over K, acceptable)
 - Cross-kind dispatch (one Python iteration per vehicle kind in the
   outer `MultiVehiclePhysics`)
 
@@ -69,7 +67,6 @@ from .gear import (check_input_type, check_request_shape, check_vehicle_request,
                    clamp_drive_to_gear, effective_throttle, encode_requests, refuses_gear,
                    update_gear, with_throttle)
 from .raycast import is_ray_hit_corrected, read_distances, sensor_fan
-from .visual import WheelJointInternalSync
 
 
 #: Monotonic MODULE-GLOBAL build counter stamped onto every
@@ -186,6 +183,12 @@ class MultiVehicleKindPhysics:
         self.fan_samples = check_fan_uniformity(sensors)
         K = len(entities)
         NK = n_envs * K
+        # The joint-writing wheel visuals were removed in 2.0.6 (ConfigError,
+        # also raised by resolve() and VehiclePhysics.__init__).
+        if config.enable_wheel_joint_internal_sync:
+            from .config import ConfigError
+            from .config import JOINT_SYNC_REMOVED_MSG
+            raise ConfigError(JOINT_SYNC_REMOVED_MSG)
 
         # Proto VehiclePhysics with batch dim = N * K. All its internal tensors
         # (omega, prev_compression, _wheel_body_b, _up_world, …) come out at
@@ -231,33 +234,16 @@ class MultiVehicleKindPhysics:
             base_idx_list, dtype=torch.long, device=self.dev,
         )
 
-        # Replace the proto's WheelJointInternalSync with K per-entity WheelJointInternalSync objects,
-        # each one bound to its own entity and built for the actual Genesis
-        # n_envs. Compute output gets sliced (N, n_wheels) per entity for
-        # each visual.step(). (See the [VISUAL] block at the bottom of step().)
-        self._proto.visual = None
-        self.visuals: list[WheelJointInternalSync] = []
-        self._visual_batch = None
-        if self._proto.resolved.enable_wheel_joint_internal_sync:
-            for ent in entities:
-                vis = WheelJointInternalSync(
-                    entity=ent, resolved=self._proto.resolved,
-                    n_envs=n_envs, device=self.dev, dtype=self.fdt,
-                )
-                vis.ray_miss = self._proto._ray_miss
-                self.visuals.append(vis)
-            # v1.0.15: batch the K writers into ONE solver call per step (same
-            # kind → identical dof layouts). Falls back to the per-entity loop
-            # (self.visuals) if construction fails.
-            try:
-                from .visual import KindVisualBatch
-                self._visual_batch = KindVisualBatch(self.visuals)
-            except Exception:
-                self._visual_batch = None
 
     # ------------------------------------------------------------------
     # Expose proto attributes for callers (omega, last_*, etc.)
     # ------------------------------------------------------------------
+    @property
+    def visuals(self) -> tuple:
+        """Always ``()`` since 2.0.6 (read-only): the per-vehicle joint-writing
+        ``WheelJointInternalSync`` objects it held through 2.0.5 were removed."""
+        return ()
+
     @property
     def omega(self) -> torch.Tensor:
         return self._proto.omega
@@ -280,75 +266,31 @@ class MultiVehicleKindPhysics:
         return [env * self.K + slot for env in range(self.n_envs)]
 
     def export_slot(self, slot: int) -> dict:
-        """Snapshot one vehicle's runtime + visual state (see
-        :meth:`VehiclePhysics.export_runtime_state`).
+        """Snapshot one vehicle's runtime state (see
+        :meth:`VehiclePhysics.export_runtime_state`): this slot's
+        ``env * K + slot`` rows, plus ``K`` and ``n_envs``.
 
-        The physics rows are this slot's ``env * K + slot`` rows. The visual
-        accumulators travel with them: this slot's ``WheelJointInternalSync``
-        spin angle and slew state, and its column of the batched writer's spin
-        accumulator. The batched writer's slew tensors are kind-wide (one row
-        block per env spanning all K), so they ride along on slot 0 only and
-        are re-imported whole when the shape still matches."""
+        Through 2.0.5 the snapshot also carried the joint-writing visual state
+        (``visual_angle``, ``visual_susp_*``, ``batch_angle``, ``batch_susp_*``);
+        those writers were removed in 2.0.6 and the keys are no longer written
+        (:meth:`import_slot` ignores them, so a 2.0.5 snapshot still loads)."""
         state = self._proto.export_runtime_state(rows=self.slot_rows(slot))
         state["K"] = int(self.K)
         state["n_envs"] = int(self.n_envs)
-        vis = self.visuals[slot] if slot < len(self.visuals) else None
-        state["visual_angle"] = (None if vis is None
-                                 else vis.wheel_visual_angle.detach().clone())
-        state["visual_susp_set_prev"] = (
-            None if vis is None or vis._susp_set_prev is None
-            else vis._susp_set_prev.detach().clone())
-        state["visual_susp_ctrl_prev"] = (
-            None if vis is None or vis._susp_ctrl_prev is None
-            else vis._susp_ctrl_prev.detach().clone())
-        vb = getattr(self, "_visual_batch", None)
-        state["batch_angle"] = (None if vb is None
-                                else vb._angle[:, slot].detach().clone())
-        if vb is not None and slot == 0:
-            state["batch_susp_set_prev"] = (
-                None if vb._susp_set_prev is None
-                else vb._susp_set_prev.detach().clone())
-            state["batch_susp_ctrl_prev"] = (
-                None if vb._susp_ctrl_prev is None
-                else vb._susp_ctrl_prev.detach().clone())
         return state
 
     def import_slot(self, slot: int, state: dict) -> None:
         """Write an :meth:`export_slot` snapshot into this kind's ``slot``.
 
         Raises ``ValueError`` on a wheel-count or row-count mismatch (from
-        :meth:`VehiclePhysics.load_runtime_state`). Visual accumulators are
-        restored only where the shapes still agree — they are render state, and
-        a mismatch there must not abort a physics carry."""
-        rows = self.slot_rows(slot)
-        self._proto.load_runtime_state(state, rows=rows)
-        vis = self.visuals[slot] if slot < len(self.visuals) else None
-        if vis is not None:
-            ang = state.get("visual_angle")
-            if ang is not None and tuple(ang.shape) == tuple(vis.wheel_visual_angle.shape):
-                vis.wheel_visual_angle = ang.to(
-                    device=vis.wheel_visual_angle.device,
-                    dtype=vis.wheel_visual_angle.dtype).clone()
-            for key, attr in (("visual_susp_set_prev", "_susp_set_prev"),
-                              ("visual_susp_ctrl_prev", "_susp_ctrl_prev")):
-                t = state.get(key)
-                if t is not None:
-                    setattr(vis, attr, t.clone())
-        vb = getattr(self, "_visual_batch", None)
-        if vb is not None:
-            ang = state.get("batch_angle")
-            if ang is not None and tuple(ang.shape) == tuple(vb._angle[:, slot].shape):
-                vb._angle[:, slot] = ang.to(device=vb._angle.device,
-                                            dtype=vb._angle.dtype)
-            for key, attr in (("batch_susp_set_prev", "_susp_set_prev"),
-                              ("batch_susp_ctrl_prev", "_susp_ctrl_prev")):
-                t = state.get(key)
-                cur = getattr(vb, attr, None)
-                if t is not None and (cur is None or tuple(cur.shape) == tuple(t.shape)):
-                    setattr(vb, attr, t.clone())
+        :meth:`VehiclePhysics.load_runtime_state`). The 2.0.5 visual keys
+        (``visual_angle``, ``visual_susp_set_prev`` / ``_ctrl_prev``,
+        ``batch_angle``, ``batch_susp_set_prev`` / ``_ctrl_prev``) are ignored
+        if present."""
+        self._proto.load_runtime_state(state, rows=self.slot_rows(slot))
 
     def reset(self, rows=None, **kwargs) -> None:
-        """Reset the physics + visual state of the given FLAT proto rows.
+        """Reset the physics state of the given FLAT proto rows.
 
         ``rows`` is a flat ``env * K + slot`` row index (or a bool mask of
         length ``NK``), NOT a vehicle index — one vehicle at ``n_envs > 1``
@@ -360,17 +302,10 @@ class MultiVehicleKindPhysics:
         meaning rows; passing it by keyword now raises ``TypeError`` rather
         than quietly running wrong-meaning code (v1.6.2).
 
-        Visual state follows the SAME rows (v1.6.2): each requested row maps
-        back to ``(env, slot)`` and only that vehicle's spin accumulators are
-        cleared — in the per-entity writer and in the batched one. Through
-        1.6.2-pre the visual resets ran with no index at all, so resetting one
-        row wiped every vehicle of the kind (measured at K=2/n_envs=2: vehicle
-        0's batch angle ``[0.4316, 0.3281, -2.7312, 2.6947]`` → all zeros while
-        only vehicle 1 was asked for). The ONE thing that stays kind-wide on a
-        partial reset is the batched writer's susp SLEW origin, which is not
-        expressible per vehicle — see
-        ``KindVisualBatch.reset_slot_visual_state`` for why dropping it would
-        kick every other vehicle on the control path."""
+        Through 2.0.5 this also reset the joint-writing visual state of the
+        same rows (removed in 2.0.6). The closed-form spin angle
+        (``wheel_spin_angle``) is physics-side state and is reset with the rows.
+        """
         if kwargs:
             if "vehicle_ids" in kwargs:
                 raise TypeError(
@@ -387,33 +322,6 @@ class MultiVehicleKindPhysics:
                 rows = torch.nonzero(rows, as_tuple=False).flatten()
             rows = rows.reshape(-1).to(dtype=torch.long)
         self._proto.reset(rows)
-
-        visuals = getattr(self, "visuals", None) or []
-        vb = getattr(self, "_visual_batch", None)
-        # proto.visual is None in kind mode — clear the per-vehicle visual
-        # syncs (and the batched writer) explicitly: spin accumulators AND
-        # the v1.1.16 susp slew state (a stale slew origin would inject a
-        # transient PD force on the first post-reset steps).
-        if rows is None:
-            for vis in visuals:
-                if vis is not None:
-                    vis.reset_visual_state()
-            if vb is not None:
-                vb.reset_visual_state()
-            return
-
-        # Partial reset: row -> (env, slot), env-major / vehicle-minor.
-        per_slot: dict = defaultdict(list)
-        for r in rows.tolist():
-            per_slot[int(r) % self.K].append(int(r) // self.K)
-        for slot, envs in per_slot.items():
-            env_idx = torch.as_tensor(sorted(set(envs)), dtype=torch.long,
-                                      device=self.dev)
-            full = int(env_idx.numel()) == self.n_envs
-            if slot < len(visuals) and visuals[slot] is not None:
-                visuals[slot].reset_visual_state(None if full else env_idx)
-            if vb is not None:
-                vb.reset_slot_visual_state(slot, None if full else env_idx)
 
     # ------------------------------------------------------------------
     # Batched I/O — replaces the per-entity reads/writes in VehiclePhysics.step
@@ -656,31 +564,6 @@ class MultiVehicleKindPhysics:
         p._prev_init = True
         p._stepped_once[:] = True
 
-        # [VISUAL] — K same-kind WheelJointInternalSync writers. Since v1.0.15 they are
-        # batched into ONE solver-level set_dofs_position across all K entities
-        # (KindVisualBatch — identical layouts by construction, so the K
-        # per-entity calls, each triggering its own solver reset + FK pass,
-        # collapse into one). Falls back to the per-entity loop if the batch
-        # writer could not be built.
-        if self.visuals:
-            # NB: 'N' got reassigned earlier in section (A) to the per-wheel
-            # normal-force tensor — use the explicit self.n_envs / self.K
-            # here instead of the local names.
-            n_envs = self.n_envs
-            steer_NK = steer_per_wheel.reshape((n_envs, K, n))
-            dist_NK  = distances.reshape((n_envs, K, n))
-            omega_NK = p.omega.reshape((n_envs, K, n))
-            if self._visual_batch is not None:
-                self._visual_batch.step(steer_NK, dist_NK, omega_NK, DT)
-            else:
-                for k_i, vis in enumerate(self.visuals):
-                    vis.step(
-                        steer_NK[:, k_i, :].contiguous(),
-                        dist_NK[:, k_i, :].contiguous(),
-                        omega_NK[:, k_i, :].contiguous(),
-                        DT,
-                    )
-
         if defer_apply:
             return (total_F.reshape(self.n_envs, K, 3),
                     total_T.reshape(self.n_envs, K, 3))
@@ -718,7 +601,7 @@ class MultiVehicleKindPhysics:
         the multi-vehicle analogue of ``VehiclePhysics.wheel_visual_transforms``.
 
         Returns ``(pos, quat)`` shaped ``(n_envs, K, n_wheels, 3)`` and
-        ``(n_envs, K, n_wheels, 4)`` (env-major). WheelJointInternalSync-independent;
+        ``(n_envs, K, n_wheels, 4)`` (env-major). Closed form, no solver joint read;
         steer + suspension + spin baked in (spin honors ``visual_spin_enabled``).
         ``frame="local"`` is relative to each vehicle's chassis, ``"world"``
         absolute."""
@@ -1021,21 +904,12 @@ class MultiVehiclePhysics:
         ``MultiVehicleKindPhysics.reset`` with a vehicle index instead resets
         only env 0's copy (that parameter is a flat ROW index).
 
-        What this reset touches, exactly. PER VEHICLE: all physics state of
-        those rows (``core.RUNTIME_STATE_ATTRS``, ``_stepped_once``,
-        ``_prev_init``) and the visual spin accumulators of those vehicles
-        only, in both the per-entity writer and the batched one. KIND-WIDE,
-        and left ALONE on a partial reset: the batched writer's susp slew
-        origin (``KindVisualBatch._susp_set_prev`` / ``_susp_ctrl_prev``),
-        because "no origin" is the whole tensor being None — dropping it would
-        snap every other vehicle of the kind, a real joint PD transient under
-        ``visual_susp_mode="control"``. On that path the reset vehicles' susp
-        visuals therefore slew (rate-limited) rather than snap. When the
-        batched writer is absent (``_visual_batch is None``, so the per-entity
-        ``WheelJointInternalSync`` is the live writer) the reset vehicle's own
-        slew origin IS dropped and it snaps instead. A full reset
-        (``vehicle_ids=None``) snaps on either path. Chassis POSE is never touched by
-        any of these — place vehicles with ``Vehicle.set_pos`` / ``set_quat``."""
+        What this reset touches, exactly: all physics state of those rows
+        (``core.RUNTIME_STATE_ATTRS`` — the closed-form spin angle included —
+        ``_stepped_once``, ``_prev_init``), per vehicle. Through 2.0.5 it also
+        reset the joint-writing visual writers' state (removed in 2.0.6). Chassis
+        POSE is never touched — place vehicles with ``Vehicle.set_pos`` /
+        ``set_quat``."""
         if vehicle_ids is None:
             for kind in self.kinds:
                 kind.reset()
@@ -1193,7 +1067,7 @@ class MultiVehiclePhysics:
         """Closed-form wheel visual poses for every vehicle, in the caller's flat
         order. Returns a list (length ``n_vehicles``) of ``(pos, quat)`` tuples,
         each ``(n_envs, n_wheels, 3)`` / ``(n_envs, n_wheels, 4)``. Per-vehicle
-        because kinds may differ in wheel count. WheelJointInternalSync-independent."""
+        because kinds may differ in wheel count. Closed form."""
         kind_out = [k.wheel_visual_transforms(frame) for k in self.kinds]   # (N,K,n,·)
         out = [None] * self.n_vehicles
         for flat_i, kind_idx, slot_idx in self._flat_to_kind:

@@ -37,12 +37,31 @@ that a future break is fixed in one place:
     ENGINE-PRIVATE read of the engine's own ``_balanced_variant_mapping``,
     imported at call time; raises if it is gone.
 
-``add_render_node`` / ``queue_instance_poses`` / ``hide_vgeoms``
-    The instanced wheel renderer's access to the rasterizer context
-    (``ctx.add_node``, the private ``ctx.jit`` buffer queue) and an
-    ENGINE-PRIVATE WRITE: the per-env visibility mask ``vgeom.active_envs_mask``
-    of the URDF wheel visual geoms (``hide_vgeoms`` raises if the attribute is
-    missing).
+Wheel rendering (2.0.6, engine-node override; every target first appeared in
+genesis-world 1.5.0, and a 1.5.x patch is admitted silently by ``require_genesis``)
+    Checks: ``check_render_seg_api`` (at build, when the main scene renders) and
+    ``check_render_fallback_api`` (before the first fallback node); both RAISE.
+    ENGINE-PRIVATE READS: ``ctx.nodes_by_seg_keys`` (``engine_part_nodes``),
+    ``ctx.rendered_envs_idx`` (``rendered_envs``), ``ctx.segmentation_level``,
+    ``SEGMENTATION_LEVELS``, ``vgeom.desc.dynamic_vertices``
+    (``part_is_posed``), ``ctx.jit._buffer`` (``queued_model``, wiring self-test
+    only), ``vgeom.seg_keys`` / ``geom.seg_keys``, ``ctx.__dict__["_sync_shapes"]``
+    (``on_render_sync`` / ``render_sync_depth``), ``node.mesh.primitives`` and
+    ``primitive.poses`` (the renderer's per-sync ordering guard, and the rows a
+    non-finite pose keeps), the module constant
+    ``genesis.vis.rasterizer_context.POSE_MAX_ABS`` (``pose_max_abs``; the
+    engine's own invalid-pose bound, read since the 2.0.6 fix round); the CALL
+    ``ctx.update(force_render=True)`` (``force_render_sync``, wiring self-test).
+    WRITES into engine-owned
+    objects: the instance attribute ``ctx._sync_shapes`` (``on_render_sync``
+    wraps it); ``primitive.poses``, ``mesh._bounds`` and the queued ``"model"``
+    buffer of the ENGINE's wheel nodes (``queue_part_poses``); segmentation-map
+    registration of SDK fallback nodes (``register_fallback_seg`` ->
+    ``ctx.create_node_seg``). Kept: ``ctx.add_node`` (``add_render_node``,
+    fallback nodes) and ``pyrender.Mesh.from_trimesh(envs=)`` (fallback nodes,
+    called from ``visual``). Removed in 2.0.6:
+    ``hide_vgeoms`` (the private ``vgeom.active_envs_mask`` write) and
+    ``queue_instance_poses`` (generalised by ``queue_part_poses``).
 
 ``COARSE_SDF_MATERIAL_KW`` / ``coarse_sdf_nonconvex_geoms`` /
 ``warn_coarse_sdf_on_nonconvex``
@@ -62,7 +81,11 @@ __all__ = ["apply_links_wrench", "link_inertial",
            "LinkInertialProps", "check_link_inertial_api",
            "sensor_miss_value", "GENESIS_FLOOR", "GENESIS_UNVALIDATED_FROM",
            "GenesisVersionError", "require_genesis",
-           "add_render_node", "queue_instance_poses", "hide_vgeoms",
+           "add_render_node", "queue_part_poses", "check_render_seg_api",
+           "check_render_fallback_api", "rendered_envs", "engine_part_nodes",
+           "part_is_posed", "pose_max_abs", "register_fallback_seg", "on_render_sync",
+           "render_sync_depth", "force_render_sync", "queued_model",
+           "WHEEL_RENDER_TAG", "RENDER_TESTED_GENESIS",
            "kinematic_raycast_entity", "variant_index",
            "COARSE_SDF_MATERIAL_KW",
            "coarse_sdf_nonconvex_geoms", "warn_coarse_sdf_on_nonconvex"]
@@ -364,67 +387,314 @@ def variant_index(n_variants: int, n_envs: int) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Instanced wheel rendering: rasterizer-context access (genesis-world 1.5.0)
+# Wheel rendering (2.0.6, "engine-node override"): rasterizer-context access
 # ---------------------------------------------------------------------------
+#
+# Every target below first appeared in genesis-world 1.5.0 (the 1.4.5
+# rasterizer context was rewritten) and a 1.5.x patch release is admitted by
+# require_genesis with no warning, so a same-name meaning change is the risk.
+# The structure checks (check_render_seg_api / check_render_fallback_api) catch
+# renames and signature changes; the ordering of the SDK's write after the
+# engine's is checked at run time by the renderer, ONE SYNC LATE, and only for
+# writes to primitive.poses (see visual.InstancedWheelRenderer._check_last_writes;
+# an engine "model" buffer queued after the hook is covered only by the flush
+# test tests/test_render_sync_pose.py). The check compares the poses written by
+# the last COMPLETED hooked sync; after a hooked sync that did not complete (an
+# exception or a BaseException anywhere in the wrapper) the next hooked sync is
+# not checked and checking resumes on the one after. A non-finite closed-form
+# pose is not an error: that wheel instance keeps the row the SDK last wrote
+# (the engine's POSE_MAX_ABS rule, pose_max_abs), with no warning.
+
+#: Prefix of every error / warning raised by the wheel render path. Hook
+#: errors raised on the native viewer's thread surface there only as
+#: "Unexpected viewer error", so the prefix names the source.
+WHEEL_RENDER_TAG = "[genesis_vehicle:wheel-render]"
+
+#: The genesis-world release the wheel render path was written and measured on.
+RENDER_TESTED_GENESIS = "1.5.0"
+
+
+def _render_api_error(what: str) -> RuntimeError:
+    import genesis as gs                             # noqa: PLC0415
+    return RuntimeError(
+        f"{WHEEL_RENDER_TAG} {what} (genesis-world {getattr(gs, '__version__', '?')}; "
+        f"the SDK's wheel renderer was written and tested against genesis-world "
+        f"{RENDER_TESTED_GENESIS}). Rendering a VehicleScene (a camera or a viewer) "
+        f"needs it; headless scenes (no camera, no viewer) are unaffected.")
+
+
+def _require_attr(obj: Any, name: str, where: str) -> Any:
+    """``getattr`` WITHOUT a default: a missing engine attribute raises the
+    prefixed RuntimeError naming it (never a silent fallback value)."""
+    try:
+        return getattr(obj, name)
+    except AttributeError:
+        raise _render_api_error(f"{where} has no attribute {name!r}") from None
+
+
+def check_render_seg_api(ctx: Any) -> None:
+    """Structure check of the engine surface the wheel-pose override uses,
+    called once at ``VehicleScene.build`` when the main scene renders. Raises
+    ``RuntimeError`` naming the first missing / changed item.
+
+    Checked: ``ctx.nodes_by_seg_keys`` is a dict; ``ctx._sync_shapes`` is
+    callable; ``ctx.rendered_envs_idx`` is a sequence; ``ctx.jit.update_buffer``
+    takes exactly ``(primitives, buffer_name, data)`` (the 1.4.5 signature was
+    ``(node, buffer_name, data)``); ``pyrender.Mesh.from_trimesh`` takes
+    ``envs``; ``RigidLink.vgeoms`` / ``.geoms`` and ``RigidVisGeom.seg_keys`` /
+    ``RigidGeom.seg_keys`` exist. It checks existence and signatures only: a
+    same-name change of MEANING (e.g. the engine's pose write moving after
+    ``_sync_shapes``) is caught at run time by the renderer, not here. The
+    fallback-only surface is checked by :func:`check_render_fallback_api`."""
+    import inspect                                   # noqa: PLC0415
+    nb = _require_attr(ctx, "nodes_by_seg_keys", "RasterizerContext")
+    if not isinstance(nb, dict):
+        raise _render_api_error(
+            f"RasterizerContext.nodes_by_seg_keys is a {type(nb).__name__}, not a dict")
+    if not callable(_require_attr(ctx, "_sync_shapes", "RasterizerContext")):
+        raise _render_api_error("RasterizerContext._sync_shapes is not callable")
+    ridx = _require_attr(ctx, "rendered_envs_idx", "RasterizerContext")
+    if ridx is None or not hasattr(ridx, "__len__"):
+        raise _render_api_error("RasterizerContext.rendered_envs_idx is not a sequence (context not built?)")
+    jit = _require_attr(ctx, "jit", "RasterizerContext")
+    ub = _require_attr(jit, "update_buffer", "RasterizerContext.jit")
+    params = [p for p in inspect.signature(ub).parameters if p != "self"]
+    if params != ["primitives", "buffer_name", "data"]:
+        raise _render_api_error(
+            f"RasterizerContext.jit.update_buffer takes {params}, expected "
+            f"['primitives', 'buffer_name', 'data']")
+    from genesis.ext import pyrender                 # noqa: PLC0415
+    if "envs" not in inspect.signature(pyrender.Mesh.from_trimesh).parameters:
+        raise _render_api_error("pyrender.Mesh.from_trimesh has no 'envs' parameter")
+    from genesis.engine.entities import rigid_entity as _re   # noqa: PLC0415
+    for cls_name, attrs in (("RigidLink", ("vgeoms", "geoms")),
+                            ("RigidVisGeom", ("seg_keys",)),
+                            ("RigidGeom", ("seg_keys",))):
+        cls = _require_attr(_re, cls_name, "genesis.engine.entities.rigid_entity")
+        for a in attrs:
+            _require_attr(cls, a, cls_name)
+
+
+def check_render_fallback_api(ctx: Any) -> None:
+    """Structure check of the surface an SDK fallback node uses, called when the
+    first fallback node is about to be made (a wheel the engine draws no node
+    for, e.g. ``vis_mode="collision"``): ``ctx.create_node_seg(seg_key,
+    seg_node)``, ``ctx.segmentation_level`` in ``SEGMENTATION_LEVELS``, and
+    ``SEGMENTATION_LEVELS == SegmentationKeys._fields`` (the level names are
+    also the key field names :func:`register_fallback_seg` reads)."""
+    import inspect                                   # noqa: PLC0415
+    cns = _require_attr(ctx, "create_node_seg", "RasterizerContext")
+    params = [p for p in inspect.signature(cns).parameters if p != "self"]
+    if params != ["seg_key", "seg_node"]:
+        raise _render_api_error(
+            f"RasterizerContext.create_node_seg takes {params}, expected ['seg_key', 'seg_node']")
+    level = _require_attr(ctx, "segmentation_level", "RasterizerContext")
+    from genesis.vis import rasterizer_context as _rc   # noqa: PLC0415
+    levels = _require_attr(_rc, "SEGMENTATION_LEVELS", "genesis.vis.rasterizer_context")
+    from genesis.engine.render_context import SegmentationKeys   # noqa: PLC0415
+    if tuple(levels) != tuple(SegmentationKeys._fields):
+        raise _render_api_error(
+            f"SEGMENTATION_LEVELS {tuple(levels)} differ from SegmentationKeys fields "
+            f"{tuple(SegmentationKeys._fields)}")
+    if level not in levels:
+        raise _render_api_error(f"segmentation_level {level!r} is not one of {tuple(levels)}")
+
+
+def rendered_envs(ctx: Any) -> list:
+    """The env indices the context renders (``ctx.rendered_envs_idx``); node
+    instance r of an env-instanced node is env ``rendered_envs(ctx)[r]``."""
+    return [int(i) for i in _require_attr(ctx, "rendered_envs_idx", "RasterizerContext")]
+
+
+def engine_part_nodes(ctx: Any, part: Any) -> tuple:
+    """The engine's render nodes of one rigid geom ``part`` (visual or
+    collision), looked up by its segmentation keys in the engine-internal
+    ``ctx.nodes_by_seg_keys``. ENGINE-PRIVATE read. An empty result is NOT a
+    decision input for the caller (a key-form change would read as "no node");
+    the renderer decides from the engine model which parts must have nodes and
+    raises when one has none."""
+    return tuple(ctx.nodes_by_seg_keys.get(_require_attr(part, "seg_keys", type(part).__name__), ()))
+
+
+def part_is_posed(vgeom: Any) -> bool:
+    """False when the visual geom draws ``DynamicVertices`` (its vertices are
+    written in world space, so a pose override cannot apply): reads the
+    ENGINE-PRIVATE ``vgeom.desc.dynamic_vertices``; raises if ``desc`` or the
+    field is missing."""
+    desc = _require_attr(vgeom, "desc", type(vgeom).__name__)
+    return _require_attr(desc, "dynamic_vertices", "visual geom desc") is None
+
+
+def pose_max_abs() -> float:
+    """The engine's invalid-pose bound ``genesis.vis.rasterizer_context.
+    POSE_MAX_ABS`` (1e20 on 1.5.0; ENGINE-PRIVATE read of a module constant,
+    imported at call time, no default: a missing name raises the prefixed
+    ``RuntimeError``). The engine keeps a node instance at the transform it was
+    last drawn with when any entry of its new pose is not ``abs(x) < POSE_MAX_ABS``
+    (a NaN fails that test); the wheel renderer applies the same rule to the
+    closed-form poses it writes."""
+    from genesis.vis import rasterizer_context as _rc   # noqa: PLC0415
+    return float(_require_attr(_rc, "POSE_MAX_ABS", "genesis.vis.rasterizer_context"))
+
+
+def queue_part_poses(ctx: Any, items: Any) -> None:
+    """Pose render nodes: ``items`` is a sequence of ``(node, T)`` with ``T`` a
+    ``(R, 4, 4)`` float32 C-contiguous world transform per rendered env.
+
+    For every primitive of every node: ``mesh._bounds = None`` (ENGINE-PRIVATE
+    write, mirroring the engine's own pose sync so the mesh bounds are
+    recomputed), ``primitive.poses = T`` (WRITE; the renderer reads draw-sort
+    centroids and shadow bounds from it), then ONE ``ctx.jit.update_buffer(
+    primitives, "model", data)`` (WRITE into the engine's per-frame upload
+    queue) with one TRANSPOSED array per primitive (1.5.0 uploads "model" with
+    the translation in the last row). The queue is a dict keyed by (primitive,
+    buffer), so the last write before the flush wins. Asserts the shapes: a bare
+    ``(R, 4, 4)`` passed where a list is expected would be zipped row by row and
+    silently pose one instance. The caller holds the viewer lock."""
+    prims, data = [], []
+    for node, T in items:
+        if not (isinstance(T, np.ndarray) and T.dtype == np.float32 and T.ndim == 3
+                and T.shape[1:] == (4, 4) and T.flags.c_contiguous):
+            raise ValueError(
+                f"{WHEEL_RENDER_TAG} queue_part_poses: each T must be a (R, 4, 4) float32 "
+                f"C-contiguous array, got {type(T).__name__} "
+                f"{getattr(T, 'shape', None)} {getattr(T, 'dtype', None)}")
+        mesh = node.mesh
+        mesh._bounds = None
+        Tt = np.ascontiguousarray(T.transpose((0, 2, 1)))
+        for prim in mesh.primitives:
+            prim.poses = T
+            prims.append(prim)
+            data.append(Tt)
+    assert len(data) == len(prims)
+    if prims:
+        ctx.jit.update_buffer(prims, "model", data)
+
+
+def queued_model(ctx: Any, primitive: Any) -> Any:
+    """The "model" buffer queued for ``primitive`` and not flushed yet, or None
+    (ENGINE-PRIVATE read of ``ctx.jit._buffer``; used only by the renderer's
+    wiring self-test)."""
+    return _require_attr(ctx.jit, "_buffer", "RasterizerContext.jit").get((primitive, "model"))
+
 
 def add_render_node(ctx: Any, obj: Any) -> Any:
     """Add a pyrender ``Mesh`` to the rasterizer context's scene and return its
     node (``RasterizerContext.add_node``, which takes the viewer lock itself).
-    1.5.0 removed ``add_external_node`` / ``external_nodes``."""
+    Used for fallback wheel nodes only (2.0.6)."""
     return ctx.add_node(obj)
 
 
-def queue_instance_poses(ctx: Any, node: Any, T: Any) -> None:
-    """Stream ``(n_instances, 4, 4)`` world transforms ``T`` into EVERY
-    primitive of an instanced render ``node``.
-
-    For each primitive: set ``primitive.poses = T`` (the renderer reads bounds
-    and centroids of instance-placed primitives from ``poses``), then queue ONE
-    ``ctx.jit.update_buffer(primitives, "model", data)`` with one array per
-    primitive -- the engine zips the two sequences, so a short ``data`` would
-    silently drop primitives. genesis-world 1.5.0 uploads "model" TRANSPOSED
-    (translation in the last row), hence ``T.transpose((0, 2, 1))``. The caller
-    holds the viewer lock."""
-    prims = list(node.mesh.primitives)
-    for prim in prims:
-        prim.poses = T
-    Tt = np.ascontiguousarray(T.transpose((0, 2, 1)))
-    ctx.jit.update_buffer(prims, "model", [Tt] * len(prims))
+def register_fallback_seg(ctx: Any, node: Any, seg_keys: Any) -> None:
+    """Give an SDK fallback node the segmentation id of ``seg_keys`` at the
+    context's level: ``ctx.create_node_seg(getattr(seg_keys,
+    ctx.segmentation_level), node)`` (WRITE into the engine's segmentation
+    maps). Deliberately NOT added to ``ctx.nodes_by_seg_keys``, so the engine
+    and the override never treat it as an engine node. The integer it gets is
+    assigned in registration order, after the engine's own keys."""
+    ctx.create_node_seg(getattr(seg_keys, ctx.segmentation_level), node)
 
 
-def hide_vgeoms(vgeoms: Any, n_envs: int) -> int:
-    """Hide visual geoms from the rasterizer in every env, BEFORE ``build()``.
+def on_render_sync(ctx: Any, fn: Any, *, before: Any = None) -> Any:
+    """Run ``fn()`` after every engine node sync of ``ctx`` (and ``before()``
+    ahead of it): replaces the INSTANCE attribute ``ctx._sync_shapes`` with a
+    wrapper (ENGINE-PRIVATE WRITE). 1.5.0 calls ``_sync_shapes`` only from
+    ``RasterizerContext.update`` (once per sync that passes its early return),
+    inside ``with viewer_lock``, and the engine writes the poses of its mesh
+    nodes only there; so ``fn`` sees -- and overrides -- every engine pose
+    write of that sync, under the same lock (reentrant on the viewer).
 
-    genesis-world 1.5.0 renders a visual geom per env from its private
-    ``vgeom.active_envs_mask`` (``(n_envs,)`` bool) and reads it only when some
-    geom of the solver carries one (``KinematicSolver._has_variants``); the
-    ``active_envs_idx = []`` assignment the SDK used through 2.0.4 is a no-op
-    there (measured: 5864 wheel pixels drawn with it, 0 with the mask, V1-shaped
-    scene). Sets an all-False mask of length ``max(n_envs, 1)`` and an empty
-    ``active_envs_idx``. Visual only: collision geoms are untouched. Returns the
-    number of geoms hidden.
+    This is the enforcement point of the wheel-render contract, and it covers
+    ONLY ``scene.visualizer.context``: the two syncs ``Visualizer.build`` makes
+    before any SDK code runs, viewer frames drawn during build, camera SENSORS
+    (``scene.add_sensor(gs.sensors.*CameraOptions)``; a rasterizer sensor uses
+    its own context when there is no viewer), batch-renderer and raytracer
+    sensors, and visual raycasting / picking are not hooked and show the URDF
+    wheel at the solver's pose. The native viewer thread was not run here
+    (no display); what it draws is inferred from the source.
 
-    ENGINE-PRIVATE write: ``active_envs_mask`` is not public API. Raises
-    ``AttributeError`` naming the attribute, before any write to that geom,
-    when a visual geom does not carry it (an engine that renamed or dropped
-    it): assigning a new attribute there would hide nothing and the wheel would
-    be drawn twice without any error."""
-    import torch                                     # noqa: PLC0415
-    import genesis as gs                             # noqa: PLC0415
-    n = 0
-    for vg in vgeoms:
-        if not hasattr(vg, "active_envs_mask"):
-            raise AttributeError(
-                f"hide_vgeoms: visual geom {vg!r} has no 'active_envs_mask' "
-                f"attribute (genesis-world {getattr(gs, '__version__', '?')}); "
-                f"this engine-private per-env visibility mask is what genesis-"
-                f"world 1.5.0 renders from, so the URDF wheel visual cannot be "
-                f"hidden and would be drawn twice.")
-        vg.active_envs_mask = torch.zeros(max(int(n_envs), 1), dtype=torch.bool,
-                                          device=gs.device)
-        vg.active_envs_idx = np.array([], dtype=np.int64)
-        n += 1
-    return n
+    The wrapper depth is always 1: a second install on the same context adds
+    ``fn`` to the existing wrapper, and installing an ``fn`` that is already
+    there (compared with ``==``, so a bound method of the same object counts)
+    raises ``RuntimeError``. An exception from ``fn`` / ``before`` is re-raised
+    as ``RuntimeError`` carrying :data:`WHEEL_RENDER_TAG`. Returns the wrapper
+    (its ``calls`` counter counts completed hooked syncs).
+
+    Order inside one sync: every ``before()``, then the engine's original
+    ``_sync_shapes``, then every ``fn()``; an exception at any point ends the
+    sync there (``calls`` is not incremented). An exception from the original
+    ``_sync_shapes`` propagates unwrapped. The renderer passes its ordering
+    guard as ``before``: it compares, by value (``equal_nan=True``), the poses
+    written by the last COMPLETED hooked sync with what the primitives hold
+    now, and discards that record whether or not it raised; only a completed
+    ``fn()`` records again. So an engine pose write that moved after this
+    wrapper is detected ONE SYNC LATE (the frame of the sync where it happened
+    is drawn at the solver's pose; the raise comes at the start of the next
+    hooked sync; a frame with no later hooked sync is never checked); after a
+    hooked sync that did not complete (the guard, the engine's
+    ``_sync_shapes`` or ``fn`` raised, or a ``BaseException`` such as
+    ``KeyboardInterrupt``) the next hooked sync is not checked and checking
+    resumes on the one after, so a persistent late write raises on at least
+    every second hooked sync (and while ``fn`` raises on every sync, its own
+    exception surfaces on each); and an engine ``"model"`` buffer queued after
+    the wrapper WITHOUT touching ``primitive.poses`` is not detected at run
+    time at all (covered only by ``tests/test_render_sync_pose.py``'s flush
+    test, to be run on every engine bump). A non-finite closed-form pose is
+    not an error: that wheel instance keeps its last SDK-written row (see
+    ``visual.InstancedWheelRenderer``)."""
+    cur = ctx.__dict__.get("_sync_shapes")
+    if cur is not None and getattr(cur, "_gv_render_hook", False):
+        if any(f == fn for f, _ in cur._gv_fns):
+            raise RuntimeError(f"{WHEEL_RENDER_TAG} on_render_sync: {fn!r} is already installed "
+                               f"on this context (it would run twice per sync)")
+        cur._gv_fns.append((fn, before))
+        return cur
+    original = _require_attr(ctx, "_sync_shapes", "RasterizerContext")
+    fns = [(fn, before)]
+
+    def _gv_sync_shapes(*args: Any, **kwargs: Any) -> Any:
+        try:
+            for _, b in fns:
+                if b is not None:
+                    b()
+        except Exception as e:
+            if str(e).startswith(WHEEL_RENDER_TAG):
+                raise
+            raise RuntimeError(f"{WHEEL_RENDER_TAG} {type(e).__name__}: {e}") from e
+        out = original(*args, **kwargs)
+        try:
+            for f, _ in fns:
+                f()
+        except Exception as e:
+            if str(e).startswith(WHEEL_RENDER_TAG):
+                raise
+            raise RuntimeError(f"{WHEEL_RENDER_TAG} {type(e).__name__}: {e}") from e
+        _gv_sync_shapes.calls += 1
+        return out
+
+    _gv_sync_shapes._gv_render_hook = True
+    _gv_sync_shapes._gv_original = original
+    _gv_sync_shapes._gv_fns = fns
+    _gv_sync_shapes.calls = 0
+    ctx._sync_shapes = _gv_sync_shapes
+    return _gv_sync_shapes
+
+
+def render_sync_depth(ctx: Any) -> int:
+    """Number of SDK wrappers stacked on ``ctx._sync_shapes`` (0 or 1)."""
+    d, f = 0, ctx.__dict__.get("_sync_shapes")
+    while f is not None and getattr(f, "_gv_render_hook", False):
+        d += 1
+        f = getattr(f, "_gv_original", None)
+    return d
+
+
+def force_render_sync(ctx: Any, viewer_lock: Any) -> None:
+    """One forced node sync of ``ctx`` under ``viewer_lock``
+    (``ctx.update(force_render=True)``); used by the renderer's wiring
+    self-test."""
+    with viewer_lock:
+        ctx.update(force_render=True)
 
 
 # ---------------------------------------------------------------------------

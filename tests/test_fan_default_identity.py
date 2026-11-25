@@ -1,14 +1,14 @@
 """A regression lock on the default CONTACT PATH, plus the cross-tree witnesses.
 
-What each test here proves (v2.0.5):
+What each test here proves (v2.0.6):
 
-* ``test_contact_path_rollout_matches_the_2_0_4_tree_on_1_5_0``: the 200-step
-  brake-then-throttle rollout below gives, bit for bit, what the v2.0.4 tree +
-  the two-line ``skip_forward`` patch gave on genesis-world 1.5.0 when
-  ``BASELINES`` was captured. So 2.0.5 reproduces the 2.0.4 tree's physics on
-  1.5.0 on this rollout, and later releases are locked to it on exactly this
-  engine version and platform. It is NOT evidence that 2.0.4 is right, and it
-  says nothing across engines (1.4.5 <-> 1.5.0).
+* ``test_contact_path_rollout_matches_the_2_0_6_capture_on_1_5_0``: the 200-step
+  brake-then-throttle rollout below gives, bit for bit, what the 2.0.6 tree
+  gave on genesis-world 1.5.0 when ``BASELINES`` was captured (through v2.0.5:
+  the v2.0.4 tree + the two-line ``skip_forward`` patch, test
+  ``test_contact_path_rollout_matches_the_2_0_4_tree_on_1_5_0``). Later
+  releases are locked to it on exactly this engine version and platform. It is
+  NOT evidence that 2.0.6 is right, and it says nothing across engines.
 * ``test_witness_rollout_matches_the_2_0_4_tree_on_1_5_0`` (N24): a rollout on
   which no 1.8.0 mechanism acts (10 m/s, wheels rolling, no throttle / brake,
   no landing), captured the same way. Through v2.0.4 this test was the
@@ -28,7 +28,23 @@ What each test here proves (v2.0.5):
 ``car_4w_rwd_ackermann(stability="control")``, with ``RollingResistance``
 removed from its hook list (``_contact_path_cfg``; the v1.7.0 re-anchor below).
 
-Baseline capture (v2.0.5)
+Baseline capture (v2.0.6)
+-------------------------
+* ``BASELINES[("1.5.0", "linux-x86_64")]`` (the contact path) was re-captured
+  in 2.0.6 from the 2.0.6 tree (the ``StaticFrictionLock`` reversal re-anchor
+  removed and the ground gate ``ctx.N > 0`` added; before the version bump)
+  with this file's own ``_contact_path_cfg`` / ``_drive`` (2026-11-24,
+  harness ``.pm_r2/r206/h/capture206.py`` outside the repo; genesis-world
+  1.5.0, CPU backend, WSL2). Why: the ground gate moves the rollout (the
+  car is dropped from z 1.0 under full brake, so braked wheels land); first
+  difference at the checked step 49, final x 6.018531322479248 ->
+  6.019377708435059 m (0.846 mm). Before the capture, the 2.0.6 tree with only
+  the gate removed reproduced the 2.0.5 entry bit for bit (so the change is
+  the gate's), and the change stayed within the 2 mm bound fixed after the
+  plan's prototype (0.85 mm; a regression bound, not acceptance evidence).
+  The witness entries (``WITNESS_BASELINES``) are unchanged and still pass.
+
+Baseline capture (v2.0.5; the contact path through v2.0.5, the witnesses still)
 -------------------------
 * Captured from the v2.0.4 tree + the two-line ``skip_forward`` patch on
   genesis-world 1.5.0 (linux-x86_64); 2.0.5 reproduces it bit for bit. A
@@ -125,24 +141,25 @@ BASELINE_COMMIT = "37b8b7943f7000245e462e53090d2ce3b303dd70"
 #: (genesis-world version, platform key) -> {step index -> the four wheel
 #: distances of the reference car (float32), "final_pos" -> the chassis position
 #: after step 199}, for the CONTACT-PATH rollout ("control" minus
-#: RollingResistance), captured from the v2.0.4 tree + the two-line
-#: ``skip_forward`` patch on genesis-world 1.5.0 (module docstring, "Baseline
-#: capture"). Platform key: see ``platform_key()``.
+#: RollingResistance), captured from the 2.0.6 tree on genesis-world 1.5.0
+#: (module docstring, "Baseline capture (v2.0.6)"; through v2.0.5 from the
+#: v2.0.4 tree + the two-line ``skip_forward`` patch). Platform key: see ``platform_key()``.
 BASELINES = {
-    # Captured 2026-11-24 (gs150 step 8, harness capture_locks.py outside the
-    # repo, which imports this file's _contact_path_cfg / _drive from the
-    # patched 2.0.4 tree); equal bit for bit to an independent run of the same
-    # tree in the 2.0.5 AC-E determinism probe.
+    # Captured 2026-11-24 from the 2.0.6 tree (implement agent, harness
+    # .pm_r2/r206/h/capture206.py outside the repo, which imports this file's
+    # _contact_path_cfg / _drive from that tree). Through v2.0.5 this entry was
+    # the v2.0.4-tree capture (final_pos (6.018531322479248,
+    # -5.587245865967816e-08, 0.11140414327383041)).
     ("1.5.0", "linux-x86_64"): {
-        49:  [0.41484057903289795, 0.4148404598236084,
-              0.4172234535217285, 0.4172234535217285],
-        99:  [0.4116325378417969, 0.4116325378417969,
-              0.4111868143081665, 0.41118693351745605],
-        149: [0.41161608695983887, 0.4116159677505493,
+        49:  [0.4148343801498413, 0.41483426094055176,
+              0.4172496795654297, 0.41724956035614014],
+        99:  [0.4116324186325073, 0.4116324186325073,
+              0.41118693351745605, 0.4111870527267456],
+        149: [0.4116162061691284, 0.4116162061691284,
               0.4111919403076172, 0.4111919403076172],
-        199: [0.4116004705429077, 0.4116004705429077,
+        199: [0.4116002321243286, 0.4116002321243286,
               0.411207914352417, 0.411207914352417],
-        "final_pos": (6.018531322479248, -5.587245865967816e-08, 0.11140414327383041),
+        "final_pos": (6.019377708435059, 3.9860489664533816e-07, 0.11140403896570206),
     },
 }
 
@@ -202,12 +219,13 @@ def test_contact_path_cfg_drops_only_rolling_resistance():
     assert contact == [n for n in full if n != "RollingResistance"]
 
 
-def test_contact_path_rollout_matches_the_2_0_4_tree_on_1_5_0():
+def test_contact_path_rollout_matches_the_2_0_6_capture_on_1_5_0():
     """Regression lock (see the module docstring): the contact-path rollout
-    equals, bit for bit, its capture from the v2.0.4 tree + the two-line
-    ``skip_forward`` patch on genesis-world 1.5.0 (linux-x86_64). 2.0.5
-    reproduces it bit for bit; later releases are locked to it on exactly
-    this engine version and platform."""
+    equals, bit for bit, its capture from the 2.0.6 tree on genesis-world
+    1.5.0 (linux-x86_64); later releases are locked to it on exactly this
+    engine version and platform. (Through v2.0.5:
+    ``test_contact_path_rollout_matches_the_2_0_4_tree_on_1_5_0``, against the
+    v2.0.4-tree capture.)"""
     genesis = pytest.importorskip("genesis")
     from genesis_vehicle import VehicleScene, car_4w_rwd_ackermann
 
@@ -241,8 +259,8 @@ def test_contact_path_rollout_matches_the_2_0_4_tree_on_1_5_0():
         expect = torch.tensor(want, dtype=got.dtype)
         assert torch.equal(got, expect), (
             f"step {i}: the default contact path changed since its capture "
-            f"from the 2.0.4 tree on genesis-world 1.5.0.\n"
-            f"  baseline (2.0.4 tree, genesis {version}, {plat}): {want}\n"
+            f"from the 2.0.6 tree on genesis-world 1.5.0.\n"
+            f"  baseline (2.0.6 tree, genesis {version}, {plat}): {want}\n"
             f"  now:                                   {got.tolist()}")
 
     _drive(vs, [veh], record=check)

@@ -1,560 +1,95 @@
-"""Wheel visual-joint sync layer (for the Genesis viewer).
+"""Wheel visuals for the Genesis renderer (2.0.6: engine-node override).
 
-`WheelJointInternalSync` drives the URDF **wheel** spin / steer / suspension joints
-(via ``set_dofs_position`` — a kinematic write; control-path suspension
-joints via ``control_dofs_position``, see below) so that the **Genesis
-viewer** shows wheels rotating, steered, and ground-following. Scope and
-non-scope, important:
+``VehicleScene`` draws the wheels of a rendered scene (a camera or a viewer) by
+overriding the poses of the ENGINE's own wheel render nodes with the closed-form
+wheel transform (``wheel_visual_transforms``: steer + suspension + spin),
+composed with each geom's local offset, on every node sync of the main scene's
+rasterizer context. It writes no solver state: no joint is written, no FK runs,
+no PD acts; headless physics and rendered physics are the same computation.
 
-- It only touches the WHEEL visual joints. It does NOT move the chassis —
-  the chassis (base link) is driven by real dynamics
-  (``apply_links_external_wrench``) and is read with ``entity.get_pos/get_quat``
-  regardless of whether this runs.
-- It is NOT physics-neutral. (Through 2.0.4 this line said "purely cosmetic:
-  it does NOT feed back into the dynamics" -- that was wrong.) Writing the
-  visual joints changes the chassis trajectory (measured below). The joints
-  are dofs of the chassis articulation and the wheel-side links carry mass;
-  that is one candidate coupling, not an established cause. Measured: the
-  kinematic suspension write moves the reference car (``car_4w.urdf``) about
-  +0.142 m over a 10.7 m run against the same run with no visual joint path,
-  on genesis-world 1.4.5 and 1.5.0 alike (impl-review, CPU/WSL2, dt 0.025 x 10
-  substeps, brake 1.5 s then throttle 0.5 for 5 s, ``internal_sync`` + one
-  offscreen camera); which coupling produces it is not established. What
-  does hold: the suspension force N is applied once, through the chassis
-  wrench -- this layer adds no second N. The control path's PD is a separate
-  effect, see ``WheelJointInternalSync``.
-- It exists for the Genesis-native viewer. An **external renderer (UE /
-  Unity) does NOT need it** — use ``VehiclePhysics.wheel_visual_transforms``
-  (closed-form, viewer-independent) instead; that is also cleaner (no
-  substep jitter during hard transients).
+Since 2.0.6 the URDF wheel visual geoms are NOT hidden, so every wheel pixel
+carries the segmentation id Genesis gives that wheel's URDF link part, at every
+``n_envs`` and segmentation level. A wheel the engine draws no node for (e.g. an
+entity added with ``vis_mode="collision"``, whose wheel links have no colliders
+after ``urdf_prep``) gets an SDK FALLBACK node: the harvested wheel mesh,
+registered for segmentation under the link's first visual geom (at geom level a
+fallback wheel with several visual geoms is one merged mesh under visual geom
+0's ``GeomKey``).
 
-Suspension visualisation: if the URDF prismatic joint declares non-zero
-dynamics, we use control_dofs_position with high kp/kv;
-otherwise (dynamics=0) we use set_dofs_position directly.
+What is NOT covered (the hook sits on ``scene.visualizer.context`` only, see
+``_gs_compat.on_render_sync``): camera SENSORS (``scene.add_sensor(
+gs.sensors.{Rasterizer,BatchRenderer,Raytracer}CameraOptions)``; the rasterizer
+one renders from its own context when there is no viewer), visual raycasting /
+picking, the two syncs ``Visualizer.build`` makes and the viewer frames drawn
+during ``build()`` show the URDF wheel at the SOLVER's pose (the solver's own
+wheel joint state, which no SDK code writes and which does not follow the
+commanded steer, suspension or spin; measured values in
+``VehiclePhysics.link_transforms``). The native viewer thread was not run when
+this was written (no display); what it draws is inferred from the source.
+
+Removed in 2.0.6: ``WheelJointInternalSync`` and ``KindVisualBatch`` (the
+joint-writing path, which moved the chassis trajectory: the reference car ended
++0.142 m ahead over 10.7 m, and ΣN lost the wheel-side link weight; the
+coupling was not established). Importing either raises ``ImportError``. NB
+because this module's ``__getattr__`` raises ``ImportError`` for them,
+``hasattr(genesis_vehicle.visual, "WheelJointInternalSync")`` raises instead of
+returning False. External renderers (UE / Unity) read
+``VehiclePhysics.wheel_visual_transforms`` / ``visual_parts_transforms``.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Optional, Sequence
 
 import numpy as np
-import torch
 import genesis as gs
 
-from ._gs_compat import (add_render_node, queue_instance_poses,
-                         require_genesis)
+from ._gs_compat import (WHEEL_RENDER_TAG, add_render_node,
+                         check_render_fallback_api, check_render_seg_api,
+                         engine_part_nodes, force_render_sync, on_render_sync,
+                         part_is_posed, pose_max_abs, queue_part_poses, queued_model,
+                         register_fallback_seg, rendered_envs, require_genesis)
 
 require_genesis(gs)
 
-from .raycast import is_ray_hit_corrected  # noqa: E402  (after the engine check)
+_logger = logging.getLogger("genesis_vehicle")
+
+_REMOVED = {
+    "WheelJointInternalSync": (
+        "WheelJointInternalSync was removed in 2.0.6: it wrote the URDF wheel "
+        "joints into the rigid solver, which moved the chassis trajectory. Use "
+        "VehicleScene (it draws the wheels from the closed form at every n_envs) "
+        "or VehiclePhysics.wheel_visual_transforms() / visual_parts_transforms(); "
+        "the spin angle it accumulated is VehiclePhysics.wheel_spin_angle."),
+    "KindVisualBatch": (
+        "KindVisualBatch was removed in 2.0.6: it wrote the URDF wheel joints of "
+        "a vehicle kind into the rigid solver, which moved the chassis "
+        "trajectory. Use VehicleScene (it draws the wheels from the closed form "
+        "at every n_envs) or MultiVehiclePhysics.wheel_visual_transforms()."),
+}
 
 
-# Defaults used when the control_dofs_position path is taken.
-_SUSP_VIS_KP = 1.0e7
-_SUSP_VIS_KV = 1.0e5
-
-# Visual-suspension slew-rate limit (m/s): the susp visual TARGET may move at
-# most this fast. The control path's PD (kp above) applies REAL joint forces,
-# and the set path teleports wheel-link mass — an instantaneous air<->ground
-# target jump therefore injects a force impulse into the chassis (field
-# report: VJS On added ~2-3 cm extra compression on hard drop landings,
-# enough to flip a marginal landing into the buried state). Slew-limiting
-# the target bounds that impulse while staying far faster than any visual
-# need. (v1.1.16)
-_SUSP_VIS_MAX_RATE = 2.0
+def __getattr__(name: str) -> Any:
+    """``from genesis_vehicle.visual import WheelJointInternalSync`` and
+    ``genesis_vehicle.visual.WheelJointInternalSync`` both raise ``ImportError``
+    with the replacement named (2.0.6)."""
+    if name in _REMOVED:
+        raise ImportError(_REMOVED[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def _susp_visual_target(d, mesh_radius, l_susp, clamp, prev, dt, miss=None):
-    """Shared susp visual-joint target for both writer paths and the batched
-    writer: ``mesh_radius - d``; a ray MISS -> fully extended ``-l_susp``;
-    clamped to the stroke bound; slew-rate-limited against ``prev`` (pass None
-    to skip).
-
-    Air is ``raycast.is_ray_hit_corrected`` negated — the SAME predicate
-    ``core._susp_visual_offset`` uses, tested against the sensor's OWN miss
-    sentinel ``miss`` (``None`` raises ``ValueError`` since v1.8.0; through
-    1.7.x it fell back to the deprecated ``RAY_MISS_THRESHOLD``, correct only at
-    the default ``max_range=20.0``, removed in 1.8.0). ``d`` is a
-    CORRECTED distance (the high-cast offset already removed), so the
-    unpopulated-sensor zero is NOT detectable here and is not tested for; this
-    helper only runs inside a full step, past the first-step protection.
-
-    NB a NEGATIVE ``d`` is a valid deep-over-compression reading under the
-    high-cast ray scheme (raycast.RAY_UP_OFFSET), NOT air — the old
-    ``d <= 1e-6`` air test would have misclassified it, and so would a
-    ``d != 0.0`` term on a hit landing exactly at the offset."""
-    air = ~is_ray_hit_corrected(d, miss)
-    jp = mesh_radius - d
-    jp = torch.where(air, torch.full_like(jp, -l_susp), jp)
-    if clamp is not None:
-        jp = torch.maximum(-clamp, torch.minimum(clamp, jp))
-    else:
-        jp = torch.clamp(jp, -l_susp, l_susp)
-    if prev is not None and dt > 0.0:
-        max_step = _SUSP_VIS_MAX_RATE * dt
-        jp = prev + torch.clamp(jp - prev, -max_step, max_step)
-    return jp
-
-# One-time-per-process perf advisory when WheelJointInternalSync is active.
-_PERF_WARNED = False
+#: One WARNING per process for a wheel the renderer can only draw as a
+#: synthesized cylinder with no segmentation id.
+_HARVEST_WARNED = False
 
 
-def _warn_perf_once() -> None:
-    global _PERF_WARNED
-    if _PERF_WARNED:
-        return
-    _PERF_WARNED = True
-    import os, sys
-    if os.environ.get("GENESIS_VEHICLE_QUIET"):
-        return
-    print(
-        "[genesis_vehicle] PERF: WheelJointInternalSync is ENABLED — it drives the URDF "
-        "wheel visual joints through the engine's articulated-body forward "
-        "kinematics every step (one collider/constraint reset + FK pass per "
-        "entity; batched into a single set_dofs_position in v0.7.16, ~0.85 ms/step "
-        "per vehicle on CPU). It is only needed for the Genesis viewer. For an "
-        "external renderer (UE / Unity), or any headless run, set "
-        "enable_wheel_joint_internal_sync=False and read wheel poses from "
-        "VehiclePhysics.visual_parts_transforms() / wheel_visual_transforms() "
-        "(closed-form, ~µs). Silence with GENESIS_VEHICLE_QUIET=1.",
-        file=sys.stderr, flush=True,
-    )
-
-
-class WheelJointInternalSync:
-    """(Formerly ``VisualJointSync``; renamed in v1.1.19 — it is an
-    internal joint-sync mechanism, not a pure visual one.)
-
-    Drives a vehicle's URDF WHEEL visual joints (spin, steer, suspension) to
-    match physics state, for the Genesis viewer. Wheels only — never the
-    chassis. INTENDED to be cosmetic, but NOT physics-neutral: the set path
-    teleports wheel-link mass and the control path's PD (kp=_SUSP_VIS_KP)
-    applies real joint forces. Both targets are stroke-clamped and
-    slew-rate-limited (_SUSP_VIS_MAX_RATE); that bound was measured only as
-    extra compression on hard drop landings (< 1 cm; ~2-3 cm unclamped). This
-    docstring called the residual disturbance "negligible" through 2.0.4 --
-    wrong as a general statement. Measured on a full drive (CPU/WSL2, dt 0.025,
-    ``internal_sync`` + one offscreen camera, brake 1.5 s then throttle):
-
-    - set (kinematic) path: the reference car (``car_4w.urdf``, 10 substeps,
-      throttle 0.5 for 5 s) ends about +0.142 m ahead of the same run with no
-      visual joint path, over 10.7 m, on genesis-world 1.4.5 and 1.5.0 alike
-      (impl-review); mechanism not established.
-    - control path: whether its PD acts depends on the engine. A URDF
-      ``effort="0"`` (``tests/data/car_ref.urdf``, ``car_4w.urdf``,
-      ``truck_6w.urdf`` all write it on the suspension joints) is a ZERO force
-      range on 1.4.5 -- the PD is inert and the joint hangs at its limit --
-      and an UNBOUNDED one on 1.5.0, where the PD is live. Measured with
-      ``visual_susp_mode="control"`` forced (implement agent, 2.0.5 tree): on
-      1.5.0, against the same run with the suspension dofs' force range set
-      to 0 after build, chassis z differed by up to 0.190 m during the landing
-      (reference car, 10 substeps) and 0.030 m (``truck_6w_partial_ackermann``,
-      4 substeps, throttle 0.3 for 10 s), final x by 6.5 mm and 15.7 mm; with
-      the force range 0, 1.5.0 reproduced 1.4.5 to within 6e-5 m. This layer
-      sets no force range. Under ``visual_susp_mode="auto"`` both of those
-      URDFs resolve to the set path (their suspension ``<dynamics>`` are all
-      zero), so the PD is used only with ``"control"`` or a URDF declaring
-      non-zero suspension dynamics.
-
-    The suspension force N is still applied once (chassis wrench); neither path
-    adds a second N, but neither is free of feedback. External renderers
-    should use ``VehiclePhysics.wheel_visual_transforms`` instead
-    (viewer-independent).
-
-    Emits a one-time-per-process performance advisory on construction (it is the
-    dominant SDK cost at scale, and is unnecessary for external/headless use)."""
-
-    def __init__(
-        self,
-        entity: Any,
-        resolved: Any,         # ResolvedConfig
-        n_envs: int,
-        device: Any,
-        dtype: Any,
-        wheel_mesh_radius: Optional[float] = None,
-    ):
-        _warn_perf_once()
-        self.entity = entity
-        self.resolved = resolved
-        self.n_envs = n_envs
-        self.device = device
-        self.dtype = dtype
-        self.wheels = resolved.wheels
-        self.n_wheels = len(self.wheels)
-        # Ray-miss sentinel of the sensor feeding `distances`; VehiclePhysics
-        # sets it (and keeps it current through set_ray_miss_value). None =
-        # not set yet; a step with it None raises ValueError (v1.8.0: the
-        # RAY_MISS_THRESHOLD fallback was removed).
-        self.ray_miss = None
-        self.spin_enabled = bool(getattr(resolved, "visual_spin_enabled", True))
-
-        # Visual mesh radius for suspension positioning. Default = avg wheel radius.
-        if wheel_mesh_radius is None:
-            radii = [float(w.radius) for w in self.wheels if w.radius is not None]
-            self.wheel_mesh_radius = float(sum(radii) / len(radii)) if radii else 0.35
-        else:
-            self.wheel_mesh_radius = float(wheel_mesh_radius)
-
-        # Average rest stroke (used for the airborne suspension visual fallback).
-        rest_strokes = [float(w.rest_stroke) for w in self.wheels if w.rest_stroke is not None]
-        self.l_susp = float(sum(rest_strokes) / len(rest_strokes)) if rest_strokes else 0.10
-
-        # Resolve DoF indices for spin/steer/suspension joints.
-        self.spin_dofs: list[int] = []
-        self.steer_dofs: list[int] = []
-        self.steer_axis_signs: list[int] = []
-        self.steer_wheel_idx: list[int] = []
-        self.susp_dofs: list[int] = []
-        self.susp_uses_control: list[bool] = []   # True -> control_dofs_position; False -> set_dofs_position
-
-        urdf = resolved.urdf
-        # Top-level override for suspension visual mode. "auto" keeps the per-joint
-        # decision based on URDF <dynamics>; "kinematic"/"control" force one path
-        # for every wheel (heavy wheels need "control" — see VehicleConfig docstring).
-        mode = getattr(resolved, "visual_susp_mode", "auto")
-        for i, w in enumerate(self.wheels):
-            if w.spin_joint_name is not None:
-                self.spin_dofs.append(int(entity.get_joint(w.spin_joint_name).dofs_idx_local[0]))
-            else:
-                self.spin_dofs.append(-1)
-            if w.steer_joint_name is not None:
-                self.steer_dofs.append(int(entity.get_joint(w.steer_joint_name).dofs_idx_local[0]))
-                self.steer_axis_signs.append(int(urdf.steer_axis_signs.get(w.steer_joint_name, 1)))
-                self.steer_wheel_idx.append(i)
-            if w.susp_joint_name is not None:
-                self.susp_dofs.append(int(entity.get_joint(w.susp_joint_name).dofs_idx_local[0]))
-                if mode == "control":
-                    uses_ctrl = True
-                elif mode == "kinematic":
-                    uses_ctrl = False
-                else:   # "auto"
-                    uses_ctrl = bool(urdf.susp_has_dynamics.get(w.susp_joint_name, False))
-                self.susp_uses_control.append(uses_ctrl)
-            else:
-                self.susp_dofs.append(-1)
-                self.susp_uses_control.append(False)
-
-        # Cull -1 entries for batch DoF writes (joints not present in URDF).
-        self._spin_dofs_valid = [d for d in self.spin_dofs if d >= 0]
-        self._spin_idx_valid = [i for i, d in enumerate(self.spin_dofs) if d >= 0]
-        # Split suspension DoFs by control-vs-set path. Build once via a
-        # zipped iterable of (wheel_idx, dof, uses_control) for valid wheels.
-        susp_triples = [
-            (i, d, self.susp_uses_control[i])
-            for i, d in enumerate(self.susp_dofs)
-            if d >= 0
-        ]
-        self._susp_set_dofs = [d for (_, d, u) in susp_triples if not u]
-        self._susp_set_idx = [i for (i, _, u) in susp_triples if not u]
-        self._susp_ctrl_dofs = [d for (_, d, u) in susp_triples if u]
-        self._susp_ctrl_idx = [i for (i, _, u) in susp_triples if u]
-        # Suspension-offset clamp. Kept consistent with core._susp_visual_offset
-        # so the viewer matches the closed-form wheel_visual_transforms.
-        #   resolved.susp_visual_clamp is None -> per-wheel = own rest_stroke
-        #     (min 0.02 m); a float -> uniform clamp. Replaces the old fixed 0.19.
-        _clamp_override = getattr(resolved, "susp_visual_clamp", None)
-        if _clamp_override is not None:
-            set_strokes = [float(_clamp_override) for _ in self._susp_set_idx]
-        else:
-            set_strokes = [max(0.02, float(self.wheels[i].rest_stroke)
-                               if self.wheels[i].rest_stroke is not None else 0.10)
-                           for i in self._susp_set_idx]
-        self._susp_set_clamp = (
-            torch.tensor(set_strokes, device=device, dtype=dtype).unsqueeze(0)
-            if set_strokes else None)
-
-        # Set high kp/kv on control-path suspension joints.
-        if self._susp_ctrl_dofs:
-            import numpy as np
-            n_ctrl = len(self._susp_ctrl_dofs)
-            kp_arr = np.full(n_ctrl, _SUSP_VIS_KP, dtype=np.float32)
-            kv_arr = np.full(n_ctrl, _SUSP_VIS_KV, dtype=np.float32)
-            entity.set_dofs_kp(kp=kp_arr, dofs_idx_local=self._susp_ctrl_dofs)
-            entity.set_dofs_kv(kv=kv_arr, dofs_idx_local=self._susp_ctrl_dofs)
-
-        # Precompute steer axis signs (was rebuilt as a fresh tensor every step).
-        self._steer_signs = (
-            torch.tensor(self.steer_axis_signs, device=device, dtype=dtype).unsqueeze(0)
-            if self.steer_dofs else None)
-
-        # Batched-write plan. spin + steer + suspension(set-path) all go through
-        # set_dofs_position, and EACH solver call triggers a full collider reset
-        # + constraint reset + forward-kinematics pass over every link & geom.
-        # Issuing 3 separate calls per step therefore pays for 3 FK passes; we
-        # combine them into ONE call (one FK pass) — the dominant WheelJointInternalSync
-        # cost at n=1. control_dofs_position (PD, heavy wheels) uses a different
-        # API and stays separate. The position tensors are concatenated in the
-        # SAME order the dof indices are gathered here.
-        self._batch_spin = bool(self.spin_enabled and self._spin_dofs_valid)
-        batch_dofs: list[int] = []
-        if self._batch_spin:
-            batch_dofs += list(self._spin_dofs_valid)
-        if self.steer_dofs:
-            batch_dofs += list(self.steer_dofs)
-        if self._susp_set_dofs:
-            batch_dofs += list(self._susp_set_dofs)
-        self._batch_set_dofs = batch_dofs if batch_dofs else None
-
-        # Visual-state accumulators.
-        self.wheel_visual_angle = torch.zeros(n_envs, self.n_wheels, device=device, dtype=dtype)
-        # Slew-rate state for the susp visual targets (see _SUSP_VIS_MAX_RATE).
-        self._susp_set_prev: Optional[torch.Tensor] = None
-        self._susp_ctrl_prev: Optional[torch.Tensor] = None
-
-    def reset_visual_state(self, env_ids=None) -> None:
-        """Clear the accumulators after a physics/scene reset. Dropping the
-        slew state makes the next susp target SNAP instead of slewing from
-        the stale pre-reset value (which, on the control path, would inject
-        a real transient joint force right after the reset)."""
-        if env_ids is None:
-            self.wheel_visual_angle.zero_()
-            self._susp_set_prev = None
-            self._susp_ctrl_prev = None
-        else:
-            self.wheel_visual_angle[env_ids] = 0.0
-            # The spin accumulator is cleared for THOSE envs only. The slew
-            # origin is not per-env clearable: "no origin" is the tensor being
-            # None, not a row value, so it is dropped WHOLE — this vehicle's
-            # other envs snap their susp visual target once as well. (The
-            # comment here used to claim "forget only those rows", which the
-            # code never did.) Scope: one vehicle's own visual writer; other
-            # vehicles of the kind are untouched either way.
-            self._susp_set_prev = None
-            self._susp_ctrl_prev = None
-
-    def step(
-        self,
-        steer_per_wheel: torch.Tensor,    # (n_envs, n_wheels), physics-side angles
-        distances: torch.Tensor,          # (n_envs, n_wheels)
-        omega: torch.Tensor,              # (n_envs, n_wheels)
-        dt: float,
-    ) -> None:
-        # Build the per-group position tensors, then issue ONE set_dofs_position
-        # for all of spin + steer + suspension(set-path). Concatenation order
-        # MUST match self._batch_set_dofs (spin, steer, susp — same conditions).
-        parts: list[torch.Tensor] = []
-
-        # Spin — integrate angle and wrap to [-pi, pi]. Skipped entirely when
-        # disabled (e.g. tank cylindrical wheels: rotation isn't visible).
-        if self._batch_spin:
-            self.wheel_visual_angle.add_(omega * dt)
-            two_pi = 2.0 * math.pi
-            self.wheel_visual_angle = (
-                (self.wheel_visual_angle + math.pi) % two_pi
-            ) - math.pi
-            parts.append(self.wheel_visual_angle[:, self._spin_idx_valid])
-
-        # Steer. Physics-side `steer_per_wheel` is ISO 8855 (+ = right turn). The
-        # URDF joint angle for a CW (right) visual rotation depends on the axis z
-        # sign: visual_cmd = -phys * sign (sign = +1 for (0,0,1), -1 for (0,0,-1)).
-        if self.steer_dofs:
-            phys = steer_per_wheel[:, self.steer_wheel_idx]
-            parts.append(-phys * self._steer_signs)
-
-        # Suspension, set_dofs_position path: joint_pos = mesh_radius - hit.
-        susp_joint_pos = None
-        if self._susp_set_dofs:
-            d = distances[:, self._susp_set_idx]
-            jp = _susp_visual_target(d, self.wheel_mesh_radius, self.l_susp,
-                                     self._susp_set_clamp,
-                                     self._susp_set_prev, dt, self.ray_miss)
-            self._susp_set_prev = jp
-            susp_joint_pos = jp
-            parts.append(jp)
-
-        # Single batched write — one solver collider/constraint reset + one FK
-        # pass for all visual joints, instead of one per group.
-        if self._batch_set_dofs is not None:
-            combined = parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
-            self.entity.set_dofs_position(
-                combined, self._batch_set_dofs, zero_velocity=False,
-            )
-
-        # Suspension drift suppression: zero the susp joint velocity. (Through
-        # 2.0.4 this passed skip_forward=True; genesis-world 1.5.0 removed the
-        # keyword and refreshes link/geom poses lazily when they are next read,
-        # so no explicit FK pass is issued here either way.)
-        if susp_joint_pos is not None:
-            self.entity.set_dofs_velocity(
-                torch.zeros_like(susp_joint_pos), self._susp_set_dofs,
-            )
-
-        # Suspension joints. control_dofs_position path (heavy wheels):
-        # Use the SAME ground-following formula as the set_dofs_position path
-        # so the wheel mesh lands on the ground at equilibrium regardless of
-        # chassis settle height. The earlier "command = compression" formula
-        # was wrong for URDFs whose susp joint origin sits at the chassis z
-        # plane — `compression` is always >= 0, so the wheel
-        # could only ride UP from rest, never extend DOWN to reach the ground.
-        if self._susp_ctrl_dofs:
-            d = distances[:, self._susp_ctrl_idx]
-            # PD path applies REAL joint forces (kp=_SUSP_VIS_KP) — the
-            # target is stroke-clamped and slew-rate-limited so an air<->
-            # ground jump cannot inject a large impulse into the chassis.
-            joint_pos = _susp_visual_target(d, self.wheel_mesh_radius,
-                                            self.l_susp, None,
-                                            self._susp_ctrl_prev, dt,
-                                            self.ray_miss)
-            self._susp_ctrl_prev = joint_pos
-            self.entity.control_dofs_position(
-                joint_pos, dofs_idx_local=self._susp_ctrl_dofs,
-            )
-
-
-class KindVisualBatch:
-    """Batched writer for K same-kind ``WheelJointInternalSync`` objects (v1.0.15).
-
-    Each ``WheelJointInternalSync.step`` issues its own ``set_dofs_position`` (plus
-    the susp velocity-zero and, for heavy wheels, ``control_dofs_position``) —
-    and every solver entry pays a collider/constraint reset + FK pass. K
-    same-kind vehicles therefore paid K× that cost per step (the reason the
-    old perf advisory said ~0.85 ms/step *per vehicle*). Same-kind entities
-    share one dof LAYOUT (identical URDF/joints), so all K writes collapse
-    into ONE solver-level ``set_dofs_position`` over the concatenated GLOBAL
-    dof indices (``entity._dof_start + local``) — one solver entry, one FK.
-
-    Math is identical to ``WheelJointInternalSync.step``, just computed on
-    ``(n_envs, K, n)`` slabs instead of K ``(n_envs, n)`` slices. The spin
-    accumulator lives here in batched form. Construction raises if the K
-    layouts differ (caller falls back to the per-entity loop).
-    """
-
-    def __init__(self, visuals: "list[WheelJointInternalSync]"):
-        if not visuals:
-            raise ValueError("KindVisualBatch needs at least one WheelJointInternalSync")
-        v0 = visuals[0]
-        for v in visuals[1:]:
-            if (v._batch_set_dofs != v0._batch_set_dofs
-                    or v._spin_idx_valid != v0._spin_idx_valid
-                    or v.steer_dofs != v0.steer_dofs
-                    or v.steer_wheel_idx != v0.steer_wheel_idx
-                    or v._susp_set_dofs != v0._susp_set_dofs
-                    or v._susp_set_idx != v0._susp_set_idx
-                    or v._susp_ctrl_dofs != v0._susp_ctrl_dofs
-                    or v._susp_ctrl_idx != v0._susp_ctrl_idx
-                    or v.n_wheels != v0.n_wheels):
-                raise ValueError("KindVisualBatch requires identical layouts")
-        self.proto = v0
-        self.K = len(visuals)
-        self.n_envs = v0.n_envs
-        self.solver = v0.entity._solver
-
-        def _globals(local_dofs):
-            return [int(v.entity._dof_start) + int(d)
-                    for v in visuals for d in local_dofs]
-
-        # Per-entity blocks, matching combined.reshape(n_envs, K*m) row order.
-        self._set_dofs_g = (_globals(v0._batch_set_dofs)
-                            if v0._batch_set_dofs else None)
-        self._susp_set_g = (_globals(v0._susp_set_dofs)
-                            if v0._susp_set_dofs else None)
-        self._susp_ctrl_g = (_globals(v0._susp_ctrl_dofs)
-                             if v0._susp_ctrl_dofs else None)
-
-        # Batched spin accumulator (replaces the K per-visual accumulators).
-        self._angle = torch.zeros(self.n_envs, self.K, v0.n_wheels,
-                                  device=v0.device, dtype=v0.dtype)
-        # Batched slew-rate state for the susp visual targets.
-        self._susp_set_prev = None
-        self._susp_ctrl_prev = None
-
-    def reset_visual_state(self, env_ids=None) -> None:
-        """Mirror of ``WheelJointInternalSync.reset_visual_state`` for the batched
-        writer (spin accumulator + slew snap). Kind-WIDE: it clears every
-        vehicle's column. For a per-vehicle reset use
-        :meth:`reset_slot_visual_state`."""
-        if env_ids is None:
-            self._angle.zero_()
-        else:
-            self._angle[env_ids] = 0.0
-        self._susp_set_prev = None
-        self._susp_ctrl_prev = None
-
-    def reset_slot_visual_state(self, slot: int, env_ids=None) -> None:
-        """Clear ONE vehicle's spin accumulator column (``env_ids`` = those envs,
-        ``None`` = all envs of that vehicle).
-
-        The slew tensors are deliberately NOT dropped here. They are kind-wide
-        — one row block per env spanning all K vehicles — and "no slew origin"
-        is the tensor being None, so clearing them for one vehicle is not
-        expressible; dropping them would snap the susp visual target of every
-        OTHER vehicle of the kind too, which on the control path
-        (``visual_susp_mode="control"``) is a real joint PD transient, not a
-        cosmetic jump. The reset vehicle therefore slews to its new target at
-        ``_SUSP_VIS_MAX_RATE`` instead of snapping — bounded motion, and the
-        only way to keep a partial reset local. A FULL reset
-        (:meth:`reset_visual_state`) still snaps, as before."""
-        slot = int(slot)
-        if env_ids is None:
-            self._angle[:, slot] = 0.0
-        else:
-            self._angle[env_ids, slot] = 0.0
-
-    def step(self, steer_NK: torch.Tensor, dist_NK: torch.Tensor,
-             omega_NK: torch.Tensor, dt: float) -> None:
-        """Inputs are ``(n_envs, K, n_wheels)`` slabs (the kind's natural
-        layout) — no per-entity slicing."""
-        v0 = self.proto
-        N, K = self.n_envs, self.K
-        parts: list[torch.Tensor] = []
-
-        if v0._batch_spin:
-            self._angle.add_(omega_NK * dt)
-            two_pi = 2.0 * math.pi
-            self._angle = ((self._angle + math.pi) % two_pi) - math.pi
-            parts.append(self._angle[:, :, v0._spin_idx_valid])
-
-        if v0.steer_dofs:
-            phys = steer_NK[:, :, v0.steer_wheel_idx]
-            parts.append(-phys * v0._steer_signs.unsqueeze(0))   # (1,1,m) bcast
-
-        susp_written = False
-        if v0._susp_set_dofs:
-            d = dist_NK[:, :, v0._susp_set_idx]
-            clamp = (v0._susp_set_clamp.unsqueeze(0)
-                     if v0._susp_set_clamp is not None else None)
-            jp = _susp_visual_target(d, v0.wheel_mesh_radius, v0.l_susp,
-                                     clamp, self._susp_set_prev, dt,
-                                     v0.ray_miss)
-            self._susp_set_prev = jp
-            parts.append(jp)
-            susp_written = True
-
-        if self._set_dofs_g is not None:
-            combined = parts[0] if len(parts) == 1 else torch.cat(parts, dim=2)
-            # (N, K, m) → (N, K·m): row blocks per entity = global-idx order.
-            self.solver.set_dofs_position(
-                combined.reshape(N, -1), self._set_dofs_g)
-
-        if susp_written:
-            # No skip_forward (removed in genesis-world 1.5.0; poses refresh
-            # lazily on the next read) -- see WheelJointInternalSync.step.
-            self.solver.set_dofs_velocity(
-                torch.zeros(N, len(self._susp_set_g),
-                            device=v0.device, dtype=v0.dtype),
-                self._susp_set_g)
-
-        if self._susp_ctrl_g is not None:
-            d = dist_NK[:, :, v0._susp_ctrl_idx]
-            jp = _susp_visual_target(d, v0.wheel_mesh_radius, v0.l_susp,
-                                     None, self._susp_ctrl_prev, dt,
-                                     v0.ray_miss)
-            self._susp_ctrl_prev = jp
-            self.solver.control_dofs_position(
-                jp.reshape(N, -1), self._susp_ctrl_g)
-
-
-
-# ----------------------------------------------------------------------
-# Instanced (solver-free) wheel rendering — v1.1.17
-# ----------------------------------------------------------------------
-
-def _pose_mats(pos: np.ndarray, quat_wxyz: np.ndarray) -> np.ndarray:
+def _pose_mats(pos: np.ndarray, quat_wxyz: np.ndarray, dtype: Any = np.float32) -> np.ndarray:
     """(N, 3) positions + (N, 4) wxyz quats -> (N, 4, 4) transforms."""
     w = quat_wxyz[:, 0]; x = quat_wxyz[:, 1]
     y = quat_wxyz[:, 2]; z = quat_wxyz[:, 3]
-    T = np.zeros((pos.shape[0], 4, 4), dtype=np.float32)
+    T = np.zeros((pos.shape[0], 4, 4), dtype=dtype)
     T[:, 0, 0] = 1 - 2 * (y * y + z * z)
     T[:, 0, 1] = 2 * (x * y - w * z)
     T[:, 0, 2] = 2 * (x * z + w * y)
@@ -569,171 +104,424 @@ def _pose_mats(pos: np.ndarray, quat_wxyz: np.ndarray) -> np.ndarray:
     return T
 
 
+def _local_T(geom: Any) -> np.ndarray:
+    """A rigid geom's pose in its link frame (``init_pos`` / ``init_quat``), float64 4x4."""
+    lp = np.asarray(geom.init_pos, dtype=np.float64).reshape(1, 3)
+    lq = np.asarray(geom.init_quat, dtype=np.float64).reshape(1, 4)
+    return _pose_mats(lp, lq, np.float64)[0]
+
+
+# numpy floating-point warnings silenced while the closed-form poses are
+# assembled: an inf in one env's pose (inf * 0 in the matmul, seen in the unit
+# test; a float32 cast overflow) would otherwise print a RuntimeWarning for a
+# row that ``_keep_invalid_rows`` then drops. A NaN pose printed none in the
+# unit test (run with -W error::RuntimeWarning).
+def _nonfinite_ok() -> Any:
+    return np.errstate(invalid="ignore", over="ignore")
+
+
+def _keep_invalid_rows(T: np.ndarray, prev: np.ndarray, max_abs: float) -> np.ndarray:
+    """The engine's invalid-pose rule applied to a pose array about to be
+    written: every instance row of ``T`` (shape ``(R, 4, 4)``) with an entry
+    that is not ``abs(x) < max_abs`` (NaN included) is replaced by the same row
+    of ``prev``. Returns ``T`` itself when every row is valid, else a copy."""
+    bad = ~(np.abs(T) < max_abs).all(axis=(-2, -1))
+    if not bad.any():
+        return T
+    out = T.copy()
+    out[bad] = np.asarray(prev)[bad]
+    return out
+
+
+def _cylinder_mesh(radius: Optional[float]) -> Any:
+    import trimesh as _tm
+    r = float(radius or 0.35)
+    width = max(0.08, 0.4 * r)
+    tm = _tm.creation.cylinder(radius=r, height=width, sections=24)
+    # cylinder axis is +z; a wheel spins about the chassis +y axis
+    tm.apply_transform(_tm.transformations.rotation_matrix(math.pi / 2.0, (1, 0, 0)))
+    return tm
+
+
 class InstancedWheelRenderer:
-    """Solver-free wheel visuals (v1.1.17) — VehicleScene's default when the
-    scene renders (wheel_render_mode="auto", n_envs == 1).
+    """VehicleScene's wheel renderer (2.0.6: engine-node override, "ENO").
 
-    One instanced pyrender node per (vehicle kind, wheel index); instance
-    poses are streamed each step from the closed-form
-    ``wheel_visual_transforms`` (steer + suspension + spin baked). The path
-    touches the RENDERER only — no joint writes, no solver FK, no PD — so
-    wheel visuals cannot perturb physics BY CONSTRUCTION (WheelJointInternalSync,
-    the previous mechanism, drives solver joints and measurably can; it
-    remains available via ``wheel_render_mode="internal_sync"`` and is still
-    used automatically for ``n_envs > 1``).
+    One unit per vehicle kind (batched solver) or per vehicle (per_vehicle
+    solver), holding the K entities, the wheel list and the closed-form pose
+    provider. On every node sync of the main scene's rasterizer context
+    (``_gs_compat.on_render_sync``), :meth:`update` writes, into every engine
+    render node of each wheel part, ``T_closed(env, k, i) @ T_local(part)`` for
+    the rendered envs, and the closed form itself into fallback nodes.
 
-    The URDF wheel-link visual geoms are hidden by the caller
-    (``_gs_compat.hide_vgeoms``, before build) and re-baked here into per-wheel
-    trimeshes (vgeom local offsets applied), so the instanced copies look
-    identical to what the URDF wheels would have shown. Nodes are plain
-    render-context nodes (``is_marker=False``, ``_gs_compat.add_render_node``):
-    every camera renders them without needing ``debug=True``. Node creation is
-    lazy (first ``update()``); pose writes hold the viewer lock."""
+    Which parts are drawn is decided from the ENGINE MODEL, never from an empty
+    node lookup: entity ``surface.vis_mode`` None -> the wheel link's visual
+    geoms; ``"collision"`` -> its collision geoms; a link with no such geoms, or
+    a wheel name that does not resolve -> one SDK fallback node. A part that
+    must be drawn but has no engine node raises ``RuntimeError``; a visual geom
+    with ``DynamicVertices`` raises ``ValueError`` (defensive: not reachable
+    through ``VehicleScene.add_vehicle``). A non-None ``vis_mode`` other than
+    ``"collision"`` on a wheel link that carries collision geoms raises
+    ``ValueError`` at ``build()`` of a rendered scene: on 1.5.0 only ``"sdf"``
+    reaches here (``Scene.add_entity`` clears every other non-debug value to
+    None), and its draw layout was never run. It needs an UNPREPARED URDF
+    (``add_vehicle(morph=...)``; ``prepare_vehicle_urdf`` strips wheel
+    colliders). With a prepared URDF the wheel link has no colliders and an
+    ``"sdf"`` entity's wheels are drawn by fallback nodes -- untested.
 
-    def __init__(self, gs_scene: Any, node_swap: bool = False):
-        # (node_swap is accepted for call-site compatibility but no longer
-        # used: v1.1.20 final streams poses through the engine's own
-        # per-frame buffer-update queue — context.jit.update_buffer, reached
-        # through _gs_compat.queue_instance_poses since 2.0.5 — the
-        # SAME mechanism Genesis uses to stream link-frame instance poses,
-        # consumed by BOTH the native viewer and offscreen cameras on the
-        # render thread. Earlier attempts: in-place poses writes froze in
-        # the viewer (classic renderer uploads the instance buffer only
-        # once), and node-recreation caused shadow-state flicker / marker
-        # translucency.)
+    Ordering guard (per sync): the engine writes its nodes' poses inside
+    ``_sync_shapes``, before the hook. At the end of every :meth:`update` that
+    completes, the renderer records a private COPY of every pose array it
+    wrote. At the START of every hooked sync it compares each recorded
+    primitive's ``poses`` with that copy by value (``np.array_equal(...,
+    equal_nan=True)``) and then discards the record, also when the comparison
+    raised. A raise (``RuntimeError``) means: the wheel poses the SDK wrote on
+    the previous completed hooked sync were changed before this one -- a
+    re-assignment or an in-place write by anything after the hook, e.g. an
+    engine whose pose write moved later in ``update()``. Limits:
+    (1) ONE SYNC LATE: the first affected frame has already been drawn at the
+    solver's pose, and the raise comes at the next hooked sync; a frame with no
+    later hooked sync (the last render of a process, or a single render after a
+    step) is never checked. (2) It does NOT detect an engine ``"model"`` buffer
+    queued after the hook without touching ``primitive.poses`` (the queue is
+    last-write-wins); that case is guarded only by the flush test in
+    ``tests/test_render_sync_pose.py``, to be run on every engine bump.
+    (3) After a hooked sync that did not complete -- the guard raised, the
+    engine's ``_sync_shapes`` raised, the pose provider (or anything else in
+    :meth:`update`) raised, or a ``BaseException`` such as
+    ``KeyboardInterrupt`` -- nothing was recorded, so the next hooked sync is
+    not checked; checking resumes on the one after. A persistent late write
+    therefore raises on at least every second hooked sync; while the provider
+    raises on every sync, its own exception surfaces on each.
+    (4) A non-finite pose is not an error (next paragraph).
+
+    Non-finite poses: before writing, every instance row (one rendered env of
+    one wheel node) with an entry that is not ``abs(x) < POSE_MAX_ABS`` (NaN or
+    inf; the engine's own invalid-pose rule, read through
+    ``_gs_compat.pose_max_abs``) is replaced by the row the SDK last wrote to
+    that node (the record of the last completed :meth:`update`, which survives
+    the guard's discard), or by the node's current row when the SDK has written
+    none. So a diverged env's wheel instance keeps its last drawn pose and no
+    NaN reaches the renderer's bounds; no warning is issued (2.0.6). The record
+    and the guard copy hold the array actually written. The SDK writes one
+    array to every primitive of a node; the first primitive's row is the one
+    kept (as in the engine). The wiring self-test (:meth:`wire`) runs one forced
+    sync and checks the hook ran once and the poses / queued buffers equal the
+    override -- a wiring / structure check: that sync cannot test the ordering,
+    because on 1.5.0 the engine writes node poses only on a sync after a state
+    change (measured)."""
+
+    def __init__(self, gs_scene: Any):
         self._gs_scene = gs_scene
         self._units: list[dict] = []
-
-    # -- harvesting ----------------------------------------------------------
-
-    @staticmethod
-    def harvest_wheel_meshes(entity: Any, wheels: Any) -> Optional[list]:
-        """Per-wheel trimesh in the WHEEL-LINK frame (local geom offsets baked
-        in). Source order per wheel (v1.1.22):
-
-        1. the link's VISUAL geoms — the normal case;
-        2. its COLLISION geoms, when the wheel was authored with a collider
-           and no visual (``urdf_prep`` promotes those to visuals, so this is
-           only a safety net for callers that skipped the prep);
-        3. a cylinder synthesized from the wheel's ``radius`` — last resort,
-           so a wheel with NO geometry at all still shows up.
-
-        Returns None only if the wheel links cannot be resolved at all, in
-        which case the caller falls back to WheelJointInternalSync."""
-        import trimesh as _tm
-        out = []
-        for w in wheels:
-            name = getattr(w, "name", None)
-            link = None
-            if name:
-                try:
-                    link = entity.get_link(name)
-                except Exception:
-                    link = None
-            if link is None:
-                return None
-            geoms = list(getattr(link, "vgeoms", None) or [])
-            if not geoms:
-                geoms = list(getattr(link, "geoms", None) or [])   # colliders
-            parts = []
-            for g in geoms:
-                try:
-                    tm = g.get_trimesh().copy()
-                except Exception:
-                    continue
-                lp = np.asarray(g.init_pos, dtype=np.float64).reshape(1, 3)
-                lq = np.asarray(g.init_quat, dtype=np.float64).reshape(1, 4)
-                tm.apply_transform(_pose_mats(lp, lq)[0].astype(np.float64))
-                parts.append(tm)
-            if not parts:
-                r = float(getattr(w, "radius", None) or 0.35)
-                width = max(0.08, 0.4 * r)
-                tm = _tm.creation.cylinder(radius=r, height=width, sections=24)
-                # cylinder axis is +z; a wheel spins about the chassis +y axis
-                tm.apply_transform(_tm.transformations.rotation_matrix(
-                    math.pi / 2.0, (1, 0, 0)))
-                parts.append(tm)
-            out.append(_tm.util.concatenate(parts) if len(parts) > 1 else parts[0])
-        return out
+        self._ctx = None
+        self._hook = None
+        self._resolved = False
+        self._pose_max_abs: Optional[float] = None
+        # primitive -> a private copy of the array the last COMPLETED update()
+        # assigned to primitive.poses. ``_last`` is the guard's copy (compared by
+        # value, then discarded, at the start of every hooked sync); ``_drawn``
+        # is the same record kept for the non-finite-row rule (never discarded).
+        self._last: dict = {}
+        self._drawn: dict = {}
 
     # -- units ---------------------------------------------------------------
 
-    def add_unit(self, meshes: list, provider: Any, K: int) -> None:
-        """Register one vehicle kind: ``meshes`` = per-wheel trimeshes (from
-        :meth:`harvest_wheel_meshes`), ``provider(frame)`` returning the
+    def add_unit(self, entities: Sequence, wheels: Sequence, provider: Any, K: int) -> None:
+        """Register one vehicle kind: ``entities`` (K of them, slot order),
+        ``wheels`` (the kind's ``cfg.wheels``), ``provider(frame)`` returning the
         closed-form ``(pos, quat)`` shaped ``(n_envs, K, n, 3/4)`` (kind
         physics) or ``(n_envs, n, 3/4)`` (single VehiclePhysics, K == 1)."""
-        self._units.append(dict(meshes=meshes, provider=provider,
-                                K=int(K), n=len(meshes), nodes=None))
+        entities = tuple(entities)
+        if len(entities) != int(K):
+            raise ValueError(f"add_unit: {len(entities)} entities for K={K}")
+        self._units.append(dict(entities=entities, wheels=tuple(wheels), provider=provider,
+                                K=int(K), n=len(wheels), parts=None, fallback=None))
 
     def rebind(self, providers: Sequence) -> None:
         """Re-point the units' pose providers, in unit order.
 
-        ``providers`` is one ``(provider, K, n)`` per unit, matched
-        POSITIONALLY — unit *i* takes ``providers[i]``. The caller
-        (``VehicleScene._rebind_wheel_renderer``) owns that ordering
-        assumption and documents why it holds. Used when
+        ``providers`` is one ``(provider, K, n, entities)`` per unit, matched
+        POSITIONALLY (``VehicleScene._rebind_wheel_renderer`` owns that
+        ordering). K, n AND the identity of every entity (in slot order) must
+        still match: the wheel parts are tied to entities, and two same-shaped
+        kinds swapping places would otherwise pose one vehicle's wheels on the
+        other. Raises ``ValueError`` on any mismatch and leaves EVERY unit
+        untouched (validated in full before the first assignment). Used when
         ``VehicleScene`` rebuilds its batched driver: the old providers are
-        bound methods of the DISCARDED kind, which is never stepped again, so
-        leaving them in place freezes the rendered wheels permanently while the
-        physics keeps running (v1.6.2 fix).
-
-        ``K`` and ``n`` must both still match: :meth:`update` reshapes each
-        read to the unit's ``(K, n)`` — fixed when the meshes were harvested in
-        :meth:`add_unit` — so a changed wheel count would turn the freeze into
-        a reshape error one frame later. Raises ``ValueError`` on any mismatch
-        and leaves EVERY unit untouched (validated in full before the first
-        assignment), so the caller can keep the previous driver. The nodes
-        themselves are not recreated: :meth:`update` only writes pose buffers,
-        which do not depend on where the poses came from."""
+        bound methods of the DISCARDED kind, which is never stepped again."""
         if len(providers) != len(self._units):
             raise ValueError(
                 f"rebind got {len(providers)} providers for "
                 f"{len(self._units)} render units (the vehicle kinds changed)")
-        for u, (_, K, n) in zip(self._units, providers):
+        for u, (_, K, n, ents) in zip(self._units, providers):
             if int(K) != int(u["K"]) or int(n) != int(u["n"]):
                 raise ValueError(
                     f"rebind shape mismatch: unit has K={u['K']}, n={u['n']}; "
                     f"new provider has K={int(K)}, n={int(n)}")
-        for u, (provider, _, _) in zip(self._units, providers):
+            ents = tuple(ents)
+            if len(ents) != len(u["entities"]) or any(a is not b for a, b in zip(ents, u["entities"])):
+                raise ValueError(
+                    "rebind entity mismatch: the new provider's kind holds different "
+                    "entities (or a different slot order) than the render unit")
+        for u, (provider, _, _, _) in zip(self._units, providers):
             u["provider"] = provider
 
-    # -- per-step update -------------------------------------------------------
+    # -- wiring ----------------------------------------------------------------
+
+    def wire(self) -> None:
+        """Install on the main scene's rasterizer context (after ``build()``):
+        structure check, hook, one build-time :meth:`update` under the viewer
+        lock (decides the parts and the fallbacks and poses every node before
+        any draw), then the behavioural self-test: one forced sync must run the
+        hook exactly once and leave every posed primitive at the override
+        (poses and, when queued, the engine's "model" buffer)."""
+        vis = self._gs_scene.visualizer
+        ctx = vis.context
+        check_render_seg_api(ctx)
+        self._ctx = ctx
+        self._hook = on_render_sync(ctx, self.update, before=self._check_last_writes)
+        with vis.viewer_lock:
+            self.update()
+        c0 = self._hook.calls
+        force_render_sync(ctx, vis.viewer_lock)
+        if self._hook.calls != c0 + 1:
+            raise RuntimeError(
+                f"{WHEEL_RENDER_TAG} wiring self-test: one forced sync ran the wheel hook "
+                f"{self._hook.calls - c0} times (expected 1)")
+        for prim, arr in self._last.items():
+            if np.abs(np.asarray(prim.poses, dtype=np.float64) - arr).max() > 1e-6:
+                raise RuntimeError(
+                    f"{WHEEL_RENDER_TAG} wiring self-test: a wheel node's poses differ "
+                    f"from the override after a forced sync")
+            q = queued_model(ctx, prim)
+            if q is not None and np.abs(np.asarray(q).transpose(0, 2, 1) - arr).max() > 1e-6:
+                raise RuntimeError(
+                    f"{WHEEL_RENDER_TAG} wiring self-test: the queued 'model' buffer of a "
+                    f"wheel node is not the transposed override (engine buffer layout changed?)")
+
+    def _check_last_writes(self) -> None:
+        """The per-sync ordering guard (runs at the START of every hooked
+        sync): every primitive posed by the last completed :meth:`update` must
+        still hold, by value (``equal_nan=True``), the poses written there.
+        The record is discarded afterwards, also when this raises, so only
+        :meth:`update` re-creates it. See the class docstring for what it does
+        and does not detect (one sync late; not a queued buffer; no check on
+        the sync after an incomplete one)."""
+        try:
+            for prim, saved in self._last.items():
+                if not np.array_equal(prim.poses, saved, equal_nan=True):
+                    raise RuntimeError(
+                        f"{WHEEL_RENDER_TAG} the wheel poses the SDK wrote on the previous "
+                        f"completed hooked sync were changed before this one (a write after "
+                        f"the SDK's sync hook; the engine's pose write is no longer inside "
+                        f"_sync_shapes?); detected one sync late: the previous frame may "
+                        f"have drawn that wheel at the solver's pose")
+        finally:
+            self._last = {}
+
+    # -- parts -------------------------------------------------------------------
+
+    def _resolve(self, ctx: Any) -> None:
+        """Decide, from the engine model, each (unit, k, i)'s drawn parts and
+        whether it needs a fallback node; create the fallback nodes (in unit, k,
+        i order, so their segmentation ids follow the engine's in that order)."""
+        R = len(rendered_envs(ctx))
+        self._pose_max_abs = pose_max_abs()
+        for u in self._units:
+            parts, fallback = [], {}
+            for k, ent in enumerate(u["entities"]):
+                vis_mode = ent.surface.vis_mode
+                for i, w in enumerate(u["wheels"]):
+                    name = w.name
+                    link = None
+                    if name is not None:
+                        try:
+                            link = ent.get_link(name)
+                        except gs.GenesisException:
+                            _logger.debug("wheel link %r not found", name, exc_info=True)
+                            link = None
+                    if link is None:
+                        fallback[(k, i)] = (None, None, w)
+                        continue
+                    vgeoms, cgeoms = list(link.vgeoms), list(link.geoms)
+                    if vis_mode is None:
+                        if vgeoms:
+                            for vg in vgeoms:
+                                if not part_is_posed(vg):
+                                    raise ValueError(
+                                        f"{WHEEL_RENDER_TAG} wheel {name!r}: its visual geom draws "
+                                        f"DynamicVertices (world-space vertices), which a pose "
+                                        f"override cannot place")
+                                parts.append((k, i, vg, _local_T(vg)))
+                        else:
+                            fallback[(k, i)] = (link, cgeoms[0].seg_keys if cgeoms else None, w)
+                    elif not cgeoms:
+                        fallback[(k, i)] = (link, vgeoms[0].seg_keys if vgeoms else None, w)
+                    elif vis_mode == "collision":
+                        for g in cgeoms:
+                            parts.append((k, i, g, _local_T(g)))
+                    else:
+                        raise ValueError(
+                            f"{WHEEL_RENDER_TAG} wheel {name!r}: entity vis_mode={vis_mode!r} with "
+                            f"collision geoms on the wheel link is not supported by the wheel "
+                            f"renderer (with wheel colliders only vis_mode None and 'collision' "
+                            f"are supported; the draw layout "
+                            f"of {vis_mode!r} with wheel colliders was never run). Prepare the "
+                            f"URDF with genesis_vehicle.urdf_prep.prepare_vehicle_urdf (it strips "
+                            f"wheel colliders), or use vis_mode=None / 'collision'. Raised from "
+                            f"build() of a rendered scene (a camera or a viewer); headless scenes "
+                            f"are unaffected.")
+            # C25: one node reached from two parts with different T_local
+            seen: dict = {}
+            for j, (k, i, part, Tl) in enumerate(parts):
+                nodes = engine_part_nodes(ctx, part)
+                if not nodes:
+                    raise RuntimeError(
+                        f"{WHEEL_RENDER_TAG} wheel {u['wheels'][i].name!r} (vehicle slot {k}): "
+                        f"the engine draws this wheel part but no render node was found under its "
+                        f"segmentation keys (the engine's node lookup changed?)")
+                for node in nodes:
+                    prev = seen.get(id(node))
+                    if prev is not None and not np.allclose(prev, Tl, atol=1e-9):
+                        raise RuntimeError(
+                            f"{WHEEL_RENDER_TAG} one engine render node is reached from two wheel "
+                            f"parts with different local offsets (a collider and a visual geom "
+                            f"sharing a GeomKey?)")
+                    seen[id(node)] = Tl
+            u["parts"] = parts
+            u["part_k"] = np.array([p[0] for p in parts], dtype=np.int64)
+            u["part_i"] = np.array([p[1] for p in parts], dtype=np.int64)
+            u["part_T"] = (np.stack([p[3] for p in parts]) if parts
+                           else np.zeros((0, 4, 4)))
+            u["fallback"] = {}
+            if fallback:
+                check_render_fallback_api(ctx)
+            for (k, i), (link, seg_keys, w) in sorted(fallback.items()):
+                u["fallback"][(k, i)] = self._make_fallback(ctx, u, k, i, link, seg_keys, w, R)
+        self._resolved = True
+
+    def _make_fallback(self, ctx: Any, u: dict, k: int, i: int, link: Any,
+                       seg_keys: Any, w: Any, R: int) -> Any:
+        """One SDK fallback node for wheel (k, i) of unit ``u``: the harvested
+        mesh, R instances, registered for segmentation under ``seg_keys`` (or
+        unregistered, with the one-per-process harvest WARNING)."""
+        global _HARVEST_WARNED
+        mesh = self._harvest(link, w)
+        if seg_keys is None and not _HARVEST_WARNED:
+            _HARVEST_WARNED = True
+            _logger.warning(
+                "[genesis_vehicle:wheel-harvest] wheel %r: no wheel link geometry to "
+                "draw or to take a segmentation id from; drawn as a synthesized "
+                "cylinder of its radius with no segmentation id. Its URDF wheel "
+                "visual, if any, is drawn as well (twice). (one warning per process)",
+                w.name)
+        from genesis.ext import pyrender
+        obj = pyrender.Mesh.from_trimesh(
+            mesh, name=f"gv_wheel_fb_{id(u)}_{k}_{i}",
+            poses=np.tile(np.eye(4, dtype=np.float32), (R, 1, 1)),
+            smooth=False, is_marker=False,
+            envs=(np.ones(R, dtype=bool) if self._gs_scene.n_envs > 1 else None))
+        node = add_render_node(ctx, obj)
+        if seg_keys is not None:
+            register_fallback_seg(ctx, node, seg_keys)
+        return node
+
+    @staticmethod
+    def _harvest(link: Any, wheel: Any) -> Any:
+        """The fallback mesh of one wheel, in the wheel-link frame: its visual
+        geoms, else its collision geoms, else a cylinder of the wheel radius."""
+        import trimesh as _tm
+        geoms = []
+        if link is not None:
+            geoms = list(link.vgeoms) or list(link.geoms)
+        parts = []
+        for g in geoms:
+            tm = g.get_trimesh().copy()
+            tm.apply_transform(_local_T(g))
+            parts.append(tm)
+        if not parts:
+            parts.append(_cylinder_mesh(getattr(wheel, "radius", None)))
+        return _tm.util.concatenate(parts) if len(parts) > 1 else parts[0]
+
+    # -- per-sync update ---------------------------------------------------------
+
+    def drawn_nodes(self) -> list:
+        """``[(unit_idx, k, i, node, T_local or None)]`` for every node the
+        renderer poses (engine nodes with the part's local offset, fallback
+        nodes with None). For tests and harnesses."""
+        out = []
+        ctx = self._ctx
+        for ui, u in enumerate(self._units):
+            for (k, i, part, Tl) in (u["parts"] or []):
+                for node in engine_part_nodes(ctx, part):
+                    out.append((ui, k, i, node, Tl))
+            for (k, i), node in (u["fallback"] or {}).items():
+                out.append((ui, k, i, node, None))
+        return out
 
     def update(self) -> None:
-        """Stream the current closed-form wheel poses into the render nodes.
-
-        Uses the engine's OWN per-frame instance-buffer update queue
-        (``context.jit.update_buffer``, through
-        ``_gs_compat.queue_instance_poses``): set ``primitive.poses`` on every
-        primitive and queue a model-buffer refresh that the render thread
-        flushes on its next pass. Works identically for the native viewer and
-        offscreen cameras; no node churn, no marker semantics, normal opaque
-        depth-tested rendering."""
-        if not self._units:
+        """Write the current closed-form wheel poses into the wheel nodes
+        (engine nodes and fallbacks) for the rendered envs. Called from the
+        sync hook (and once at wiring); holds the viewer lock (reentrant)."""
+        ctx = self._ctx
+        if ctx is None or not self._units:
             return
-        vis = getattr(self._gs_scene, "_visualizer", None)
-        if vis is None:
-            return
-        from genesis.ext import pyrender
-        ctx = vis.context
-        with vis.viewer_lock:
+        with self._gs_scene.visualizer.viewer_lock:
+            if not self._resolved:
+                self._resolve(ctx)
+            ridx = rendered_envs(ctx)
+            R = len(ridx)
+            items = []
             for u in self._units:
-                p, q = u["provider"]("world")
                 K, n = u["K"], u["n"]
-                pos = p.detach().cpu().numpy().reshape(K, n, 3)
-                quat = q.detach().cpu().numpy().reshape(K, n, 4)
-                if u["nodes"] is None:
-                    nodes = []
-                    for i, mesh in enumerate(u["meshes"]):
-                        name = f"gv_wheel_{id(u)}_{i}"
-                        obj = pyrender.Mesh.from_trimesh(
-                            mesh, name=name,
-                            poses=_pose_mats(pos[:, i], quat[:, i]),
-                            smooth=False, is_marker=False)
-                        nodes.append(add_render_node(ctx, obj))   # pyrender Node
-                    u["nodes"] = nodes
-                else:
-                    for i, node in enumerate(u["nodes"]):
-                        queue_instance_poses(
-                            ctx, node, _pose_mats(pos[:, i], quat[:, i]))
+                p, q = u["provider"]("world")
+                p = p.detach().cpu().numpy().astype(np.float64).reshape(-1, K, n, 3)[ridx]
+                q = q.detach().cpu().numpy().astype(np.float64).reshape(-1, K, n, 4)[ridx]
+                with _nonfinite_ok():                  # a non-finite row is dropped below
+                    T = _pose_mats(p.reshape(-1, 3), q.reshape(-1, 4), np.float64).reshape(R, K, n, 4, 4)
+                parts = u["parts"]
+                if parts:
+                    with _nonfinite_ok():
+                        Tw = T[:, u["part_k"], u["part_i"]] @ u["part_T"][None]      # (R, P, 4, 4)
+                        Tw = np.ascontiguousarray(Tw.transpose(1, 0, 2, 3), dtype=np.float32)
+                    done = set()
+                    for j, (k, i, part, _) in enumerate(parts):
+                        nodes = engine_part_nodes(ctx, part)
+                        if not nodes:
+                            raise RuntimeError(
+                                f"{WHEEL_RENDER_TAG} wheel {u['wheels'][i].name!r} (vehicle slot "
+                                f"{k}): its engine render node disappeared")
+                        arr = Tw[j]
+                        for node in nodes:
+                            if id(node) in done:
+                                continue
+                            done.add(id(node))
+                            for prim in node.mesh.primitives:
+                                if len(prim.poses) != R:
+                                    raise RuntimeError(
+                                        f"{WHEEL_RENDER_TAG} an engine wheel node holds "
+                                        f"{len(prim.poses)} instances, expected one per rendered "
+                                        f"env ({R})")
+                            items.append((node, arr))
+                if u["fallback"]:
+                    with _nonfinite_ok():
+                        Tf = np.ascontiguousarray(T.transpose(1, 2, 0, 3, 4), dtype=np.float32)  # (K, n, R, 4, 4)
+                    for (k, i), node in u["fallback"].items():
+                        items.append((node, Tf[k, i]))
+            items = [(node, self._valid_rows(node, arr)) for node, arr in items]
+            queue_part_poses(ctx, items)
+            self._drawn = self._last = {prim: arr.copy() for node, arr in items
+                                        for prim in node.mesh.primitives}
+
+    def _valid_rows(self, node: Any, arr: np.ndarray) -> np.ndarray:
+        """``arr`` with every instance row that fails the engine's invalid-pose
+        rule (``_gs_compat.pose_max_abs``) replaced by the row the SDK last
+        wrote to ``node`` (its first primitive's record), else by that
+        primitive's current row. See the class docstring."""
+        prims = node.mesh.primitives
+        if not prims:
+            return arr
+        prev = self._drawn.get(prims[0])
+        if prev is None or prev.shape != arr.shape:
+            prev = prims[0].poses
+        return _keep_invalid_rows(arr, prev, self._pose_max_abs)

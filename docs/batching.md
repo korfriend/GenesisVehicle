@@ -131,7 +131,11 @@ overrides) and runs a single batched compute per kind:
   removed in v2.0.5).
 - **Sensor reads**: K small `sensor.read()` calls in a Python loop
   (one raycaster per vehicle — unavoidable per-vehicle I/O).
-- **Visual writes** (only when `enable_wheel_joint_internal_sync=True`): since
+- **Visual writes — REMOVED in v2.0.6** (no SDK path writes wheel joints any
+  more; `enable_wheel_joint_internal_sync=True` raises `ConfigError`, and a
+  rendered `VehicleScene` draws the wheels by overriding the engine's own wheel
+  render nodes from the closed form, `physics-contracts.md` §7.8). History,
+  through v2.0.5 (only when `enable_wheel_joint_internal_sync=True`): since
   v1.0.15 the K same-kind writers collapse into **one** solver-level
   `set_dofs_position` over concatenated global dof indices
   (`KindVisualBatch` — one engine reset + FK pass for ALL K entities;
@@ -479,7 +483,7 @@ already happened** (the grouping/dispatch bookkeeping is unit-tested in
 | L2 sweep | [`samples/perf_multi_vehicle.py`](../samples/perf_multi_vehicle.py) | 1.14× at K=2, 1.07× at K=4 (4-kind fleet) |
 | L2 × L3 minimal | [`samples/l2l3_minimal.py`](../samples/l2l3_minimal.py) | shortest runnable L2 × L3 (K interacting × N scenarios, per-scenario control) |
 | L2 × L3 combined | [`samples/perf_l2_l3_combined.py`](../samples/perf_l2_l3_combined.py) | 4.6× at K=2 N=4 (≈ product of L2 × L3 individual) |
-| Multi-vehicle visual | [`samples/road_loop.py`](../samples/road_loop.py) | pre-1.0.15 figure: 6% faster than per-vehicle loop (16 vehicles, 4 kinds). v1.0.15 `KindVisualBatch` batches the visual writes themselves — 30 tanks CPU: 23.3 → 14.2 ms/step with VJS on |
+| Multi-vehicle visual | [`samples/road_loop.py`](../samples/road_loop.py) | pre-1.0.15 figure: 6% faster than per-vehicle loop (16 vehicles, 4 kinds). v1.0.15 `KindVisualBatch` batched the visual writes themselves — 30 tanks CPU: 23.3 → 14.2 ms/step with the joint-writing wheel visuals (VJS, `WheelJointInternalSync`) on (history: VJS and `KindVisualBatch` were removed in v2.0.6; rendered cost since then: CHANGELOG 2.0.6 §8.5) |
 | L2 × L3 ego+traffic visual | [`samples/city_traffic_ego.py`](../samples/city_traffic_ego.py) | 8 vehicles × 4 envs = 32 batched; 3.5× throughput vs n_envs=1 |
 
 Re-run the samples on your machine — absolute numbers depend on GPU

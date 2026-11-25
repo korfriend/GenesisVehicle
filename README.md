@@ -115,7 +115,7 @@ import on an older engine (genesis itself must still be importable). A
 genesis-world >= 1.6 logs one "not validated" WARNING and continues; **a 1.5.x
 patch release (1.5.1, ...) is admitted silently and is NOT validated** — the 20
 engine-keyed identity locks skip on it, and it needs its own capture / parity
-round. The 2.0.5 suite runs on 1.5.0; **measurements published before v2.0.5
+round. The 2.0.5 and 2.0.6 suites run on 1.5.0; **measurements published before v2.0.5
 were taken on 1.4.5 (v1.6.9-v2.0.4) or 1.4.0 (before) and keep their labels**;
 a figure in these docs without an engine label is not a 1.5.0 figure. Every
 `<= 1.3.3` / 1.4.x compatibility branch was removed in v2.0.5 (through v2.0.4
@@ -334,12 +334,14 @@ python -m genesis_vehicle.samples.bench_raycast_mode    # 10. raycast_mode bench
 Most scripts accept `--viewer` for an offscreen camera render; the five
 benchmarks (`perf_vectorization`, `perf_multi_vehicle`, `perf_l2_l3_combined`,
 `bench_raycast_mode`, `bench_path_follower`) are intentionally headless (rendering would distort the
-numbers). Since v0.7.14 the samples set
-`cfg.enable_wheel_joint_internal_sync = args.viewer` (it defaults to `False` now), so
-headless runs skip the per-step viewer-joint FK and report pure-physics
-timing. The catalog [`samples/README.md`](samples/README.md) has the
-per-sample viewer status, the `--viewer` ↔ `enable_wheel_joint_internal_sync` note, and
-pointers to which sample is the right visual counterpart for each benchmark.
+numbers). With `--viewer`, `VehicleScene` draws the wheels by overriding the
+engine's own wheel render nodes from the closed form (v2.0.6, at every
+`n_envs`; no solver write). (Through v2.0.5 this paragraph said the samples set
+`cfg.enable_wheel_joint_internal_sync = args.viewer` — no sample has done so
+for several releases, and since v2.0.6 `True` raises `ConfigError`.) The
+catalog [`samples/README.md`](samples/README.md) has the per-sample viewer
+status, the wheel-rendering note, and pointers to which sample is the right
+visual counterpart for each benchmark.
 
 ## Documentation
 
@@ -379,10 +381,10 @@ genesis_vehicle/
 ├── urdf.py                         parse_urdf() + URDFParsedConfig
 ├── raycast.py                      WheelRayPattern
 ├── dynamics.py                     brake_projection / deadbeat_scale / suspension_normal_force
-├── visual.py                       WheelJointInternalSync (viewer wheel-joint driver)
+├── visual.py                       wheel renderer: engine-node override (v2.0.6; the joint-writing WheelJointInternalSync was removed)
 ├── tire_models/                    TireModel ABC + Pacejka + Coulomb
 ├── strategies/                     steering / drivetrain / coupling / stability
-├── presets.py                      4 ready-to-use VehicleConfig builders
+├── presets.py                      5 ready-to-use VehicleConfig builders
 ├── control/                        PathFollower (MPC layer + PD; gear mode v2.0.2; opt-in K-turn v2.0.3), inverse plants, brake model, sweep_measure, identify
 ├── docs/                           the wiki
 └── tests/                          pure-Python unit tests (no Genesis needed)
@@ -396,13 +398,15 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-1391 tests collected (1388 passed, 3 skipped) covering URDF parsing, config resolve, suspension sizing, strategy
+1473 tests collected (1470 passed, 3 skipped) covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a no-axle-torque
-witness and a driving-rollout lock, both bit-identical to the v2.0.4 tree on
-genesis-world 1.5.0 since v2.0.5 — through v2.0.4 the witness reached back to
-the v1.5.0 tree on 1.4.5, a statement 2.0.5 no longer checks), the config-rebuild state carry and the reset
+witness bit-identical to the v2.0.4 tree on genesis-world 1.5.0 since v2.0.5,
+and a driving-rollout lock re-captured from the v2.0.6 tree in v2.0.6 because
+the lock's ground gate changed the braked spawn drop — through v2.0.4 the
+witness reached back to the v1.5.0 tree on 1.4.5, a statement 2.0.5 no longer
+checks), the config-rebuild state carry and the reset
 semantics (v1.6.2), the raycast-mode benchmark harness (schedule,
 gates, pairing and publication rule, driven through an injected runner), the
 build-time config derivations staying live under a post-`build()` write
@@ -438,9 +442,9 @@ stall reproduced on the real NMPC, the PD golden up to its four `GOAL-MISSED`
 steps, a pre-registered run-away property test on a kinematic plant),
 the opt-in gear mode and the gear-mode follower (v2.0.2 — the shift and
 drive-torque rules on both solvers, every skid-steer refusal site, a
-a platform-gated byte-identity check of signed inputs, since v2.0.5 against a
-capture of the 2.0.4 tree on genesis-world 1.5.0 (the 2.0.1 and 2.0.4 fixtures
-are kept, not asserted),
+a platform-gated byte-identity check of signed inputs, since v2.0.6 against a
+capture of the 2.0.6 tree on genesis-world 1.5.0 (in v2.0.5 of the 2.0.4 tree;
+the 2.0.1, 2.0.4 and 2.0.5 fixtures are kept, not asserted),
 the stage-2 brake model and its low-speed coast, `SHIFT` / `GUARD` /
 `GEAR-ABORT` against an independent oracle),
 the opt-in K-turn (v2.0.3 — the trigger and planner, mirror symmetry, the leg
@@ -452,16 +456,23 @@ overpowering the brake, the per-wheel and rigid-body caps over every wheel
 subset and steer angle, the cap report, a light vehicle and a low-yaw-inertia
 car at rest, the server's generic hook set), the required engine and where its
 check is called, `--no-target-collision` and its refusals, and per-env
-variants (v2.0.5), and the server subpackage surface.
+variants (v2.0.5), the `StaticFrictionLock` without its reversal re-anchor
+and with its ground gate, the 2.0.6 identity-lock capture, and the engine-node
+wheel renderer (v2.0.6 — rendered vs headless bit-identical in one process, the
+wheel pose at every render flush, wheel segmentation, the removed joint-writing
+path and its raising settings), and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` 1.5.0 must be importable. No GPU needed — measured
-on the v2.0.5 tree with the optional MPC packages installed, `1388 passed,
-3 skipped`, 1391 node ids (implementation on a 1.5.0 overlay and again in the
-upgraded venv, impl-review on the overlay; no timing quoted; CPU/WSL2,
+on the v2.0.6 fix-round tree with the optional MPC packages installed, `1470
+passed, 3 skipped`, 1473 node ids (implementation and impl-review, id lists
+byte-equal), and re-run in full on the final tree by the fact-check stage after
+two later edits (a test assertion and a docstring): `1470 passed, 3 skipped`,
+1473 ids, id list byte-equal to the fix-round run; no timing quoted; CPU/WSL2,
 genesis-world 1.5.0, `test_fusion_probe.py` excluded;
 the 3 skips are the env-gated live server tests,
 run them with `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`; without casadi + do_mpc the
-solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1369 passed,
+solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1388 passed,
+3 skipped`, 1391 ids at v2.0.5 (genesis-world 1.5.0), `1369 passed,
 3 skipped` at v2.0.4 (genesis-world 1.4.5), `1285 passed,
 3 skipped` in five parts, 527.3 s summed, at v2.0.3, `1225 passed,
 3 skipped` in 433.5 s at v2.0.2, `1127 passed,
@@ -497,10 +508,36 @@ patch that changes braking physics with no opt-out and REMOVES
 (CHANGELOG 2.0.4 §1). 2.0.5 is a patch that REQUIRES a new engine
 (genesis-world 1.5.0; 1.4.5 dropped) and adds public surface
 (`GenesisVersionError`, `require_genesis`, per-env variants), by user decision
-(CHANGELOG 2.0.5 §1).
+(CHANGELOG 2.0.5 §1). 2.0.6 is a patch that REMOVES the joint-writing wheel
+visuals (their settings raise), removes `StaticFrictionLock._s_eng` /
+`_rested`, and changes braked low-speed physics, by user decision (CHANGELOG
+2.0.6 §1-§2).
 (This line said "pre-1.0, so minor bumps
 may break" — stale since 1.0.) Current version: `genesis_vehicle.__version__`. Per-release notes
 in [`CHANGELOG.md`](CHANGELOG.md).
+
+**Upgrading to 2.0.6** (breaking in a patch release, by user decision;
+genesis-world 1.5.0 as for 2.0.5): remove `wheel_render_mode="internal_sync"`
+(`ValueError`) and `enable_wheel_joint_internal_sync=True` (`ConfigError`);
+imports of `WheelJointInternalSync` / `KindVisualBatch` raise `ImportError`
+(read `physics.wheel_spin_angle` instead of `physics.visual.wheel_visual_angle`;
+`physics.visual is None` keeps working); `visual_susp_mode` has no effect (one
+WARNING for a value other than `"auto"`); code that copies
+`StaticFrictionLock` state by name must use `STATE_ATTRS` (5 names; `_s_eng` /
+`_rested` raise). A raw `VehiclePhysics` in your own `gs.Scene` no longer gets
+animated wheels from the SDK. No SDK path writes the wheel joints any more, so
+rendered `n_envs > 1` trajectories change from 2.0.5 (2.0.5 moved the reference
+car +0.142 m over 10.7 m against headless); rendered runs were bit-identical to
+headless on every row measured (CHANGELOG 2.0.6 §6, including an L2-server
+`RigidOptions` row and an L3-style reset row) — not on every scene, and the live
+L3 server with its viewer was not run. Wheel segmentation
+works at every `n_envs` (integers at `n_envs == 1` renumber — read them through
+`scene.segmentation_idx_dict`). Braked low-speed physics changed (the lock's
+reversal re-anchor removed, a ground gate added; 18 identity locks
+re-captured): re-run identify where the `[genesis_vehicle:sfl-cap]` line
+reports; sweep tables are unaffected. Run the render tests on every engine
+bump. One acceptance gate failed and was waived by the user (a light tank's
+50-s rest). Read CHANGELOG 2.0.6 (§11 is the field-team note) first.
 
 **Upgrading to 2.0.5:** upgrade the ENGINE first, in this order — Python
 >= 3.12, then `genesis-world==1.5.0 quadrants==1.4.0 coacd==1.0.14
@@ -512,12 +549,13 @@ headless path is the 2.0.4 tree's on 1.5.0 bit for bit (46 items); across the
 engine change only tolerances hold (≤ 5.63e-5 m in x and ≤ 5.93e-5 m in z on 16
 parity scenarios; one
 forced tank scene 0.126 m apart through a round-off-decided touchdown sign that
-exists on 2.0.4, fixed in 2.0.6 — planned). Changed: `--no-target-collision`
+exists on 2.0.4, fixed in 2.0.6). Changed: `--no-target-collision`
 now works for primitive targets and EXITS (rc 2) with a URDF vehicle or
-`--multi-env` (it was a silent no-op); on 1.5.0 a URDF `effort="0"` makes the
-`visual_susp_mode="control"` PD live. The rendered `WheelJointInternalSync`
+`--multi-env` (it was a silent no-op); on 1.5.0 a URDF `effort="0"` made the
+`visual_susp_mode="control"` PD live (through 2.0.5; no SDK code reads
+`visual_susp_mode` since 2.0.6). The rendered `WheelJointInternalSync`
 path moves the chassis trajectory on both engines (a defect that exists on
-2.0.4, documented, fix planned for 2.0.6). Rollback = 2.0.4 + genesis-world
+2.0.4; fixed in 2.0.6 by removing the path). Rollback = 2.0.4 + genesis-world
 1.4.5. Read CHANGELOG 2.0.5 (§12 is the field-team note) first.
 
 **Upgrading to 2.0.4:** `StaticFrictionLock` (in every `"control"` preset and,

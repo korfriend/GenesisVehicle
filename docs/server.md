@@ -1621,13 +1621,31 @@ After build, the server also emits topology once:
 > been correct.
 
 > **Wheel pose source (v0.7.7+):** the server fills the per-wheel `wPx..wQw`
-> from `VehiclePhysics.wheel_visual_transforms("world")` — a closed-form pose
-> that already includes steer + suspension + spin and works regardless of
-> WheelJointInternalSync (the server runs headless, so WheelJointInternalSync is off). The trailing
+> from `VehiclePhysics.wheel_visual_transforms("world")` (L3: the batched
+> closed-form host poses) — a closed-form pose that already includes steer +
+> suspension + spin and does not depend on any joint state. **Correction
+> (v2.0.6):** this note said "the server runs headless, so
+> WheelJointInternalSync is off". That was wrong: both servers open a Genesis
+> viewer unless `--headless` is passed, and the L3 server (`--multi-env`, a
+> rendered `n_envs > 1` VehicleScene) with its viewer ran WheelJointInternalSync
+> through v2.0.5, which moved its chassis trajectory (reference car +0.142 m
+> over 10.7 m against headless, CHANGELOG 2.0.5 §10.2). The L2 server's viewer
+> (`n_envs` 1) used the solver-free instanced renderer. UE / Unity clients were
+> never affected: the wire carries closed-form poses. Since v2.0.6 no SDK path
+> writes wheel joints, so a 2.0.5 L3 viewer run's trajectory changes; rendered
+> runs were bit-identical to headless on every row measured (CHANGELOG 2.0.6 §6,
+> including an L2-server `RigidOptions` row and an L3-style reset row), which is
+> not every scene. The server viewers draw the wheels through the engine-node
+> override (`physics-contracts.md` §7.8), and under the default `--vis_mode
+> collision` (both servers) the wheels are SDK fallback nodes, so the L3 viewer
+> should show wheels it did not show on 2.0.5 — inferred from the offscreen
+> collision-mode rows and the source; the live servers and the native viewer
+> were not run for this release. The trailing
 > `spinAngle` is therefore sent as `0` (spin is baked into the wheel quat — the
 > client uses the quat directly and must NOT re-apply spin). Earlier versions
 > read `entity.get_link(wheel)`, which returned a frozen rest pose with
-> WheelJointInternalSync off (no suspension travel / no steer). See
+> WheelJointInternalSync off (no suspension travel / no steer; since v2.0.6 no
+> SDK code writes those joints at all). See
 > [`api-reference.md`](api-reference.md#76-wheel-visual-pose-for-external-renderers-wheel_visual_transforms-v077).
 | `/Genesis/Dynamic/StateBulk` | chunked `id, Px,Py,Pz, Qx,Qy,Qz,Qw` | dynamic obstacle transforms |
 | `/Genesis/Init/TimeDilation` | `ratio:f` | tells the client to slow playback when the loop can't hit real-time (`ratio = dt / loop_avg`) |
@@ -1712,8 +1730,12 @@ already sending them keep working unchanged.
 > **Steering note:** `steerScale` is the **center (bicycle) angle**; with
 > Ackermann the inner wheel turns *more*. If a client expects "max angle =
 > exact wheel angle," account for the Ackermann inner/outer spread. Keep
-> `steerScale` ≤ the URDF steer joint limit or the physics angle will
-> exceed what the visual joint can show.
+> `steerScale` ≤ the URDF steer joint limit: the SDK does not clamp the physics
+> steer angle to it. (Through v2.0.5 this note said the physics angle would
+> otherwise "exceed what the visual joint can show" — the joint-writing wheel
+> visuals, where they ran. Since v2.0.6 no SDK path writes the steer joint; the
+> wire pose and every SDK-drawn wheel use the closed-form angle, so the drawn
+> wheel turns as far as the physics, past the URDF limit.)
 
 > **Silent-failure guards (v1.1.26):** a mapping whose `drivingJoints` match
 > no wheel spin joint used to build a DEAD drivetrain (all-zero drive

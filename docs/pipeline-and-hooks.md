@@ -95,6 +95,7 @@ VehiclePhysics.step(inputs)
         for hook in stability_hooks if POST_TIRE in hook.slots:
             hook.apply_post_tire(ctx)  if present    # ctx.omega = omega_t; SFL may set ctx.hold_applied
                                                      # SFL engages on ctx.brake_rem > 0 (v2.0.4)
+                                                     #   & ctx.N > 0 (v2.0.6 ground gate)
         # a write to ctx.T_resist here raises RuntimeError
     (D) F_long = clamp(F_long, lo, hi, ±D)          # held wheels (ctx.hold_applied): [lo, hi] only
         omega = omega_t - DT * R * F_long / I_wheel, then |omega| -= B_rem*DT/I_wheel (not past 0)
@@ -113,13 +114,17 @@ VehiclePhysics.step(inputs)
 [5] _gs_compat.apply_links_wrench(solver, F, T) (chassis)
     → solver.apply_links_external_wrench  (the one path since v2.0.5,
       genesis-world 1.5.0; the <= 1.3.3 force + torque fallback was removed)
-[6] wheel visuals (rendered scenes only): VehicleScene streams closed-form
-    wheel poses into instanced render nodes AFTER the physics advance — NOT
-    via the rigid solver. WheelJointInternalSync, the legacy solver-joint
-    fallback, runs here instead for n_envs > 1 /
-    wheel_render_mode="internal_sync"; it writes solver joints and DOES
-    move the chassis trajectory (physics-contracts.md §7.8, corrected in
-    v2.0.5). ext. renderers use visual_parts_transforms.
+[6] wheel visuals (rendered scenes only; v2.0.6): not part of the physics
+    step. On every sync of scene.visualizer.context (recording inside
+    Scene.step, viewer refresh, setter syncs, camera renders) the SDK hook
+    overwrites the poses of the ENGINE's own wheel render nodes with the
+    closed-form wheel pose, at every n_envs — NOT via the rigid solver; no
+    SDK code writes solver state for rendering (physics-contracts.md §7.8).
+    Through v2.0.5 VehicleScene streamed instanced nodes once after the
+    physics advance at n_envs == 1, and WheelJointInternalSync (removed in
+    v2.0.6) wrote solver joints here for n_envs > 1 /
+    wheel_render_mode="internal_sync", which moved the chassis trajectory.
+    ext. renderers use visual_parts_transforms.
     (Through v2.0.4 this step said that with the native viewer the stream
     ran inside viewer.update()'s render-lock hold, atomic with the camera +
     node poses (v1.1.25). That was true on genesis-world <= 1.3.3 only: the
@@ -136,7 +141,7 @@ attribute (a tuple containing some of `"PRE_LOOP"`, `"POST_TIRE"`).
 |---|---|---|
 | `RollingResistance` | `("POST_TIRE",)` | Pre-tire phase (v1.7.0): adds the axle torque `cr * N * r * tanh(ω * r / tanh_scale)` to `ctx.T_resist`; the pipeline caps it and applies it to ω first, before the drive torque, the brake and the tyre (v1.8.0 order). No post-tire work. **Through v1.6.10 this row said it "subtracts `cr * N * tanh(v_long / scale)` from `F_long`". That was what the code did, but it was wrong as a description of an effect: the overshoot clamp ran after the hook and cut the force back to zero, so the hook changed nothing (measured coast decel 0.0073 m/s² with or without it on the reference car; CHANGELOG 1.7.0 §1.1).** |
 | `LowSpeedRegularizer` | `("PRE_LOOP", "POST_TIRE")` | Pre-loop: compute `moving ∈ [0,1]` from chassis speed. Post-tire: scale `F_long`/`F_lat` by `moving`; record an omega pull target so core blends ω toward `v_long / radius`. |
-| `StaticFrictionLock` | `("POST_TIRE",)` | **Since v2.0.4** engages per wheel where the brake holds the wheel (`ctx.brake_rem > 0`) and planar contact speed `sqrt(v_long² + v_lat²) < min(v_thr, 0.5)`, at any pedal; never sets `ctx.omega_override`; replaces the tyre force only after its creep test (the held-wheel deadbeat binds and the speed did not fall this step); before that the anchor follows the contact and the brake does the stopping. Its spring rate is `k_eff`, `k_spring` capped per wheel ([`physics-contracts.md` §7.22](physics-contracts.md)). **Through 2.0.3 this row said: engages when `brake > brake_thr` and speed `< v_thr`, requests `omega = 0` via `ctx.omega_override` from the first engaged step, takes over below `REST_SPEED` (0.05 m/s) or on the creep test** — the 2.0.3 code; the pedal rule, the forced ω and the rest-speed takeover were removed in v2.0.4 (a pedal ≤ 0.3 never held a vehicle on a slope; the forced ω slid locked wheels where the brake could not hold). Then a 2D spring-damper `F = -K_spring·displacement - D·velocity`, `D = max(k_damp, critical)` and bounded by the one-step deadbeat, projected onto the per-wheel friction ellipse and limited to `ctx.F_long_bounds`; the wheels it holds go into `ctx.hold_applied`. Holds the point where the contact came to rest ([`physics-contracts.md` §7.17](physics-contracts.md)). **This row said, through v1.7.0, "stores anchor at lock engagement" and "holds with zero drift on any slope up to μ ≈ tan(slope_angle) (truck preset … rock-solid up to ~30°)". The second was wrong: the hold is limited by the brake capacity (the tank preset does not hold 10°), and on 1.7.0 the reference car crept down 10° under full brake (CHANGELOG 1.8.0 §2.2). The ~30° truck figure was not re-measured for 1.8.0.** |
+| `StaticFrictionLock` | `("POST_TIRE",)` | **Since v2.0.4** engages per wheel where the brake holds the wheel (`ctx.brake_rem > 0`) and planar contact speed `sqrt(v_long² + v_lat²) < min(v_thr, 0.5)`, at any pedal, **and (since v2.0.6) `ctx.N > 0`** (ground gate; a wheel at N = 0 is not engaged, held or taken over, [`physics-contracts.md` §7.22.5](physics-contracts.md)); never sets `ctx.omega_override`; replaces the tyre force only after its creep test (the held-wheel deadbeat binds and the speed did not fall this step); before that the anchor follows the contact and the brake does the stopping. Its spring rate is `k_eff`, `k_spring` capped per wheel ([`physics-contracts.md` §7.22](physics-contracts.md)). **Through 2.0.3 this row said: engages when `brake > brake_thr` and speed `< v_thr`, requests `omega = 0` via `ctx.omega_override` from the first engaged step, takes over below `REST_SPEED` (0.05 m/s) or on the creep test** — the 2.0.3 code; the pedal rule, the forced ω and the rest-speed takeover were removed in v2.0.4 (a pedal ≤ 0.3 never held a vehicle on a slope; the forced ω slid locked wheels where the brake could not hold). Then a 2D spring-damper `F = -K_spring·displacement - D·velocity`, `D = max(k_damp, critical)` and bounded by the one-step deadbeat, projected onto the per-wheel friction ellipse and limited to `ctx.F_long_bounds`; the wheels it holds go into `ctx.hold_applied`. Holds the takeover point (through v2.0.5 "the point where the contact came to rest", via the reversal re-anchor removed in v2.0.6; [`physics-contracts.md` §7.17](physics-contracts.md)). **This row said, through v1.7.0, "stores anchor at lock engagement" and "holds with zero drift on any slope up to μ ≈ tan(slope_angle) (truck preset … rock-solid up to ~30°)". The second was wrong: the hold is limited by the brake capacity (the tank preset does not hold 10°), and on 1.7.0 the reference car crept down 10° under full brake (CHANGELOG 1.8.0 §2.2). The ~30° truck figure was not re-measured for 1.8.0.** |
 
 **Hook config stays live (v1.6.4).** `StaticFrictionLock`'s speed threshold is
 now squared once at build (`v_thr²`, in double, then cast) instead of on every

@@ -331,10 +331,10 @@ def test_a_derived_cache_is_invisible_to_a_generic_attribute_sweep():
             f"{type(obj).__name__} grew an attribute: "
             f"{set(vars(obj)) - names}")
     tensors = {k for k, v in hook.__dict__.items() if torch.is_tensor(v)}
-    # v1.8.0: the rest-anchor state joined the integrator state (STATE_ATTRS).
+    # v1.8.0: the rest-anchor state joined the integrator state (STATE_ATTRS);
+    # v2.0.6: _s_eng / _rested left it with the reversal re-anchor.
     assert tensors == set(StaticFrictionLock.STATE_ATTRS) == {
-        "_d_long", "_d_lat", "_was_active",
-        "_s_eng", "_rested", "_rest", "_v_prev_sq"}, (
+        "_d_long", "_d_lat", "_was_active", "_rest", "_v_prev_sq"}, (
         "the only tensor attributes of a hook may be its INTEGRATOR state — "
         "the ones control/plant._sync_hooks row-slices and interleaves. A "
         f"config tensor in here would be sliced as if it were state: {tensors}")

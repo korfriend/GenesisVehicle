@@ -229,8 +229,9 @@ def test_t5_a_post_build_wheel_count_change_raises_and_keeps_the_scene(cpu_genes
     assert "4 -> 3" in str(e1.value)
     assert vehs[0].name in str(e1.value)
     # The cheap cfg check is the one that fires, BEFORE a replacement driver is
-    # constructed (constructing one is not side-effect free — a new
-    # WheelJointInternalSync writes kp/kv onto the live entity).
+    # constructed (through 2.0.5 constructing one also wrote kp/kv onto the live
+    # entity through the joint-writing visuals, removed in 2.0.6; the precheck
+    # still saves building a driver only to discard it).
     assert "[config precheck]" in str(e1.value)
 
     # No zombie: the previous driver is still installed, still 4-wheeled.
@@ -335,67 +336,77 @@ def test_t6_kind_reset_takes_rows_and_mvp_reset_takes_vehicles(cpu_genesis):
         kind.reset(vehicle_ids=[1])
 
 
+def _wheel_node_err(vs, unit=0):
+    """Max |node pose - closed form o T_local| over every wheel node of one
+    render unit, full 3x4, per rendered env and vehicle slot."""
+    from genesis_vehicle.visual import _pose_mats
+    r = vs._wheel_renderer
+    u = r._units[unit]
+    ctx = vs.scene.visualizer.context
+    ridx = list(ctx.rendered_envs_idx)
+    K, n = u["K"], u["n"]
+    p, q = u["provider"]("world")
+    p = p.detach().cpu().double().numpy().reshape(-1, K, n, 3)[ridx]
+    q = q.detach().cpu().double().numpy().reshape(-1, K, n, 4)[ridx]
+    err = {}
+    for ui, k, i, node, Tl in r.drawn_nodes():
+        if ui != unit:
+            continue
+        T = _pose_mats(p[:, k, i], q[:, k, i], np.float64)
+        if Tl is not None:
+            T = T @ Tl
+        got = np.asarray(node.mesh.primitives[0].poses, dtype=np.float64)
+        e = float(np.abs(got[:, :3, :] - T[:, :3, :]).max())
+        err[k] = max(err.get(k, 0.0), e)
+    return err
+
+
 def test_t6b_a_per_vehicle_reset_does_not_wipe_another_vehicles_visuals(cpu_genesis):
     """A per-vehicle reset must be local in the VISUAL state too.
 
-    The visual resets used to run with no index, so resetting vehicle 1 wiped
-    every vehicle of the kind: vehicle 0's batched spin accumulator went
-    ``[0.4316, 0.3281, -2.7312, 2.6947]`` → all zeros (K=2, n_envs=2, measured).
-    Joint sync is forced on here (headless builds pick the instanced renderer
-    otherwise) so both writers — the per-entity ``WheelJointInternalSync`` and
-    the batched ``KindVisualBatch`` — are live."""
+    Through 2.0.5 this checked the joint-writing writers' spin accumulators
+    (removed in 2.0.6). Since 2.0.6 the rendered wheel is the closed form, so
+    the visual state IS ``wheel_spin_angle`` (+ steer + suspension): K=2,
+    n_envs=2, one camera; ``vs.physics.reset(vehicle_ids=[1])`` mid-run must
+    leave vehicle 0's spin rows untouched and zero vehicle 1's, and at the next
+    sync every wheel node of both vehicles must equal the closed form o T_local
+    (vehicle 0's nodes therefore unchanged by the reset)."""
     cfg = car_4w_rwd_ackermann(URDF, stability="control")
-    cfg.enable_wheel_joint_internal_sync = True
     vs = VehicleScene(dt=cfg.recommended_dt, substeps=10, n_envs=2,
                       show_viewer=False, init_genesis=False)
     vs.add_ground_plane(friction=1.0)
-    # A camera turns wheel visuals on at build (n_envs>1 takes the joint-sync
-    # fallback rather than the instanced renderer), which is what creates the
-    # per-entity writers and KindVisualBatch.
-    vs.add_camera(res=(160, 120), GUI=False)
+    cam = vs.add_camera(res=(160, 120), GUI=False)
     vehs = [vs.add_vehicle(URDF, car_4w_rwd_ackermann, cfg=cfg,
                            pos=(0.0, 4.0 * i, 0.6),
                            material=gs.materials.Rigid(friction=1.0))
             for i in range(2)]
     vs.build()
+    assert vs._wheel_renderer is not None, "premise: the scene renders its wheels"
     _drive(vs, vehs, 30)
+    cam.render()
 
     kind = vs.physics.kinds[0]
-    vb = kind._visual_batch
-    assert len(kind.visuals) == 2 and vb is not None, (
-        "premise: both visual writers are live")
-    keep_batch = vb._angle[:, 0].clone()
-    assert float(keep_batch.abs().max()) > 0.0, (
-        "premise: the batched writer accumulated spin while driving")
-    # With KindVisualBatch live it is the batch that accumulates, so the
-    # per-entity writers' own accumulators stay at zero in this configuration.
-    # Seed them so the per-entity reset path is observable too (the batch
-    # writer can fail to be built — construction is guarded — and then these
-    # are the live ones).
-    for i, vis in enumerate(kind.visuals):
-        vis.wheel_visual_angle = torch.full_like(
-            vis.wheel_visual_angle, 0.25 + i)
-    keep_vis = kind.visuals[0].wheel_visual_angle.clone()
+    p = kind._proto
+    rows0, rows1 = kind.slot_rows(0), kind.slot_rows(1)
+    keep0 = p.wheel_spin_angle[rows0].clone()
+    assert float(keep0.abs().max()) > 0.0, "premise: vehicle 0's wheels spun"
+    nodes0_before = {id(node): np.asarray(node.mesh.primitives[0].poses).copy()
+                     for _, k, _, node, _ in vs._wheel_renderer.drawn_nodes() if k == 0}
 
     vs.physics.reset(vehicle_ids=[1])
 
-    assert torch.equal(vb._angle[:, 0], keep_batch), (
-        "vehicle 0's batched spin accumulator was wiped by vehicle 1's reset")
-    assert torch.equal(kind.visuals[0].wheel_visual_angle, keep_vis), (
-        "vehicle 0's per-entity spin accumulator was wiped")
-    assert float(vb._angle[:, 1].abs().max()) == 0.0
-    assert float(kind.visuals[1].wheel_visual_angle.abs().max()) == 0.0
+    assert torch.equal(p.wheel_spin_angle[rows0], keep0), (
+        "vehicle 0's spin was wiped by vehicle 1's reset")
+    assert float(p.wheel_spin_angle[rows1].abs().max()) == 0.0
 
-    # A single flat ROW is just as local (env 0's vehicle 1 only).
-    _drive(vs, vehs, 10)
-    keep_batch = vb._angle[:, 0].clone()
-    env1_of_veh1 = vb._angle[1, 1].clone()
-    assert float(env1_of_veh1.abs().max()) > 0.0
-    kind.reset(rows=[1])
-    assert torch.equal(vb._angle[:, 0], keep_batch)
-    assert float(vb._angle[0, 1].abs().max()) == 0.0
-    assert torch.equal(vb._angle[1, 1], env1_of_veh1), (
-        "row 1 is env0/veh1 — env 1's copy of that vehicle must survive")
+    vs.scene.visualizer.context.update(force_render=True)
+    err = _wheel_node_err(vs)
+    assert max(err.values()) <= 1e-6, err
+    for _, k, _, node, _ in vs._wheel_renderer.drawn_nodes():
+        if k == 0:
+            assert np.array_equal(np.asarray(node.mesh.primitives[0].poses),
+                                  nodes0_before[id(node)]), (
+                "vehicle 0's wheel nodes moved on vehicle 1's reset")
 
 
 # --- T7: the instanced wheel renderer follows the rebuild ---------------------
@@ -423,6 +434,10 @@ def test_t7_instanced_wheel_renderer_is_rebound(cpu_genesis):
     # renderer needed its nodes recreated on a provider swap, it would raise or
     # crash here rather than merely draw a stale pose.)
     r.update()
+
+    # Full-matrix check (a rotation-only error is 1.885 vs 3.8 mm translation
+    # on the not-rebound mutant, so translation alone is not enough).
+    assert max(_wheel_node_err(vs).values()) <= 1e-6
 
     p0, q0 = r._units[0]["provider"]("world")
     p0, q0 = p0.clone(), q0.clone()
