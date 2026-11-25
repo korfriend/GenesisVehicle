@@ -10,6 +10,784 @@ running version the first time it is instantiated in a process.
 
 ---
 
+## [2.1.0] — 2026-11-25
+
+**One opt-in feature on top of 2.0.6: `PathFollower(mpc_decel_limit="brake")`,
+an END-GATED deceleration bound for the MPC follower.** On a solve where the
+active forward block's reference end time is within N·DT_MPC (2.0 s) of the
+solve time IN REFERENCE TIME and the rig reference's end point lies ahead of the
+rear axle, the MPC is bounded by the params record's brake-1 row; on every other
+solve by the throttle row, as in 2.0.6 (§3). It is not "the brake row as the
+bound": mid-path decelerations get nothing. **For the default (`"throttle"`): the
+default's commands and per-step logs are identical to 2.0.6 on the measured runs (I-1 16 + 3 runs, I-2 fixture,
+I-6) — measured, not enforced on every scene; `mpc_stats` gains `decel_gate: None`** (§4). A second planned opt-in, the Pacejka prediction model
+(`mpc_model="pacejka"`), was implemented, FAILED its non-harm gates, was
+investigated over two further rounds and was REMOVED by user decision;
+`mpc_model="pacejka"` raises exactly as in 2.0.6, and §8 records what was
+established, what was not and what was refuted. A first design of the brake
+bound (the brake row on every solve) also failed its gates and never shipped
+(§5).
+
+**What this release does NOT give you, stated plainly:** no benefit claim from
+rows whose outcome was known beforehand — the benefit rests on one fresh μ 1.0
+row (F-N4) and the μ 0.6 tier (§6); no gate that sees loss of steering
+authority under brake-row braking — at μ 0.6 the brake row sits at the
+front-lock knee and B′ locked the front wheels in the arc on every
+braking-in-arc row (§7.1); no guard on a PD fall-back inside an open window
+(throttle 1.0 at 9.24 m/s commanded in a μ 0.6 arc, §7.2); no check that the
+record describes the vehicle — a record that over-states the grip turned a
+`DONE` into `GOAL-MISSED` on one mismatch row (§6.5); no real-time figure for
+`"brake"` (§6.6); one vehicle, flat ground, μ 1.0 and 0.6 only (§9).
+
+| abbr | meaning |
+|---|---|
+| A / B′ | the default arm (`mpc_decel_limit="throttle"`) / `mpc_decel_limit="brake"` as shipped (end-gated brake row) |
+| B (round 1) | the first brake-bound design: the brake row on every solve (never shipped, §5) |
+| P / Q | the removed Pacejka arms: Pacejka + throttle bound / Pacejka + brake bound (round 1 only) |
+| THR / BRK | the throttle-row / brake-row problem of a gated pair |
+| MPC / NMPC / LMPC | Model Predictive Control / nonlinear MPC (do_mpc + IPOPT) / linear MPC (OSQP) |
+| NLP / IPOPT | the NMPC's per-solve nonlinear program / its interior-point solver |
+| PD | the 1.x proportional path law (the follower's hand-over and fall-back law) |
+| rig | rear-axle centre, the MPC's reference point; "rig reference end point" = the block's last waypoint moved back by `rig_offset` along the final heading |
+| DT_MPC / N | the MPC node spacing (0.1 s, `control/mpc/law.py`) / horizon nodes (20) |
+| reference time | the clock of the forward block's time-stamped rig reference (`_MPCLaw.ref`), re-timed by block entry, the heading gate, the watchdog, the K-turn release and `set_path` |
+| k_open | first log row on which `decel_open` is true |
+| CTE | cross-track error (m) to the dense course polyline; "arc window" = projection s in [arc start, arc end + 5 m], "in the arc" = [arc start, arc end] |
+| v_done | `v_long` at the terminal step (m/s) |
+| R-FAIL | solves whose result was not applied (`capped_infeasible`, `failed:*`, exception, NaN) |
+| μ / μg | tyre friction coefficient / μ · 9.81 m/s² |
+| β | body slip angle atan2(v_lat, v) (rad); "spin" = \|β\| > 0.35 at v > 3 m/s or \|e_psi\| > π/2 on an R-MPC step |
+| lock | steps with v_long > 1 m/s and front-wheel roll ratio ω·r / max(v_long, 0.1) < 0.5 |
+| b_max(v) | the brake level whose modelled deceleration equals the brake-1 row: (a_coast − row)/k_b, a_coast = the modelled acceleration at throttle 0, brake 0 |
+| k_b | stage-2 brake gain (m/s² per unit brake) |
+| w_t | the stage-1 yaw-rate target `max(v,0)·tan(δ_cmd)/L` handed to stage 2 (δ_cmd = the MPC's front steering command, L = wheelbase) |
+| N1 … O2, S1F, O1F, S1R, G1 … G5, K1 | the frozen acceptance courses (§6.1; argv in the acceptance files outside the repo) |
+| F-G6 … F-G10, F-N4, R10v6 | round-2 rows defined before any round-2 run (§6.2) |
+| `_mu06` / μ-suffix (N1μ …) | the same course on a vehicle and assets at μ 0.6 (§6.4) |
+| M-row | a mismatch run: the μ 1.0 record and table driving a μ 0.6 vehicle (§6.5) |
+| I-x / S-x / H-x / PV-x / C-x / A-x / D-x | identity gate / safety gate / hypothesis / probe-validity check / plan-review condition (C21 = the in-arc CTE gate of the μ 0.6 braking rows) / API-review condition / user decision (D-13–D-15: recorded findings), defined outside the repo (`.pm_r2/r21/`, `.pm_r2/plan_r21*.md`, `.pm_r2/review_r21_*.md`, `.pm_r2/api_review_r21*.md`) |
+| fresh / replication / seen | evidence labels (§6): not observed by anyone before the criteria were frozen / a round-1 outcome predicted by replays to carry over / the outcome of that very row observed before |
+
+**Conditions of every number in this entry unless a row says otherwise:**
+CPU/WSL2, genesis-world 1.5.0, casadi 3.8.2, do_mpc 5.1.2,
+`OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`, one foreground process at a time,
+2026-11-25; reference car `samples/urdf/car_4w.urdf` with
+`car_4w_rwd_ackermann`, dt 0.025 × 4 substeps, flat plane with plane and
+chassis friction 1.0; `mpc_follow_demo` with NMPC, `on_solve_failure="pd"`,
+heading gate and watchdog on, gear mode WITH gear feedback, `SweepTable` stage
+2, `--t-max 60`, ramp 1.0; the frozen asset pairs re-identified on the 2.0.6
+tree (params sha256 `2d990a80…`, table `79137089…`; μ 0.6 params `c9b73d0f…`,
+table `f4a0b539…`); single runs (determinism re-checked by byte-identical
+repeats, PV-0 / PV-0μ). Who measured is named per number: "implementation"
+(the implementing agent, runner and grader under `.pm_r2/r21/tools/`, outside
+this repo), "impl-review" (the independent reviewer, its own scratch harness),
+"plan agent" / "plan-review" (scratch prototypes and probes before the
+implementation). Where the implementation's and impl-review's figures differ,
+impl-review's measured figure is quoted and both are named.
+
+### 1. Why a minor version, and the user decisions
+
+Additive minor release by the rule in `README.md` ("Releases and Versioning"):
+one new keyword (`PathFollower(mpc_decel_limit=)`, with its resolved instance
+attribute `.mpc_decel_limit`), one new `mpc_stats` key, one new `solver_params`
+keyword, one new class attribute (`PathFollower.MPC_DECEL_LIMITS`) and one new
+module constant (`control.mpc.params.DECEL_LIMITS`); the default value stays
+`"throttle"` (the default's commands and per-step logs identical to 2.0.6 on the
+measured runs, §4 — measured, not enforced on every scene). Every item below was
+decided by the user (2026-11-24/25); who decided is part of the fact.
+
+- **Opt-in; the default value stays `"throttle"`** (2026-11-24) — for both
+  planned items.
+- **μ 0.6 tier included** (D-3; the plan recommended excluding it). μ 0.6 is
+  roughly wet asphalt by general reference values (dry about 0.8–1.0, wet
+  about 0.5–0.7, packed snow about 0.2–0.3, ice about 0.1 — not measured here);
+  nothing is claimed for ice-level μ. **A μ 0.6 safety failure would block the
+  opt-in** (D-6 (a)); none occurred. Mismatch rows are report-only with a
+  mandatory per-arm table (D-10, §6.5).
+- **After round 1 failed** (§5): fix the brake bound's low-speed regime and
+  verify again, criteria unchanged; then **D-12 = the end gate** (§3), keeping
+  the value name `"brake"` with the wording of §3 (API review).
+- **`mpc_model="pacejka"`**: after round 1 failed, "investigate and try again in
+  this release" (the user's choice over the recommended deferral); after round
+  2, "one more attempt" on the untested hand-over candidate (D-11); after round
+  3 refuted it, **D-11′ = remove it from 2.1.0** and put a re-evaluation on the
+  roadmap with no release assigned (§8, §12).
+- Failed benefit hypotheses would ship documented, safety failures block (D-2);
+  no benefit hypothesis of the shipped arm failed.
+
+### 2. Added: `mpc_decel_limit`
+
+| item | behaviour (code path) |
+|---|---|
+| `PathFollower(..., mpc_decel_limit=)` | keyword, `_Unset("throttle")` (signature repr `'throttle'`); `"throttle"` (default) or `"brake"` |
+| `PathFollower.MPC_DECEL_LIMITS` | `("throttle", "brake")` |
+| other value | `ValueError("mpc_decel_limit must be one of ['throttle', 'brake']; got …")`, check step 7 (`_check_mpc_args`, with the other MPC-argument values, before the dependency import) |
+| with `mpc_model="off"`, any value (even `"throttle"`) | `ValueError('mpc_model="off" takes no MPC argument; got mpc_decel_limit')` (step 4) |
+| `"brake"` with `command_mode="signed"` (resolved) | `ValueError('mpc_decel_limit="brake" needs command_mode="gear" …')`, after `_check_command_mode`, before any attribute is set — a signed R-MPC step has no brake channel above the hold speed |
+| `"brake"` with an empty brake row, a non-numeric row, or a value that is not a finite deceleration < 0 | `ValueError` naming `decel_brake_by_speed` with the identify hint, step 9 (`_check_mpc_args`, right after `load_mpc_params`), and again in `solver_params` |
+| no follower or plant side effect before these refusals | by code order for all four; tested for three of them (unknown value, signed, empty / invalid brake row: a stub plant's `steer_range` is unchanged after the raise); the `"off"` refusal (step 4, before any write) is by code order only. The step-9 refusal runs after `require_mpc_deps`, which imports do_mpc (process-wide side effects, `docs/path-following.md` §5.1) |
+| brake row decelerating LESS than the throttle row at some speed | `UserWarning("… NARROWER there")` naming those speeds among the speeds present in both rows (a brake-row speed absent from the throttle row is not compared), from `solver_params` (so once per follower, in `_init_mpc`) |
+| `PathFollower.mpc_decel_limit` | the resolved value; `None` with `mpc_model="off"` (unlike `mpc_impl` / `on_solve_failure` / `dt_ctrl`, which do not exist then) |
+| `mpc_stats["decel_gate"]` | present for every MPC follower: `None` under `"throttle"`; under `"brake"` `{open, open_solves, switches}` — `open` = whether the LAST solve used the brake row (`None` before the first solve, held between solves), `open_solves` = solves on the brake row, including those whose solver call failed or raised (classified `exception`) — an error from the gate or the warm-start transfer propagates before the counters update and is not counted, `switches` = solves whose row differs from the previous solve's (the pair starts on the throttle row, so a first solve that opens counts one); cumulative since construction, kept by `set_path` |
+| `MPCVehicleParams.solver_params(model="bicycle", *, steer_cap=1.0, dt_ctrl=0.025, decel_limit="throttle")` | keyword-only; `"throttle"` gives a result field-for-field equal to the call without the keyword (I-2); `"brake"` builds the deceleration table and `accel_min` from `decel_brake_by_speed` with the same 0 m/s rule. **A table selector with no gate**: the result is ONE parameter set with that bound everywhere; only the follower gates. `control.mpc.params.DECEL_LIMITS = ("throttle", "brake")` |
+| exports | none added (`__all__` of `control` / `control.mpc` unchanged); `MPC_MODELS = ("bicycle", "off")` and `SUPPORTED_MODELS = ("bicycle",)` as in 2.0.6 |
+| private | `_MPCLaw(..., decel_gate=False)` (an explicit seam: False looks up nothing on the solver; True raises `TypeError` at construction unless `solver.select_decel` is callable), `_DecelGatedNMPC`, `_DecelGatedLMPC`, `law.DECEL_GATE_TOL = 1e-9`, `alpasim_nonlinear.DECEL_FIELDS`. A pair whose two solvers differ in `N`, `dt`, parameter type, any parameter field but the deceleration bound, `opt_x` labels, constraint shape or scaling raises `ValueError` at construction; a warm-start transfer with a wrong shape raises `ValueError` before anything is assigned; an exception from the gate propagates out of `PathFollower.step` / `plan` (no PD fall-back) |
+| `samples/mpc_follow_demo.py` | six flags: `--decel-limit throttle\|brake` (absent = the follower default), `--lead-in L` (20), `--final-len F` (15), `--turn left\|right` (left; the defaults give the 2.0.6 waypoints exactly), `--mu-lat`, `--mu-long` (every wheel's `WheelConfig.mu_lat` / `mu_long` before `build()` through `control.sweep_measure.apply_plant_overrides`). Exit 2: any `--decel-limit` with `--mpc-model off`; `--decel-limit brake` with `--command-mode signed`; a μ flag without both `--table` and `--params` (the cache is keyed on URDF + preset only). Log keys `v_lat`, `yaw_rate`, `steer_raw` (stage-2 steer before the `steer_cap` clip), `front_roll_min`, `decel_open`; result fields `mpc_decel_limit`, `table_sha256`, `params_sha256`, `v_done`, `rest_xy`, `post_terminal`, `path_sha256`, `live_mu`, `record_tyre_mu`, `record_plant_overrides`, `setup_ms`, `decel_switch_steps`, `decel_first_open_k`; one `WARNING record tyre mu != vehicle mu` line when they differ (the sample's own check; the SDK checks nothing on this path) |
+
+### 3. What `"brake"` means: the end gate
+
+**On each MPC solve, the brake row bounds the solve when BOTH hold:**
+
+1. **the active forward block's reference end time is within N·DT_MPC (2.0 s
+   at the default N = 20) of the solve time, in REFERENCE TIME** —
+   `t + DT_MPC·N >= t_end − 1e-9`, with `t_end` the last time of the block's
+   time-stamped rig reference (`_MPCLaw.decel_open_at`); **and**
+2. **the rig reference's end point lies ahead of the rear axle** — when (1)
+   holds, the horizon's last reference node is clamped to the reference end,
+   and its body-x coordinate in the solve frame (rear-axle centre, chassis
+   heading) must be > 0.
+
+Otherwise the throttle row, through the default's own NLP. Consequences, each
+a property of the code, not an accident:
+
+- **Reference time, not distance.** A vehicle behind its schedule gets the
+  brake row EARLIER and FARTHER from the end. Measured: on F-G7
+  (`--course behind --behind-len 3`) the gate opened at 20.475 s with the car
+  15 m off the path (plan-review, scratch harness; the acceptance run opened at
+  the same step, k_open 819, implementation); about 38 m from the end on a 40 m
+  no-ramp straight at a constant 12 m/s reference (k_open 56, 57 open solves,
+  `DONE` 7.075 s like A); about 12 m from the goal on the first solve after a
+  K-turn release (`--course behind --behind-len 4 --kturn on`, `DONE` 28.925 vs
+  A 28.975 s) (both impl-review).
+- **Mid-path decelerations get nothing.** A reference speed drop in mid-path,
+  and a profile that ramps down before its last 2.0 s of reference time (that
+  earlier deceleration), get the throttle row. Only the final 2 s of a forward
+  block's schedule (a goal or a cusp) can open the gate.
+- **After the end point passes behind the rear axle, the throttle row** (the
+  mismatch row of §6.5 closed this way at k 656).
+- **The heading gate, the watchdog, the K-turn release and `set_path` re-time
+  the reference** (`_reseed_block`, block entry) and so move the opening. The
+  choice is re-evaluated on every solve and has no other state.
+- **Held steps** (between solves, every 4th step solves) are clipped by the
+  table of the LAST solve; under `on_solve_failure="hold"` that is the table of
+  the solve that just failed.
+- **The NMPC builds two NLPs** (THR with exactly the 2.0.6 call, BRK with the
+  brake table) and on a switch copies the primal iterate (`opt_x_num`, its
+  unscaled twin), do_mpc's `u0` (the command-change penalty's previous command)
+  and `_t0` from the previously active one; the duals are copied only when the
+  source has solved, and under the follower's IPOPT options only `opt_x_num`
+  and `u0` affect the next solve (api-review probe: bitwise-equal output with
+  and without duals). No dual warm start is claimed. The LMPC keeps one QP and
+  swaps its parameter set per solve.
+- **Equality with the default before the first open solve is MEASURED, not
+  guaranteed.** THR is a separate object from what a default follower builds,
+  and IPOPT gives no such guarantee. Measured (I-5, every logged key except
+  `decel_open`, on every row before k_open): 45 / 45 B′ runs (implementation:
+  25 at μ 1.0, 20 at μ 0.6) and 13 / 13 re-run (impl-review). Genesis-free,
+  real NLPs: one test in `tests/test_mpc_decel_gate.py` asserts bitwise-equal commands
+  and law state up to the predicted open solve on one 30 m path.
+
+```mermaid
+flowchart TD
+    S["MPC solve at follower time t<br/>(every 0.1 s on a forward block)"] --> M{"mpc_decel_limit"}
+    M -->|"'throttle' (default)"| T["one solver: throttle row<br/>(the 2.0.6 construction; decel_gate None)"]
+    M -->|"'brake'"| R["sample the rig reference at<br/>ts = t + DT_MPC·k, k = 0..N"]
+    R --> C1{"ts[N] ≥ t_end − 1e-9 ?<br/>reference time; t_end = end of the<br/>active forward block's reference"}
+    C1 -->|no| TR["throttle-row problem"]
+    C1 -->|yes| C2{"last reference node = rig reference end point:<br/>body-x from the rear axle &gt; 0 ?"}
+    C2 -->|"no (end behind the rear axle)"| TR
+    C2 -->|yes| BR["brake-row problem<br/>(warm start moved over on a switch)"]
+```
+
+**What the open solve can ask of stage 2.** At the identify speeds (3 m/s and
+above) the most negative target maps to brake 1.0 within 0.16 % (target /
+brake-1.0 deceleration 1.0007–1.0016); below 3 m/s the target exceeds what
+brake 1.0 delivers by up to 0.85 % (2 m/s 1.0018, 1 m/s 1.0028, 0.5 m/s
+1.0085) (impl-review computation from the frozen μ 1.0 table and params,
+throttle 0, flat ground). The throttle row maps to brake about 0.40 on the
+reference car (plan agent, §2.3 of its plan).
+
+### 4. The default: what is identical, and how far that is shown
+
+**The default's commands and per-step logs are identical to 2.0.6 on the
+measured runs (I-1 16 + 3 runs, I-2 fixture, I-6) — measured, not enforced on
+every scene; `mpc_stats` gains `decel_gate: None`.** Code: with
+`"throttle"` the follower makes ONE `_build_solver` call with the 2.0.6
+arguments, no wrapper, and `_MPCLaw(decel_gate=False)`, which looks nothing up
+on the solver; the clip and `solver_params("throttle")` arithmetic are
+unchanged (impl-review code audit; a constructor spy test in
+`tests/test_mpc_decel_gate.py`).
+
+| gate | what | result |
+|---|---|---|
+| I-1 | 16 default closed-loop runs (the 13 arm-A courses, the signed demo, the LMPC demo, the `--plant diff` demo) on the 2.1.0 tree vs captures on 2.0.6 (`d68ef4d`), `==` per step on k, t, x, y, yaw, v, regime, mode, throttle, steer, brake, gear, engaged gear, status, plus step count, end mode, waypoint hash, thread environment | 16 / 16 (implementation); 8 / 8 re-run (impl-review: N1, G4, K1, O1, G3, signed, LMPC, diff) |
+| I-1μ | 3 default runs at μ 0.6 (N1μ, S1μ, O1Fμ) vs 2.0.6 with μ applied by a harness | 3 / 3 (implementation); O1Fμ re-run (impl-review) |
+| I-2 | `tests/test_mpc_default_identity.py`: every field of the default follower's `solver.p` (NMPC gear, NMPC signed, LMPC) and of `solver_params()` against a fixture captured on 2.0.6 | in the suite |
+| I-3 | `test_pd_golden.py`, `test_mpc_field_replay.py`, `test_fan_default_identity.py`, the `kturn_off_2_0_2.json` replays, `test_legacy_inputs_bit_identity.py`, unmodified | pass |
+| I-6 | the 16 round-1 A rows vs the round-2 A rows on every round-1 key | 16 / 16 (implementation) |
+
+Not shown: the 7 default courses impl-review did not re-run; any scene outside
+these runs. Code that compares the exact key set of `mpc_stats` sees one more
+key.
+
+### 5. History: the first brake-bound design failed, and why
+
+**Round 1 (never shipped): the brake row on every solve.** It FAILED two frozen
+safety gates on the 2.0.2 "behind" courses (implementation):
+
+| gate | G4 (`behind 15`) | G5 (`behind 22`) | limit |
+|---|---|---|---|
+| S-4 time to `DONE`, B − A | 23.05 vs 20.4 s, **+2.650 s** | 26.275 vs 23.425 s, **+2.850 s** | +0.5 s |
+| S-6 whole-course CTE max | **15.0960** vs 15.0603 m | **15.0960** vs 15.0603 m | A + 0.02 = 15.0803 m (missed by 1.6 cm) |
+
+Its benefit hypotheses passed (H-B1, H-B2); S-1, S-2, S-3 and braking at brake
+1.0 inside the arc at μ 1.0 passed.
+
+**Cause, measured** (plan agent's replay at the first R-MPC solve of G4, read
+again by plan-review): at step 380 (t 9.5 s) the heading gate released
+`PD-ALIGN` with the car 13.6 m beside the path at 1.996 m/s, heading 135.2°
+against the path's 180° (the plan first wrote 150°; plan-review measured
+135.2°, e_psi 44.8° — the release threshold π/4). The re-timed reference made
+the path start due now, so **all 21 reference nodes lay BEHIND the car**
+(x_ref −7.01 at node 0 to −4.17 at node 20, 10.9–13.7 m to the left). With the
+forward-only bound `v_x ≥ 0` the tracking optimum is a stop: both arms planned
+one (A `cmd_a` −2.094 at the throttle row, B −4.439). **The wider bound only
+made the stop sooner**: B reached v < 0.1 m/s at step 401, A at 419; then both
+dithered `MPC` ↔ `MPC-HOLD` (B 69 steps, A 41) and the watchdog fired twice in
+B, once in A (`PD-STALL` 82 vs 42 steps). Not the cause: the 0 m/s rule, the
+3 m/s row applied down to 0, `brake_for`, the tanh coast fade. The underlying
+hand-over is a pre-existing property of the default (§7.6, D-14).
+
+**Redesign.** Two candidates were measured on seen rows (plan agent, scratch):
+a speed gate (brake row only at ≥ 3 m/s; G4 +0.075 s, but no identity with the
+default and no brake authority for stops below 3 m/s) and the end gate (G4
++0.225 s, G5 +0.000 s). The user chose the end gate. Plan-review found that the
+first end-gate prototype CRASHED when the gate opened on the follower's first
+solve (`AttributeError: 'MPC' object has no attribute 'lam_x_num'` — do_mpc
+creates the duals only in its first solve) and that the gate is in reference
+time, not geometry; both are addressed in the shipped code (§3; F-G10 opens on
+the first solve and ends `DONE`).
+
+**Round 2 (shipped) passed**: S-4 G4 **+0.225 s** (20.625 vs 20.4), G5
+**+0.000 s** (23.425 vs 23.425) (implementation; impl-review re-ran both, same
+figures); S-6 G4 / G5 15.0603 = A.
+
+### 6. Measurements, with their evidence labels
+
+**Labels.** A benefit is claimed ONLY from fresh rows: **F-N4** (arrival speed)
+and the **μ 0.6 tier** (H-B1μ, H-B2μ). F-G6, F-G8, F-G9 are fresh NON-HARM rows.
+Known beforehand at μ 1.0 (seen: the planner's prototype runs and plan-review's
+probes): **N1, G4, G5, S1F, F-G7, F-G10, R10v6**. Every other frozen μ 1.0 B′
+row (and the `--plant diff` and LMPC report rows) is a replication (a round-1
+outcome the plan agent's replays predicted to carry over). Every frozen μ 1.0 A
+row was seen (round 1); of the round-2 rows' A sides, F-G7, F-G10 and R10v6
+were seen, F-G6, F-G8, F-G9 and F-N4 fresh. The demo-course numbers (N1) are therefore NOT evidence of a benefit.
+Thresholds were fixed in `.pm_r2/r21/acceptance.json` (round 1) and
+`acceptance_r2.json` (round 2) before the first run of each round.
+
+#### 6.1 μ 1.0, frozen courses (B′ vs A)
+
+Implementation; rows marked † were re-run by impl-review (B′: I-5 PASS at the
+same k_open; end modes and times confirmed for S1F, O1F, G4 and G5; A on N1, O1,
+G4 by I-1).
+
+| course | label | A end, t (s) | B′ end, t (s) | whole CTE max A / B′ (m) | v_done A / B′ | R-FAIL A / B′ | k_open |
+|---|---|---|---|---|---|---|---|
+| N1 † (demo: lead 20, R 30, v 8) | seen | DONE 13.45 | DONE 13.45 | 0.684 / 0.074 | 4.58 / 3.24 | 0 / 0 | 456 |
+| N2 (lead 60, R 30, v 10) | replication | DONE 16.475 | DONE 16.475 | 1.222 / 0.172 | 5.88 / 4.04 | 0 / 0 | 572 |
+| N3 (R 20) | replication | DONE 14.925 | DONE 14.925 | 1.275 / 0.233 | 5.94 / 4.07 | 0 / 0 | 508 |
+| H1 (R 15) | replication | DONE 14.15 | DONE 14.125 | 1.319 / 0.253 | 5.93 / 4.16 | 0 / 0 | 476 |
+| S1 (R 11.3) | replication | DONE 13.6 | DONE 13.575 | 1.384 / 0.246 | 5.85 / 4.15 | 0 / 0 | 452 |
+| O1 † (R 8.5) | replication | DONE 13.225 | DONE 13.275 | 1.871 / 1.391 | 6.21 / 3.83 | 1 / 1 | 436 |
+| O2 (lead 80, R 10, v 12) | replication | DONE 14.9 | DONE 14.975 | 3.152 / 2.530 | 6.37 / 3.63 | 0 / 0 | 492 |
+| S1F † (S1, final 3 m) | seen | DONE 12.4 | DONE 12.45 | 0.711 / 0.330 | 5.60 / 3.29 | 0 / 0 | 404 |
+| O1F † (O1, final 3 m) | replication | DONE 11.975 | DONE 12.075 | 0.576 / 0.231 | 5.38 / 3.15 | 0 / 0 | 388 |
+| S1R (S1F mirrored) | replication | DONE 12.4 | DONE 12.45 | 0.712 / 0.330 | 5.60 / 3.29 | 0 / 0 | 404 |
+| G1 (vertex 90) | replication | DONE 9.8 | DONE 9.8 | 2.856 / 2.856 | 2.67 / 2.58 | 5 / 5 | 320 |
+| G2 (misaligned) | replication | DONE 41.775 | DONE 41.775 | 15.117 / 15.117 | 1.79 / 1.79 | 0 / 0 | 1621 |
+| G3 (cusp) | replication | DONE 11.175 | DONE 11.125 | 0.050 / 0.050 | −2.00 / −2.00 | 0 / 0 | 168 |
+| G4 † (behind 15) | seen | DONE 20.4 | DONE 20.625 | 15.060 / 15.060 | 4.11 / 2.91 | 0 / 1 | 745 |
+| G5 † (behind 22) | seen | DONE 23.425 | DONE 23.425 | 15.060 / 15.060 | 1.80 / 1.80 | 0 / 0 | 885 |
+| K1 (behind 6, `--kturn on`) | replication | DONE 29.375 | DONE 29.325 | 10.550 / 10.550 | 3.18 / 2.95 | 0 / 0 | 1071 |
+
+Every B′ run opened exactly once and every switching solve converged
+(implementation). Gates (B′ vs A): S-1 (DONE where A is DONE) 16 / 16; S-2
+(R-FAIL ≤ A + 2) 16 / 16 (both over all 16 courses); S-3 (no spin; gated on
+N1–O2, S1F, O1F, S1R) 10 / 10, max |β| ≤ 0.123; S-4 +0.225 / +0.000 s; S-6
+(whole CTE max ≤ A + 0.02 m; on N1, N2, N3, G1–G5) 8 / 8. At μ 1.0 no row locked a
+front wheel in the arc. Braking inside the arc (steps with brake > 0.5): S1F /
+S1R 33 steps, peak combined demand sqrt(a_x² + a_y²)/μg 0.665; O1F 31 steps,
+0.839 (a_x by finite difference) (implementation). H-B1 (v_done(B′) < v_done(A)
+− 0.52) passes on N1 (seen), N2 and S1 (replication); H-B2 (whole CTE max on N1
+0.684 → 0.074) passes and is a SEEN row. Report rows: `--plant diff` N1 (S-1 /
+S-3 gated) `DONE` 13.45, CTE max 0.0697 (A 0.6149), `DifferentiablePlant`
+`coupled=False` only; LMPC N1 `DONE` 13.625 vs A 13.475, CTE max 0.2422 both,
+v_done 3.21 vs 4.82 (both implementation; LMPC + `"brake"` was not measured
+beyond this one report row).
+
+#### 6.2 μ 1.0, round-2 rows
+
+| row | argv | label | kind | A | B′ | verdict |
+|---|---|---|---|---|---|---|
+| **F-N4** | `--lead-in 40 --radius 25 --v 9` | **fresh** | safety + benefit | DONE 14.2, CTE max 0.9937, v_done 5.19 | DONE 14.2, CTE max 0.1495, v_done **3.50** | safety PASS; benefit PASS (3.50 < 5.19 − 0.52) |
+| F-G6 | `--course behind --behind-len 15 --v 3` | fresh | non-harm | DONE 12.75, CTE max 15.0327 | DONE 12.775 (**+0.025 s**), 15.0327 | PASS |
+| F-G8 | `--course cusp --v 6` | fresh | non-harm | DONE 10.95, 0.0497 | DONE 10.7 (**−0.25 s**), 0.0500 | PASS |
+| F-G9 | `--course behind --behind-len 22 --v 5` | fresh | non-harm | DONE 9.6, 15.4253, R-FAIL 1 | DONE 9.825 (**+0.225 s**), 15.4253, R-FAIL 1 | PASS |
+| F-G7 | `--course behind --behind-len 3` | seen | end mode = A's | **GOAL-MISSED** 25.55, R-FAIL 9 | GOAL-MISSED 25.55, R-FAIL 9 (opened 20.475 s, car 15 m off the path) | PASS — A fails too |
+| F-G10 | `--course behind --behind-len 3 --start-yaw π --t-max 20` | seen | the first-solve opening | DONE 1.35 | DONE 1.35, no exception, opened on the first solve (k 0) | PASS |
+| R10v6 | `--course behind --behind-len 10 --v 6` | seen | report | MPC-ABORT 8.275 | MPC-ABORT 8.225, the switching solve `capped_infeasible` | the default fails here too |
+
+Implementation; impl-review re-ran F-G6, F-G8 and F-G10 with the same results
+and did NOT re-run F-N4, F-G9, F-G7 or R10v6. **F-N4 is the only fresh μ 1.0
+benefit row.**
+
+#### 6.3 Scenes outside the gates (impl-review, report only, A vs B′ on the same scene)
+
+| scene | A | B′ |
+|---|---|---|
+| forward 4 m → cusp → reverse 6 m → forward 12 m, 3 m/s | DONE 9.225 | DONE 9.225; one opening per forward block, 3 switches; the follower's own `BRAKE_TRANS` does the cusp stop |
+| `set_path` at 7.0 s (8.0 m/s) to an 8 m straight at 10 m/s | DONE 8.375, β 0.146 | DONE 8.35, β 0.000; opened at the `set_path` step |
+| 40 m straight at a constant 12 m/s, no ramp (lags its schedule) | DONE 7.075 | DONE 7.075; opened about 38 m from the end |
+| lag with a corner (`--course vertex --vertex-deg 60 --v 10`) | DONE 6.65, CTE max 7.67, β 0.128 | DONE 6.70, 7.67, β 0.145; opened at x 3.5 m |
+| `on_solve_failure="hold"`, failed status injected on the switch solve | DONE 13.425 | DONE 13.425; the bogus command is applied (field parity of `"hold"`) |
+| same injection under `"pd"` | — | DONE 13.425, 4 `PD-FALLBACK` steps |
+| `DifferentiablePlant` stage 2 on O1F | DONE 11.9, CTE max 1.18 | DONE 11.95, 0.43, β 0.122 |
+| gate chatter | — | not provoked: at most 3 switches (a multi-block run) over 65 gated runs (45 implementation, 20 impl-review) |
+
+#### 6.4 μ 0.6 tier
+
+**How μ 0.6 is set — and the trap.** Ground-plane friction does NOT reach the
+ray-wheel tyre force; only the per-wheel `WheelConfig.mu_lat` / `mu_long` do
+(`PacejkaAnisotropic` / `CoulombIsotropic` read `wheel_meta`; `_pipeline.py`
+reads no ground or material friction). Measured: plane friction 0.6 with wheel
+μ 1.0 gave a trajectory bit-identical (same hash) to plane friction 1.0; wheel
+μ 0.6 changed it (5 s full throttle 8.534 → 8.233 m/s, max a_y under full lock
+6.601 → 4.355 m/s²) (plan agent, probe P1, scratch). **Lowering the plane
+friction does not make a slippery world.** μ 0.6 here is
+`mu_lat = mu_long = 0.6` on every wheel through
+`control.sweep_measure.apply_plant_overrides` before `build()` (the sample's
+`--mu-lat 0.6 --mu-long 0.6`), with the params record and the sweep table
+measured with the same flags (`identify` / `sweep_measure --mu-lat 0.6
+--mu-long 0.6`; the record carries `plant_overrides`). **Where μ 1 remains:**
+Genesis rigid contacts (plane and chassis material at 1.0 in the sample; that
+the chassis never touched the ground is a plan-agent statement for its P1 probe
+course, not checked on the acceptance courses); the `[sfl-cap]` warning's
+millimetre text "at mu 1.0"; rolling resistance and k_b, independent of μ by
+design; `StaticFrictionLock`'s friction ellipse omits `lat_scale` (equal to the
+tyre's only at `lat_scale` 1.0, which the reference car has) — a known
+pre-existing gap, not a claim.
+
+**What the record changes at μ 0.6** (plan agent's diff, plan-review checked the
+ratios; geometry, mass, `izz_cg`, axle loads, `accel_tau`, `deadbeat_scale`,
+`brake_gain` 5.0152 unchanged to ≤ 1e-5 relative):
+
+| field | μ 1.0 | μ 0.6 | ratio |
+|---|---|---|---|
+| tyre `mu_lat` / `mu_long` | 1.0 | 0.6 | 0.600 |
+| front / rear cornering stiffness | 33204 / 32555 | 19394 / 19227 | 0.584 / 0.591 |
+| `steer_yaw_tau` (the MPC's steering time constant) | 0.0805 | 0.1428 | 1.774 |
+| `decel_brake_by_speed` at 3 / 6 / 10 / 14 m/s | −5.166 / −5.174 / −5.190 / −5.215 | −4.209 / −4.337 / −4.431 / −4.665 | 0.81–0.89 |
+| `decel_throttle_by_speed` at 3 m/s (others unchanged) | −2.153 | −1.868 | 0.868 |
+| `accel_max_by_speed` at 0 m/s (others unchanged) | 1.908 | 1.559 | 0.817 |
+| `v_star` | 2.981 | 1.788 | 0.600 |
+
+identify's cornering cases reach 0.54 μg at μ 0.6 (0.33 μg at μ 1.0), so the
+bicycle fit stays unsaturated (residual 0.74 %); its stiffness is 0.946 / 0.952
+of the Pacejka small-slip value per axle at μ 0.6 (0.971 / 0.967 at μ 1.0).
+
+**The brake row sits at the front-lock knee at μ 0.6.** It maps to brake b_max
+0.811 / 0.835 / 0.850 / 0.891 at 3 / 6 / 10 / 14 m/s (plan agent, checked by
+plan-review); the throttle row to 0.34–0.40. The straight-line brake curve at
+μ 0.6 (implementation; plan-review's 10 and 6 m/s rows reproduced to the
+printed digits; `.pm_r2/r21/logs/c19_brake_curve_mu06.jsonl`; deceleration in
+m/s² over 0.25 s, front roll ratio where < 1 (rear roll ratio named where
+< 1; only the 3 m/s / brake 1.0 cell); the largest deceleration of each row in
+bold):
+
+| v0 | 0.5 | 0.7 | 0.8 | 0.85 | 0.9 | 0.95 | 1.0 |
+|---|---|---|---|---|---|---|---|
+| 10 m/s | −2.653 | −3.650 | −4.148 | −4.397 | **−4.646** | −4.492, fronts 0.387 | −4.412, fronts 0.0 |
+| 6 m/s | −2.652 | −3.633 | −4.131 | −4.062, fronts 0.109 | −4.088, fronts 0.0 | −4.181, fronts 0.0 | **−4.286**, fronts 0.0 |
+| 3 m/s | −2.645 | −3.626 | −3.861, fronts 0.0 | −3.965, fronts 0.0 | −4.070, fronts 0.0 | **−4.174**, fronts 0.0 | −4.164, fronts 0.0, rears 0.261 |
+
+Fronts lock from 0.90–0.95 at 10 m/s, 0.80–0.85 at 6 m/s, 0.70–0.80 at 3 m/s
+(the preset's brake bias is 60/40 front); the deceleration is not monotone in
+brake at any of the three speeds: at 10 m/s it peaks at 0.9 (−4.646) and falls
+to −4.412 at 1.0; at 6 m/s it has a LOCAL peak at 0.8 (−4.131, the last brake
+level before the fronts lock), drops to −4.062 at 0.85 and then rises past it
+(−4.181 at 0.95, −4.286 at 1.0, the row's largest); at 3 m/s 0.95 → 1.0 goes
+−4.174 → −4.164. In a turn the lock comes earlier.
+
+**Results** (implementation; † B′ re-run by impl-review, same end modes and
+times). Courses keep v and lead-in and scale the radius by 1/0.6 (same
+a_y/μg); **N1μ is the unscaled demo** (0.36 μg), so N1 → N1μ is not a
+same-demand pair. Labels (`acceptance_r2.json` `labels`): every μ 0.6 B′ row is
+fresh except S1Fμ and the M_S1Fμ B′ mismatch run (replications of the plan
+agent's F2 / F3 runs); the A sides of N1μ, S1μ and O1Fμ were seen; the other A
+rows are fresh. All 16 frozen μ 0.6 courses are listed (the three mismatch runs
+are §6.5).
+
+| course | A end, t | B′ end, t | whole CTE max A / B′ | v_done A / B′ | B′ in-arc lock (steps / longest) | spin A / B′ |
+|---|---|---|---|---|---|---|
+| N1μ † | DONE 13.45 | DONE 13.45 | 0.528 / 0.122 | 4.58 / 3.56 | 0 / 0 | no / no |
+| N2μ (R 50) | DONE 19.575 | DONE 19.6 | 0.791 / 0.320 | 6.14 / 4.79 | 0 / 0 | no / no |
+| N3μ (R 33.3) | DONE 16.95 | DONE 16.95 | 0.963 / 0.335 | 6.06 / 4.83 | 0 / 0 | no / no |
+| H1μ (R 25) | DONE 15.65 | DONE 15.65 | 0.989 / 0.348 | 6.12 / 4.91 | 0 / 0 | no / no |
+| S1μ (R 18.83) | DONE 14.7 | DONE 14.725 | 0.656 / 0.481 | 6.24 / 4.97 | 0 / 0 | no / no |
+| O1μ (R 14.17) | DONE 14.25 | DONE 14.25 | 2.077 / 2.109 | 5.55 / 4.40 | 0 / 0 | **yes** (β 0.465) / **yes** (0.460) |
+| O2μ (lead 80, R 16.67, v 12) | DONE 16.525 | DONE 16.525 | 4.684 / 4.684 | −0.81 / −0.81 | 0 / 0 | **yes** (1.122) / **yes** (1.122) |
+| S1Fμ † | DONE 13.65 | DONE 13.6 | 1.320 / 0.692 | 5.77 / 4.52 | **21 / 21** | no / no |
+| O1Fμ † | DONE 13.1 | DONE 13.35 | 1.477 / 1.450 | 4.90 / 2.08 | **22 / 22** | no / no (β 0.159 / 0.209) |
+| S1Rμ | DONE 13.65 | DONE 13.6 | 1.320 / 0.692 | 5.77 / 4.52 | **21 / 21** | no / no |
+| G1μ | DONE 9.825 | DONE 9.825 | 2.966 / 2.966 | 2.79 / 2.60 | — | no / no |
+| G2μ | DONE 41.85 | DONE 41.85 | 15.136 / 15.136 | 1.79 / 1.79 | — | no / no |
+| G3μ | DONE 11.425 | DONE 11.325 | 0.050 / 0.050 | −2.00 / −2.00 | — | no / no |
+| G4μ | DONE 20.65 | DONE 20.7 | 15.077 / 15.077 | 3.97 / 2.89 | — | no / no |
+| G5μ | DONE 23.725 | DONE 23.725 | 15.077 / 15.077 | 1.92 / 1.92 | — | no / no |
+| K1μ | DONE 29.5 | DONE 29.475 | 10.577 / 10.577 | 3.32 / 2.94 | — | no / no |
+
+Gates, B′ vs A within the tier (implementation, `grade_r2_mu06`): S-1 16 / 16
+and S-2 16 / 16 (all 16 courses above); S-3 8 / 8 gated (N1μ, N2μ, N3μ, H1μ,
+S1μ, S1Fμ, O1Fμ, S1Rμ; O1μ and O2μ: **the default itself spins**, so they are
+reported, not gated; B′ spins there too; the G and K courses are outside S-3),
+S-4 G4μ +0.05 s, G5μ +0.000 s, S-6 8 / 8 (N1μ, N2μ, N3μ, G1μ–G5μ), C21
+(arc-window and whole CTE max ≤ 1.10·A + 0.02 m on the braking-in-arc rows;
+B′ vs the limit) S1Fμ 0.692 vs limit 1.472, O1Fμ 1.450 vs limit 1.644, S1Rμ
+0.692 vs limit 1.472. **No spin where the default does not spin, and no gate
+failure, on any matched-μ row.**
+Fresh benefit hypotheses: **H-B1μ**
+(v_done(B′) < v_done(A) − 0.42) PASS — N1μ 4.58 → 3.56, N2μ 6.14 → 4.79, S1μ
+6.24 → 4.97; rest overshoot past the goal 1.02 → 0.03, 2.82 → 1.26, 2.94 → 1.46
+m; **H-B2μ** (whole CTE max on N1μ < A − 0.05) PASS — 0.528 → 0.122. Report row:
+`--plant diff` N1μ `DONE` 13.45, CTE max 0.0932 (A 0.3996), no spin.
+
+#### 6.5 Mismatch rows: a record that over-states the grip (WARNING)
+
+The μ 1.0 record and table driving a μ 0.6 vehicle — the realistic field misuse
+(implementation; † re-run by impl-review). Report-only by user decision (D-10).
+Labels: the M_S1Fμ B′ run replicates the plan agent's F3 run; the other
+mismatch B′ runs are fresh.
+
+| M-course | arm | end, t (s) | arc CTE max / mean (m) | max \|β\| | in-arc lock (steps / longest) | max in-arc brake | gate |
+|---|---|---|---|---|---|---|---|
+| S1μ | A | DONE 14.8 | 0.794 / 0.399 | 0.214 | 0 / 0 | 0.00 | — |
+| S1μ | B′ | DONE 14.7 | 0.809 / 0.403 | 0.216 | 0 / 0 | 0.00 | opened at k 500 |
+| S1Fμ | A | **GOAL-MISSED** 14.025 | 2.429 / 0.907 | 0.165 | 0 / 0 | 0.40 | — |
+| S1Fμ | B′ | DONE 13.625 | 0.613 / 0.353 | 0.142 | 22 / 22 | 1.00 | opened at k 452 |
+| O1Fμ † | A | DONE 13.4 | 2.264 / 1.227 | 0.197 | 0 / 0 | 0.36 | — |
+| O1Fμ † | B′ | **GOAL-MISSED** 17.5 | 2.619 / 1.511 | 0.246 | 11 / 11 | 0.67 | opened k 424, closed k 656, 58 open solves |
+
+**Warning: on M_O1Fμ the opt-in turned a `DONE` into `GOAL-MISSED`.** Why
+(impl-review, from its logs): the gate opens at k 424 at 9.6 m/s inside the arc;
+the μ 1.0 record's brake row (−5.19 m/s² at 10 m/s, against about −4.43
+reachable at μ 0.6 — a 14.6 % shortfall, plan agent) is not reachable on μ 0.6
+tyres while cornering; the MPC plans the stop with it and stage 2 maps it to
+brake 0.6–0.75 (k_b of the μ 1.0 record); **the fronts lock** (roll ratio 0.00
+from about k 506 to 530; **29 consecutive locked steps** at v > 1 m/s counted
+over every step, 11 counted inside the arc by the implementation's metric) with
+the steering saturated; the car **understeers about 2.6 m wide** of the arc
+(radius 16.78 m vs 14.17 m) and about 1.4 m wide of the final straight, bleeds
+speed to a 0.1 m/s crawl with `MPC` / `MPC-HOLD` dithering, comes no closer than
+**1.598 m** to the goal against `arrival_goal` 1.5 m (missing the circle by
+0.098 m), the gate closes at k 656 when the end passes behind the rear axle,
+and `GOAL-MISSED` fires at 17.5 s. A brakes at most 0.36 in the arc and never
+locks; it also runs wide but sweeps past the goal at 4.08 m/s, grazing the
+circle at **1.4775 m**. **The verdict difference is therefore about 0.12 m around
+the arrival circle, and A's `DONE` is itself marginal.** On M_S1Fμ the order is
+the reverse (A `GOAL-MISSED`, B′ `DONE`). **Nothing on the `SweepTable` path
+detects a record / vehicle μ mismatch** (the sample prints its own warning;
+the SDK's live cross-check runs only with a `DifferentiablePlant` and only
+warns). Use a record measured at the vehicle's μ.
+
+#### 6.6 Cost
+
+Implementation, the sample's result fields, median (min–max) over 16 courses,
+single runs; NOT re-measured by impl-review:
+
+| | A | B′ |
+|---|---|---|
+| constructor, μ 1.0 | 744 (726–856) ms | 896 (855–1014) ms |
+| NMPC `setup_ms`, μ 1.0 (B′: THR + BRK) | 125 (118–141) ms | 246 (234–292) ms |
+| constructor, μ 0.6 | 709 (677–856) ms | 933 (878–1058) ms |
+| `setup_ms`, μ 0.6 | 118 (113–153) ms | 263 (249–296) ms |
+| LMPC constructor (N1) | 21.2 ms | 21.6 ms |
+
+**No real-time figure exists for `"brake"`**: `bench_path_follower` runs signed
+mode only and `"brake"` refuses signed mode, so the bench has no applicable arm
+and was not run. The real-time figures in `docs/path-following.md` §5.6 are
+default, signed-mode figures and are unchanged.
+
+### 7. Known limitations
+
+#### 7.1 Loss of steering authority under brake-row braking is guarded by nothing
+
+S-3 sees spin, not understeer, and C21 bounds in-arc CTE against a formula A
+already nearly fills. At μ 0.6 B′ locked the front wheels inside the arc on
+every braking-in-arc row: **21–22 consecutive in-arc steps** (S1Fμ / S1Rμ 21,
+O1Fμ 22; implementation) — **33 / 41 / 29 consecutive steps** on S1Fμ / O1Fμ /
+M_O1Fμ counted over every step above 1 m/s (impl-review). On the matched-μ rows
+the measured effect is small (O1Fμ arc CTE max 1.450 vs A 1.477; max |β| 0.209
+vs 0.159; peak combined demand 1.154 μg by finite difference); on the mismatch
+row it is the mechanism of the failure (§6.5). The follower's brake-1.0 paths
+(the terminal command, `BRAKE_TRANS`, `MPC-ABORT`, `SHIFT`, `GUARD`, a PD-phase
+`brake_for` at full brake) are in the locking range at μ 0.6 for every arm,
+the default included (plan-review's reading of the straight-line brake curve);
+locked steps after the terminal command were non-zero on 14 of the 16 frozen
+μ 0.6 courses in both arms (0 on G3μ and O2μ, which end moving backwards,
+v_done −2.00 / −0.81 m/s, where the lock metric's v_long > 1 m/s cannot hold;
+among the mismatch runs 0 on M_O1Fμ B′, which ended at 0.12 m/s;
+implementation, result field `post_terminal.locked_steps`). `control/brake.py` does not model the
+friction-limited regime.
+
+#### 7.2 A PD fall-back inside an open window
+
+On open windows the BRK NLP produced a `capped_infeasible` solve on O1Fμ and on
+G4 (A: none on either). On O1Fμ the 4-step PD fall-back commanded **throttle 1.0
+at 9.24 m/s inside the μ 0.6 arc**; on O1 (μ 1.0) throttle 0.8–0.88 (A has
+R-FAIL 1 there too) (impl-review). S-2 (R-FAIL ≤ A + 2) tolerates it; nothing
+else guards it.
+
+#### 7.3 The brake row may not be reachable
+
+Nothing checks it. The MPC plans a deceleration the vehicle never gets when the
+vehicle's real brake-1 deceleration is weaker than the record's row — lower live
+μ, payload, a downhill grade — or when a stage-2 `brake_gain=` is LARGER than
+the vehicle's real gain (the target then maps to brake < 1). A smaller one
+over-brakes intermediate targets but still reaches the row at brake 1. On the
+`SweepTable` path nothing compares the record (or the table) with the vehicle.
+With a `DifferentiablePlant` stage 2 the coupled solve receives, on an open
+solve's braking steps, a throttle target beyond the throttle channel's reach
+(`coupled=True` not measured).
+
+#### 7.4 The stage-2 steer inverse is discontinuous beyond the table's range
+
+When a yaw-rate target lies beyond the steer-1.0 row, `SweepTable`'s steer
+inverse returns the endpoint ±1.0 with no bisection, and the `steer_cap` 0.5
+clip makes that 0.5. On the μ 0.6 table at 10 m/s a target of magnitude 0.55
+rad/s gives steer 0.398 and 0.60 gives 1.0 → 0.5 (about 0.96 μg on the 10 m/s
+courses); at 12 and 14 m/s the jump is at 0.5 rad/s. It exists at μ 1.0 too,
+at 12 and 14 m/s (plan-review, Genesis-free). Pre-existing, every arm.
+
+#### 7.5 The gate is in reference time
+
+§3. A lagging vehicle gets the brake row early and far from the end; a
+stopped-and-dithering one too, until the end passes behind it. No gate chatter
+was provoked (§6.3).
+
+#### 7.6 Known limitations of the DEFAULT stack, recorded in this release
+
+Pre-existing, not changed by 2.1.0:
+
+- **D-13, the default stage-2 steer grid over-delivers yaw**, by an amount that
+  depends on the requested yaw rate: at 10 m/s, frozen-table over fine-table
+  steer ×1.22–1.23 at 0.53–0.56 rad/s, ×1.15 at 0.73, ×1.02 at 0.92; measured
+  plant over target 1.22–1.25, 1.22, 0.98 (plan agent and plan-review; frozen
+  5-point steer grid vs a 17-point scratch table). A finer grid is not a simple
+  fix: it lowered A's H1 arc-window CTE mean 0.179 → 0.079 m and raised its
+  maximum 0.253 → 0.336 m (single scratch runs).
+- **D-14, the default's heading-only hand-over can face a reference behind the
+  car**: after `PD-ALIGN` releases on heading alone, the re-timed reference can
+  lie entirely behind the car; the MPC brakes to a stop and dithers (G4, A: 41
+  `MPC-HOLD` and 42 `PD-STALL` steps; plan-review). It slows the default on the
+  "behind" courses; a candidate for the planned 2.3.0 hold-release rule.
+- **D-15, the stage-1 yaw-rate target is kinematic**: `w_t` is 0.4–2.1 % above
+  the prediction model's own steady state on the H1 / S1 arcs (plan agent,
+  Genesis-free replay); a model-consistent target changed A's signed in-arc
+  offset by −0.003 / −0.008 m (H1 / S1) and raised its S1 arc max 0.4366 →
+  0.4436 m (scratch harness, single runs). Not shown to be harmful or helpful.
+
+### 8. Investigation record: `mpc_model="pacejka"` (removed)
+
+**Shipped state:** `PathFollower(..., mpc_model="pacejka")` raises
+`ValueError` naming `['bicycle', 'off']`, as in 2.0.6; no Pacejka code is in the
+tree (per-file "pacejka" line counts equal 2.0.6's, model and test files
+byte-identical to 2.0.6; implementation, re-checked by impl-review). The
+design was a Pacejka lateral tyre law in the NMPC's dynamic branch (≥ 5 m/s),
+same states, cost and bounds; below 5 m/s both models are the same kinematic
+bicycle. Conditions of everything in this section: CPU/WSL2, genesis-world
+1.5.0, reference car, μ 1.0, the frozen μ 1.0 assets, single runs.
+
+**Round 1 (implementation): FAILED the non-harm gates.** Arc-window CTE, frozen
+limits 1.10·A + 0.02 m (max) and 1.10·A + 0.005 m (mean): H1 (0.68 μg) P vs A
+max 0.3120 > 0.2979 and mean 0.2178 > 0.2016; S1 (0.90 μg) mean 0.2994 >
+0.1660; Q vs B failed on H1 and S1. It held at 0.22–0.51 μg (N1–N3). Its benefit
+appeared only beyond saturation (arc CTE max O1 0.880 vs 1.546, O2 1.496 vs
+2.896), and its fresh hypothesis verdict (S1 and O2) FAILED (S1: 0.459 vs A
+0.437). S-1, S-2, S-3 and solve time passed.
+
+**Round 2 (plan agent, scratch; corrected by plan-review).** Refuted as the
+main cause: the model predicting the plant worse (it predicted better with the
+wheel angle as input). Refuted as a fix: a double-counted steering lag
+(prediction improved, tracking did not). Refuted: a 3 % stiffness offset, the
+solver (all solves converged), and the cost tuning as a bias against the
+Pacejka model (the formulation favours whichever model matches the plant). The best variant — the
+model's tyre seeing stage 2's steering gain — still failed H1's maximum (0.401
+vs 0.298, a real deviation at arc exit and arrival; plan-review withdrew the
+plan's "a phase it does not touch") and S1's mean by 0.0004 m, on rows already
+seen, and coupled the model to the sweep table. Plan-review corrected the
+reading of the grid numbers (table-to-kinematic ratios are not over-delivery)
+and noted that S1 contradicted the grid as the primary cause. Record: **no
+variant measured in 2.1.0 passed the frozen rows.**
+
+**Round 3 (plan agent; plan-review re-computed the tables).** The hand-over
+candidate (stage 2 is given a kinematic yaw-rate target) was tested and
+refuted. The record, in plan-review's wording:
+
+- **Established:** stage 2's default steer grid over-delivers yaw at 10 m/s by
+  an amount that depends on the requested yaw rate: frozen over fine table
+  steer ×1.22–1.23 at 0.53–0.56 rad/s, ×1.15 at 0.73, ×1.02 at 0.92; measured
+  plant over target 1.22–1.25, 1.22, 0.98.
+- **Explains in direction:** why the Pacejka arm, not the default, ran on the
+  over-delivering part of the map on S1.
+- **Not established:** why the Pacejka arm ran further inside than the default
+  on H1, where both arms see the same grid error and the Pacejka arm's
+  over-delivery was the smaller; and why it still ran inside with a fine table
+  (+0.099 / +0.201 m).
+- **Refuted on this car:** the yaw-rate hand-over. The kinematic target exceeds
+  the model's own steady state by only 0.4–2.1 % (both models are neutral-steer
+  here). A model-consistent target moved the Pacejka arm's signed in-arc mean by
+  −0.002 / −0.004 m (H1 / S1), and it still failed the frozen rows.
+- **Withdrawn:** the statement that the higher-fidelity model predicts less yaw
+  for the same steering command.
+
+Outside that wording: "neutral steer" holds below the tyre peak (slip angle in
+the arc about 0.08–0.12 rad against a peak of 0.441; plan-review requires the
+qualification); the frozen-row figures of the model-consistent target were H1
+max 0.3084 / mean 0.2159, S1 mean 0.2964; a lag-type variant (the plan's node-1
+yaw rate) lost the loop: S1 `GOAL-MISSED` 14.525 s, arc CTE max 2.083 m.
+
+Also recorded: the frozen arc window [arc start, arc end + 5 m] overlaps the
+start of arrival braking on H1 / S1 (braking starts 0.7 m after the arc end
+with the 15 m final leg at 10 m/s) — a coverage weakness, not a defect that
+excuses a variant (plan-review). **A later re-evaluation** needs a stage 2
+consistent at the requested yaw rate (a fine table or an exact inverse), fresh
+courses (a final leg ≥ 35 m at 10 m/s so braking starts after arc end + 5 m,
+mirrored turns, other R / v pairs at 0.5–0.95 μg) and criteria frozen before
+the first run — a roadmap plan, no release assigned (§12).
+
+### 9. Not measured
+
+Other vehicles (no params record exists for one); slopes; μ other than 1.0 and
+0.6, μ_lat ≠ μ_long, mixed- or split-μ surfaces, runtime μ changes, ice-level
+μ; LMPC + `"brake"` in closed loop beyond the one μ 1.0 report row;
+`DifferentiablePlant(coupled=True)`; a user `brake_gain=`; GPU; `n_envs > 1`; a
+live OSC client (the server and the OSC wire do not use `PathFollower`); gate
+chatter (none provoked); real time under `"brake"`; the 7 default I-1 courses
+impl-review did not re-run; F-N4, F-G9, F-G7, R10v6 by impl-review.
+
+### 10. Upgrade note for the field team
+
+1. **Nothing to do for the default.** The default's commands and per-step logs
+   are identical to 2.0.6 on the measured runs (I-1 16 + 3 runs, I-2 fixture,
+   I-6; §4) — measured, not enforced on every scene; `mpc_stats` gains
+   `decel_gate: None`, so code comparing the exact key set sees one more key.
+2. **To opt in:** `PathFollower(..., mpc_decel_limit="brake")` with gear mode
+   (the MPC default) and a params record with a valid `decel_brake_by_speed`
+   (every `identify` record has one). Construction takes about 0.15–0.22 s
+   longer (constructor medians at μ 1.0 / 0.6; `setup_ms` +121 / +145 ms;
+   implementation, §6.6). Expect stronger braking only in the last 2 s of each forward block's
+   SCHEDULE (§3) — not at mid-path stops, and earlier than that if the vehicle
+   lags its schedule.
+3. **Use a record measured at the vehicle's grip.** A μ 1.0 record on a lower-μ
+   vehicle can lock the front wheels and understeer under the brake row (§6.5,
+   §7.1); re-run `identify` and `sweep_measure` with `--mu-lat` / `--mu-long`.
+   Ground-plane friction does not change the tyre (§6.4).
+4. Never pass a `brake_gain=` larger than the vehicle's real gain with
+   `"brake"` (§7.3).
+5. Code matching the 2.0.6 `mpc_model` error text is unaffected (unchanged).
+
+### 11. Earlier documentation corrected in place
+
+Each says in place that it was wrong, conditional, or history:
+
+- **"The MPC prediction keeps its throttle-based deceleration bound"** — now:
+  by default; `"brake"` bounds end-gated solves by the brake row.
+  `docs/physics-contracts.md` §7.20.2, `docs/path-following.md` §5.3 and §5.9
+  ("The brake model — stage 2 only"), `docs/api-reference.md` (`control.brake`
+  row); the `control/brake.py` module docstring was corrected by the
+  implementation.
+- **The 2.1.0 roadmap** ("the Pacejka prediction model with a deceleration
+  bound widened to the brake's limit"): shipped as the END-GATED brake bound
+  only; Pacejka removed after investigation. `docs/path-following.md` §5.3,
+  CHANGELOG 2.0.0 lead and §13, 2.0.1 §10, 2.0.2 §5 / §11, 2.0.3 §9, 2.0.4 §12,
+  2.0.5 §14, 2.0.6 §13 (marked).
+- **`docs/physics-contracts.md` §7.18 construction order** lacked
+  `mpc_decel_limit` in the `"off"` refusal list and the step-7 / step-9 / signed
+  checks; and its "each check raising before any side effect" did not hold for
+  the (v2.0.1) wheelbase / steering-limit check, which raises after
+  `plant.steer_range` is written and after the live cross-check warnings
+  (pre-existing, found by the 2.1.0 API review), nor for the waypoint parsing
+  (a wrong shape, or a coordinate that does not convert to `float`), which
+  raises from `_parse_path` after `plant.steer_range` is written
+  (pre-existing, found by the 2.1.0 docs review). New §7.24.
+- **`docs/path-following.md` §5.4 check order** listed the (v2.0.2) command-mode
+  and (v2.0.3) K-turn checks after the waypoint parsing and the wheelbase check;
+  in `PathFollower.__init__` they run before any attribute is set (pre-existing,
+  found by the 2.1.0 docs review).
+- **"NMPC max deviation 0.682 m vs PD 0.297 m"** (`docs/path-following.md`
+  §5.7) did not say where: the default's whole-course maximum on the demo
+  course sits on the final straight, 10.6 m past the arc end, in the arrival
+  phase (plan agent; on 2.1.0 A's whole max 0.684 vs its arc-window max 0.074,
+  implementation).
+- **The §5 preamble of `docs/path-following.md`** named only §5.3, §5.8 and
+  §5.9 as exceptions to its 2026-11-21 / genesis-world 1.4.5 conditions; §5.10
+  and the 2.1.0 figures were not listed — now every subsection that names its
+  own conditions is an exception.
+- **`mpc_stats` key lists** (`docs/path-following.md` §5.4,
+  `docs/api-reference.md`): `decel_gate` added.
+- **`docs/testing.md`, `README.md`**: test counts; `docs/index.md`,
+  `samples/README.md` (the sample's flags).
+- Source docstrings of `control/mpc/law.py`, `control/path_follower.py`,
+  `control/mpc/params.py`, `control/mpc/alpasim_nonlinear.py`,
+  `control/mpc/alpasim_linear.py` and `control/brake.py` were corrected in the
+  same release (text only).
+
+### 12. Roadmap (planned, not present)
+
+2.2.0: feedforward from the MPC plan and a PD correction on the predicted
+trajectory (closed-loop K-turn arc tracking a candidate). 2.3.0: a hold-release
+rule (D-14 is a candidate case), a KICK redesign and a wider default sweep grid
+(D-13 bears on it). Recorded, no release assigned: a re-evaluation of a Pacejka
+prediction model under the conditions of §8; the earlier recorded items
+(the dead wheel spin-inertia fallback, the raycast-mode default, lock
+hysteresis / continuity, the dead server squeeze patches). Default-on K-turn:
+deferred. Plans, not commitments.
+
+### Documentation
+
+`docs/physics-contracts.md` new §7.24 (the gated bound: enforced / not
+enforced), §7.18 and §7.20.2 corrected; `docs/path-following.md` new §5.11,
+§5.3 / §5.4 / §5.7 / §5.9 corrected; `docs/api-reference.md`, `docs/index.md`,
+`docs/testing.md`, `README.md`, `samples/README.md`. Corrected in place: §11.
+
+### Tests
+
+**1553 passed, 3 skipped, 1556 node ids** (implementation, 9 chunks (two moved
+to the background by the tool timeout, nothing else running);
+impl-review the same, 0 failed); CPU/WSL2, genesis-world 1.5.0,
+`requirements-mpc.txt` installed, `test_fusion_probe.py` excluded; no timing
+quoted. The 3 skips are the env-gated live-server tests. Ledger against 2.0.6
+(1473 ids): **+83, no real removals** (two `test_rolling_resistance.py` ids
+differ only in the URDF path string of their parametrize id) —
+`test_mpc_decel_gate.py` 23 (the gate truth table at N 20 and 10, the
+end-ahead / behind / at-the-axle cases, select-before-solve, the warm-start
+transfer bitwise both ways, a first-solve opening equal to a cold BRK solve, the
+pair's layout checks, `mpc_stats["decel_gate"]`, an injected transfer error
+propagating, the construction spy, the LMPC swap), `test_mpc_decel_limit.py` 28
+(tables and the 0 m/s rule, refusals and their placement, the held-step clip,
+the gear finish at an open brake-row target), `test_mpc_follow_demo_course.py`
+23 (the sample's default waypoints equal 2.0.6's, flags, exit 2),
+`test_mpc_default_identity.py` 6 (I-2), `test_path_follower_mpc_api.py` 3.
+`test_mpc_model_values_of_2_0_0` (Pacejka refused) is unchanged. Mutants: the
+implementation's gate set (28 runs, plus 10 targeted runs naming the planned
+killer) and 7 of impl-review's own, all killed.
+Held back, untracked, not part of this release: `tests/test_fusion_probe.py`
+(raises at its line 243 since 2.0.4), `tools/` and
+`samples/data/car_sweep_generated.csv` (not git-ignored).
+
+---
+
+
 ## [2.0.6] — 2026-11-25
 
 **BREAKING in a patch release, by user decision. Three changes on top of 2.0.5
@@ -898,7 +1676,7 @@ Each says in place that it was wrong, or that it is history:
 
 ### 13. Roadmap (planned, not present)
 
-2.1.0: opt-in `mpc_model="pacejka"` and opt-in `mpc_decel_limit="brake"`. 2.2.0:
+2.1.0: opt-in `mpc_model="pacejka"` and opt-in `mpc_decel_limit="brake"`. [2.1.0: shipped the opt-in END-GATED `mpc_decel_limit="brake"` only; `mpc_model="pacejka"` failed its non-harm gates and was removed after investigation, no release assigned — CHANGELOG 2.1.0 §3, §8.] 2.2.0:
 feedforward from the MPC plan and a PD correction on the predicted trajectory
 (closed-loop K-turn arc tracking a candidate). 2.3.0: a hold-release rule, a
 KICK redesign and a wider default sweep grid. Recorded, no release assigned: the
@@ -1751,7 +2529,7 @@ fix (§10.2) and the `"control"`-path force range (§10.3), directly after 2.0.5
 own plan, locks re-captured there. [2.0.6: shipped — all three, plus a ground
 gate on the lock and restored wheel segmentation, by user decision; CHANGELOG
 2.0.6.] 2.1.0: opt-in `mpc_model="pacejka"` and
-opt-in `mpc_decel_limit="brake"`. 2.2.0: feedforward from the MPC plan and a PD
+opt-in `mpc_decel_limit="brake"`. [2.1.0: shipped the opt-in END-GATED `mpc_decel_limit="brake"` only; `mpc_model="pacejka"` failed its non-harm gates and was removed after investigation, no release assigned — CHANGELOG 2.1.0 §3, §8.] 2.2.0: feedforward from the MPC plan and a PD
 correction on the predicted trajectory (closed-loop K-turn arc tracking is a
 candidate). 2.3.0: a hold-release rule, a KICK redesign and a wider default
 sweep grid. Default-on K-turn: deferred. Unifying the spring cap on one
@@ -2526,7 +3304,7 @@ Each says in place that it was wrong or incomplete:
 2.1.0: the Pacejka prediction model and a deceleration bound widened to the
 brake's limit, and unifying the spring cap on one constant (1) *(corrected in
 2.0.5: the unification was WITHDRAWN by the user on 2026-11-24; 2.0.6 was
-inserted before 2.1.0 — CHANGELOG 2.0.5 §14)*. 2.2.0:
+inserted before 2.1.0 — CHANGELOG 2.0.5 §14)*. [2.1.0: shipped the opt-in END-GATED `mpc_decel_limit="brake"` only; `mpc_model="pacejka"` failed its non-harm gates and was removed after investigation, no release assigned — CHANGELOG 2.1.0 §3, §8.] 2.2.0:
 feedforward from the MPC plan and a PD correction on the predicted trajectory
 (closed-loop K-turn arc tracking is a candidate there). 2.3.0: a hold-release
 rule, a KICK redesign and a wider default sweep speed grid. Default-on K-turn:
@@ -3155,7 +3933,7 @@ counted toward the cap. Final: 0 calls in every run (§5.4).
 
 The light-brake slope hold (CHANGELOG 2.0.2 §7) is planned as the next release
 after 2.0.3 (2.0.4 in the current plan) — a plan, not a commitment. 2.1.0: the Pacejka
-prediction model and a deceleration bound widened to the brake's limit. 2.2.0:
+prediction model and a deceleration bound widened to the brake's limit. [2.1.0: shipped the opt-in END-GATED `mpc_decel_limit="brake"` only; `mpc_model="pacejka"` failed its non-harm gates and was removed after investigation, no release assigned — CHANGELOG 2.1.0 §3, §8.] 2.2.0:
 feedforward from the MPC plan and a PD correction on the predicted trajectory
 (closed-loop K-turn arc tracking is a candidate there). 2.3.0: a hold-release
 rule, a KICK redesign and a wider default sweep speed grid. Default-on K-turn:
@@ -3603,7 +4381,11 @@ the stage-2 command conversion (`control/brake.py` + the gear finish) only.
 (`decel_throttle_by_speed`, about -2.15 m/s² on the reference car), so the MPC
 plans no harder deceleration than 2.0.1 did, and `DifferentiablePlant`'s unroll
 still predicts with its constant constructor `brake`. Widening the MPC bound to
-the brake's limit is planned for 2.1.0.
+the brake's limit is planned for 2.1.0. [2.1.0: shipped as an opt-in, END-GATED
+bound (`mpc_decel_limit="brake"`: the brake row only in the last 2.0 s of a
+forward block's reference schedule, end ahead of the rear axle); a bound widened
+on every solve failed its gates and never shipped — CHANGELOG 2.1.0 §3, §5. The
+default MPC keeps the throttle-based bound.]
 
 #### 5.1 Model and k_b
 
@@ -4005,7 +4787,7 @@ the round-1 tree, carried: both arms signed, rc 0).
 2.0.3: controller-initiated reverse (K-turn) — the MPC/PD planning of reverse
 segments and cusps that 2.0.2 does not do; `_desired_gear` is its seam. 2.1.0:
 the Pacejka prediction model and a deceleration bound widened to the brake's
-limit. 2.2.0: feedforward from the MPC plan and a PD correction on the predicted
+limit. [2.1.0: shipped the opt-in END-GATED `mpc_decel_limit="brake"` only; `mpc_model="pacejka"` failed its non-harm gates and was removed after investigation, no release assigned — CHANGELOG 2.1.0 §3, §8.] 2.2.0: feedforward from the MPC plan and a PD correction on the predicted
 trajectory. 2.3.0: a hold-release rule, a KICK redesign and a wider default
 sweep speed grid. The light-brake slope hold (§7) ships as its own release.
 None of this is in 2.0.2. (The 2.0.1 roadmap listed "2.0.2: braking and
@@ -4674,7 +5456,7 @@ run ends.
 2.0.2: braking and stopping by the brake channel only, with a forward/reverse
 gear state; 2.0.3: reverse-assisted alignment (K-turn); 2.1.0: the Pacejka
 prediction model; 2.2.0: a PD correction on the MPC's predicted trajectory.
-Whether 2.0.2 and 2.0.3 merge is undecided. None of this is in 2.0.1.
+Whether 2.0.2 and 2.0.3 merge is undecided. None of this is in 2.0.1. [2.1.0: the Pacejka prediction model failed its non-harm gates and was removed after investigation, no release assigned; 2.1.0 shipped the opt-in END-GATED `mpc_decel_limit="brake"` only — CHANGELOG 2.1.0 §3, §8.]
 
 ### 11. Still open / not measured
 
@@ -4757,7 +5539,7 @@ PD's (0.682 vs 0.297 m), accepted by the user with the criterion unchanged
 two-axle Ackermann vehicles on forward blocks are supported. The Pacejka
 prediction model (planned 2.1.0) and a PD correction on the MPC's predicted
 trajectory (planned 2.2.0) are **not in this release** (roadmap replaced in
-CHANGELOG 2.0.1 §10).
+CHANGELOG 2.0.1 §10). [2.1.0: the Pacejka prediction model failed its non-harm gates and was removed after investigation, no release assigned; 2.1.0 shipped the opt-in END-GATED `mpc_decel_limit="brake"` only — CHANGELOG 2.1.0 §3, §8.]
 
 | abbr | meaning |
 |---|---|
@@ -5372,7 +6154,7 @@ release that changes the plant.
   Windows/macOS library name was not checked.
 - Thread safety beyond one two-thread probe: not established (§1).
 - Whether the recorded tyre block is enough for the planned 2.1.0 Pacejka
-  prediction model is not verified.
+  prediction model is not verified. [2.1.0: the Pacejka prediction model failed its non-harm gates and was removed after investigation, no release assigned; 2.1.0 shipped the opt-in END-GATED `mpc_decel_limit="brake"` only — CHANGELOG 2.1.0 §3, §8.]
 - The cause of the session-to-session RT spread, and of the solve spikes
   (§7).
 - **The misaligned-start stall (§3.3)**, inherited from the field code:

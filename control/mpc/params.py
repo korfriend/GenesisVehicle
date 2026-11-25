@@ -16,6 +16,12 @@ neither casadi/do_mpc nor osqp:
   ``VehicleParams`` (same fields, same meaning, same defaults); derived from
   an :class:`MPCVehicleParams` by :meth:`MPCVehicleParams.solver_params`.
 
+(v2.1.0) ``solver_params(decel_limit=)`` selects the deceleration bound's
+source table (``"throttle"`` default, ``"brake"``) of ONE parameter set — a
+table selector with no gate. ``PathFollower(mpc_decel_limit="brake")`` builds
+both sets and uses the brake one only on end-gated solves (see
+``PathFollower``).
+
 Schema rule (fixed for 2.x): :meth:`MPCVehicleParams.from_json` accepts
 exactly ``genesis_vehicle.mpc_params/1``; every 2.x reader keeps accepting
 ``/1``; any other or missing ``schema`` is a ``ValueError``. A JSON written by
@@ -36,6 +42,14 @@ SCHEMA = "genesis_vehicle.mpc_params/1"
 #: Prediction models a params record can feed, per SDK release. 2.0.0 ships the
 #: field bicycle model only.
 SUPPORTED_MODELS = ("bicycle",)
+
+#: (v2.1.0) Deceleration-table sources of ``solver_params(decel_limit=)``:
+#: ``"throttle"`` (default, the 2.0.x bound) = the record's
+#: ``decel_throttle_by_speed`` (throttle -1, brake 0); ``"brake"`` = its
+#: ``decel_brake_by_speed`` (brake 1, throttle 0, flat ground, at the record's mu).
+#: This selects a table only; the follower's ``mpc_decel_limit="brake"`` uses the
+#: brake table on end-gated solves and the throttle table on all others.
+DECEL_LIMITS = ("throttle", "brake")
 
 
 # --- solver-side parameters (field VehicleParams) ------------------------------
@@ -63,6 +77,33 @@ class _AlpaSimParams:
     accel_min: Optional[float] = None
     accel_max_tab: Optional[tuple] = None
     accel_min_tab: Optional[tuple] = None
+
+
+def _decel_rows(data: dict, decel_limit: str):
+    """The sorted ``[(v, a), ...]`` rows of the deceleration bound's source
+    table. ``ValueError`` for an unknown ``decel_limit`` and, under
+    ``"brake"``, for an empty ``decel_brake_by_speed`` or any row whose speed
+    is not a finite number or whose value is not a finite number < 0."""
+    if decel_limit not in DECEL_LIMITS:
+        raise ValueError(f"mpc_decel_limit must be one of {list(DECEL_LIMITS)}; got {decel_limit!r}")
+    if decel_limit == "throttle":
+        return sorted((float(v), float(a)) for v, a in data["decel_throttle_by_speed"].items())
+    tab = data.get("decel_brake_by_speed")
+    hint = " — re-run `python -m genesis_vehicle.control.identify`"
+    if not isinstance(tab, dict) or not tab:
+        raise ValueError("mpc_decel_limit=\"brake\" needs a non-empty decel_brake_by_speed in the "
+                         f"params record; got {tab!r}{hint}")
+    rows = []
+    for v, a in tab.items():
+        try:
+            fv, fa = float(v), float(a)
+        except (TypeError, ValueError):
+            raise ValueError(f"decel_brake_by_speed row {v!r}: {a!r} is not numeric{hint}") from None
+        if not (np.isfinite(fv) and np.isfinite(fa) and fa < 0.0):
+            raise ValueError(f"mpc_decel_limit=\"brake\": decel_brake_by_speed row {v!r}: {a!r} must be a "
+                             f"finite deceleration < 0 at a finite speed{hint}")
+        rows.append((fv, fa))
+    return sorted(rows)
 
 
 def accel_limits(p, v):
@@ -186,7 +227,7 @@ class MPCVehicleParams:
     # -- derived solver parameters ------------------------------------------------
 
     def solver_params(self, model: str = "bicycle", *, steer_cap: float = 1.0,
-                      dt_ctrl: float = 0.025) -> _AlpaSimParams:
+                      dt_ctrl: float = 0.025, decel_limit: str = "throttle") -> _AlpaSimParams:
         """The solver-side parameter set for prediction ``model``.
 
         ``"bicycle"`` = the field ``params_from_json`` (``mpc_follower.py:72-89``)
@@ -200,12 +241,39 @@ class MPCVehicleParams:
           speed's value (identify does not measure decel at rest);
         * constant limits ``accel_max = min(table)``, ``accel_min = max(table)``.
 
-        Raises ``ValueError`` for a model this release does not ship.
+        ``decel_limit`` (v2.1.0, keyword-only): the source of the deceleration
+        table and of ``accel_min`` — ``"throttle"`` (default; the 2.0.x rule,
+        ``decel_throttle_by_speed``, and the result is field-for-field the call
+        without the keyword) or ``"brake"`` (``decel_brake_by_speed``: brake 1,
+        throttle 0, flat ground, at the mu the record was measured at; the same
+        0 m/s rule). Under ``"brake"`` an empty brake row or a row that is not a
+        finite deceleration < 0 raises ``ValueError``, and a ``UserWarning``
+        names each speed, among the speeds present in BOTH rows, at which the
+        brake row decelerates LESS than the throttle row (that would narrow the
+        bound there); a speed in only one row is not compared. Nothing here checks
+        that the record's brake row is reachable by the vehicle being driven
+        (a larger stage-2 ``brake_gain=``, lower live mu, payload or a slope
+        make it unreachable, silently). This is a TABLE selector: the result
+        is one parameter set with that bound everywhere; the follower's
+        ``mpc_decel_limit="brake"`` builds both sets and uses the brake one only
+        on end-gated solves (``PathFollower``).
+
+        Raises ``ValueError`` for a model this release does not ship and for an
+        unknown ``decel_limit``.
         """
         if model not in SUPPORTED_MODELS:
             raise ValueError(f"mpc_model must be one of {list(SUPPORTED_MODELS) + ['off']}; "
                              f"got {model!r}")
         j = self.data
+        dec = _decel_rows(j, decel_limit)
+        if decel_limit == "brake":
+            thr = dict(_decel_rows(j, "throttle"))
+            weaker = [v for v, a in dec if v in thr and a > thr[v]]
+            if weaker:
+                import warnings
+                warnings.warn("mpc_decel_limit=\"brake\": the record's brake row decelerates less than its "
+                              f"throttle row at {weaker} m/s, so the brake bound is NARROWER there",
+                              UserWarning, stacklevel=2)
         p = _AlpaSimParams()
         p.mass, p.inertia = float(j["mass"]), float(j["izz_cg"])
         p.wheelbase, p.l_rig_to_cg = float(j["wheelbase"]), float(j["l_rig_to_cg"])
@@ -213,7 +281,6 @@ class MPCVehicleParams:
         p.rear_cornering_stiffness = float(j["rear_cornering_stiffness"])
         p.steer_max = float(steer_cap) * float(j["max_steer_rad"])
         amx = sorted((float(v), float(a)) for v, a in j["accel_max_by_speed"].items())
-        dec = sorted((float(v), float(a)) for v, a in j["decel_throttle_by_speed"].items())
         p.accel_max_tab = ([v for v, _ in amx], [a for _, a in amx])
         p.accel_min_tab = ([0.0] + [v for v, _ in dec], [dec[0][1]] + [a for _, a in dec])
         p.accel_max, p.accel_min = min(a for _, a in amx), max(a for _, a in dec)

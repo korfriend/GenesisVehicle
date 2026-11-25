@@ -115,7 +115,7 @@ import on an older engine (genesis itself must still be importable). A
 genesis-world >= 1.6 logs one "not validated" WARNING and continues; **a 1.5.x
 patch release (1.5.1, ...) is admitted silently and is NOT validated** — the 20
 engine-keyed identity locks skip on it, and it needs its own capture / parity
-round. The 2.0.5 and 2.0.6 suites run on 1.5.0; **measurements published before v2.0.5
+round. The 2.0.5, 2.0.6 and 2.1.0 suites run on 1.5.0; **measurements published before v2.0.5
 were taken on 1.4.5 (v1.6.9-v2.0.4) or 1.4.0 (before) and keep their labels**;
 a figure in these docs without an engine label is not a 1.5.0 figure. Every
 `<= 1.3.3` / 1.4.x compatibility branch was removed in v2.0.5 (through v2.0.4
@@ -354,7 +354,7 @@ Detailed docs live under [`docs/`](docs/):
 | [`docs/quickstart.md`](docs/quickstart.md) | Minimal example, runnable end-to-end |
 | [`docs/concepts.md`](docs/concepts.md) | Mental model: 5-step pipeline, ISO 8855, hook intuition, batched-by-default |
 | [`docs/batching.md`](docs/batching.md) | The L1 / L2 / L3 vectorization axes — when to use which, measured speedups, the L2 × L3 combined pattern |
-| [`docs/path-following.md`](docs/path-following.md) | `PathFollower`: the MPC layer (v2.0.0 default) and the 1.x PD law, the two inverse plants, sweep measurement, identify, the v2.0.2 gear command mode and its stage-2 brake model (§5.9), the v2.0.3 opt-in K-turn (§5.10), migrating from 1.x and between 2.0.x releases |
+| [`docs/path-following.md`](docs/path-following.md) | `PathFollower`: the MPC layer (v2.0.0 default) and the 1.x PD law, the two inverse plants, sweep measurement, identify, the v2.0.2 gear command mode and its stage-2 brake model (§5.9), the v2.0.3 opt-in K-turn (§5.10), the v2.1.0 opt-in end-gated brake bound (§5.11), migrating from 1.x and between 2.x releases |
 | [`docs/tire-and-contact.md`](docs/tire-and-contact.md) | Tire model (Pacejka vs Coulomb) & ground-contact mechanism (raycast wheel etc.) — the two axes, standard names, recommendation |
 | [`docs/server.md`](docs/server.md) | OSC physics server for external clients (Unreal / Unity) — purpose, modes, full wire-schema reference |
 | [`docs/api-reference.md`](docs/api-reference.md) | Full public API surface (every class + function + default) |
@@ -385,7 +385,7 @@ genesis_vehicle/
 ├── tire_models/                    TireModel ABC + Pacejka + Coulomb
 ├── strategies/                     steering / drivetrain / coupling / stability
 ├── presets.py                      5 ready-to-use VehicleConfig builders
-├── control/                        PathFollower (MPC layer + PD; gear mode v2.0.2; opt-in K-turn v2.0.3), inverse plants, brake model, sweep_measure, identify
+├── control/                        PathFollower (MPC layer + PD; gear mode v2.0.2; opt-in K-turn v2.0.3; opt-in end-gated brake bound v2.1.0), inverse plants, brake model, sweep_measure, identify
 ├── docs/                           the wiki
 └── tests/                          pure-Python unit tests (no Genesis needed)
 ```
@@ -398,7 +398,7 @@ From the repo root:
 python -m pytest tests/ -v
 ```
 
-1473 tests collected (1470 passed, 3 skipped) covering URDF parsing, config resolve, suspension sizing, strategy
+1556 tests collected (1553 passed, 3 skipped) covering URDF parsing, config resolve, suspension sizing, strategy
 math, dynamics primitives, version reporting, stability-profile semantics,
 multi-vehicle grouping/input routing, the ray-MISS sentinel and grounded
 predicates, the swept-envelope wheel contact (including a no-axle-torque
@@ -460,18 +460,21 @@ variants (v2.0.5), the `StaticFrictionLock` without its reversal re-anchor
 and with its ground gate, the 2.0.6 identity-lock capture, and the engine-node
 wheel renderer (v2.0.6 — rendered vs headless bit-identical in one process, the
 wheel pose at every render flush, wheel segmentation, the removed joint-writing
-path and its raising settings), and the server subpackage surface.
+path and its raising settings), the opt-in end-gated brake bound (v2.1.0 — the
+gate's truth table, the warm-start transfer, the refusals and their placement,
+the default's solver parameters pinned to a 2.0.6 capture, the sample's 2.1.0
+flags), and the server subpackage surface.
 Almost all pure-Python; a handful build a real `VehicleScene` on the CPU
 backend, so `genesis-world` 1.5.0 must be importable. No GPU needed — measured
-on the v2.0.6 fix-round tree with the optional MPC packages installed, `1470
-passed, 3 skipped`, 1473 node ids (implementation and impl-review, id lists
-byte-equal), and re-run in full on the final tree by the fact-check stage after
-two later edits (a test assertion and a docstring): `1470 passed, 3 skipped`,
-1473 ids, id list byte-equal to the fix-round run; no timing quoted; CPU/WSL2,
-genesis-world 1.5.0, `test_fusion_probe.py` excluded;
+on the v2.1.0 tree with the optional MPC packages installed, `1553 passed,
+3 skipped`, 0 failed, 1556 node ids (implementation, 9 chunks (two moved to the background by the tool timeout,
+nothing else running); impl-review the same); no timing quoted; CPU/WSL2, genesis-world 1.5.0,
+`test_fusion_probe.py` excluded;
 the 3 skips are the env-gated live server tests,
 run them with `GENESIS_VEHICLE_LIVE_SERVER_TEST=1`; without casadi + do_mpc the
-solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1388 passed,
+solver-dependent MPC tests skip, `docs/testing.md`). Earlier: `1470 passed,
+3 skipped`, 1473 ids at v2.0.6 (implementation, impl-review and a full re-run
+on the final tree), `1388 passed,
 3 skipped`, 1391 ids at v2.0.5 (genesis-world 1.5.0), `1369 passed,
 3 skipped` at v2.0.4 (genesis-world 1.4.5), `1285 passed,
 3 skipped` in five parts, 527.3 s summed, at v2.0.3, `1225 passed,
@@ -511,10 +514,40 @@ patch that changes braking physics with no opt-out and REMOVES
 (CHANGELOG 2.0.5 §1). 2.0.6 is a patch that REMOVES the joint-writing wheel
 visuals (their settings raise), removes `StaticFrictionLock._s_eng` /
 `_rested`, and changes braked low-speed physics, by user decision (CHANGELOG
-2.0.6 §1-§2).
+2.0.6 §1-§2). 2.1.0 is an additive minor release: one opt-in keyword
+(`PathFollower(mpc_decel_limit=)`), one new `mpc_stats` key, one new
+`solver_params` keyword; the default value stays `"throttle"` (its commands
+and per-step logs identical to 2.0.6 on the measured runs; CHANGELOG 2.1.0 §1,
+§4).
 (This line said "pre-1.0, so minor bumps
 may break" — stale since 1.0.) Current version: `genesis_vehicle.__version__`. Per-release notes
 in [`CHANGELOG.md`](CHANGELOG.md).
+
+**Upgrading to 2.1.0** (additive; genesis-world 1.5.0 as for 2.0.5): nothing to
+do for the default — its commands and per-step logs are identical to 2.0.6 on
+16 + 3 closed-loop runs compared per step, a parameter fixture and the round-1
+acceptance rows (CHANGELOG 2.1.0 §4); `mpc_stats` gains `decel_gate: None`, so
+code comparing its exact key set sees one more key. New opt-in:
+`PathFollower(..., mpc_decel_limit="brake")` (gear mode only) bounds the MPC by
+the params record's brake-1 row on END-GATED solves only — the active forward
+block's reference end time within N·DT_MPC (2.0 s) of the solve time in
+REFERENCE time (N = horizon nodes, DT_MPC = 0.1 s node spacing), and the rig
+(rear-axle) reference's end point ahead of the rear axle — and by the throttle
+row otherwise: mid-path decelerations get nothing, and a vehicle behind its
+schedule gets the brake row earlier and farther from the end; equality with the
+default before the first open solve was measured, not guaranteed. Construction
+takes about 0.15–0.22 s longer with it (constructor medians at tyre friction
+μ 1.0 / 0.6;
+`setup_ms` +121 / +145 ms; implementation). Use a params record measured at the
+vehicle's grip (`--mu-lat` / `--mu-long`; ground-plane friction does not reach
+the tyre): a μ 1.0 record (μ = tyre friction coefficient) on a μ 0.6 vehicle
+locked the front wheels and turned one `DONE` into `GOAL-MISSED` — the verdict
+difference is about 0.12 m around the 1.5 m arrival circle and the default's
+`DONE` is itself marginal; on a second course the order reversed (impl-review)
+— and nothing on the `SweepTable` path detects it. No real-time figure exists for it.
+`mpc_model="pacejka"` still raises: the Pacejka prediction model planned for
+2.1.0 failed its non-harm gates and was removed (CHANGELOG 2.1.0 §8). Read
+CHANGELOG 2.1.0 (§10 is the field-team note) first.
 
 **Upgrading to 2.0.6** (breaking in a patch release, by user decision;
 genesis-world 1.5.0 as for 2.0.5): remove `wheel_render_mode="internal_sync"`

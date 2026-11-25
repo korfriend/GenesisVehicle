@@ -34,6 +34,13 @@ Changes from the field port (each one named, none changes the NLP):
   and reported, the field returned zeros;
 * opt-in solve-time options (default off): ``shift_warm_start``,
   ``openblas_threads``, extra ``nlpsol_opts``.
+* (v2.1.0) ``PathFollower(mpc_decel_limit="brake")`` builds TWO of these
+  problems (the default throttle-bound one and one bounded by the record's
+  brake-1 row, used on end-gated solves only: reference time; rig reference
+  end point ahead of the rear axle; see ``PathFollower``'s
+  ``mpc_decel_limit``) behind the private :class:`_DecelGatedNMPC`; each NLP is the
+  field problem with its own deceleration table. The follower's default
+  (``"throttle"``) builds one, exactly as 2.0.6 did.
 
 Not thread-safe: casadi's NumPy mode and the OpenBLAS thread count are
 process-global.
@@ -299,3 +306,139 @@ class NonlinearMPC:
         unscaled (``opt_x_num_unscaled``); node 0 is the ``x0`` it was given."""
         v = np.array(self._mpc.opt_x_num_unscaled.cat, dtype=float).ravel()
         return v[self._plan_idx]
+
+
+# -- v2.1.0: the end-gated deceleration bound of mpc_decel_limit="brake" ------------
+
+#: ``_AlpaSimParams`` fields allowed to differ between the two solvers of a
+#: decel-gated pair (the deceleration bound and nothing else).
+DECEL_FIELDS = ("accel_min", "accel_min_tab")
+
+
+def _check_decel_pair_params(p_thr, p_brk) -> None:
+    """``ValueError`` unless the two parameter sets have the same type and agree
+    on every dataclass field except :data:`DECEL_FIELDS`."""
+    import dataclasses
+    if type(p_thr) is not type(p_brk):
+        raise ValueError("decel-gated solver pair: parameter types differ "
+                         f"({type(p_thr).__name__} vs {type(p_brk).__name__})")
+    for f in dataclasses.fields(p_thr):
+        if f.name in DECEL_FIELDS:
+            continue
+        a, b = getattr(p_thr, f.name), getattr(p_brk, f.name)
+        if a != b:
+            raise ValueError(f"decel-gated solver pair: parameter {f.name!r} differs ({a!r} vs {b!r}); "
+                             f"only {list(DECEL_FIELDS)} may differ")
+
+
+def _dm_shape(x) -> tuple:
+    import casadi
+    return tuple(casadi.DM(x).shape)
+
+
+def _transfer_warm_start(src: "NonlinearMPC", dst: "NonlinearMPC") -> None:
+    """Copy the do_mpc warm start of ``src`` into ``dst`` BY VALUE (v2.1.0 gate
+    switch). Always: the primal iterate ``opt_x_num`` (IPOPT's ``x0``), its
+    unscaled twin ``opt_x_num_unscaled``, ``u0`` (do_mpc's ``_u_prev``, a cost
+    parameter of the command-change penalty) and ``_t0``. The duals
+    ``lam_x_num`` / ``lam_g_num`` and ``flags['initial_run']`` only if ``src``
+    has solved (do_mpc creates ``lam_*`` in its first ``solve``); otherwise
+    ``dst.flags['initial_run']`` is set to False. Under the follower's options
+    (no ``warm_start_init_point``) only ``opt_x_num`` and ``u0`` affect the
+    next solve; IPOPT ignores the duals (api-review probe). Every shape is
+    checked BEFORE anything is assigned and a mismatch raises ``ValueError``
+    (casadi accepts a wrong-size ``master`` silently; the error would surface
+    inside the next solve as an exception and a silent PD fall-back). No
+    ``try``: a failure propagates to the caller."""
+    import casadi
+    s, d = src._mpc, dst._mpc
+    checks = [("opt_x_num", s.opt_x_num.master, d.opt_x_num.master),
+              ("opt_x_num_unscaled", s.opt_x_num_unscaled.master, d.opt_x_num_unscaled.master)]
+    u = np.array(s.u0.cat, dtype=float).ravel()
+    u_dst = np.array(d.u0.cat, dtype=float).ravel()
+    if u.shape != u_dst.shape:
+        raise ValueError(f"decel gate transfer: u0 shape {u.shape} vs {u_dst.shape}")
+    duals = hasattr(s, "lam_x_num")
+    if duals:
+        checks += [("lam_x_num", s.lam_x_num, d.opt_x_num.master),
+                   ("lam_g_num", s.lam_g_num, d.nlp_cons_lb)]
+    for name, a, b in checks:
+        if _dm_shape(a) != _dm_shape(b):
+            raise ValueError(f"decel gate transfer: {name} shape {_dm_shape(a)} vs {_dm_shape(b)}")
+    d.opt_x_num.master = casadi.DM(s.opt_x_num.master)
+    d.opt_x_num_unscaled.master = casadi.DM(s.opt_x_num_unscaled.master)
+    d.u0 = u.copy()
+    d._t0 = np.array(s._t0, copy=True)
+    if duals:
+        d.lam_x_num = casadi.DM(s.lam_x_num)
+        d.lam_g_num = casadi.DM(s.lam_g_num)
+        d.flags["initial_run"] = bool(s.flags["initial_run"])
+    else:
+        d.flags["initial_run"] = False
+
+
+class _DecelGatedNMPC:
+    """(v2.1.0, private) The two NLPs behind ``PathFollower(mpc_decel_limit=
+    "brake")``: ``thr`` = the default throttle-bound :class:`NonlinearMPC`,
+    ``brk`` = the same problem with the brake-1 deceleration row as its bound.
+    The law (:class:`.law._MPCLaw` with ``decel_gate=True``) decides per solve
+    which one is active (:meth:`select_decel`); this class only switches and
+    carries the warm start across a switch (:func:`_transfer_warm_start`).
+    ``thr`` is active at construction.
+
+    Explicit members only (no ``__getattr__``, no ``_mpc``): ``p`` (the ACTIVE
+    solver's parameters — the law's stage-1 clip reads it), ``N``, ``dt``,
+    ``u_prev``, ``setup_ms`` (sum of both setups), ``solve``,
+    ``max_violation``, ``plan_vector``, ``set_u_prev``, ``select_decel``.
+    The constructor raises ``ValueError`` unless both solvers have the same
+    ``N``, ``dt``, parameter type and every parameter field except
+    :data:`DECEL_FIELDS`, the same ``opt_x`` labels, ``nlp_cons_lb`` shape and
+    ``opt_x_scaling`` (the law caches ``N`` and the wheelbase at construction,
+    so they must agree rather than be delegated)."""
+
+    def __init__(self, thr: "NonlinearMPC", brk: "NonlinearMPC"):
+        if thr is brk:
+            raise ValueError("decel-gated solver pair: thr and brk are the same object")
+        if int(thr.N) != int(brk.N) or float(thr.dt) != float(brk.dt):
+            raise ValueError(f"decel-gated solver pair: N / dt differ ({thr.N}, {thr.dt} vs {brk.N}, {brk.dt})")
+        _check_decel_pair_params(thr.p, brk.p)
+        a, b = thr._mpc, brk._mpc
+        if list(a.opt_x.labels()) != list(b.opt_x.labels()):
+            raise ValueError("decel-gated solver pair: the opt_x labels differ")
+        if _dm_shape(a.nlp_cons_lb) != _dm_shape(b.nlp_cons_lb):
+            raise ValueError("decel-gated solver pair: the nlp_cons_lb shapes differ")
+        if not np.array_equal(np.array(a.opt_x_scaling.cat, dtype=float),
+                              np.array(b.opt_x_scaling.cat, dtype=float)):
+            raise ValueError("decel-gated solver pair: opt_x_scaling differs")
+        self._thr, self._brk = thr, brk
+        self._active = thr
+        self.N, self.dt = int(thr.N), float(thr.dt)
+        self.setup_ms = float(thr.setup_ms) + float(brk.setup_ms)
+
+    @property
+    def p(self):
+        return self._active.p
+
+    @property
+    def u_prev(self) -> np.ndarray:
+        return self._active.u_prev
+
+    def select_decel(self, open_: bool) -> None:
+        """Make ``brk`` (``open_`` True) or ``thr`` active; on a change the
+        warm start moves from the previously active solver."""
+        want = self._brk if open_ else self._thr
+        if want is not self._active:
+            _transfer_warm_start(self._active, want)
+            self._active = want
+
+    def set_u_prev(self, delta: float, accel: float) -> None:
+        self._active.set_u_prev(delta, accel)
+
+    def solve(self, x0, ref_xyyaw) -> SolveResult:
+        return self._active.solve(x0, ref_xyyaw)
+
+    def max_violation(self) -> float:
+        return self._active.max_violation()
+
+    def plan_vector(self) -> np.ndarray:
+        return self._active.plan_vector()

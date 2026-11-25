@@ -14,6 +14,36 @@ the forward block and the inverse plant in stage 2.
     python -m genesis_vehicle.samples.mpc_follow_demo --course vertex --vertex-deg 150
     python -m genesis_vehicle.samples.mpc_follow_demo --radius 17 --v 10  # tighter demo turn
     python -m genesis_vehicle.samples.mpc_follow_demo --course behind --behind-len 6 --kturn on --t-max 60  # 2.0.3 K-turn
+    python -m genesis_vehicle.samples.mpc_follow_demo --decel-limit brake  # 2.1.0 opt-in (end-gated brake bound)
+    python -m genesis_vehicle.samples.mpc_follow_demo --lead-in 60 --radius 11.3 --v 10 --final-len 3 --turn right
+
+2.1.0 options (all opt-in; with none of them a run is the 2.0.6 run):
+``--decel-limit throttle|brake`` (passes ``mpc_decel_limit``; absent = the follower's default
+``"throttle"``; exits 2 with ``--mpc-model off``, and ``brake`` exits 2 with ``--command-mode signed``);
+demo-course geometry ``--lead-in L`` (first straight, default 20 m), ``--final-len F`` (last
+straight, default 15 m) and ``--turn left|right`` (default left; the defaults give the 2.0.6
+waypoints exactly); ``--mu-lat`` / ``--mu-long`` set every wheel's ``WheelConfig.mu_lat`` /
+``mu_long`` before ``build()`` through ``control.sweep_measure.apply_plant_overrides`` (the
+identify / sweep_measure mechanism; the ground plane and chassis friction stay 1.0 — they act only
+on Genesis rigid contacts, not on the ray-wheel tyre) and require both ``--table`` and
+``--params`` (exit 2 otherwise, so the cache is never read or written with another mu). The demo
+prints one ``WARNING record tyre mu != vehicle mu`` line when the params record's tyre mu
+differs from the vehicle's; the SDK's ``SweepTable`` path itself checks nothing. ``--log`` rows
+gain ``v_lat``, ``yaw_rate``, ``steer_raw`` (stage-2 steer before the ``steer_cap`` clip; ``null``
+on steps that run no steer inversion) and ``front_roll_min`` (min over the front wheels of
+``omega * r / max(v_long, 0.1)``) and ``decel_open`` (``mpc_stats["decel_gate"]["open"]`` after the
+step: whether the last MPC solve used the brake row under ``--decel-limit brake``, held between
+solves; ``null`` under the default throttle bound, with ``--mpc-model off`` and before the first
+solve); the result gains ``mpc_decel_limit``, the asset sha256s, ``v_done``, ``rest_xy``,
+``post_terminal``, ``path_sha256``, ``live_mu``, ``record_tyre_mu``, ``record_plant_overrides``,
+``setup_ms``, ``decel_switch_steps`` (one ``{k, t, open, status}`` per solve that switched the
+deceleration row) and ``decel_first_open_k``. ``--decel-limit brake`` uses the brake row only on
+solves whose active forward block's reference end time is within 2.0 s of the solve time (in
+reference time) and whose rig reference end point is ahead of the rear axle; every other solve uses
+the throttle row — mid-path speed drops (and a speed profile that ramps down before the last 2 s of
+reference time) get the throttle row, as does every solve after the end point has passed behind the
+rear axle. Equality with the default before the first open solve is measured, not guaranteed. Full
+statement: the ``mpc_decel_limit`` docstring of ``PathFollower``.
 
 Courses (v2.0.1 adds ``misaligned``, ``vertex`` and ``--radius``; v2.0.3 adds
 ``behind``, described under K-turn below): ``demo`` (the field
@@ -115,16 +145,22 @@ GRID_FLAGS = ["--v-list=-2,0,2,4,6,8,10,12,14,16", "--throttle-list=-1,-0.5,0,0.
               "--steer-list=-1,-0.5,0,0.5,1", "--pitch-list=-10,-5,0,5,10", "--roll-list=0"]
 
 
-def demo_course(v=8.0, ramp=1.0, radius=30.0):
+def demo_course(v=8.0, ramp=1.0, radius=30.0, lead_in=20.0, final_len=15.0, turn="left"):
     """Field demo course (dense 0.1 m line -> 0.5 m waypoints): straight 20 m,
     a 90 degree left turn of ``radius`` (field: 30 m), straight 15 m. Returns
-    ``(path, dense polyline (n, 2))``."""
-    pts = [(x, 0.0) for x in np.arange(0.0, 20.0, 0.1)]
+    ``(path, dense polyline (n, 2))``. (v2.1.0) ``lead_in`` / ``final_len`` set
+    the first / last straight (m) and ``turn="right"`` mirrors the course in y;
+    the defaults reproduce the 2.0.6 waypoints exactly."""
+    if turn not in ("left", "right"):
+        raise ValueError(f"turn must be 'left' or 'right'; got {turn!r}")
+    mir = -1.0 if turn == "right" else 1.0
+    lead = float(lead_in)
+    pts = [(x, 0.0) for x in np.arange(0.0, lead, 0.1)]
     R = float(radius)
     for th in np.arange(0.0, math.pi / 2, 0.1 / R):
-        pts.append((20.0 + R * math.sin(th), R - R * math.cos(th)))
-    for d in np.arange(0.0, 15.0 + 1e-9, 0.1):
-        pts.append((20.0 + R, R + d))
+        pts.append((lead + R * math.sin(th), mir * (R - R * math.cos(th))))
+    for d in np.arange(0.0, float(final_len) + 1e-9, 0.1):
+        pts.append((lead + R, mir * (R + d)))
     P = np.array(pts)
     S = np.r_[0.0, np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
     V = np.minimum(v, np.sqrt(2 * ramp * (S + 0.5)))
@@ -213,7 +249,8 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
         on_solve_failure="pd", gpu=False, viewer=False, log=print, radius=30.0,
         vertex_deg=90.0, start_yaw=None, align_gate=True, stall_timeout=True, log_path=None,
         command_mode="gear", gear_feedback=True, kturn=False, lateral_limit=None, max_reverse=None,
-        behind_len=6.0):
+        behind_len=6.0, decel_limit=None, lead_in=20.0, final_len=15.0, turn="left",
+        mu_lat=None, mu_long=None):
     """Drive one run; returns the result dict (also the ``MPC_RESULT`` record).
 
     ``command_mode`` ``"gear"`` (default) / ``"signed"`` is passed to
@@ -224,7 +261,10 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
     ``align_gate`` / ``stall_timeout`` False pass ``mpc_align_gate=None`` /
     ``mpc_stall_timeout=None`` (MPC only). ``log_path``: one JSON line per step.
     ``kturn`` (v2.0.3): pass ``mpc_kturn=KTurnParams(lateral_limit, max_reverse)`` (MPC only; False
-    leaves the follower's default ``None``); ``behind_len``: the ``"behind"`` course length."""
+    leaves the follower's default ``None``); ``behind_len``: the ``"behind"`` course length.
+    (v2.1.0) ``decel_limit`` (None = the follower default) is passed as ``mpc_decel_limit`` with
+    the MPC layer on; ``lead_in`` / ``final_len`` / ``turn``: demo-course geometry; ``mu_lat`` /
+    ``mu_long`` (None = the preset's) are applied to every wheel before ``build()``."""
     import genesis as gs
     import genesis_vehicle as gv
     from genesis_vehicle import DifferentiablePlant, PathFollower, VehicleScene, presets
@@ -232,7 +272,7 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
 
     v = COURSE_V[course] if v is None else float(v)
     if course == "demo":
-        path, P = demo_course(v, ramp, radius)
+        path, P = demo_course(v, ramp, radius, lead_in=lead_in, final_len=final_len, turn=turn)
     elif course == "cusp":
         path, P = cusp_course(v_fwd=v, ramp=ramp)
     elif course == "misaligned":
@@ -253,6 +293,10 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
     vs.add_ground_plane(friction=1.0)
     veh = vs.add_vehicle(urdf, getattr(presets, preset), pos=(spawn[0], spawn[1], 0.5),
                          quat=quat, material=gs.materials.Rigid(friction=1.0))
+    if mu_lat is not None or mu_long is not None:
+        # (v2.1.0) tyre mu on every wheel, before build (the identify / sweep_measure mechanism)
+        from genesis_vehicle.control.sweep_measure import apply_plant_overrides
+        apply_plant_overrides(veh.cfg, urdf, mu_lat=mu_lat, mu_long=mu_long, log=log)
     vs.build()
     for _ in range(int(0.5 / DT)):                  # settle on the brake
         veh.set_inputs(throttle=0.0, brake=1.0, steer=0.0)
@@ -264,6 +308,8 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
         kw["mpc_align_gate"] = None
     if mpc_model != "off" and not stall_timeout:
         kw["mpc_stall_timeout"] = None
+    if mpc_model != "off" and decel_limit is not None:
+        kw["mpc_decel_limit"] = decel_limit
     if kturn:
         from genesis_vehicle.control import KTurnParams
         kw["mpc_kturn"] = KTurnParams(lateral_limit=lateral_limit, max_reverse=max_reverse)
@@ -279,13 +325,43 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
                        command_mode=command_mode, **kw)
     gear_mode = fol.command_mode == "gear"
     ctor_ms = (time.perf_counter() - t0) * 1e3
+    # (v2.1.0 instrumentation, read-only) the stage-2 steer before the steer_cap clip, recorded by
+    # wrapping the plant's steer inversion on this instance (returned values unchanged).
+    raw = {"steer": None}
+    if getattr(fol.plant, "has_coupled_solve", False):
+        _solve = fol.plant.solve
+
+        def _rec_solve(*a, **k):
+            out = _solve(*a, **k)
+            raw["steer"] = float(out[1])
+            return out
+        fol.plant.solve = _rec_solve
+    else:
+        _steer_for = fol.plant.steer_for
+
+        def _rec_steer(*a, **k):
+            out = _steer_for(*a, **k)
+            raw["steer"] = float(out)
+            return out
+        fol.plant.steer_for = _rec_steer
+    ph = veh.physics
+    _ax = ph.wheel_meta.axle_index.detach().cpu().numpy().reshape(-1)
+    front_idx = np.where(_ax == _ax.min())[0]
+    radius_w = ph.wheel_meta.radius.detach().cpu().numpy().reshape(-1)
+
+    def front_roll_min(v_long):
+        om = ph.omega.detach().cpu().numpy().reshape(-1)
+        return float(min(om[i] * radius_w[i] for i in front_idx) / max(float(v_long), 0.1))
     tc, ts, xy, modes, rev_entry, solve_ms = [], [], [], {}, None, []
     rows, seq = [], []
     terminal_cmd = None
+    v_done = None
+    gate_switches, gate_steps = 0, []           # (v2.1.0, read-only) the decel gate's switch steps
     for k in range(int(t_max / DT)):
         st = extract_state(veh)
         eng = int(veh.gear[0]) if gear_mode else None
         gkw = {"gear": eng} if (gear_mode and gear_feedback) else {}
+        raw["steer"] = None
         t1 = time.perf_counter()
         cmd = fol.step(st["pos_xy"], st["yaw"], st["v_long"], st["pitch"],
                        st["roll"], yaw_rate=st["yaw_rate"], v_lat=st["v_lat"],
@@ -303,16 +379,26 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
             seq[-1][1] += 1
         else:
             seq.append([fol.last_mode, 1, round(k * DT, 3)])
+        gate = (fol.mpc_stats or {}).get("decel_gate") if fol._law is not None else None
+        decel_open = None if gate is None else gate["open"]
+        if gate is not None and gate["switches"] > gate_switches:
+            gate_switches = gate["switches"]
+            gate_steps.append(dict(k=k, t=k * DT, open=decel_open,
+                                   status=fol._law.last_status if solved else None))
         if log_path is not None:
             rows.append(dict(k=k, t=k * DT, x=float(st["pos_xy"][0]), y=float(st["pos_xy"][1]),
                              yaw=float(st["yaw"]), v=float(st["v_long"]),
                              regime=fol.regime, mode=fol.last_mode, thr=float(thr),
                              steer=float(steer), brake=float(brake), gear=gear, eng=eng,
-                             status=fol._law.last_status if solved else None))
+                             status=fol._law.last_status if solved else None,
+                             v_lat=float(st["v_lat"]), yaw_rate=float(st["yaw_rate"]),
+                             steer_raw=raw["steer"], front_roll_min=front_roll_min(st["v_long"]),
+                             decel_open=decel_open))
         if rev_entry is None and fol.last_mode == "DRV-1":
             rev_entry = k
         xy.append(st["pos_xy"])
         if fol.last_mode in PathFollower.TERMINAL_MODES:   # DONE / GOAL-MISSED / MPC-ABORT / GEAR-ABORT
+            v_done = float(st["v_long"])
             ts.append(0.0)
             terminal_cmd = (thr, steer, brake, gear)
             break
@@ -324,16 +410,25 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
     # v2.0.2: APPLY the terminal command (throttle 0, brake 1) until the car is
     # still or 2 s have passed (not part of the metrics below).
     post_v, post_s = None, 0.0
+    post = {"max_abs_beta_v1": 0.0, "locked_steps": 0, "n_samples": 0}
     if terminal_cmd is not None:
         thr_t, steer_t, brake_t, gear_t = terminal_cmd
         veh.set_inputs(throttle=float(thr_t), brake=float(brake_t), steer=float(steer_t),
                        **({"gear": gear_t} if gear_t is not None else {}))
         for _ in range(int(2.0 / DT)):
-            if abs(extract_state(veh)["v_long"]) < 0.01:
+            sp_ = extract_state(veh)
+            if abs(sp_["v_long"]) < 0.01:
                 break
             vs.step()
             post_s += DT
+            sp_ = extract_state(veh)          # (v2.1.0, read-only) the window after the terminal command
+            post["n_samples"] += 1
+            if sp_["v_long"] > 1.0:
+                post["max_abs_beta_v1"] = max(post["max_abs_beta_v1"],
+                                              abs(math.atan2(sp_["v_lat"], sp_["v_long"])))
+                post["locked_steps"] += int(front_roll_min(sp_["v_long"]) < 0.5)
         post_v = abs(extract_state(veh)["v_long"])
+    rest_xy = [float(c) for c in extract_state(veh)["pos_xy"]]
     xy = np.array(xy)
     cte = np.hypot(P[None, :, 0] - xy[:, None, 0], P[None, :, 1] - xy[:, None, 1]).min(1)
     tcs, tss = np.array(tc[20:]), np.array(ts[20:])
@@ -369,6 +464,37 @@ def run(*, table, params, preset="car_4w_rwd_ackermann", urdf=URDF, mpc_model="b
                         t_max=t_max, backend="gpu" if gpu else "cpu",
                         env_threads={k_: os.environ.get(k_) for k_ in
                                      ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS")}))
+    # (v2.1.0) arm identity, asset hashes, mu provenance (C1, C12, PV-7mu), waypoint hash (C3)
+    import hashlib
+
+    def _sha(f):
+        if not isinstance(f, (str, os.PathLike)) or not os.path.exists(f):
+            return None
+        with open(f, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    from genesis_vehicle.control import load_mpc_params
+    rec = load_mpc_params(params).data if mpc_model != "off" or params is not None else {}
+    tyre = rec.get("tyre") if isinstance(rec, dict) else None
+    record_tyre_mu = (sorted({(float(a["mu_lat"]), float(a["mu_long"])) for a in tyre["axles"]})
+                      if isinstance(tyre, dict) else None)
+    live_mu = sorted({(float(w.mu_lat), float(w.mu_long)) for w in veh.physics.resolved.wheels})
+    res.update(
+        mpc_decel_limit=fol.mpc_decel_limit, table_sha256=_sha(table), params_sha256=_sha(params),
+        v_done=v_done, rest_xy=rest_xy, post_terminal=post,
+        path_sha256=hashlib.sha256(json.dumps([list(map(float, p_)) for p_ in path]).encode()).hexdigest(),
+        live_mu=[list(m) for m in live_mu],
+        record_tyre_mu=None if record_tyre_mu is None else [list(m) for m in record_tyre_mu],
+        record_plant_overrides=rec.get("plant_overrides") if isinstance(rec, dict) else None,
+        setup_ms=getattr(getattr(fol._law, "solver", None), "setup_ms", None) if fol._law is not None else None,
+        decel_switch_steps=gate_steps,
+        decel_first_open_k=next((g["k"] for g in gate_steps if g["open"]), None))
+    res["conditions"].update(lead_in=lead_in if course == "demo" else None,
+                             final_len=final_len if course == "demo" else None,
+                             turn=turn if course == "demo" else None, mu_lat=mu_lat, mu_long=mu_long,
+                             decel_limit=decel_limit)
+    if record_tyre_mu is not None and record_tyre_mu != live_mu:
+        log(f"WARNING record tyre mu != vehicle mu: record {record_tyre_mu} vs vehicle {live_mu} "
+            "(the SweepTable path checks nothing; see the docs)")
     ok = done and (course != "demo" or res["cte_max"] < 1.0)
     res["pass"] = bool(ok)
     if log_path is not None:
@@ -392,6 +518,8 @@ def main():
     ap.add_argument("--urdf", default=URDF)
     ap.add_argument("--preset", default="car_4w_rwd_ackermann")
     ap.add_argument("--mpc-model", choices=("bicycle", "off"), default="bicycle")
+    ap.add_argument("--decel-limit", choices=("throttle", "brake"), default=None,
+                    help="v2.1.0 PathFollower(mpc_decel_limit=); absent = the follower default (throttle)")
     ap.add_argument("--mpc-impl", choices=("nonlinear", "linear"), default="nonlinear")
     ap.add_argument("--on-solve-failure", choices=("pd", "hold"), default="pd")
     ap.add_argument("--plant", choices=("table", "diff"), default="table")
@@ -405,6 +533,13 @@ def main():
     ap.add_argument("--max-reverse", type=float, default=None,
                     help="KTurnParams.max_reverse (m); implies --kturn on")
     ap.add_argument("--radius", type=float, default=30.0, help="demo course turn radius (m)")
+    ap.add_argument("--lead-in", type=float, default=20.0, help="v2.1.0 demo course: first straight (m)")
+    ap.add_argument("--final-len", type=float, default=15.0, help="v2.1.0 demo course: last straight (m)")
+    ap.add_argument("--turn", choices=("left", "right"), default="left", help="v2.1.0 demo course turn direction")
+    ap.add_argument("--mu-lat", type=float, default=None,
+                    help="v2.1.0: every wheel's WheelConfig.mu_lat (needs --table and --params)")
+    ap.add_argument("--mu-long", type=float, default=None,
+                    help="v2.1.0: every wheel's WheelConfig.mu_long (needs --table and --params)")
     ap.add_argument("--vertex-deg", type=float, default=90.0, help="vertex course heading change")
     ap.add_argument("--start-yaw", type=float, default=None, help="spawn yaw (rad), default 0")
     ap.add_argument("--align-gate", choices=("on", "off"), default="on")
@@ -428,6 +563,14 @@ def main():
         if a.mpc_model == "off" or a.command_mode == "signed" or a.align_gate == "off":
             ap.error("--kturn on / --lateral-limit / --max-reverse need the MPC layer in gear mode with the "
                      "heading gate (not --mpc-model off, not --command-mode signed, not --align-gate off)")
+    if a.decel_limit is not None and a.mpc_model == "off":
+        ap.error("--decel-limit is an MPC-layer option (PathFollower refuses mpc_decel_limit with "
+                 "--mpc-model off, even 'throttle')")
+    if a.decel_limit == "brake" and a.command_mode == "signed":
+        ap.error("--decel-limit brake needs gear mode (not --command-mode signed)")
+    if (a.mu_lat is not None or a.mu_long is not None) and (a.table is None or a.params is None):
+        ap.error("--mu-lat / --mu-long need both --table and --params (assets measured at that mu; the "
+                 "cache is keyed on URDF + preset only)")
     table, params = a.table, a.params
     if table is None or params is None:
         ct, cp = ensure_cache(a.urdf, a.preset, a.remeasure, a.gpu)
@@ -440,7 +583,9 @@ def main():
               log_path=a.log, command_mode=a.command_mode,
               gear_feedback=a.gear_feedback == "on",
               kturn=(a.kturn == "on" or a.lateral_limit is not None or a.max_reverse is not None),
-              lateral_limit=a.lateral_limit, max_reverse=a.max_reverse, behind_len=a.behind_len)
+              lateral_limit=a.lateral_limit, max_reverse=a.max_reverse, behind_len=a.behind_len,
+              decel_limit=a.decel_limit, lead_in=a.lead_in, final_len=a.final_len, turn=a.turn,
+              mu_lat=a.mu_lat, mu_long=a.mu_long)
     print("MPC_RESULT " + json.dumps(res, default=str), flush=True)
     return 0 if res["pass"] else 1
 

@@ -22,6 +22,12 @@ Changes from the field port:
 * the result carries the numeric status (``info.status_val``, compared with
   ``osqp.SolverStatus``) and the returned primal ``x``'s constraint violation,
   instead of the field's ``(u or zeros, status string)``.
+* (v2.1.0) ``PathFollower(mpc_decel_limit="brake", mpc_impl="linear")``
+  wraps ONE of these in the private :class:`_DecelGatedLMPC`, which swaps its
+  ``p`` between the throttle-row and the brake-row parameter sets per solve;
+  the brake-row set on end-gated solves only (reference time; rig reference
+  end point ahead of the rear axle; see ``PathFollower``'s
+  ``mpc_decel_limit``).
 """
 from __future__ import annotations
 
@@ -33,7 +39,7 @@ from typing import Optional
 import numpy as np
 
 from ._deps import require_mpc_deps
-from .alpasim_nonlinear import SolveResult
+from .alpasim_nonlinear import SolveResult, _check_decel_pair_params
 from .params import MPCGains, _AlpaSimParams, accel_limits
 
 _log = logging.getLogger(__name__)
@@ -237,3 +243,57 @@ class LinearMPC:
 
     def max_violation(self) -> float:
         return float("inf") if self._last_qp is None else self._last_qp["violation"]
+
+
+class _DecelGatedLMPC:
+    """(v2.1.0, private) The LMPC side of ``PathFollower(mpc_decel_limit=
+    "brake")``: ONE :class:`LinearMPC` built on the throttle-row parameters
+    ``p_thr``; :meth:`select_decel` points its ``p`` at ``p_brk`` (open) or
+    ``p_thr`` (closed). Neither parameter object is mutated, and nothing is
+    transferred: :meth:`LinearMPC.solve` re-reads the deceleration row of its
+    current ``p`` at the speed of ``x0`` on every solve (its per-solve box),
+    and, while ``p.accel_min_tab`` is set, nothing else in the QP reads the
+    bound. That holds only with the table: :meth:`LinearMPC.__init__` caches
+    the constant ``accel_min`` box from ``p_thr``, and with neither
+    ``accel_min_tab`` nor ``accel_max_tab`` set :meth:`LinearMPC.solve` never
+    refreshes it, so the swap would not take effect. ``solver_params`` always
+    sets both tables, so that case is not reachable through the SDK's own
+    parameter path. The law decides when to open.
+
+    Explicit members only (no ``__getattr__``): ``p`` (the active parameters),
+    ``N``, ``dt``, ``u_prev``, ``solve``, ``max_violation``, ``set_u_prev``,
+    ``select_decel``. No ``plan_vector`` (the LMPC keeps no state trajectory,
+    so ``last_plan`` stays ``None``) and no ``setup_ms`` (:class:`LinearMPC`
+    has none). ``ValueError`` unless ``lmpc.p`` is ``p_thr`` and the two
+    parameter sets agree on type and every field except the deceleration
+    bound."""
+
+    def __init__(self, lmpc: LinearMPC, p_thr, p_brk):
+        if lmpc.p is not p_thr:
+            raise ValueError("decel-gated LMPC: the LinearMPC must be built on the throttle-row parameters")
+        if p_thr is p_brk:
+            raise ValueError("decel-gated LMPC: p_thr and p_brk are the same object")
+        _check_decel_pair_params(p_thr, p_brk)
+        self._lmpc = lmpc
+        self._p_thr, self._p_brk = p_thr, p_brk
+        self.N, self.dt = int(lmpc.N), float(lmpc.dt)
+
+    @property
+    def p(self):
+        return self._lmpc.p
+
+    @property
+    def u_prev(self) -> np.ndarray:
+        return self._lmpc.u_prev
+
+    def select_decel(self, open_: bool) -> None:
+        self._lmpc.p = self._p_brk if open_ else self._p_thr
+
+    def set_u_prev(self, delta: float, accel: float) -> None:
+        self._lmpc.set_u_prev(delta, accel)
+
+    def solve(self, x0, ref_xyyaw) -> SolveResult:
+        return self._lmpc.solve(x0, ref_xyyaw)
+
+    def max_violation(self) -> float:
+        return self._lmpc.max_violation()

@@ -1629,15 +1629,20 @@ code and tests build on it the same way. Guide: `path-following.md` §5.
 
 **Enforced (code path named):**
 
-- **Construction order**, each check raising before any side effect
-  (`PathFollower.__init__` → `_check_mpc_args`): path length ≥ 2; plant
+- **Construction order** (`PathFollower.__init__` → `_check_mpc_args`), each
+  check raising before any follower or plant write, except the two named at the
+  end of this bullet (the waypoint parsing and the wheelbase / steering-limit
+  check); `require_mpc_deps` also imports do_mpc, a process-wide side effect,
+  before the params file is read: path length ≥ 2; plant
   present; `mpc_model` ∈ `PathFollower.MPC_MODELS` = `("bicycle", "off")`
   (`"pacejka"` raises `ValueError`; `mpc_feedforward=` / `mpc_correction=` are
   `TypeError`, not accepted-and-ignored); with `"off"`, any MPC-only argument
   (`mpc_params`, `mpc_impl`, `on_solve_failure`, `mpc_gains`, `mpc_v_floor`,
   `dt_ctrl`, and since v2.0.1 `mpc_align_gate`, `mpc_stall_timeout` — even as
-  `None`) raises `ValueError` — told apart from "not given" by the `_Unset`
-  sentinel, so an explicit default value also raises; a live vehicle or
+  `None` — since v2.0.3 `mpc_kturn` and since v2.1.0 `mpc_decel_limit`, even as
+  `"throttle"`) raises `ValueError` — told apart from "not given" by the `_Unset`
+  sentinel, so an explicit default value also raises (through v2.0.6 this list
+  omitted `mpc_kturn`, which the code has refused since v2.0.3); a live vehicle or
   `DifferentiablePlant` whose resolved steering is not `Ackermann` (or a
   subclass) on exactly two axles raises `ValueError` naming
   `mpc_model="off"` (axles counted from `WheelConfig.axle_index`; an unknown
@@ -1646,18 +1651,40 @@ code and tests build on it the same way. Guide: `path-following.md` §5.
   `on_solve_failure` ∈ {`"pd"`, `"hold"`}; (v2.0.1) `mpc_align_gate` is `None`
   or two finite reals with `0 < theta_off < theta_on <= π` and
   `mpc_stall_timeout` is `None` or a finite real > 0 (`ValueError`; `bool`
-  rejected); missing optional packages raise
+  rejected); (v2.1.0) `mpc_decel_limit` ∈ `PathFollower.MPC_DECEL_LIMITS` =
+  `("throttle", "brake")` (`ValueError`, step 7); missing optional packages raise
   `ImportError` (`require_mpc_deps`); the params file is loaded and validated
   (`load_mpc_params`: `FileNotFoundError` for a missing file; `ValueError` for
   schema ≠ `genesis_vehicle.mpc_params/1`, missing keys, or a JSON `steering`
-  that is not a two-axle Ackermann). Only after these does the 1.x plant
-  coercion (`_as_plant`, `TypeError`) and the waypoint parsing run — so under
+  that is not a two-axle Ackermann); (v2.1.0) under `mpc_decel_limit="brake"`
+  the record's `decel_brake_by_speed` must be non-empty with every row a finite
+  deceleration < 0 at a finite speed (`ValueError`, step 9, right after
+  `load_mpc_params`; checked again in `solver_params`). Only after these does the 1.x plant
+  coercion (`_as_plant`, `TypeError`) run, then the command-mode, K-turn and
+  v2.1.0 signed checks below, and only after the attributes and
+  `plant.steer_range` are written the waypoint parsing (`_parse_path`) — so under
   the default `mpc_model` a call without params reports U1 even when the plant
   OBJECT or a waypoint's SHAPE is also wrong; the path-length, plant-missing,
   `mpc_model`-value and two-axle checks still come before U1. `tests/test_path_follower_mpc_api.py` pins the order.
-  (v2.0.1) After those, in `_init_mpc`: `ValueError` unless the params'
-  `wheelbase > 0` and the solver's steering limit `steer_cap · max_steer_rad`
-  lies in (0, π/2) — R_min scales the §7.19 budgets.
+  (v2.1.0) `mpc_decel_limit="brake"` with the resolved `command_mode="signed"`
+  raises `ValueError` after `_check_command_mode` and before any attribute is
+  set. The four v2.1.0 refusals run before any follower or plant write by
+  code order; three are tested (unknown value, signed, empty / invalid brake
+  row: a stub plant's `steer_range` is unchanged after the raise), the `"off"`
+  refusal (step 4) by code order only. A waypoint whose shape is not
+  `(x, y, z, speed[, yaw])`, or with a coordinate that does not convert to
+  `float`, raises `ValueError` from `_parse_path` AFTER `plant.steer_range` is
+  written — the bullet's opening covered it through
+  v2.0.6, wrongly (found by the 2.1.0 docs review).
+  (v2.0.1) After those, in `_init_mpc`: `ValueError` unless
+  the params' `wheelbase > 0` and the solver's steering limit `steer_cap ·
+  max_steer_rad` lies in (0, π/2) — R_min scales the §7.19 budgets. **This
+  check is NOT "before any side effect"**: it raises after `plant.steer_range`
+  has been written and after the live cross-check warnings; the bullet's
+  opening "each check raising before any side effect" did not exclude it
+  through v2.0.6 (found by the 2.1.0 API review; pre-existing). The v2.1.0
+  "NARROWER" `UserWarning` (a brake row decelerating less than the throttle row
+  somewhere) is also issued there, from `solver_params`.
 - **Regime selection** (`PathFollower.plan`): the path state machine runs every
   step; DONE / cusp brake → a fixed command (`CMD`); `"off"` → the 1.x law
   (`R-OFF`); a reverse block → the 1.x law (`R-REV`), with no solver call; a
@@ -1724,7 +1751,13 @@ The 538-step replay was re-run with the 2.0.1 defaults (max difference 0.0,
   the per-axle tyre coefficients — and a mismatch there only WARNS;
 - that the prediction model matches the plant: it is a linear-tyre bicycle
   model, not the ray-wheel pipeline (no load transfer, slope, terrain, wheel
-  spin or tyre saturation);
+  spin or tyre saturation) — still the only model in v2.1.0 (a Pacejka
+  prediction model was implemented for 2.1.0, failed its non-harm gates and was
+  removed; `mpc_model="pacejka"` raises; CHANGELOG 2.1.0 §8);
+- that the MPC's deceleration bound is reachable by the vehicle: the throttle
+  row by default, the brake row on end-gated solves under
+  `mpc_decel_limit="brake"` (§7.24) — nothing compares either with the live
+  vehicle;
 - any real-time bound: the NMPC overran 25 ms on 5.0-24.1 % of control steps
   on the measured machine depending on the session and harness
   (`path-following.md` §5.6);
@@ -1976,7 +2009,10 @@ limit (the brake model below is linear only below it).
 **The brake model is stage 2 only.** `control/brake.py` (`brake_for`,
 `coast_for_brake`, `brake_gain_closed_form`, `brake_gain_from_params`) is
 called from the gear finish and from construction; the MPC prediction model
-keeps its throttle-based deceleration bound and `DifferentiablePlant`'s unroll
+keeps its throttle-based deceleration bound **by default** — since v2.1.0
+`mpc_decel_limit="brake"` (opt-in, gear mode only) bounds END-GATED solves by
+the params record's brake-1 row instead (§7.24); through v2.0.6 this sentence
+was unqualified — and `DifferentiablePlant`'s unroll predicts with
 its constant constructor `brake`. `coast_for_brake` on a `SweepTable`
 (`coast_hold_speeds`): equal to `accel_at(v, 0, pitch, roll)` for |v| ≥ v_h on
 a sampled side; below v_h the flat coast held at v_h and faded by
@@ -2328,3 +2364,69 @@ mask alone left 14 takeovers at N = 0, plan agent).
   made the `visual_susp_mode="control"` PD live through v2.0.5 (§7.8); since
   v2.0.6 no SDK code drives that PD, so the SDK no longer reaches this engine
   behaviour.
+
+## 7.24 `PathFollower(mpc_decel_limit="brake")`: the end-gated deceleration bound (v2.1.0)
+
+A control-layer contract, like §7.18. Guide: `path-following.md` §5.11;
+measurements, labels and conditions: CHANGELOG 2.1.0.
+
+| abbr | meaning |
+|---|---|
+| THR / BRK | the throttle-row / brake-row problem of a gated pair |
+| NLP / QP | the NMPC's per-solve nonlinear program / the LMPC's quadratic program |
+| rig | rear-axle centre, the MPC reference point |
+| DT_MPC / N | MPC node spacing 0.1 s / horizon nodes (20 by default) |
+| μ | tyre friction coefficient |
+
+### 7.24.1 Enforced (code path named)
+
+| guarantee | enforced by | scope |
+|---|---|---|
+| the default (`"throttle"`) builds exactly the 2.0.6 solver and looks nothing up for the gate | `PathFollower._init_mpc` → one `_build_solver(st, sp)`; `_MPCLaw(decel_gate=False)` reads no solver attribute beyond 2.0.6's | construction; the default's COMMANDS being identical to 2.0.6 is a measured fact (CHANGELOG 2.1.0 §4), not enforced by a test on every scene |
+| under `"brake"` a solve uses the brake row iff `t + DT_MPC·N >= t_end − 1e-9` (`t_end` = the last time of the active forward block's rig reference; REFERENCE time) AND the horizon's last reference node — then the rig reference's end point — has body-x > 0 from the rear axle | `_MPCLaw.decel_open_at`, called by `_select_decel` in `_solve` after the reference is sampled and before `x0` / `u_prev` are set, on every solve | the NMPC (`_DecelGatedNMPC`, two NLPs) and the LMPC (`_DecelGatedLMPC`, one QP whose parameter set is swapped); no other state — re-evaluated each solve |
+| everything else gets the throttle row: mid-path reference speed drops, a profile ramping down before its last N·DT_MPC of reference time, every solve after the end point passed behind the rear axle | the same predicate | by construction |
+| held steps between solves are clipped by the LAST solve's table | the law's clip reads `solver.p`, which the pair points at the active problem | under `"hold"`: the table of the solve that just failed |
+| a switch moves the NMPC's primal warm start and do_mpc's `u0` by value; shapes are checked before any assignment | `_transfer_warm_start` (`ValueError` on a mismatch; no `try`) | duals copied only from a solver that has solved; under the follower's IPOPT options only `opt_x_num` and `u0` affect the next solve (API-review probe) — no dual warm start is claimed |
+| a gated pair whose solvers differ in anything but the deceleration bound is refused | `_DecelGatedNMPC.__init__` / `_DecelGatedLMPC.__init__`, `_check_decel_pair_params` (`ValueError`) | `N`, `dt`, parameter type and every field but `accel_min` / `accel_min_tab`; NMPC also `opt_x` labels, constraint shape, scaling |
+| an error from the gate or the transfer propagates out of `PathFollower.step` / `plan` (no PD fall-back) | no `try` in `law._solve` | tested with an injected transfer error (`tests/test_mpc_decel_gate.py`) |
+| refusals before any follower or plant side effect: a value outside `("throttle", "brake")` (step 7); any value with `mpc_model="off"` (step 4); `"brake"` with `command_mode="signed"`; `"brake"` with an empty or invalid `decel_brake_by_speed` (step 9, after `require_mpc_deps` has imported do_mpc) | §7.18 construction order | tested for three of the four with a stub plant's `steer_range`; the `"off"` refusal by code order only |
+| `mpc_stats["decel_gate"]` is `None` without the gate and `{open, open_solves, switches}` with it | `_MPCLaw.decel_gate_stats` | counters cumulative since construction, kept by `set_path` |
+
+### 7.24.2 Not enforced / not covered
+
+- **That the follower brakes for anything but the last 2.0 s of a forward
+  block's SCHEDULE.** Mid-path decelerations get the throttle row. Because the
+  test is in reference time, a vehicle behind its schedule gets the brake row
+  earlier and farther from the end (measured 15 m off the path; about 38 m from
+  the end on a no-ramp straight; about 12 m from the goal after a K-turn
+  release — CHANGELOG 2.1.0 §3). The heading gate, the watchdog, the K-turn
+  release and `set_path` re-time the reference and so move the opening.
+- **Equality with the default before the first open solve** — measured on 45
+  runs (implementation) and 13 (impl-review), and bitwise on one Genesis-free
+  path in `tests/test_mpc_decel_gate.py`; not guaranteed (THR is a separate
+  object; IPOPT gives no such guarantee).
+- **That the brake row is reachable.** Nothing checks it: lower live μ, payload,
+  a downhill grade, or a stage-2 `brake_gain=` LARGER than the vehicle's real
+  gain make it unreachable, silently. On the `SweepTable` path nothing compares
+  the record or the table with the vehicle; the live cross-check runs only with
+  a `DifferentiablePlant` and only warns. A μ 1.0 record on a μ 0.6 vehicle
+  turned a `DONE` into `GOAL-MISSED` on one measured course (CHANGELOG 2.1.0
+  §6.5) — the verdict difference is about 0.12 m around the 1.5 m arrival
+  circle and the default's `DONE` is itself marginal; on a second course the
+  order reversed (impl-review).
+- **Steering authority under brake-row braking.** No gate sees front-wheel lock
+  or understeer (the spin gate sees body slip β and, on R-MPC steps, heading
+  error — not front lock or understeer). At μ 0.6 the brake row maps to
+  brake 0.81–0.89, at the straight-line front-lock knee, and the opt-in locked
+  the front wheels in the arc on every braking-in-arc course measured
+  (CHANGELOG 2.1.0 §6.4, §7.1).
+- **A PD fall-back inside an open window**: after a `capped_infeasible` BRK
+  solve the PD law drives (throttle 1.0 at 9.24 m/s was commanded in a μ 0.6
+  arc); only the R-FAIL count limit of the acceptance gates covered it.
+- The stage-2 steer inverse's jump to the steer cap beyond the table's range
+  (pre-existing, every arm; CHANGELOG 2.1.0 §7.4).
+- Real time under `"brake"` (no bench arm: the bench is signed-only and
+  `"brake"` refuses signed mode); one more NLP setup (`setup_ms` +121 / +145 ms,
+  construction about +0.15–0.22 s — medians at μ 1.0 / 0.6, implementation).
+- Other vehicles, slopes, μ other than 1.0 and 0.6, LMPC beyond one report run,
+  `DifferentiablePlant(coupled=True)`, GPU, `n_envs > 1`, a live OSC client.

@@ -1,0 +1,251 @@
+{
+ "captured_on": {
+  "sdk": "2.0.6",
+  "tree": "d68ef4d"
+ },
+ "solver_params_default": {
+  "type": "_AlpaSimParams",
+  "fields": {
+   "mass": 1330.0,
+   "inertia": 2714.4,
+   "l_rig_to_cg": 1.36,
+   "wheelbase": 2.7,
+   "front_cornering_stiffness": 33200.0,
+   "rear_cornering_stiffness": 32500.0,
+   "steering_time_constant": 0.08,
+   "acceleration_time_constant": 0.025,
+   "kinematic_threshold_speed": 5.0,
+   "steer_max": 0.7,
+   "accel_max": 1.29,
+   "accel_min": -2.15,
+   "accel_max_tab": [
+    [
+     0.0,
+     3.0,
+     6.0,
+     10.0,
+     14.0
+    ],
+    [
+     1.9,
+     1.75,
+     1.63,
+     1.47,
+     1.29
+    ]
+   ],
+   "accel_min_tab": [
+    [
+     0.0,
+     3.0,
+     6.0,
+     10.0,
+     14.0
+    ],
+    [
+     -2.15,
+     -2.15,
+     -2.16,
+     -2.18,
+     -2.2
+    ]
+   ]
+  }
+ },
+ "solver_params_bicycle_cap05_dt0025": {
+  "type": "_AlpaSimParams",
+  "fields": {
+   "mass": 1330.0,
+   "inertia": 2714.4,
+   "l_rig_to_cg": 1.36,
+   "wheelbase": 2.7,
+   "front_cornering_stiffness": 33200.0,
+   "rear_cornering_stiffness": 32500.0,
+   "steering_time_constant": 0.08,
+   "acceleration_time_constant": 0.025,
+   "kinematic_threshold_speed": 5.0,
+   "steer_max": 0.35,
+   "accel_max": 1.29,
+   "accel_min": -2.15,
+   "accel_max_tab": [
+    [
+     0.0,
+     3.0,
+     6.0,
+     10.0,
+     14.0
+    ],
+    [
+     1.9,
+     1.75,
+     1.63,
+     1.47,
+     1.29
+    ]
+   ],
+   "accel_min_tab": [
+    [
+     0.0,
+     3.0,
+     6.0,
+     10.0,
+     14.0
+    ],
+    [
+     -2.15,
+     -2.15,
+     -2.16,
+     -2.18,
+     -2.2
+    ]
+   ]
+  }
+ },
+ "follower_nmpc_gear": {
+  "type": "_AlpaSimParams",
+  "fields": {
+   "mass": 1330.0,
+   "inertia": 2714.4,
+   "l_rig_to_cg": 1.36,
+   "wheelbase": 2.7,
+   "front_cornering_stiffness": 33200.0,
+   "rear_cornering_stiffness": 32500.0,
+   "steering_time_constant": 0.08,
+   "acceleration_time_constant": 0.025,
+   "kinematic_threshold_speed": 5.0,
+   "steer_max": 0.35,
+   "accel_max": 1.29,
+   "accel_min": -2.15,
+   "accel_max_tab": [
+    [
+     0.0,
+     3.0,
+     6.0,
+     10.0,
+     14.0
+    ],
+    [
+     1.9,
+     1.75,
+     1.63,
+     1.47,
+     1.29
+    ]
+   ],
+   "accel_min_tab": [
+    [
+     0.0,
+     3.0,
+     6.0,
+     10.0,
+     14.0
+    ],
+    [
+     -2.15,
+     -2.15,
+     -2.16,
+     -2.18,
+     -2.2
+    ]
+   ]
+  }
+ },
+ "follower_nmpc_signed": {
+  "type": "_AlpaSimParams",
+  "fields": {
+   "mass": 1330.0,
+   "inertia": 2714.4,
+   "l_rig_to_cg": 1.36,
+   "wheelbase": 2.7,
+   "front_cornering_stiffness": 33200.0,
+   "rear_cornering_stiffness": 32500.0,
+   "steering_time_constant": 0.08,
+   "acceleration_time_constant": 0.025,
+   "kinematic_threshold_speed": 5.0,
+   "steer_max": 0.35,
+   "accel_max": 1.29,
+   "accel_min": -2.15,
+   "accel_max_tab": [
+    [
+     0.0,
+     3.0,
+     6.0,
+     10.0,
+     14.0
+    ],
+    [
+     1.9,
+     1.75,
+     1.63,
+     1.47,
+     1.29
+    ]
+   ],
+   "accel_min_tab": [
+    [
+     0.0,
+     3.0,
+     6.0,
+     10.0,
+     14.0
+    ],
+    [
+     -2.15,
+     -2.15,
+     -2.16,
+     -2.18,
+     -2.2
+    ]
+   ]
+  }
+ },
+ "follower_lmpc_gear": {
+  "type": "_AlpaSimParams",
+  "fields": {
+   "mass": 1330.0,
+   "inertia": 2714.4,
+   "l_rig_to_cg": 1.36,
+   "wheelbase": 2.7,
+   "front_cornering_stiffness": 33200.0,
+   "rear_cornering_stiffness": 32500.0,
+   "steering_time_constant": 0.08,
+   "acceleration_time_constant": 0.025,
+   "kinematic_threshold_speed": 5.0,
+   "steer_max": 0.35,
+   "accel_max": 1.29,
+   "accel_min": -2.15,
+   "accel_max_tab": [
+    [
+     0.0,
+     3.0,
+     6.0,
+     10.0,
+     14.0
+    ],
+    [
+     1.9,
+     1.75,
+     1.63,
+     1.47,
+     1.29
+    ]
+   ],
+   "accel_min_tab": [
+    [
+     0.0,
+     3.0,
+     6.0,
+     10.0,
+     14.0
+    ],
+    [
+     -2.15,
+     -2.15,
+     -2.16,
+     -2.18,
+     -2.2
+    ]
+   ]
+  }
+ }
+}

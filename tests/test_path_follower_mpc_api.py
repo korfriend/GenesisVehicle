@@ -3,14 +3,16 @@
 Each check raises before any side effect, in this order: (1) path length,
 (2) plant present, (3) ``mpc_model`` value, (4) no MPC-only argument with
 ``mpc_model="off"``, (5) a live vehicle that is not a 2-axle Ackermann,
-(6) U1 — no ``mpc_params``, (7) ``mpc_impl`` / ``on_solve_failure`` values,
-(8) optional dependencies, (9) the params record, then warnings (10) no
+(6) U1 — no ``mpc_params``, (7) ``mpc_impl`` / ``on_solve_failure`` values
+(v2.1.0 also the ``mpc_decel_limit`` value), (8) optional dependencies, (9) the
+params record (v2.1.0 also the brake row under ``"brake"``), then warnings (10) no
 forward block, (11) live plant, (12) params vs vehicle mismatch.
 
 Mutants this file must fail on (plan section 11): checks 5 and 6 swapped; the
 ``"off"`` + MPC-argument check removed; the ``FleetFollower`` MPC check removed
 (or moved after the mutation loop); ``"pacejka"`` left in the 2.0.0 allowed
-values.
+values. (The 2.1.0 ``mpc_decel_limit`` refusals and their placement are tested in
+``test_mpc_decel_limit.py``.)
 """
 import copy
 import os
@@ -117,7 +119,8 @@ def test_feedforward_and_correction_are_not_in_2_0_0():
 
 @pytest.mark.parametrize("kw", [dict(mpc_params="x.json"), dict(mpc_impl="nonlinear"),
                                 dict(on_solve_failure="pd"), dict(mpc_gains=None),
-                                dict(mpc_v_floor=0.5), dict(dt_ctrl=0.025)])
+                                dict(mpc_v_floor=0.5), dict(dt_ctrl=0.025),
+                                dict(mpc_decel_limit="throttle"), dict(mpc_decel_limit="brake")])
 def test_off_rejects_every_mpc_argument_even_at_its_default(kw):
     with pytest.raises(ValueError, match=list(kw)[0]):
         PathFollower(PATH, make_table(), mpc_model="off", **kw)
@@ -127,6 +130,7 @@ def test_signature_shows_effective_defaults():
     import inspect
     sig = inspect.signature(PathFollower)
     assert repr(sig.parameters["mpc_impl"].default) == "'nonlinear'"
+    assert repr(sig.parameters["mpc_decel_limit"].default) == "'throttle'"     # v2.1.0
     assert sig.parameters["mpc_model"].default == "bicycle"
 
 
@@ -246,3 +250,56 @@ def test_followerplan_new_fields_are_appended():
     assert names[8:] == ["regime", "a_ff", "w_ff", "gear", "a_coast", "steer_cmd"]
     p = FollowerPlan("DRV+1", 1.0, 0.5, 2.0, 3.0, 0.0, 0.0, None)    # 1.x positional
     assert p.regime == "R-OFF"
+
+
+# --- the bicycle's live cross-check warning (moved here in 2.1.0) --
+
+_TYRE_F = {"axle": 0, "pb_y": 8.0, "pc_y": 1.3, "pe_y": 0.4, "mu_lat": 1.0, "mu_long": 1.0,
+           "lat_scale": 0.9, "eps_v": 0.7, "n_wheels": 2}
+_TYRE_R = {"axle": 1, "pb_y": 9.5, "pc_y": 1.45, "pe_y": -0.2, "mu_lat": 0.95, "mu_long": 1.0,
+           "lat_scale": 0.9, "eps_v": 0.7, "n_wheels": 2}
+
+
+def _tyre_record():
+    d = copy.deepcopy(rp.PARAMS_SDK)
+    d["tyre"] = {"model": "PacejkaAnisotropic", "axles": [copy.deepcopy(_TYRE_F), copy.deepcopy(_TYRE_R)]}
+    d["axle_loads"] = {"settled": {"0": 7400.0, "1": 5650.0}, "front_axle": 0, "rear_axle": 1}
+    return MPCVehicleParams.from_dict(d)
+
+
+class _LivePlant:
+    """A DifferentiablePlant look-alike with a resolved config (``tire`` + per-wheel coefficients)."""
+    has_coupled_solve = True
+
+    def __init__(self, tire=None, wheel_over=None):
+        wheel_over = wheel_over or {}
+        from genesis_vehicle.tire_models.pacejka import PacejkaAnisotropic
+        wheels = []
+        for ax, t in ((0, _TYRE_F), (0, _TYRE_F), (1, _TYRE_R), (1, _TYRE_R)):
+            w = {k: t[k] for k in ("pb_y", "pc_y", "pe_y", "mu_lat", "mu_long")}
+            w.update(wheel_over.get(ax, {}))
+            wheels.append(types.SimpleNamespace(axle_index=ax, **w))
+        self.src = types.SimpleNamespace(resolved=types.SimpleNamespace(
+            steering=Ackermann(max_steer_rad=0.7), wheels=wheels,
+            tire=tire if tire is not None else PacejkaAnisotropic(eps_v=0.7, lat_scale=0.9)), wheel_meta=None)
+        self.mass_props = types.SimpleNamespace(mass=1330.0)
+        self.steer_range = (-1.0, 1.0)
+
+    def solve(self, *a, **k):
+        return 0.0, 0.0
+
+    def throttle_for(self, *a):
+        return 0.0
+
+    def steer_for(self, *a):
+        return 0.0
+
+
+def test_bicycle_live_mismatch_warning_text_is_unchanged(deps):
+    """The bicycle's live cross-check WARNS with the 2.0.6 text, byte for byte."""
+    plant = _LivePlant(wheel_over={1: {"mu_lat": 0.57}})
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        PathFollower(PATH, plant, mpc_params=_tyre_record(), command_mode="signed")
+    msgs = [str(x.message) for x in w]
+    assert "mpc_params do not describe this vehicle: axle 1 mu_lat: params 0.95 vs vehicle 0.57" in msgs

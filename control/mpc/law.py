@@ -13,8 +13,10 @@ target the inverse plant consumes (feedforward ``"field"``)::
     a_t = clip(a_cmd, accel_lo(v), accel_hi(v))
     w_t = max(v, 0) * tan(delta_cmd) / L
 
-all as the field ``MPCFollower`` did (``mpc_follower.py:162-174``). What it
-adds:
+all as the field ``MPCFollower`` did (``mpc_follower.py:162-174``);
+``accel_lo`` / ``accel_hi`` are read from ``solver.p``, which with the v2.1.0
+decel gate (below) is the parameter set of the solver the LAST solve used, so
+a held command between solves is clipped by that solve's table. What it adds:
 
 * every solve is classified (plan section 3.6, below) and counted in
   :attr:`mpc_stats`; what is applied depends on ``on_solve_failure``;
@@ -26,7 +28,24 @@ adds:
   (the field behaviour). At a start from rest ``(d0, a0) == (0, 0)``, do_mpc's
   initial value, so the first solve is unchanged against the field;
 * the predicted state at the node times of the last applied solve
-  (:attr:`last_plan`; NMPC only — ``None`` with the LMPC).
+  (:attr:`last_plan`; NMPC only — ``None`` with the LMPC);
+* (v2.1.0, ``decel_gate=True``, used by ``PathFollower(mpc_decel_limit=
+  "brake")``) a per-solve choice of the deceleration bound: the solver's
+  BRAKE-row problem is used on a solve when the active forward block's
+  reference end time is within ``N * DT_MPC`` (2.0 s at N = 20) of the solve
+  time IN REFERENCE TIME — ``t + DT_MPC * N >= t_end - 1e-9``, ``t_end`` =
+  the last time of the block's reference, so a vehicle behind its schedule
+  gets it earlier and farther from the end — AND the rig reference's end
+  point lies ahead of the rear axle (its body-``x`` coordinate in the solve
+  frame is ``> 0``); on every other solve the THROTTLE-row problem (the
+  default's). Mid-path reference speed drops, a profile that ramps down
+  before its last ``N * DT_MPC`` of reference time, and every solve after the
+  end point has passed behind the rear axle get the throttle row. Anything
+  that re-times the reference (block entry, :meth:`start_block`: the heading
+  gate, the watchdog, the K-turn release and ``set_path`` through the
+  follower) moves the opening. The choice is re-evaluated on every solve and
+  has no other state; counters in :meth:`decel_gate_stats`. Equality with the
+  default before the first open solve is measured, not guaranteed.
 
 | abbr | meaning |
 |---|---|
@@ -98,6 +117,8 @@ HOLD_V = 0.1
 FEAS_TOL = 1e-4
 #: Field defaults where the params give no acceleration limit.
 ACCEL_LO_DEFAULT, ACCEL_HI_DEFAULT = -9.0, 6.0
+#: (v2.1.0) Tolerance of the decel gate's reference-time test [s].
+DECEL_GATE_TOL = 1e-9
 
 IPOPT_CONV = frozenset({"Solve_Succeeded", "Solved_To_Acceptable_Level", "Feasible_Point_Found"})
 IPOPT_CAP = frozenset({"Maximum_Iterations_Exceeded", "Maximum_CpuTime_Exceeded",
@@ -206,17 +227,29 @@ class _MPCLaw:
     Args:
         solver: a :class:`.alpasim_nonlinear.NonlinearMPC` or
             :class:`.alpasim_linear.LinearMPC` (anything with ``solve``,
-            ``set_u_prev``, ``max_violation``, ``N``, ``p``).
+            ``set_u_prev``, ``max_violation``, ``N``, ``p``); with
+            ``decel_gate=True`` also a callable ``select_decel(open)`` (the
+            v2.1.0 ``_DecelGatedNMPC`` / ``_DecelGatedLMPC``), whose ``p`` is
+            the active problem's. ``p.wheelbase`` and ``N`` are read ONCE here.
         rig_offset: base_link -> rear-axle centre distance [m, positive].
         on_solve_failure: ``"pd"`` (fall back) or ``"hold"`` (field parity).
         v_floor: speed floor for timing the reference [m/s] (field 0.5).
         impl: ``"nonlinear"`` | ``"linear"`` (selects the status table).
+        decel_gate: (v2.1.0) False (default): no attribute of the solver
+            beyond the list above is looked up and nothing below runs. True:
+            ``TypeError`` here unless ``solver.select_decel`` is callable, and
+            every solve calls it with the gate predicate (module docstring)
+            AFTER the reference is sampled and BEFORE ``x0`` / ``u_prev`` are
+            set; an exception from it propagates (no fall-back).
     """
 
     def __init__(self, solver, *, rig_offset: float, on_solve_failure: str = "pd",
-                 v_floor: float = 0.5, impl: str = "nonlinear"):
+                 v_floor: float = 0.5, impl: str = "nonlinear", decel_gate: bool = False):
         if on_solve_failure not in POLICIES:
             raise ValueError(f"on_solve_failure must be one of {POLICIES}; got {on_solve_failure!r}")
+        if decel_gate and not callable(getattr(solver, "select_decel", None)):
+            raise TypeError("decel_gate=True needs a solver with a callable select_decel(open) "
+                            f"(a decel-gated solver pair); got {type(solver).__name__}")
         self.solver = solver
         self.policy = on_solve_failure
         self.impl = impl
@@ -231,6 +264,13 @@ class _MPCLaw:
         self.last_status = None
         self.last_solve_ms = None
         self._plan = None
+        # v2.1.0 decel gate: counters are cumulative since construction
+        # (start_block / set_path keep them); _decel_open is None before the
+        # first solve, then the last solve's choice.
+        self.decel_gate = bool(decel_gate)
+        self._decel_open = None
+        self._decel_open_solves = 0
+        self._decel_switches = 0
         self._reset_command()
 
     # -- block lifecycle -----------------------------------------------------------
@@ -287,13 +327,35 @@ class _MPCLaw:
         d0 = math.atan(r * self.L / v) if v > 0.25 else 0.0     # AlpaSim coerce_dynamic_state
         return np.array([0.0, 0.0, 0.0, max(v, 0.0), vy, r, d0, a0]), d0, a0
 
+    def decel_open_at(self, ts, ref_l) -> bool:
+        """(v2.1.0) The decel-gate predicate for a solve whose reference was
+        sampled at ``ts`` (``t + DT_MPC * arange(N + 1)``, the times
+        :meth:`_ref_at` used) giving ``ref_l`` ((N+1, 3), solve frame): the
+        horizon's last node reaches the block reference's end time (reference
+        time, tolerance :data:`DECEL_GATE_TOL`) AND the reference at that node
+        — then the rig reference's end point — has body ``x > 0``."""
+        t_end = float(self.ref[0][-1])
+        return bool(float(ts[-1]) >= t_end - DECEL_GATE_TOL and float(ref_l[-1, 0]) > 0.0)
+
+    def _select_decel(self, ts, ref_l) -> None:
+        open_ = self.decel_open_at(ts, ref_l)
+        self.solver.select_decel(open_)          # may raise: propagates (no fall-back)
+        if open_ != bool(self._decel_open):      # the pair starts on the throttle row
+            self._decel_switches += 1
+        self._decel_open = open_
+        if open_:
+            self._decel_open_solves += 1
+
     def _solve(self, t, pos_xy, yaw, v, r, vy):
         c, s = math.cos(yaw), math.sin(yaw)
         ox, oy = float(pos_xy[0]) - self.rig * c, float(pos_xy[1]) - self.rig * s
-        X, Y, H = self._ref_at(t + DT_MPC * np.arange(self.N + 1))
+        ts = t + DT_MPC * np.arange(self.N + 1)
+        X, Y, H = self._ref_at(ts)
         gx, gy = X - ox, Y - oy
         ref_l = np.column_stack([c * gx + s * gy, -s * gx + c * gy,
                                  np.unwrap((H - yaw + math.pi) % (2 * math.pi) - math.pi)])
+        if self.decel_gate:
+            self._select_decel(ts, ref_l)
         x0, d0, a0 = self.initial_state(t, v, r, vy)
         if self._restart:
             self.solver.set_u_prev(d0, a0)
@@ -329,6 +391,23 @@ class _MPCLaw:
             return None
         t, X = self._plan
         return t + DT_MPC * np.arange(self.N + 1), X.copy()
+
+    def decel_gate_stats(self) -> Optional[dict]:
+        """(v2.1.0) ``None`` without the decel gate; else ``{open, open_solves,
+        switches}``: ``open`` = whether the LAST solve used the brake row
+        (``None`` before the first solve; held between solves),
+        ``open_solves`` = solves run on the brake row, including ones whose
+        SOLVER CALL failed or raised (an error from the gate selection or the
+        warm-start transfer propagates out of the solve before the counters
+        update and is not counted — pinned by
+        ``tests/test_mpc_decel_gate.py::test_a25_transfer_error_propagates_out_of_plan``),
+        ``switches`` = solves whose row differs from the
+        previous solve's (the pair starts on the throttle row, so a first solve
+        that opens counts one). Cumulative since construction."""
+        if not self.decel_gate:
+            return None
+        return {"open": self._decel_open, "open_solves": self._decel_open_solves,
+                "switches": self._decel_switches}
 
     def mpc_stats(self, t_now: Optional[float] = None) -> dict:
         age = None

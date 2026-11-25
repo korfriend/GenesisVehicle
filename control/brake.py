@@ -2,8 +2,11 @@
 
 Used ONLY in stage 2 (the inversion of an acceleration target into commands)
 of ``PathFollower(command_mode="gear")``. The MPC prediction model keeps its
-throttle-based deceleration bound, and ``DifferentiablePlant``'s unroll
-predicts with its constant constructor ``brake``; neither contains this model.
+throttle-based deceleration bound by default (since 2.1.0
+``mpc_decel_limit="brake"`` bounds it by the params record's brake-1 row on
+end-gated solves only, see ``PathFollower``; through 2.0.6 this sentence was
+unqualified), and ``DifferentiablePlant``'s unroll predicts with its constant
+constructor ``brake``; neither contains this model.
 
 Model, for a vehicle rolling at ``v`` with throttle 0 and brake ``b`` in
 [0, 1]::
@@ -17,7 +20,19 @@ measured (EXPLORATORY probe, reference car, plane mu 1.0, dt 0.025 x 4, 2 /
 there, below mu*g, so no wheel locked) and the closed form below gave 5.0152
 against 5.0204 measured. Not modelled: the friction-limited regime (wheel
 lock, low mu), where the real deceleration is smaller than the model's;
-``dynamics.brake_projection`` is not an anti-lock system.
+``dynamics.brake_projection`` is not an anti-lock system. Measured for 2.1.0
+(reference car, wheel mu 0.6 on every wheel, straight line, deceleration over
+0.25 s; implementation, CHANGELOG 2.1.0 §6.4): the front wheels lock from brake
+0.90-0.95 at 10 m/s, 0.80-0.85 at 6 m/s, 0.70-0.80 at 3 m/s (60/40 front brake
+bias), and the deceleration is NOT monotone in brake at any of the three
+speeds (levels sampled 0.5, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0): at 10 m/s it
+peaks at 0.9 (4.646 m/s^2) and falls to 4.412 at 1.0; at 6 m/s it drops after
+0.8 (4.131 -> 4.062 at 0.85) and its largest value is at 1.0 (4.286); at
+3 m/s it peaks at 0.95 (4.174) and is 4.164 at 1.0. The brake-1 row of a
+mu 0.6 record maps to brake 0.81-0.89 here, i.e. at that knee, so
+``PathFollower(mpc_decel_limit="brake")`` can command brake up to that level
+on open solves at mu 0.6, at the front-lock onset (measured maximum R-MPC
+brake on the mu 0.6 acceptance rows 0.76-0.85; implementation).
 
 | abbr | meaning |
 |---|---|

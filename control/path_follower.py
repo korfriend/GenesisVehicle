@@ -646,9 +646,16 @@ class PathFollower:
             external reset (or a follower constructed on a vehicle rolling the
             wanted way in the other engaged gear) the vehicle can be driven in
             its engaged gear until ``GUARD`` (see :meth:`resync_gear`). The
-            brake level comes from a brake -> deceleration model in STAGE 2 only
-            (:mod:`genesis_vehicle.control.brake`; the MPC prediction keeps its
-            throttle-based deceleration bound). Gear mode refuses a skid-steer
+            brake level comes from a brake -> deceleration model in STAGE 2
+            (:mod:`genesis_vehicle.control.brake`). The MPC prediction keeps its
+            throttle-based deceleration bound by default; since 2.1.0
+            ``mpc_decel_limit="brake"`` (opt-in, gear mode only) bounds it by the
+            params record's brake-1 row on GATED solves only — those where the
+            active forward block's reference end time is within N * DT_MPC
+            (2.0 s) of the solve time in reference time and the rig
+            reference's end point is ahead of the rear axle — and by the
+            throttle row on every other solve (see ``mpc_decel_limit``; through
+            2.0.6 this said the MPC always kept the throttle-based bound). Gear mode refuses a skid-steer
             ``DifferentiablePlant`` source (``ValueError``; a ``SweepTable``
             cannot tell — the vehicle refuses the gear on its first step) and
             needs a plant with ``accel_at`` (``TypeError`` otherwise). See
@@ -717,6 +724,69 @@ class PathFollower:
             previous command otherwise. Under ``"pd"`` a capped solve is
             applied when its iterate is feasible — feasible, not optimal.
             The classification is in :mod:`genesis_vehicle.control.mpc.law`.
+        mpc_decel_limit: (v2.1.0) the source of the MPC's deceleration bound.
+            ``"throttle"`` (default): the 2.0.x bound on every solve, the
+            record's ``decel_throttle_by_speed`` (throttle -1, brake 0), which
+            stage 2 realises at brake about 0.40 on the reference car; one solver
+            is built, exactly as in 2.0.6. ``"brake"`` (opt-in, END-GATED): the
+            record's ``decel_brake_by_speed`` (brake 1, throttle 0, flat ground,
+            at the mu the record was measured at) bounds a solve only when BOTH
+            (i) the active forward block's reference end time is within
+            ``N * DT_MPC`` (2.0 s at the default horizon) of the solve time IN
+            REFERENCE TIME — so a vehicle behind its schedule gets it earlier
+            and farther from the end, on a block of any length (measured: 15 m
+            off the path on a 3 m block; about 38 m from the end on a 40 m
+            straight at a constant 12 m/s; about 12 m from the goal on the
+            first solve after a K-turn release) — and (ii) the rig reference's
+            end point
+            (the block's last waypoint moved back by ``rig_offset`` along the
+            final heading) lies ahead of the rear axle along body +x. Every
+            other solve uses the throttle row through the default's own NLP: a
+            reference speed drop in mid-path, a profile that ramps down before
+            its last 2.0 s of reference time (that earlier deceleration), and
+            every solve after the end point has passed behind the rear axle.
+            The heading gate, the watchdog, the K-turn release and
+            :meth:`set_path` re-time the reference and so move the opening.
+            The NMPC builds two NLPs (throttle row and brake row; the second
+            costs one more setup, ``setup_ms`` is their sum) and moves the
+            primal warm start and do_mpc's ``u_prev`` across a switch (only
+            those affect the next solve under the shipped solver options); the
+            LMPC swaps the bound of its one QP. On held steps the stage-1 clip
+            uses the table of the LAST solve. Equality with the default before
+            the first open solve was MEASURED (closed-loop runs, 2.1.0
+            acceptance), not guaranteed: IPOPT gives no such guarantee. On an
+            open solve, at the identify speeds (3 m/s and above), stage 2 can
+            map the most negative target to brake 1.0 within 0.16 % (ratio
+            target / brake-1.0 deceleration 1.0007-1.0016 on the reference car
+            at mu 1.0, throttle 0, flat ground, a computation from its frozen
+            sweep table and params record). Below 3 m/s the target exceeds
+            what brake 1.0 delivers by up to 0.85 % (2 m/s 1.0018, 1 m/s
+            1.0028, 0.5 m/s 1.0085; impl-review computation, same table,
+            params and conditions). Raises ``ValueError`` for any other value, with
+            ``mpc_model="off"`` (even ``"throttle"``), for ``"brake"`` with
+            ``command_mode="signed"`` (a signed R-MPC step has no brake channel
+            above the hold speed), and for ``"brake"`` with an empty or
+            non-negative / non-finite brake row. Not checked: that the record's
+            brake row is reachable by the vehicle being driven — a stage-2
+            ``brake_gain=`` LARGER than the vehicle's real gain maps the target
+            to brake < 1 (the vehicle decelerates less than planned), and lower
+            live mu, payload or a downhill grade make the row unreachable at any
+            brake; nothing reports it. On the ``SweepTable`` path nothing checks
+            the brake row (or the tyre block) against the vehicle. Measured at
+            wheel mu 0.6 (reference car, CHANGELOG 2.1.0 §6.4-§7.1): the brake
+            row maps to brake 0.81-0.89, at the front-lock knee, and the front
+            wheels locked inside the arc on every braking-in-arc course; no gate
+            sees the resulting understeer; with a mu 1.0 record on a mu 0.6
+            vehicle one course ended ``GOAL-MISSED`` where the default ended
+            ``DONE`` — the verdict difference is about 0.12 m around the 1.5 m
+            arrival circle and the default's ``DONE`` is itself marginal; on a
+            second mismatch course the order reversed (impl-review; CHANGELOG
+            2.1.0 §6.5). With a
+            ``DifferentiablePlant`` stage 2 the coupled solve receives, on an
+            open solve's braking steps, a throttle target beyond the throttle
+            channel's reach. Gate counters: ``mpc_stats["decel_gate"]``.
+            Resolved value: :attr:`mpc_decel_limit` (``None`` with
+            ``mpc_model="off"``).
         mpc_gains: :class:`~genesis_vehicle.control.mpc.MPCGains` (AlpaSim
             defaults if None).
         mpc_v_floor: speed floor for timing the MPC reference (m/s, default
@@ -942,6 +1012,8 @@ class PathFollower:
 
     #: Release-specific accepted values of ``mpc_model``.
     MPC_MODELS = ("bicycle", "off")
+    #: (v2.1.0) Accepted values of ``mpc_decel_limit`` (default ``"throttle"``).
+    MPC_DECEL_LIMITS = ("throttle", "brake")
     #: (v2.0.1) ``last_mode`` values that end a run: ``DONE`` (inside
     #: ``arrival_goal`` of the last waypoint; recomputed every step, as in
     #: 1.x), ``GOAL-MISSED`` and ``MPC-ABORT`` (both stay set until
@@ -962,6 +1034,7 @@ class PathFollower:
                  mpc_align_gate=_Unset((math.pi / 2, math.pi / 4)),
                  mpc_stall_timeout=_Unset(2.0),
                  mpc_kturn=_Unset(None),
+                 mpc_decel_limit=_Unset("throttle"),
                  lookahead: float = 3.5, arrival_goal: float = 1.5,
                  cusp_goal: float = 1.0, k_v: float = 2.0, k_w: float = 1.5,
                  k_approach: float = 1.0, v_stop: float = 0.05,
@@ -981,7 +1054,7 @@ class PathFollower:
                   "on_solve_failure": on_solve_failure, "mpc_gains": mpc_gains,
                   "mpc_v_floor": mpc_v_floor, "dt_ctrl": dt_ctrl,
                   "mpc_align_gate": mpc_align_gate, "mpc_stall_timeout": mpc_stall_timeout,
-                  "mpc_kturn": mpc_kturn}
+                  "mpc_kturn": mpc_kturn, "mpc_decel_limit": mpc_decel_limit}
         # (3) the model name.
         if mpc_model not in self.MPC_MODELS:
             raise ValueError(f"mpc_model must be one of {list(self.MPC_MODELS)}; "
@@ -995,7 +1068,8 @@ class PathFollower:
                                     ("mpc_gains", mpc_gains), ("mpc_v_floor", mpc_v_floor),
                                     ("dt_ctrl", dt_ctrl), ("mpc_align_gate", mpc_align_gate),
                                     ("mpc_stall_timeout", mpc_stall_timeout),
-                                    ("mpc_kturn", mpc_kturn))
+                                    ("mpc_kturn", mpc_kturn),
+                                    ("mpc_decel_limit", mpc_decel_limit))
                      if not isinstance(v, _Unset)]
             if given:
                 raise ValueError(f"mpc_model=\"off\" takes no MPC argument; got {', '.join(given)}")
@@ -1018,8 +1092,19 @@ class PathFollower:
             if mpc_setup["align_gate"] is None:
                 raise ValueError("mpc_kturn=KTurnParams(...) needs the heading gate (the K-turn is "
                                  "decided at a gate entry); got mpc_align_gate=None")
+        # (v2.1.0) the brake bound needs gear mode: a signed R-MPC step has no
+        # brake channel above HOLD_V, so a brake-level target is unreachable
+        # (before any attribute is set).
+        if mpc_setup is not None and mpc_setup["decel_limit"] == "brake" and command_mode != "gear":
+            raise ValueError("mpc_decel_limit=\"brake\" needs command_mode=\"gear\" (a signed R-MPC step "
+                             "has no brake channel above the hold speed, so a brake-level deceleration "
+                             f"target cannot be realised); got command_mode={command_mode!r}")
 
         self.mpc_model = mpc_model
+        #: (v2.1.0) the resolved deceleration-bound source, ``"throttle"`` or
+        #: ``"brake"``; ``None`` with ``mpc_model="off"`` (unlike ``mpc_impl`` /
+        #: ``on_solve_failure`` / ``dt_ctrl``, which do not exist at all then).
+        self.mpc_decel_limit = None if mpc_setup is None else mpc_setup["decel_limit"]
         self.command_mode = command_mode
         self._gear_mode = command_mode == "gear"
         self._k_b = k_b
@@ -1147,11 +1232,17 @@ class PathFollower:
 
     def _check_mpc_args(self, plant, mpc_model, *, mpc_params, mpc_impl,
                         on_solve_failure, mpc_gains, mpc_v_floor, dt_ctrl,
-                        mpc_align_gate, mpc_stall_timeout, mpc_kturn=None):
-        """Steps 5-10 of the constructor's check order (each raises before any
-        side effect): live-vehicle steering, params present, implementation /
-        policy / heading gate / stall timeout (v2.0.1: after U1, before the
-        dependencies), dependencies, params file, forward blocks."""
+                        mpc_align_gate, mpc_stall_timeout, mpc_kturn=None,
+                        mpc_decel_limit="throttle"):
+        """Steps 5-9 of the constructor's check order (each raises before any
+        follower or plant write; ``require_mpc_deps`` imports do_mpc, a
+        process-wide side effect, before the params file is read):
+        live-vehicle steering, params present, implementation / policy /
+        heading gate / stall timeout (v2.0.1: after U1, before the
+        dependencies) and (v2.1.0) the ``mpc_decel_limit`` value,
+        dependencies, params file and (v2.1.0) the brake row under
+        ``"brake"``. Step 10, the no-forward-block warning, is issued in
+        ``_init_mpc``."""
         # (5) a live vehicle can be checked for what the model describes.
         steering, n_axles = _live_steering(plant)
         if steering is not None and not _is_two_axle_ackermann(steering, n_axles):
@@ -1169,16 +1260,35 @@ class PathFollower:
         gate = _check_align_gate(mpc_align_gate)
         stall = _check_stall_timeout(mpc_stall_timeout)
         kturn = _check_kturn(mpc_kturn)
+        if mpc_decel_limit not in self.MPC_DECEL_LIMITS:
+            raise ValueError(f"mpc_decel_limit must be one of {list(self.MPC_DECEL_LIMITS)}; "
+                             f"got {mpc_decel_limit!r}")
         # (8) dependencies.
         from .mpc._deps import require_mpc_deps
         require_mpc_deps(mpc_impl)
         # (9) the params record (missing file, schema, keys, JSON steering).
         from .mpc.params import load_mpc_params
         params = load_mpc_params(mpc_params)
+        if mpc_decel_limit == "brake":
+            # (v2.1.0) an empty / invalid brake row raises here, before any
+            # side effect (solver_params runs only in _init_mpc).
+            from .mpc.params import _decel_rows
+            _decel_rows(params.data, "brake")
         return dict(params=params, impl=mpc_impl, policy=on_solve_failure,
                     gains=mpc_gains, v_floor=0.5 if mpc_v_floor is None else float(mpc_v_floor),
                     dt_ctrl=dt_ctrl, model=mpc_model, align_gate=gate, stall_timeout=stall,
-                    kturn=kturn)
+                    kturn=kturn, decel_limit=mpc_decel_limit)
+
+    @staticmethod
+    def _build_solver(st, sp):
+        """(v2.1.0) The one place an MPC solver is constructed: exactly the
+        2.0.6 call, ``NonlinearMPC(sp, st["gains"], yaw_bound=pi/2)`` or
+        ``LinearMPC(sp, st["gains"])``."""
+        if st["impl"] == "nonlinear":
+            from .mpc.alpasim_nonlinear import NonlinearMPC
+            return NonlinearMPC(sp, st["gains"], yaw_bound=math.pi / 2)
+        from .mpc.alpasim_linear import LinearMPC
+        return LinearMPC(sp, st["gains"])
 
     def _init_mpc(self, st, steer_cap):
         import warnings
@@ -1202,6 +1312,12 @@ class PathFollower:
                 UserWarning, stacklevel=3)
             _cross_check_live(self.plant, params)        # (12)
         sp = params.solver_params(st["model"], steer_cap=abs(steer_cap), dt_ctrl=dt_ctrl)
+        sp_brk = None
+        if st["decel_limit"] == "brake":
+            # (v2.1.0) the brake-row parameter set of the end gate; the R_min
+            # check below and the throttle-row problem use ``sp``.
+            sp_brk = params.solver_params(st["model"], steer_cap=abs(steer_cap), dt_ctrl=dt_ctrl,
+                                          decel_limit="brake")
         # (v2.0.1) minimum turn radius from the solver's own steering limit:
         # the scale of the PD budgets (F3 / F8: pi * R_min of travel per block).
         # The check stays: an infinite R_min would silently disable F3 / F8.
@@ -1214,19 +1330,24 @@ class PathFollower:
                 f"{wb!r}, steering limit {smax!r}")
         r_min = wb / math.tan(smax)
         from .mpc.law import _MPCLaw
-        if st["impl"] == "nonlinear":
-            from .mpc.alpasim_nonlinear import NonlinearMPC
-            solver = NonlinearMPC(sp, st["gains"], yaw_bound=math.pi / 2)
-        else:
-            from .mpc.alpasim_linear import LinearMPC
-            solver = LinearMPC(sp, st["gains"])
+        solver = self._build_solver(st, sp)
+        if sp_brk is not None:
+            # (v2.1.0) end gate: the throttle-row problem above plus the
+            # brake-row one (NMPC: a second NLP built by the same call; LMPC:
+            # the same QP with its ``p`` swapped per solve).
+            if st["impl"] == "nonlinear":
+                from .mpc.alpasim_nonlinear import _DecelGatedNMPC
+                solver = _DecelGatedNMPC(solver, self._build_solver(st, sp_brk))
+            else:
+                from .mpc.alpasim_linear import _DecelGatedLMPC
+                solver = _DecelGatedLMPC(solver, sp, sp_brk)
         self.mpc_params = params
         self.mpc_impl = st["impl"]
         self.on_solve_failure = st["policy"]
         self.dt_ctrl = dt_ctrl
         self._law = _MPCLaw(solver, rig_offset=float(params.rig_offset),
                             on_solve_failure=st["policy"], v_floor=st["v_floor"],
-                            impl=st["impl"])
+                            impl=st["impl"], decel_gate=sp_brk is not None)
         self._mpc_block = None          # block index the law's reference belongs to
         self._t_next = 0.0              # internal clock (when step() gets no t)
         self._t_now = None
@@ -2416,8 +2537,27 @@ class PathFollower:
         """``{n_solve, status: {converged, capped, capped_infeasible,
         "failed:<status>", exception, nan}, last_status, last_solve_ms,
         plan_age_s, handover: {align, stall}, kturn: {episodes, legs,
-        reverse_m, plan_nodes, plan_calls, plan_ms}}`` — ``None`` with
-        ``mpc_model="off"``. ``kturn`` (v2.0.3) is present for every MPC
+        reverse_m, plan_nodes, plan_calls, plan_ms}, decel_gate}`` — ``None`` with
+        ``mpc_model="off"``. ``decel_gate`` (v2.1.0) is present for every MPC
+        follower: ``None`` under ``mpc_decel_limit="throttle"``; under
+        ``"brake"`` ``{open, open_solves, switches}`` — ``open`` True when the
+        LAST solve used the brake row (its active block's reference end time
+        within N * DT_MPC of the solve time in reference time and the rig
+        reference's end point ahead of the rear axle), False when it used the
+        throttle row — as do mid-path reference speed drops (and a speed
+        profile that ramps down before the last 2 s of reference time) and
+        every solve after the end point has passed behind the rear axle —,
+        ``None`` before the first solve (held between solves); equality with
+        the default before the first open solve is measured, not guaranteed
+        (full statement: the ``mpc_decel_limit`` constructor docstring);
+        ``open_solves`` counts solves run on the brake row, including ones whose
+        SOLVER CALL failed or raised (an error from the gate selection or the
+        warm-start transfer propagates out of :meth:`plan` before the counters
+        update and is not counted — pinned by
+        ``tests/test_mpc_decel_gate.py::test_a25_transfer_error_propagates_out_of_plan``);
+        ``switches`` counts solves whose row differs from
+        the previous solve's (the first solve is compared with the throttle
+        row). Cumulative since construction (``set_path`` keeps them). ``kturn`` (v2.0.3) is present for every MPC
         follower (zeros without ``mpc_kturn``), cumulative since construction
         (``set_path`` keeps it); ``plan_ms`` is wall-clock (perf_counter). ``handover`` (v2.0.1) counts entries into
         R-ALIGN / R-STALL since construction (``set_path`` keeps it):
@@ -2428,6 +2568,7 @@ class PathFollower:
         stats = self._law.mpc_stats(self._t_now)
         stats["handover"] = dict(self._handover)
         stats["kturn"] = dict(self._kt_stats)
+        stats["decel_gate"] = self._law.decel_gate_stats()
         return stats
 
     @property
